@@ -1,7 +1,8 @@
 "use client";
 
 import type { ColumnProps } from "@douyinfe/semi-ui/lib/es/table";
-import { MockActionButton } from "@/components/common/mock-action-button";
+import Link from "next/link";
+import { Button } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import type { EmployeeRecord } from "@/features/admin/types";
 import {
@@ -47,11 +48,21 @@ const columns: ColumnProps<EmployeeRecord>[] = [
   createScopedColumn({
     title: "操作",
     width: 100,
-    render: (_value: unknown, record: EmployeeRecord) => <MockActionButton message={`查看员工 ${record.displayName}`}>查看</MockActionButton>,
+    render: (_value: unknown, record: EmployeeRecord) => (
+      <Link href={`/admin/employees/${record.userId}`}>
+        <Button theme="borderless">查看</Button>
+      </Link>
+    ),
   }),
 ];
 
-export function EmployeesTable({ records }: { records: EmployeeRecord[] }) {
+export function EmployeesTable({ records, actionHref }: { records: EmployeeRecord[]; actionHref?: string }) {
+  const action = actionHref ? (
+    <Link href={actionHref}>
+      <Button theme="solid" type="primary">关联员工档案</Button>
+    </Link>
+  ) : undefined;
+
   return (
     <ManagementDirectory
       columns={columns}
@@ -59,6 +70,7 @@ export function EmployeesTable({ records }: { records: EmployeeRecord[] }) {
       getSearchText={(record) => [record.displayName, record.employeeId, record.departmentName, record.title].join(" ")}
       records={records}
       rowKey="userId"
+      action={action}
     />
   );
 }

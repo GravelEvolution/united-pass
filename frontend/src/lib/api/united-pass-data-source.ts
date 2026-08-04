@@ -1,10 +1,14 @@
 import type {
   AuditEvent,
   DashboardMetric,
+  DepartmentDetail,
   DepartmentRecord,
+  EmployeeDetail,
+  EmployeeLinkInput,
   EmployeeRecord,
   IdentityProviderRecord,
   ManagedUser,
+  UserDetail,
 } from "@/features/admin/types";
 import type { SecurityFactor, UserSession, AuthorizedApplication } from "@/features/account/types";
 import type {
@@ -50,8 +54,11 @@ export interface UnitedPassQueries {
   getAuthorizedApplications(): Promise<AuthorizedApplication[]>;
   getAdminDashboard(): Promise<AdminDashboard>;
   getUsers(query?: PageQuery): Promise<CursorPage<ManagedUser>>;
+  getUserDetail(userId: string): Promise<UserDetail | null>;
   getEmployees(query?: PageQuery): Promise<CursorPage<EmployeeRecord>>;
+  getEmployeeDetail(userId: string): Promise<EmployeeDetail | null>;
   getDepartments(): Promise<DepartmentRecord[]>;
+  getDepartmentDetail(departmentId: string): Promise<DepartmentDetail | null>;
   getIdentityProviders(query?: PageQuery): Promise<CursorPage<IdentityProviderRecord>>;
   getApplications(query?: PageQuery): Promise<CursorPage<OAuthApplication>>;
   getApplicationDetail(applicationId: string): Promise<OAuthApplicationDetail | null>;
@@ -99,6 +106,12 @@ export interface UnitedPassCommands {
 
   // Session management
   revokeSession(sessionId: string): Promise<void>;
+
+  // Admin user management
+  updateUserStatus(userId: string, status: "active" | "disabled"): Promise<void>;
+  revokeUserSessions(userId: string): Promise<void>;
+  linkEmployeeProfile(input: EmployeeLinkInput): Promise<void>;
+  offboardEmployee(userId: string): Promise<void>;
 }
 
 /**

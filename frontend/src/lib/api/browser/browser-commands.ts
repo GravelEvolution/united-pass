@@ -50,4 +50,14 @@ export const browserCommands: UnitedPassCommands = {
   revokeOtherSessions: () => mockUnitedPassDataSource.revokeOtherSessions(),
   logout: () => mockUnitedPassDataSource.logout(),
   revokeSession: (sessionId) => mockUnitedPassDataSource.revokeSession(sessionId),
+
+  // Admin user management
+  updateUserStatus: (userId, status) =>
+    mockUnitedPassDataSource.updateUserStatus(userId, status),
+  revokeUserSessions: (userId) =>
+    mockUnitedPassDataSource.revokeUserSessions(userId),
+  linkEmployeeProfile: (input) =>
+    mockUnitedPassDataSource.linkEmployeeProfile(input),
+  offboardEmployee: (userId) =>
+    mockUnitedPassDataSource.offboardEmployee(userId),
 };

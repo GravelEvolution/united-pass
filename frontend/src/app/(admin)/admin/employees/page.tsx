@@ -18,5 +18,5 @@ export default async function EmployeesPage({
     cursor: params.cursor,
   };
   const page = await serverQueries.getEmployees(query);
-  return <EmployeesTable records={page.items} />;
+  return <EmployeesTable records={page.items} actionHref="/admin/employees/link" />;
 }

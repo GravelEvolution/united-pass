@@ -20,6 +20,12 @@ import type {
 } from "@/features/applications/types";
 import { getClientProfileConfig } from "@/features/applications/types";
 import type { ConsentDecision, ConsentResolution, ConsentRequest } from "@/features/authorization/types";
+import type {
+  DepartmentDetail,
+  EmployeeDetail,
+  EmployeeLinkInput,
+  UserDetail,
+} from "@/features/admin/types";
 import {
   validateApplicationCreateInput,
   validateOAuthClientCreateInput,
@@ -151,6 +157,137 @@ const departments = [
   { departmentId: "dep_infra", name: "基础架构", parentName: "技术中心", memberCount: 32, ownerName: "程越" },
   { departmentId: "dep_success", name: "客户成功", parentName: "商业化中心", memberCount: 24, ownerName: "沈叙" },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getDepartments"]>>;
+
+const userDetails: Record<string, UserDetail> = {
+  usr_01JUP8M8B4Q7R4T6PK1D: {
+    userId: "usr_01JUP8M8B4Q7R4T6PK1D",
+    displayName: "林知行",
+    email: "zhixing.lin@example.com",
+    phoneMasked: "+86 138 **** 5621",
+    personaLabel: "外部用户 · 员工",
+    status: "active",
+    lastActiveAt: "2026-08-04T05:42:00Z",
+    personas: ["consumer", "employee"],
+    employeeProfile: {
+      employeeId: "UP-1042",
+      departmentName: "身份平台",
+      title: "产品设计师",
+    },
+    linkedIdentities: [],
+    activeSessions: [
+      { sessionId: "ses_current", deviceName: "MacBook Pro", lastActiveAt: "2026-08-04T05:42:00Z", isCurrent: true },
+    ],
+    authorizedApplications: [
+      { applicationName: "United Workspace", scopes: ["openid", "profile", "email"], grantedAt: "2026-07-15T08:30:00Z", status: "active" },
+    ],
+    recentAuditEvents: [
+      { eventId: "evt_001", eventType: "用户登录", actorName: "林知行", targetLabel: SYSTEM_NAME, occurredAt: "2026-08-04T05:42:00Z", result: "success" },
+    ],
+  },
+  usr_06APPUSER7N2X4Q8K5M9: {
+    userId: "usr_06APPUSER7N2X4Q8K5M9",
+    displayName: "陆晴",
+    email: "app.user@example.com",
+    phoneMasked: "+86 139 **** 2048",
+    personaLabel: "外部用户",
+    status: "active",
+    lastActiveAt: "2026-08-04T05:48:00Z",
+    personas: ["consumer"],
+    linkedIdentities: [],
+    activeSessions: [],
+    authorizedApplications: [
+      { applicationName: "United Workspace", scopes: ["openid", "profile", "email"], grantedAt: "2026-07-15T08:30:00Z", status: "active" },
+      { applicationName: "United Mobile", scopes: ["openid", "profile", "offline_access"], grantedAt: "2026-06-20T10:15:00Z", status: "active" },
+    ],
+    recentAuditEvents: [],
+  },
+};
+
+const employeeDetails: Record<string, EmployeeDetail> = {
+  usr_01JUP8M8B4Q7R4T6PK1D: {
+    userId: "usr_01JUP8M8B4Q7R4T6PK1D",
+    displayName: "林知行",
+    email: "zhixing.lin@example.com",
+    employeeId: "UP-1042",
+    departmentName: "身份平台",
+    departmentId: "dep_identity",
+    title: "产品设计师",
+    status: "active",
+    supervisorName: "许清和",
+    onboardedAt: "2025-03-15T00:00:00Z",
+    linkedConsumerAccount: true,
+  },
+  usr_02F4PXKQ0EZP5F7B9V3C: {
+    userId: "usr_02F4PXKQ0EZP5F7B9V3C",
+    displayName: "周予安",
+    email: "yuan.zhou@example.com",
+    employeeId: "UP-0928",
+    departmentName: "基础架构",
+    departmentId: "dep_infra",
+    title: "高级工程师",
+    status: "active",
+    supervisorName: "程越",
+    onboardedAt: "2024-08-01T00:00:00Z",
+    linkedConsumerAccount: true,
+  },
+  usr_05QG6E8W4NR7Y2Z1PC9S: {
+    userId: "usr_05QG6E8W4NR7Y2Z1PC9S",
+    displayName: "顾言",
+    email: "yan.gu@example.com",
+    employeeId: "UP-0815",
+    departmentName: "客户成功",
+    departmentId: "dep_success",
+    title: "客户成功经理",
+    status: "offboarding",
+    supervisorName: "沈叙",
+    onboardedAt: "2024-06-10T00:00:00Z",
+    linkedConsumerAccount: true,
+  },
+};
+
+const departmentDetails: Record<string, DepartmentDetail> = {
+  dep_identity: {
+    departmentId: "dep_identity",
+    name: "身份平台",
+    parentDepartmentId: "dep_product",
+    parentName: "产品与体验",
+    ownerName: "许清和",
+    memberCount: 18,
+    childDepartments: [],
+    members: [
+      { userId: "usr_01JUP8M8B4Q7R4T6PK1D", displayName: "林知行", title: "产品设计师", employeeId: "UP-1042" },
+      { userId: "usr_0A1", displayName: "许清和", title: "部门负责人", employeeId: "UP-0901" },
+      { userId: "usr_0A2", displayName: "陈思远", title: "前端工程师", employeeId: "UP-1102" },
+    ],
+  },
+  dep_infra: {
+    departmentId: "dep_infra",
+    name: "基础架构",
+    parentDepartmentId: "dep_tech",
+    parentName: "技术中心",
+    ownerName: "程越",
+    memberCount: 32,
+    childDepartments: [
+      { departmentId: "dep_infra_sre", name: "SRE", memberCount: 8 },
+      { departmentId: "dep_infra_data", name: "数据平台", memberCount: 12 },
+    ],
+    members: [
+      { userId: "usr_02F4PXKQ0EZP5F7B9V3C", displayName: "周予安", title: "高级工程师", employeeId: "UP-0928" },
+    ],
+  },
+  dep_success: {
+    departmentId: "dep_success",
+    name: "客户成功",
+    parentDepartmentId: "dep_commerce",
+    parentName: "商业化中心",
+    ownerName: "沈叙",
+    memberCount: 24,
+    childDepartments: [],
+    members: [
+      { userId: "usr_05QG6E8W4NR7Y2Z1PC9S", displayName: "顾言", title: "客户成功经理", employeeId: "UP-0815" },
+    ],
+  },
+};
 
 const identityProviders = [
   {
@@ -402,8 +539,11 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       recentEvents: auditEvents.slice(0, 3),
     }),
     getUsers: (query?: PageQuery) => Promise.resolve(toCursorPage(users, query)),
+    getUserDetail: (userId: string) => Promise.resolve(userDetails[userId] ?? null),
     getEmployees: (query?: PageQuery) => Promise.resolve(toCursorPage(employees, query)),
+    getEmployeeDetail: (userId: string) => Promise.resolve(employeeDetails[userId] ?? null),
     getDepartments: () => Promise.resolve(departments),
+    getDepartmentDetail: (departmentId: string) => Promise.resolve(departmentDetails[departmentId] ?? null),
     getIdentityProviders: (query?: PageQuery) => Promise.resolve(toCursorPage(identityProviders, query)),
     getApplications: (query?: PageQuery) => Promise.resolve(toCursorPage(applications, query)),
     getApplicationDetail: (applicationId: string) => {
@@ -768,6 +908,40 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       const index = sessions.findIndex((session) => session.sessionId === sessionId);
       if (index !== -1) {
         sessions.splice(index, 1);
+      }
+      return Promise.resolve();
+    },
+
+    updateUserStatus: (userId: string, status: "active" | "disabled"): Promise<void> => {
+      const user = users.find((u) => u.userId === userId);
+      if (user) {
+        user.status = status;
+      }
+      const detail = userDetails[userId];
+      if (detail) {
+        detail.status = status;
+      }
+      return Promise.resolve();
+    },
+
+    revokeUserSessions: (userId: string): Promise<void> => {
+      void userId;
+      return Promise.resolve();
+    },
+
+    linkEmployeeProfile: (input: EmployeeLinkInput): Promise<void> => {
+      void input;
+      return Promise.resolve();
+    },
+
+    offboardEmployee: (userId: string): Promise<void> => {
+      const detail = employeeDetails[userId];
+      if (detail) {
+        detail.status = "offboarding";
+      }
+      const employee = employees.find((e) => e.userId === userId);
+      if (employee) {
+        employee.status = "offboarding";
       }
       return Promise.resolve();
     },

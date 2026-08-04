@@ -1,7 +1,8 @@
 "use client";
 
 import type { ColumnProps } from "@douyinfe/semi-ui/lib/es/table";
-import { MockActionButton } from "@/components/common/mock-action-button";
+import Link from "next/link";
+import { Button } from "@douyinfe/semi-ui";
 import type { DepartmentRecord } from "@/features/admin/types";
 import {
   createScopedColumn,
@@ -31,7 +32,11 @@ const columns: ColumnProps<DepartmentRecord>[] = [
   createScopedColumn({
     title: "操作",
     width: 100,
-    render: (_value: unknown, record: DepartmentRecord) => <MockActionButton message={`查看部门 ${record.name}`}>查看</MockActionButton>,
+    render: (_value: unknown, record: DepartmentRecord) => (
+      <Link href={`/admin/departments/${record.departmentId}`}>
+        <Button theme="borderless">查看</Button>
+      </Link>
+    ),
   }),
 ];
 

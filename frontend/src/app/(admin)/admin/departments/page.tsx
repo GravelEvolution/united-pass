@@ -3,4 +3,9 @@ import { DepartmentsTable } from "@/features/admin/components/tables/departments
 import { serverQueries } from "@/lib/api/server/server-queries";
 
 export const metadata: Metadata = { title: "部门管理" };
-export default async function DepartmentsPage() { return <DepartmentsTable records={await serverQueries.getDepartments()} />; }
+export const dynamic = "force-dynamic";
+
+export default async function DepartmentsPage() {
+  const records = await serverQueries.getDepartments();
+  return <DepartmentsTable records={records} />;
+}

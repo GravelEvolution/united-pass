@@ -1,7 +1,8 @@
 "use client";
 
 import type { ColumnProps } from "@douyinfe/semi-ui/lib/es/table";
-import { MockActionButton } from "@/components/common/mock-action-button";
+import Link from "next/link";
+import { Button } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import type { ManagedUser } from "@/features/admin/types";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
@@ -52,7 +53,11 @@ const columns: ColumnProps<ManagedUser>[] = [
   createScopedColumn({
     title: "操作",
     width: 100,
-    render: (_value: unknown, record: ManagedUser) => <MockActionButton message={`查看用户 ${record.displayName}`}>查看</MockActionButton>,
+    render: (_value: unknown, record: ManagedUser) => (
+      <Link href={`/admin/users/${record.userId}`}>
+        <Button theme="borderless">查看</Button>
+      </Link>
+    ),
   }),
 ];
 
