@@ -2,10 +2,10 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import { ApplicationDetail } from "@/features/applications/components/application-detail";
-import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
+import { serverQueries } from "@/lib/api/server/server-queries";
 
 export async function generateStaticParams() {
-  const applications = await mockUnitedPassDataSource.getApplications();
+  const applications = await serverQueries.getApplications();
   return applications.map((application) => ({
     applicationId: application.applicationId,
   }));
@@ -17,7 +17,7 @@ export async function generateMetadata({
   params: Promise<{ applicationId: string }>;
 }): Promise<Metadata> {
   const { applicationId } = await params;
-  const detail = await mockUnitedPassDataSource.getApplicationDetail(applicationId);
+  const detail = await serverQueries.getApplicationDetail(applicationId);
   return {
     title: detail ? `OAuth 应用 · ${detail.name}` : "OAuth 应用",
   };
@@ -29,7 +29,7 @@ export default async function ApplicationDetailPage({
   params: Promise<{ applicationId: string }>;
 }) {
   const { applicationId } = await params;
-  const detail = await mockUnitedPassDataSource.getApplicationDetail(applicationId);
+  const detail = await serverQueries.getApplicationDetail(applicationId);
 
   if (!detail) {
     notFound();

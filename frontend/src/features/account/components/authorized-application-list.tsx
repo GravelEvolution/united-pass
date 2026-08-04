@@ -6,7 +6,7 @@ import { Button, Modal, Toast } from "@douyinfe/semi-ui";
 import { PageHeader } from "@/components/common/page-header";
 import { StatusBadge } from "@/components/common/status-badge";
 import type { AuthorizedApplication } from "@/features/account/types";
-import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
+import { browserCommands } from "@/lib/api/browser/browser-commands";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import styles from "./authorized-application-list.module.css";
 
@@ -136,7 +136,7 @@ function RevokeGrantButton({ grant }: { grant: AuthorizedApplication }) {
       onOk: async () => {
         setRevoking(true);
         try {
-          await mockUnitedPassDataSource.revokeGrant(grant.grantId);
+          await browserCommands.revokeGrant(grant.grantId);
           Toast.success({ content: `已撤销 ${grant.applicationName} 的授权。` });
           router.refresh();
         } catch {

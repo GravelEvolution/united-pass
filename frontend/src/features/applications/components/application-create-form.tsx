@@ -29,7 +29,7 @@ import {
   type ConsentMode,
   type ApplicationWithInitialClientResult,
 } from "@/features/applications/types";
-import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
+import { browserCommands } from "@/lib/api/browser/browser-commands";
 import { PageHeader } from "@/components/common/page-header";
 import styles from "./application-create-form.module.css";
 
@@ -178,7 +178,7 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
 
     setIsSubmitting(true);
     try {
-      const result = await mockUnitedPassDataSource.createApplicationWithInitialClient({
+      const result = await browserCommands.createApplicationWithInitialClient({
         application: {
           name: appName.trim(),
           description: appDescription.trim(),

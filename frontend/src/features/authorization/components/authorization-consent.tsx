@@ -15,7 +15,7 @@ import {
 } from "@douyinfe/semi-icons";
 import type { ConsentDecision, ConsentResolution } from "@/features/authorization/types";
 import type { CurrentUser } from "@/types/identity";
-import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
+import { browserCommands } from "@/lib/api/browser/browser-commands";
 import styles from "./authorization-consent.module.css";
 
 type AuthorizationConsentProps = {
@@ -48,7 +48,7 @@ export function AuthorizationConsent({ currentUser, resolution }: AuthorizationC
 
     setDecisionState({ phase: "submitting", decision: choice });
     try {
-      const result = await mockUnitedPassDataSource.decideConsent(
+      const result = await browserCommands.decideConsent(
         resolution.request.requestId,
         choice,
       );

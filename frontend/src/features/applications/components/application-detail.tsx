@@ -14,7 +14,7 @@ import {
   type OAuthGrantType,
   type SecretRotationResult,
 } from "@/features/applications/types";
-import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
+import { browserCommands } from "@/lib/api/browser/browser-commands";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import styles from "./application-detail.module.css";
 
@@ -298,7 +298,7 @@ function ClientSecrets({ client }: ClientCardProps) {
       onOk: async () => {
         setRotating(true);
         try {
-          const result = await mockUnitedPassDataSource.rotateClientSecret(client.clientId);
+          const result = await browserCommands.rotateClientSecret(client.clientId);
           setRotatedSecret(result);
           Toast.success({ content: "密钥已轮换，请立即复制新密钥。" });
           router.refresh();
@@ -480,7 +480,7 @@ function DangerTab({ detail }: ApplicationDetailProps) {
     const onOk = async () => {
       setToggling(true);
       try {
-        await mockUnitedPassDataSource.updateApplicationStatus(
+        await browserCommands.updateApplicationStatus(
           detail.applicationId,
           isActive ? "disabled" : "active",
         );
@@ -522,7 +522,7 @@ function DangerTab({ detail }: ApplicationDetailProps) {
 
     setDeleting(true);
     try {
-      await mockUnitedPassDataSource.deleteApplication(detail.applicationId);
+      await browserCommands.deleteApplication(detail.applicationId);
       Toast.success({ content: "应用已删除。" });
       router.push("/admin/applications");
     } catch {
