@@ -1,0 +1,44 @@
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
+  color: var(--up-ink);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.symbol {
+  position: relative;
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 10px;
+  background: linear-gradient(145deg, #386dea, #173ea5);
+  box-shadow: 0 7px 18px rgb(36 87 214 / 24%);
+}
+
+.symbol span {
+  position: absolute;
+  width: 7px;
+  height: 18px;
+  border-radius: 999px;
+  background: white;
+  transform: rotate(42deg);
+}
+
+.symbol span:first-child {
+  left: 8px;
+  top: 3px;
+}
+
+.symbol span:last-child {
+  right: 7px;
+  bottom: 3px;
+}
+
+.wordmark {
+  white-space: nowrap;
+}

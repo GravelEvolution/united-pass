@@ -1,0 +1,150 @@
+.shell {
+  min-height: 100vh;
+  background: var(--up-canvas);
+}
+
+.sidebar {
+  position: fixed;
+  z-index: 30;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  width: 252px;
+  flex-direction: column;
+  border-right: 1px solid var(--up-line);
+  background: rgb(255 255 255 / 94%);
+  backdrop-filter: blur(20px);
+}
+
+.brandLink {
+  display: block;
+  margin: 28px 28px 26px;
+}
+
+.surfaceLabel {
+  margin: 0 28px 12px;
+  color: #9aa1af;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.11em;
+}
+
+.navigation {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 14px;
+}
+
+.navigationItem {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  border-radius: 10px;
+  color: #5e6778;
+  font-size: 14px;
+  font-weight: 520;
+  transition: color 160ms ease, background 160ms ease;
+}
+
+.navigationItem:hover {
+  color: var(--up-ink);
+  background: #f5f7fa;
+}
+
+.navigationItemActive {
+  color: var(--up-brand);
+  background: var(--up-brand-soft);
+  font-weight: 650;
+}
+
+.sidebarFooter {
+  margin-top: auto;
+  padding: 18px 18px 22px;
+}
+
+.alternateLink {
+  display: block;
+  margin: 0 8px 16px;
+  color: var(--up-brand);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.profile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--up-line);
+  border-radius: 12px;
+  background: #fafbfc;
+}
+
+.profile > div {
+  min-width: 0;
+}
+
+.profile strong,
+.profile span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile strong { font-size: 13px; }
+.profile span { margin-top: 2px; color: var(--up-muted); font-size: 11px; }
+
+.main {
+  min-height: 100vh;
+  margin-left: 252px;
+  padding: clamp(34px, 5vw, 64px) clamp(24px, 5vw, 64px);
+}
+
+.mobileHeader,
+.backdrop {
+  display: none;
+}
+
+@media (max-width: 840px) {
+  .mobileHeader {
+    position: sticky;
+    z-index: 20;
+    top: 0;
+    display: flex;
+    height: 66px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--up-line);
+    background: rgb(255 255 255 / 92%);
+    backdrop-filter: blur(18px);
+  }
+
+  .sidebar {
+    width: min(84vw, 300px);
+    transform: translateX(-102%);
+    transition: transform 220ms ease;
+  }
+
+  .sidebarOpen { transform: translateX(0); }
+
+  .backdrop {
+    position: fixed;
+    z-index: 25;
+    display: block;
+    inset: 0;
+    width: 100%;
+    border: 0;
+    background: rgb(17 28 51 / 42%);
+  }
+
+  .main {
+    margin-left: 0;
+    padding: 30px 20px 48px;
+  }
+}

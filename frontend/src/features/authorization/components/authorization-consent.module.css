@@ -1,0 +1,77 @@
+.card {
+  width: min(100%, 560px);
+  margin: auto;
+  padding: 34px;
+  border: 1px solid var(--up-line);
+  border-radius: var(--up-radius-lg);
+  background: var(--up-surface);
+  box-shadow: var(--up-shadow);
+}
+
+.mockBadge {
+  margin-bottom: 24px;
+  color: var(--up-brand);
+  font-size: 11px;
+  font-weight: 740;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.application { display: flex; align-items: center; gap: 16px; }
+
+.applicationIcon {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  flex: none;
+  place-items: center;
+  border-radius: 16px;
+  color: white;
+  background: linear-gradient(145deg, #386dea, #173ea5);
+}
+
+.application h1 { margin: 0; font-size: 23px; letter-spacing: -0.025em; }
+.application p { margin: 5px 0 4px; color: var(--up-muted); font-size: 13px; }
+.application span { color: #949baa; font-size: 11px; }
+
+.identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 28px;
+  padding: 15px;
+  border-radius: 12px;
+  background: #f7f8fa;
+}
+
+.identity span,
+.identity strong,
+.identity p { display: block; margin: 0; }
+.identity span { color: var(--up-muted); font-size: 11px; }
+.identity strong { margin-top: 2px; font-size: 13px; }
+.identity p { margin-top: 2px; color: var(--up-muted); font-size: 11px; }
+
+.permissions { margin-top: 28px; }
+.permissions h2 { margin: 0 0 14px; font-size: 14px; }
+.permissions ul { display: grid; gap: 13px; margin: 0; padding: 0; list-style: none; }
+.permissions li { display: flex; gap: 12px; color: var(--up-brand); }
+.permissions strong { color: var(--up-ink); font-size: 13px; }
+.permissions p { margin: 3px 0 0; color: var(--up-muted); font-size: 12px; line-height: 1.55; }
+
+.redirectNotice {
+  margin: 24px 0 0;
+  padding: 12px 14px;
+  border: 1px solid #dce5f9;
+  border-radius: 10px;
+  color: #5c6880;
+  background: #f7f9fe;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.actions { display: grid; grid-template-columns: 1fr 2fr; gap: 12px; margin-top: 24px; }
+
+@media (max-width: 520px) {
+  .card { padding: 24px 20px; border: 0; box-shadow: none; }
+  .actions { grid-template-columns: 1fr; }
+}

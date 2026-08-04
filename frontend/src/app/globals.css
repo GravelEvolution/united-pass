@@ -1,0 +1,65 @@
+:root {
+  --up-brand: #2457d6;
+  --up-brand-strong: #173ea5;
+  --up-brand-soft: #edf3ff;
+  --up-ink: #172033;
+  --up-muted: #687185;
+  --up-line: #e4e8ef;
+  --up-surface: #ffffff;
+  --up-canvas: #f4f6f9;
+  --up-success: #16865c;
+  --up-warning: #b66b08;
+  --up-danger: #c53b3b;
+  --up-radius-sm: 8px;
+  --up-radius-md: 14px;
+  --up-radius-lg: 22px;
+  --up-shadow: 0 16px 48px rgb(34 54 94 / 8%);
+  --semi-color-primary: var(--up-brand);
+  --semi-color-primary-hover: var(--up-brand-strong);
+  --semi-border-radius-small: var(--up-radius-sm);
+  --semi-border-radius-medium: 10px;
+  --semi-font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+html {
+  background: var(--up-canvas);
+}
+
+body {
+  margin: 0;
+  color: var(--up-ink);
+  background: var(--up-canvas);
+  font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: 3px solid rgb(36 87 214 / 28%);
+  outline-offset: 2px;
+}
+
+::selection {
+  color: var(--up-ink);
+  background: #cddcff;
+}
