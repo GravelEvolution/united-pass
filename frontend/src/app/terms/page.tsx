@@ -11,7 +11,7 @@ export default function TermsPage() {
       title="服务条款"
       summary="请您在注册或使用本服务前仔细阅读并充分理解本服务条款。您一旦注册或使用本服务，即视为您已同意接受本条款的全部约束。本条款与《隐私政策》共同构成您与我们之间关于本服务的完整协议。"
       version="1.1"
-      effectiveDate="2026年8月5日"
+      effectiveDate="暂未生效"
       sections={termsSections}
       relatedHref="/privacy"
       relatedLabel="查看隐私政策"
