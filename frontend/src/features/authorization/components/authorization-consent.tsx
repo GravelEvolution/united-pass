@@ -84,7 +84,9 @@ export function AuthorizationConsent({ currentUser, resolution }: AuthorizationC
             if (redirectUrl.startsWith("/")) {
               router.push(redirectUrl);
             } else {
-              window.open(redirectUrl, "_blank", "noopener,noreferrer");
+              // Same-window redirect to the client's validated Redirect URI.
+              // This matches standard OAuth completion behavior.
+              window.location.assign(redirectUrl);
             }
           }}
         />
@@ -334,17 +336,20 @@ function DecisionResult({
             <p>你已授权 <strong>{applicationName}</strong> 访问请求的数据。</p>
             <p>
               {isExternalRedirect
-                ? <>授权完成后将跳转至 <code>{redirectUrl}</code>（Mock，不会真实跳转至外部地址）。</>
+                ? <>点击下方按钮后将跳转至 <code>{redirectUrl}</code>。</>
                 : <>点击下方按钮继续。</>}
             </p>
           </>
         ) : (
-          <p>你已拒绝 <strong>{applicationName}</strong> 的授权请求。应用不会获得任何数据访问权限。</p>
+          <>
+            <p>你已拒绝 <strong>{applicationName}</strong> 的授权请求。应用不会获得任何数据访问权限。</p>
+            <p>拒绝结果将返回已验证的 Redirect URI 并携带 OAuth 错误。</p>
+          </>
         )}
       </div>
       <div className={styles.stateActions}>
         <Button theme="solid" type="primary" onClick={onContinue}>
-          {isAllowed ? "完成并跳转" : "返回账户中心"}
+          {isAllowed ? "完成并跳转" : "完成并返回"}
         </Button>
       </div>
     </div>
