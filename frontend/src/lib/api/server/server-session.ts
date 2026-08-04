@@ -1,21 +1,18 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { SESSION_COOKIE_NAME } from "@/lib/api/constants";
 
 /**
  * Server-side session reading.
  *
- * When the real backend API is available, this module will:
- * - Read the session cookie via `next/headers` cookies()
- * - Optionally validate the session by calling a backend endpoint
- * - Provide helpers for requiring authentication before page render
+ * Reads the `up_session` HttpOnly cookie via `next/headers` cookies()
+ * and forwards it to the backend API as a Cookie header.
  *
- * See ADR-0004 for the full architecture.
- *
- * This file is currently a stub. The mock data source handles session
- * state directly until the backend is available.
+ * See ADR-0004 for the API client architecture.
+ * See ADR-0006 for the Cookie naming and deployment topology.
  */
 
-export const SESSION_COOKIE_NAME = "session";
+export { SESSION_COOKIE_NAME };
 
 export async function getSessionCookie(): Promise<string | undefined> {
   const cookieStore = await cookies();
