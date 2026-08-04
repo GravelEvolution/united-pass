@@ -55,6 +55,6 @@ pnpm build
 
 本地运行要求 Node.js 24.x 与 pnpm 10.x；`package.json` 的 `engines` 字段是安装和 CI 的版本边界。GitHub Actions 工作流 `.github/workflows/frontend.yml` 会在 push 和 pull request 时自动运行上述三项检查。
 
-当前尚未引入测试运行器。Mock 流程稳定后优先覆盖登录凭据匹配、头像文件头与尺寸校验、邮箱与手机号验证、管理列表查询投影，以及 Persona / 员工状态展示；在此之前 `typecheck`、`lint` 与生产构建均为必跑检查。
+当前已引入 Vitest 作为单元测试运行器。测试覆盖 Mock 登录凭据匹配、邮箱与手机号验证、头像 PNG/JPEG/WebP 文件头与尺寸校验、Persona 显示标签和 API 错误类型工具。运行 `pnpm test` 执行全部测试。
 
 真实 API 接入前，需要完成服务端会话、OIDC 安全校验、后端 ABAC 强制执行、重认证、错误归一化和 OpenAPI 合同生成。
