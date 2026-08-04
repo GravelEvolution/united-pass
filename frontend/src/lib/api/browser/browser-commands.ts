@@ -28,4 +28,26 @@ export const browserCommands: UnitedPassCommands = {
     mockUnitedPassDataSource.deleteApplication(applicationId),
   updateApplication: (applicationId, input) =>
     mockUnitedPassDataSource.updateApplication(applicationId, input),
+
+  updateProfile: (input) => mockUnitedPassDataSource.updateProfile(input),
+  uploadAvatar: (file) => mockUnitedPassDataSource.uploadAvatar(file),
+  requestEmailChange: (email) => mockUnitedPassDataSource.requestEmailChange(email),
+  verifyEmailChange: (requestId, code) =>
+    mockUnitedPassDataSource.verifyEmailChange(requestId, code),
+  requestPhoneChange: (phone) => mockUnitedPassDataSource.requestPhoneChange(phone),
+  verifyPhoneChange: (requestId, code) =>
+    mockUnitedPassDataSource.verifyPhoneChange(requestId, code),
+  changePassword: (currentPassword, newPassword) =>
+    mockUnitedPassDataSource.changePassword(currentPassword, newPassword),
+  enrollTotp: () => mockUnitedPassDataSource.enrollTotp(),
+  confirmTotpEnrollment: (code) => mockUnitedPassDataSource.confirmTotpEnrollment(code),
+  removeTotp: () => mockUnitedPassDataSource.removeTotp(),
+  startPasskeyEnrollment: () => mockUnitedPassDataSource.startPasskeyEnrollment(),
+  completePasskeyEnrollment: (attestation) =>
+    mockUnitedPassDataSource.completePasskeyEnrollment(attestation),
+  removePasskey: (credentialId) => mockUnitedPassDataSource.removePasskey(credentialId),
+  generateRecoveryCodes: () => mockUnitedPassDataSource.generateRecoveryCodes(),
+  revokeOtherSessions: () => mockUnitedPassDataSource.revokeOtherSessions(),
+  logout: () => mockUnitedPassDataSource.logout(),
+  revokeSession: (sessionId) => mockUnitedPassDataSource.revokeSession(sessionId),
 };

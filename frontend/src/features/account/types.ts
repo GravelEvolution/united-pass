@@ -1,3 +1,11 @@
+export type AccountProfile = {
+  displayName: string;
+  nickname?: string;
+  avatarUrl?: string;
+  email: string;
+  phoneMasked: string;
+};
+
 export type SecurityFactor = {
   factorId: string;
   kind: "password" | "totp" | "passkey";

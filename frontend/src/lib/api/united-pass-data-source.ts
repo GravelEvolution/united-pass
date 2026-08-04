@@ -76,6 +76,29 @@ export interface UnitedPassCommands {
   updateApplicationStatus(applicationId: string, status: ApplicationStatus): Promise<void>;
   deleteApplication(applicationId: string): Promise<void>;
   updateApplication(applicationId: string, input: ApplicationUpdateInput): Promise<void>;
+
+  // Account profile
+  updateProfile(input: { displayName?: string; nickname?: string }): Promise<void>;
+  uploadAvatar(file: File): Promise<{ avatarUrl: string }>;
+  requestEmailChange(email: string): Promise<{ requestId: string }>;
+  verifyEmailChange(requestId: string, code: string): Promise<void>;
+  requestPhoneChange(phone: string): Promise<{ requestId: string }>;
+  verifyPhoneChange(requestId: string, code: string): Promise<void>;
+
+  // Security
+  changePassword(currentPassword: string, newPassword: string): Promise<void>;
+  enrollTotp(): Promise<{ secret: string; qrCodeUrl: string }>;
+  confirmTotpEnrollment(code: string): Promise<void>;
+  removeTotp(): Promise<void>;
+  startPasskeyEnrollment(): Promise<{ options: string }>;
+  completePasskeyEnrollment(attestation: string): Promise<void>;
+  removePasskey(credentialId: string): Promise<void>;
+  generateRecoveryCodes(): Promise<{ codes: string[] }>;
+  revokeOtherSessions(): Promise<void>;
+  logout(): Promise<void>;
+
+  // Session management
+  revokeSession(sessionId: string): Promise<void>;
 }
 
 /**

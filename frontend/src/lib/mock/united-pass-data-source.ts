@@ -712,6 +712,65 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
     },
     getPolicies: (query?: PageQuery) => Promise.resolve(toCursorPage(policies, query)),
     getAuditEvents: (query?: PageQuery) => Promise.resolve(toCursorPage(auditEvents, query)),
+
+    updateProfile: (input: { displayName?: string; nickname?: string }): Promise<void> => {
+      if (input.displayName !== undefined) {
+        employeeAdminUser.displayName = input.displayName;
+      }
+      if (input.nickname !== undefined) {
+        employeeAdminUser.nickname = input.nickname;
+      }
+      return Promise.resolve();
+    },
+    uploadAvatar: (): Promise<{ avatarUrl: string }> =>
+      Promise.resolve({ avatarUrl: "https://example.com/avatar/mock.png" }),
+    requestEmailChange: (): Promise<{ requestId: string }> =>
+      Promise.resolve({ requestId: `req_email_${Math.random().toString(36).slice(2, 10)}` }),
+    verifyEmailChange: (): Promise<void> => Promise.resolve(),
+    requestPhoneChange: (): Promise<{ requestId: string }> =>
+      Promise.resolve({ requestId: `req_phone_${Math.random().toString(36).slice(2, 10)}` }),
+    verifyPhoneChange: (): Promise<void> => Promise.resolve(),
+    changePassword: (): Promise<void> => Promise.resolve(),
+    enrollTotp: (): Promise<{ secret: string; qrCodeUrl: string }> =>
+      Promise.resolve({
+        secret: "JBSWY3DPEHPK3PXP MOCKSECRET==",
+        qrCodeUrl: "https://example.com/totp/qr/mock",
+      }),
+    confirmTotpEnrollment: (): Promise<void> => Promise.resolve(),
+    removeTotp: (): Promise<void> => Promise.resolve(),
+    startPasskeyEnrollment: (): Promise<{ options: string }> =>
+      Promise.resolve({ options: "mock-passkey-enrollment-options" }),
+    completePasskeyEnrollment: (): Promise<void> => Promise.resolve(),
+    removePasskey: (): Promise<void> => Promise.resolve(),
+    generateRecoveryCodes: (): Promise<{ codes: string[] }> =>
+      Promise.resolve({
+        codes: [
+          "mock-rc-01-a3f9",
+          "mock-rc-02-b7e1",
+          "mock-rc-03-c2d4",
+          "mock-rc-04-e8f6",
+          "mock-rc-05-a1b3",
+          "mock-rc-06-c5d7",
+          "mock-rc-07-e9f2",
+          "mock-rc-08-b4a8",
+        ],
+      }),
+    revokeOtherSessions: (): Promise<void> => {
+      const currentSession = sessions.find((session) => session.isCurrent);
+      sessions.length = 0;
+      if (currentSession) {
+        sessions.push(currentSession);
+      }
+      return Promise.resolve();
+    },
+    logout: (): Promise<void> => Promise.resolve(),
+    revokeSession: (sessionId: string): Promise<void> => {
+      const index = sessions.findIndex((session) => session.sessionId === sessionId);
+      if (index !== -1) {
+        sessions.splice(index, 1);
+      }
+      return Promise.resolve();
+    },
   };
 }
 

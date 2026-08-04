@@ -1,0 +1,9 @@
+.container {
+  display: grid;
+  gap: 20px;
+  max-width: 640px;
+}
+
+.backLink {
+  justify-self: start;
+}
