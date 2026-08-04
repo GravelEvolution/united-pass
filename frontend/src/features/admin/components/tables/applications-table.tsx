@@ -4,7 +4,7 @@ import type { ColumnProps } from "@douyinfe/semi-ui/lib/es/table";
 import Link from "next/link";
 import { Button } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
-import type { OAuthApplication } from "@/features/applications/types";
+import { AUDIENCE_LABELS, type OAuthApplication } from "@/features/applications/types";
 import {
   createScopedColumn,
   ManagementDirectory,
@@ -15,7 +15,7 @@ import {
 const copy = {
   eyebrow: "OAuth 2.0 / OIDC",
   title: "OAuth 应用",
-  description: "管理应用元数据、客户端类型和重定向 URI。客户端密钥不会在列表中展示。",
+  description: "管理 OAuth 应用和客户端配置。客户端密钥不会在列表中展示。",
   searchPlaceholder: "搜索应用或负责人",
   actionLabel: "注册应用",
 } satisfies DirectoryCopy;
@@ -32,17 +32,17 @@ const columns: ColumnProps<OAuthApplication>[] = [
     ),
   }),
   createScopedColumn({
-    title: "客户端类型",
-    dataIndex: "clientType",
+    title: "受众",
+    dataIndex: "audience",
     width: 180,
-    render: (_value: unknown, record: OAuthApplication) => record.clientType === "public" ? "公共客户端（PKCE）" : "机密客户端",
+    render: (_value: unknown, record: OAuthApplication) => AUDIENCE_LABELS[record.audience],
   }),
   createScopedColumn({ title: "负责人", dataIndex: "ownerName", width: 150 }),
   createScopedColumn({
-    title: "重定向 URI",
-    dataIndex: "redirectUriCount",
+    title: "Client 数量",
+    dataIndex: "clientCount",
     width: 130,
-    render: (_value: unknown, record: OAuthApplication) => `${record.redirectUriCount} 个`,
+    render: (_value: unknown, record: OAuthApplication) => `${record.clientCount} 个`,
   }),
   createScopedColumn({
     title: "状态",
@@ -68,7 +68,7 @@ export function ApplicationsTable({ records }: { records: OAuthApplication[] }) 
     <ManagementDirectory
       columns={columns}
       copy={copy}
-      getSearchText={(record) => [record.name, record.ownerName, record.applicationId].join(" ")}
+      getSearchText={(record) => [record.name, record.ownerName, record.applicationId, record.audience].join(" ")}
       records={records}
       rowKey="applicationId"
       action={

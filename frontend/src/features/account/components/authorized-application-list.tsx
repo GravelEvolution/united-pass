@@ -1,7 +1,12 @@
-import { MockActionButton } from "@/components/common/mock-action-button";
+"use client";
+
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { Button, Modal, Toast } from "@douyinfe/semi-ui";
 import { PageHeader } from "@/components/common/page-header";
 import { StatusBadge } from "@/components/common/status-badge";
 import type { AuthorizedApplication } from "@/features/account/types";
+import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import styles from "./authorized-application-list.module.css";
 
@@ -74,11 +79,7 @@ function GrantCard({ grant }: { grant: AuthorizedApplication }) {
             <p>由 {grant.applicationOwner} 提供 · {grant.clientType === "public" ? "Public Client" : "Confidential Client"}</p>
           </div>
         </div>
-        {isActive && (
-          <MockActionButton danger message={`撤销 ${grant.applicationName} 的授权`}>
-            撤销授权
-          </MockActionButton>
-        )}
+        {isActive && <RevokeGrantButton grant={grant} />}
       </div>
 
       <dl className={styles.detailList}>
@@ -107,5 +108,55 @@ function GrantCard({ grant }: { grant: AuthorizedApplication }) {
         </p>
       )}
     </article>
+  );
+}
+
+function RevokeGrantButton({ grant }: { grant: AuthorizedApplication }) {
+  const router = useRouter();
+  const [revoking, setRevoking] = useState(false);
+
+  function handleRevoke() {
+    Modal.warning({
+      title: `撤销 ${grant.applicationName} 的授权？`,
+      content: (
+        <div>
+          <p>撤销后：</p>
+          <ul>
+            <li>应用将无法再访问你的数据</li>
+            <li>已签发的 Access Token 在过期前仍可能有效</li>
+            <li>Refresh Token 将立即失效</li>
+            <li>如果需要重新授权，需在应用中重新发起授权流程</li>
+          </ul>
+          <p>此操作不可逆。当前为 Mock 实现。</p>
+        </div>
+      ),
+      okText: "确认撤销",
+      cancelText: "取消",
+      okType: "danger",
+      onOk: async () => {
+        setRevoking(true);
+        try {
+          await mockUnitedPassDataSource.revokeGrant(grant.grantId);
+          Toast.success({ content: `已撤销 ${grant.applicationName} 的授权。` });
+          router.refresh();
+        } catch {
+          Toast.error({ content: "撤销授权失败，请重试。" });
+          throw new Error("revoke failed");
+        } finally {
+          setRevoking(false);
+        }
+      },
+    });
+  }
+
+  return (
+    <Button
+      theme="solid"
+      type="danger"
+      loading={revoking}
+      onClick={handleRevoke}
+    >
+      撤销授权
+    </Button>
   );
 }

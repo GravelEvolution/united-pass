@@ -5,9 +5,17 @@ import type {
   AllowedScope,
   ApplicationCreateInput,
   ApplicationCreationResult,
+  ApplicationStatus,
+  ApplicationUpdateInput,
+  OAuthApplication,
   OAuthApplicationDetail,
+  OAuthClient,
+  OAuthClientCreateInput,
+  OAuthClientCreationResult,
+  SecretRotationResult,
 } from "@/features/applications/types";
-import type { ConsentResolution, ConsentRequest } from "@/features/authorization/types";
+import { getClientProfileConfig } from "@/features/applications/types";
+import type { ConsentDecision, ConsentResolution, ConsentRequest } from "@/features/authorization/types";
 
 const externalAppUser = {
   userId: "usr_06APPUSER7N2X4Q8K5M9",
@@ -67,7 +75,7 @@ const consentResolutions: Record<string, ConsentResolution> = {
   consent_demo_007: { status: "already_authorized", requestId: "consent_demo_007", applicationName: "United Mobile", redirectHost: "mobile.united.example" },
 };
 
-const authorizedApplications: AuthorizedApplication[] = [
+const initialAuthorizedApplications: AuthorizedApplication[] = [
   {
     grantId: "grant_001",
     applicationId: "app_workspace",
@@ -105,6 +113,8 @@ const authorizedApplications: AuthorizedApplication[] = [
     status: "revoked",
   },
 ];
+
+const mutableAuthorizedApplications: AuthorizedApplication[] = [...initialAuthorizedApplications];
 
 const availableScopes: AllowedScope[] = [
   { scope: "openid", label: "OpenID", description: "获取稳定用户标识，完成 OIDC 登录。", required: true },
@@ -149,12 +159,12 @@ const identityProviders = [
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getIdentityProviders"]>>;
 
 const initialApplications = [
-  { applicationId: "app_workspace", name: "United Workspace", clientType: "confidential", ownerName: "协作产品团队", status: "active", redirectUriCount: 3, updatedAt: "2026-08-01T06:10:00Z" },
-  { applicationId: "app_mobile", name: "United Mobile", clientType: "public", ownerName: "移动端团队", status: "active", redirectUriCount: 2, updatedAt: "2026-07-28T02:32:00Z" },
-  { applicationId: "app_legacy", name: "Legacy Reports", clientType: "confidential", ownerName: "数据团队", status: "disabled", redirectUriCount: 1, updatedAt: "2026-06-16T12:00:00Z" },
+  { applicationId: "app_workspace", name: "United Workspace", audience: "external", ownerName: "协作产品团队", status: "active", clientCount: 1, updatedAt: "2026-08-01T06:10:00Z" },
+  { applicationId: "app_mobile", name: "United Mobile", audience: "external", ownerName: "移动端团队", status: "active", clientCount: 1, updatedAt: "2026-07-28T02:32:00Z" },
+  { applicationId: "app_legacy", name: "Legacy Reports", audience: "internal", ownerName: "数据团队", status: "disabled", clientCount: 1, updatedAt: "2026-06-16T12:00:00Z" },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getApplications"]>>;
 
-const mutableApplications: typeof initialApplications = [...initialApplications];
+const mutableApplications: OAuthApplication[] = [...initialApplications];
 
 const initialApplicationDetails: Record<string, OAuthApplicationDetail> = {
   app_workspace: {
@@ -162,25 +172,37 @@ const initialApplicationDetails: Record<string, OAuthApplicationDetail> = {
     name: "United Workspace",
     description: "团队协作与项目管理工作台，支持任务、文档和日程整合。",
     logoUrl: null,
-    kind: "public-app",
-    clientType: "confidential",
-    clientId: "ws_9f3a8b2c1e7d4600",
-    status: "active",
+    audience: "external",
+    ownerId: "owner_workspace",
     ownerName: "协作产品团队",
-    redirectUris: [
-      { uri: "https://workspace.united.example/auth/callback", isLoopback: false, addedAt: "2026-07-01T03:00:00Z" },
-      { uri: "https://staging.workspace.united.example/auth/callback", isLoopback: false, addedAt: "2026-07-15T06:20:00Z" },
-      { uri: "http://localhost:3000/callback", isLoopback: true, addedAt: "2026-07-20T08:00:00Z" },
-    ],
-    logoutUri: "https://workspace.united.example/auth/logout",
-    allowedScopes: [
-      { scope: "openid", label: "OpenID", description: "获取稳定用户标识，完成 OIDC 登录。", required: true },
-      { scope: "profile", label: "基本资料", description: "查看姓名、头像和账户类型。", required: false },
-      { scope: "email", label: "邮箱地址", description: "读取当前账户绑定的邮箱地址。", required: false },
-    ],
-    consentRequired: true,
-    clientSecrets: [
-      { secretId: "sec_ws_001", label: "生产环境密钥", createdAt: "2026-07-01T03:00:00Z", lastRotatedAt: "2026-07-15T06:20:00Z" },
+    status: "active",
+    clients: [
+      {
+        clientId: "ws_9f3a8b2c1e7d4600",
+        applicationId: "app_workspace",
+        name: "Workspace Web 客户端",
+        clientType: "confidential",
+        grantTypes: ["authorization_code", "refresh_token"],
+        tokenEndpointAuthMethod: "client_secret_post",
+        redirectUris: [
+          { uri: "https://workspace.united.example/auth/callback", isLoopback: false, addedAt: "2026-07-01T03:00:00Z" },
+          { uri: "https://staging.workspace.united.example/auth/callback", isLoopback: false, addedAt: "2026-07-15T06:20:00Z" },
+          { uri: "http://localhost:3000/callback", isLoopback: true, addedAt: "2026-07-20T08:00:00Z" },
+        ],
+        logoutUri: "https://workspace.united.example/auth/logout",
+        allowedScopes: [
+          { scope: "openid", label: "OpenID", description: "获取稳定用户标识，完成 OIDC 登录。", required: true },
+          { scope: "profile", label: "基本资料", description: "查看姓名、头像和账户类型。", required: false },
+          { scope: "email", label: "邮箱地址", description: "读取当前账户绑定的邮箱地址。", required: false },
+        ],
+        consentMode: "always",
+        status: "active",
+        clientSecrets: [
+          { secretId: "sec_ws_001", label: "生产环境密钥", createdAt: "2026-07-01T03:00:00Z", lastRotatedAt: "2026-07-15T06:20:00Z" },
+        ],
+        createdAt: "2026-07-01T03:00:00Z",
+        updatedAt: "2026-08-01T06:10:00Z",
+      },
     ],
     grants: [
       { grantId: "grant_001", userLabel: "陆晴", scopes: ["openid", "profile", "email"], grantedAt: "2026-07-15T08:30:00Z", lastUsedAt: "2026-08-04T05:42:00Z", status: "active" },
@@ -198,23 +220,35 @@ const initialApplicationDetails: Record<string, OAuthApplicationDetail> = {
     name: "United Mobile",
     description: "移动端应用，使用 PKCE 公共客户端。",
     logoUrl: null,
-    kind: "public-app",
-    clientType: "public",
-    clientId: "mb_2c7f4e8a1b9d0300",
-    status: "active",
+    audience: "external",
+    ownerId: "owner_mobile",
     ownerName: "移动端团队",
-    redirectUris: [
-      { uri: "com.united.mobile:/oauth2callback", isLoopback: false, addedAt: "2026-06-20T10:00:00Z" },
-      { uri: "http://localhost:8081/callback", isLoopback: true, addedAt: "2026-06-25T14:00:00Z" },
+    status: "active",
+    clients: [
+      {
+        clientId: "mb_2c7f4e8a1b9d0300",
+        applicationId: "app_mobile",
+        name: "United Mobile 客户端",
+        clientType: "public",
+        grantTypes: ["authorization_code", "refresh_token"],
+        tokenEndpointAuthMethod: "none",
+        redirectUris: [
+          { uri: "com.united.mobile:/oauth2callback", isLoopback: false, addedAt: "2026-06-20T10:00:00Z" },
+          { uri: "http://localhost:8081/callback", isLoopback: true, addedAt: "2026-06-25T14:00:00Z" },
+        ],
+        logoutUri: null,
+        allowedScopes: [
+          { scope: "openid", label: "OpenID", description: "获取稳定用户标识，完成 OIDC 登录。", required: true },
+          { scope: "profile", label: "基本资料", description: "查看姓名、头像和账户类型。", required: false },
+          { scope: "offline_access", label: "离线访问", description: "在用户不活跃时通过 Refresh Token 继续访问已授权数据。", required: false },
+        ],
+        consentMode: "always",
+        status: "active",
+        clientSecrets: [],
+        createdAt: "2026-06-20T10:00:00Z",
+        updatedAt: "2026-07-28T02:32:00Z",
+      },
     ],
-    logoutUri: null,
-    allowedScopes: [
-      { scope: "openid", label: "OpenID", description: "获取稳定用户标识，完成 OIDC 登录。", required: true },
-      { scope: "profile", label: "基本资料", description: "查看姓名、头像和账户类型。", required: false },
-      { scope: "offline_access", label: "离线访问", description: "在用户不活跃时通过 Refresh Token 继续访问已授权数据。", required: false },
-    ],
-    consentRequired: true,
-    clientSecrets: [],
     grants: [
       { grantId: "grant_002", userLabel: "陆晴", scopes: ["openid", "profile", "offline_access"], grantedAt: "2026-06-20T10:15:00Z", lastUsedAt: "2026-08-03T13:16:00Z", status: "active" },
     ],
@@ -229,24 +263,36 @@ const initialApplicationDetails: Record<string, OAuthApplicationDetail> = {
     name: "Legacy Reports",
     description: "已停用的旧版报表应用。",
     logoUrl: null,
-    kind: "internal",
-    clientType: "confidential",
-    clientId: "lr_8a1b3c5d7e9f2000",
-    status: "disabled",
+    audience: "internal",
+    ownerId: "owner_legacy",
     ownerName: "数据团队",
-    redirectUris: [
-      { uri: "https://reports.united.example/auth/callback", isLoopback: false, addedAt: "2026-05-01T08:00:00Z" },
-    ],
-    logoutUri: "https://reports.united.example/auth/logout",
-    allowedScopes: [
-      { scope: "openid", label: "OpenID", description: "获取稳定用户标识，完成 OIDC 登录。", required: true },
-      { scope: "profile", label: "基本资料", description: "查看姓名、头像和账户类型。", required: false },
-      { scope: "email", label: "邮箱地址", description: "读取当前账户绑定的邮箱地址。", required: false },
-      { scope: "reporting:read", label: "报表读取", description: "读取应用关联的业务报表。", required: false },
-    ],
-    consentRequired: false,
-    clientSecrets: [
-      { secretId: "sec_lr_001", label: "原始密钥", createdAt: "2026-05-01T08:00:00Z", lastRotatedAt: null },
+    status: "disabled",
+    clients: [
+      {
+        clientId: "lr_8a1b3c5d7e9f2000",
+        applicationId: "app_legacy",
+        name: "Legacy Reports 客户端",
+        clientType: "confidential",
+        grantTypes: ["authorization_code", "refresh_token"],
+        tokenEndpointAuthMethod: "client_secret_post",
+        redirectUris: [
+          { uri: "https://reports.united.example/auth/callback", isLoopback: false, addedAt: "2026-05-01T08:00:00Z" },
+        ],
+        logoutUri: "https://reports.united.example/auth/logout",
+        allowedScopes: [
+          { scope: "openid", label: "OpenID", description: "获取稳定用户标识，完成 OIDC 登录。", required: true },
+          { scope: "profile", label: "基本资料", description: "查看姓名、头像和账户类型。", required: false },
+          { scope: "email", label: "邮箱地址", description: "读取当前账户绑定的邮箱地址。", required: false },
+          { scope: "reporting:read", label: "报表读取", description: "读取应用关联的业务报表。", required: false },
+        ],
+        consentMode: "trusted_first_party",
+        status: "disabled",
+        clientSecrets: [
+          { secretId: "sec_lr_001", label: "原始密钥", createdAt: "2026-05-01T08:00:00Z", lastRotatedAt: null },
+        ],
+        createdAt: "2026-05-01T08:00:00Z",
+        updatedAt: "2026-06-16T12:00:00Z",
+      },
     ],
     grants: [
       { grantId: "grant_003", userLabel: "陆晴", scopes: ["openid", "profile", "email", "reporting:read"], grantedAt: "2026-05-10T14:00:00Z", lastUsedAt: "2026-06-16T12:00:00Z", status: "revoked" },
@@ -274,6 +320,21 @@ const auditEvents = [
   { eventId: "evt_004", eventType: "会话撤销", actorName: "林知行", targetLabel: "Windows 设备", occurredAt: "2026-08-02T10:07:00Z", result: "success" },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getAuditEvents"]>>;
 
+function resolveScopes(scopeIds: string[]): AllowedScope[] {
+  const scopeMap = new Map(availableScopes.map((scope) => [scope.scope, scope]));
+  return scopeIds
+    .map((scopeId) => scopeMap.get(scopeId))
+    .filter((scope): scope is AllowedScope => scope !== undefined);
+}
+
+function buildRedirectUris(uris: string[], now: string) {
+  return uris.map((uri) => ({
+    uri,
+    isLoopback: uri.startsWith("http://localhost") || uri.startsWith("http://127.0.0.1"),
+    addedAt: now,
+  }));
+}
+
 export const mockUnitedPassDataSource: UnitedPassDataSource = {
   getCurrentUser: () => Promise.resolve(externalAppUser),
   getAdminCurrentUser: () => Promise.resolve(employeeAdminUser),
@@ -287,7 +348,7 @@ export const mockUnitedPassDataSource: UnitedPassDataSource = {
     }
     return Promise.resolve({ status: "client_not_found", requestId });
   },
-  getAuthorizedApplications: () => Promise.resolve(authorizedApplications),
+  getAuthorizedApplications: () => Promise.resolve(mutableAuthorizedApplications),
   getAdminDashboard: () => Promise.resolve({
     metrics: [
       { label: "活跃用户", value: "12,840", change: "近 30 天 +8.4%", tone: "positive" },
@@ -309,35 +370,18 @@ export const mockUnitedPassDataSource: UnitedPassDataSource = {
   getAvailableScopes: () => Promise.resolve(availableScopes),
   createApplication: (input: ApplicationCreateInput): Promise<ApplicationCreationResult> => {
     const applicationId = `app_${Math.random().toString(36).slice(2, 10)}`;
-    const clientId = `${input.name.slice(0, 2).toLowerCase()}_${Math.random().toString(36).slice(2, 16)}`;
     const now = new Date().toISOString();
-
-    const scopeMap = new Map(availableScopes.map((scope) => [scope.scope, scope]));
-    const allowedScopes = input.allowedScopes
-      .map((scopeId) => scopeMap.get(scopeId))
-      .filter((scope): scope is AllowedScope => scope !== undefined);
-
-    const redirectUris = input.redirectUris.map((uri) => ({
-      uri,
-      isLoopback: uri.startsWith("http://localhost") || uri.startsWith("http://127.0.0.1"),
-      addedAt: now,
-    }));
 
     const detail: OAuthApplicationDetail = {
       applicationId,
       name: input.name,
       description: input.description,
       logoUrl: null,
-      kind: input.kind,
-      clientType: input.clientType,
-      clientId,
-      status: "active",
+      audience: input.audience,
+      ownerId: `owner_${Math.random().toString(36).slice(2, 10)}`,
       ownerName: input.ownerName,
-      redirectUris,
-      logoutUri: input.logoutUri || null,
-      allowedScopes,
-      consentRequired: input.consentRequired,
-      clientSecrets: [],
+      status: "active",
+      clients: [],
       grants: [],
       auditEntries: [
         { eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`, eventType: "应用创建", actorName: "林知行", occurredAt: now, result: "success" },
@@ -350,21 +394,160 @@ export const mockUnitedPassDataSource: UnitedPassDataSource = {
     mutableApplications.unshift({
       applicationId,
       name: input.name,
-      clientType: input.clientType,
+      audience: input.audience,
       ownerName: input.ownerName,
       status: "active",
-      redirectUriCount: redirectUris.length,
+      clientCount: 0,
       updatedAt: now,
     });
 
-    const result: ApplicationCreationResult = {
-      applicationId,
+    return Promise.resolve({ applicationId });
+  },
+  createOAuthClient: (input: OAuthClientCreateInput): Promise<OAuthClientCreationResult> => {
+    const profileConfig = getClientProfileConfig(input.profile);
+    const clientId = `${input.name.slice(0, 2).toLowerCase()}_${Math.random().toString(36).slice(2, 16)}`;
+    const now = new Date().toISOString();
+
+    const clientSecrets = profileConfig.clientType === "confidential"
+      ? [{ secretId: `sec_${Math.random().toString(36).slice(2, 8)}`, label: "初始密钥", createdAt: now, lastRotatedAt: null }]
+      : [];
+
+    const client: OAuthClient = {
       clientId,
+      applicationId: input.applicationId,
+      name: input.name,
+      clientType: profileConfig.clientType,
+      grantTypes: [...profileConfig.grantTypes],
+      tokenEndpointAuthMethod: profileConfig.tokenEndpointAuthMethod,
+      redirectUris: buildRedirectUris(input.redirectUris, now),
+      logoutUri: input.logoutUri || null,
+      allowedScopes: resolveScopes(input.allowedScopes),
+      consentMode: input.consentMode,
+      status: "active",
+      clientSecrets,
+      createdAt: now,
+      updatedAt: now,
     };
-    if (input.clientType === "confidential") {
+
+    const detail = mutableApplicationDetails[input.applicationId];
+    if (detail) {
+      detail.clients.push(client);
+      detail.updatedAt = now;
+    }
+
+    const app = mutableApplications.find((item) => item.applicationId === input.applicationId);
+    if (app) {
+      app.clientCount += 1;
+      app.updatedAt = now;
+    }
+
+    const result: OAuthClientCreationResult = { clientId };
+    if (profileConfig.clientType === "confidential") {
       result.clientSecret = `sec_${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
     }
     return Promise.resolve(result);
+  },
+  decideConsent: (_requestId: string, decision: ConsentDecision): Promise<{ redirectUrl: string }> => {
+    const redirectUrl = decision === "allow"
+      ? "https://workspace.united.example/callback"
+      : "/account";
+    return Promise.resolve({ redirectUrl });
+  },
+  revokeGrant: (grantId: string): Promise<void> => {
+    const index = mutableAuthorizedApplications.findIndex((grant) => grant.grantId === grantId);
+    if (index !== -1) {
+      mutableAuthorizedApplications.splice(index, 1);
+    }
+    for (const detail of Object.values(mutableApplicationDetails)) {
+      const grantIndex = detail.grants.findIndex((grant) => grant.grantId === grantId);
+      if (grantIndex !== -1) {
+        detail.grants[grantIndex] = { ...detail.grants[grantIndex], status: "revoked" as const };
+      }
+    }
+    return Promise.resolve();
+  },
+  rotateClientSecret: (clientId: string): Promise<SecretRotationResult> => {
+    const now = new Date().toISOString();
+    const expiryMs = Date.now() + 24 * 60 * 60 * 1000;
+    const previousSecretExpiresAt = new Date(expiryMs).toISOString();
+
+    for (const detail of Object.values(mutableApplicationDetails)) {
+      const client = detail.clients.find((c) => c.clientId === clientId);
+      if (client) {
+        if (client.clientType !== "confidential") {
+          return Promise.reject(new Error("Public clients do not use client secrets."));
+        }
+        const newSecretId = `sec_${Math.random().toString(36).slice(2, 8)}`;
+        client.clientSecrets.push({
+          secretId: newSecretId,
+          label: `轮换密钥 ${new Date().toLocaleString("zh-CN")}`,
+          createdAt: now,
+          lastRotatedAt: now,
+        });
+        client.updatedAt = now;
+        detail.updatedAt = now;
+
+        const newSecret = `sec_${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
+        return Promise.resolve({
+          secretId: newSecretId,
+          clientSecret: newSecret,
+          previousSecretExpiresAt,
+        });
+      }
+    }
+    return Promise.reject(new Error(`Client ${clientId} not found.`));
+  },
+  updateApplicationStatus: (applicationId: string, status: ApplicationStatus): Promise<void> => {
+    const now = new Date().toISOString();
+    const detail = mutableApplicationDetails[applicationId];
+    if (!detail) {
+      return Promise.reject(new Error(`Application ${applicationId} not found.`));
+    }
+    detail.status = status;
+    detail.updatedAt = now;
+    detail.auditEntries.push({
+      eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`,
+      eventType: status === "disabled" ? "应用停用" : "应用启用",
+      actorName: "林知行",
+      occurredAt: now,
+      result: "success",
+    });
+
+    const app = mutableApplications.find((item) => item.applicationId === applicationId);
+    if (app) {
+      app.status = status;
+      app.updatedAt = now;
+    }
+    return Promise.resolve();
+  },
+  deleteApplication: (applicationId: string): Promise<void> => {
+    delete mutableApplicationDetails[applicationId];
+    const index = mutableApplications.findIndex((item) => item.applicationId === applicationId);
+    if (index !== -1) {
+      mutableApplications.splice(index, 1);
+    }
+    return Promise.resolve();
+  },
+  updateApplication: (applicationId: string, input: ApplicationUpdateInput): Promise<void> => {
+    const now = new Date().toISOString();
+    const detail = mutableApplicationDetails[applicationId];
+    if (!detail) {
+      return Promise.reject(new Error(`Application ${applicationId} not found.`));
+    }
+    if (input.name !== undefined) detail.name = input.name;
+    if (input.description !== undefined) detail.description = input.description;
+    if (input.audience !== undefined) detail.audience = input.audience;
+    if (input.ownerName !== undefined) detail.ownerName = input.ownerName;
+    detail.updatedAt = now;
+
+    const app = mutableApplications.find((item) => item.applicationId === applicationId);
+    if (app) {
+      if (input.name !== undefined) app.name = input.name;
+      if (input.audience !== undefined) app.audience = input.audience;
+      if (input.ownerName !== undefined) app.ownerName = input.ownerName;
+      app.updatedAt = now;
+    }
+    return Promise.resolve();
   },
   getPolicies: () => Promise.resolve(policies),
   getAuditEvents: () => Promise.resolve(auditEvents),

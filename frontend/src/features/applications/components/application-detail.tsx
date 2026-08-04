@@ -1,10 +1,20 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
-import { Button, Empty, Tabs, Toast } from "@douyinfe/semi-ui";
+import { useRouter } from "next/navigation";
+import { Button, Empty, Modal, Tabs, Toast } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import { PageHeader } from "@/components/common/page-header";
-import type { OAuthApplicationDetail } from "@/features/applications/types";
+import {
+  AUDIENCE_LABELS,
+  CONSENT_MODE_LABELS,
+  type OAuthApplicationDetail,
+  type OAuthClient,
+  type OAuthGrantType,
+  type SecretRotationResult,
+} from "@/features/applications/types";
+import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import styles from "./application-detail.module.css";
 
@@ -12,19 +22,23 @@ type ApplicationDetailProps = {
   detail: OAuthApplicationDetail;
 };
 
-const clientTypeLabel = (clientType: string) =>
+type ClientCardProps = {
+  client: OAuthClient;
+};
+
+const clientTypeLabel = (clientType: OAuthClient["clientType"]) =>
   clientType === "public" ? "公共客户端（PKCE）" : "机密客户端";
 
-const kindLabel = (kind: string) => {
-  switch (kind) {
-    case "internal":
-      return "内部应用";
-    case "public-app":
-      return "公共应用";
-    case "hybrid":
-      return "混合应用";
+const grantTypeLabel = (grantType: OAuthGrantType) => {
+  switch (grantType) {
+    case "authorization_code":
+      return "Authorization Code";
+    case "refresh_token":
+      return "Refresh Token";
+    case "client_credentials":
+      return "Client Credentials";
     default:
-      return kind;
+      return grantType;
   }
 };
 
@@ -47,7 +61,7 @@ export function ApplicationDetail({ detail }: ApplicationDetailProps) {
           <p>{detail.description}</p>
         </div>
         <div className={styles.headerMeta}>
-          <span>Client ID: <code>{detail.clientId}</code></span>
+          <span>受众: {AUDIENCE_LABELS[detail.audience]}</span>
           <StatusBadge
             label={detail.status === "active" ? "正常" : "已停用"}
             tone={detail.status === "active" ? "success" : "danger"}
@@ -61,20 +75,8 @@ export function ApplicationDetail({ detail }: ApplicationDetailProps) {
             <BasicInfoTab detail={detail} />
           </Tabs.TabPane>
 
-          <Tabs.TabPane tab="OAuth 配置" itemKey="oauth">
-            <OAuthConfigTab detail={detail} />
-          </Tabs.TabPane>
-
-          <Tabs.TabPane tab="Redirect URI" itemKey="redirect">
-            <RedirectUriTab detail={detail} />
-          </Tabs.TabPane>
-
-          <Tabs.TabPane tab="Scopes 与 Claims" itemKey="scopes">
-            <ScopesTab detail={detail} />
-          </Tabs.TabPane>
-
-          <Tabs.TabPane tab="Client Secret" itemKey="secret">
-            <ClientSecretTab detail={detail} />
+          <Tabs.TabPane tab="OAuth Clients" itemKey="clients">
+            <ClientsTab detail={detail} />
           </Tabs.TabPane>
 
           <Tabs.TabPane tab="授权记录" itemKey="grants">
@@ -103,14 +105,8 @@ function BasicInfoTab({ detail }: ApplicationDetailProps) {
       <dt>应用说明</dt>
       <dd>{detail.description || "—"}</dd>
 
-      <dt>应用类型</dt>
-      <dd>{kindLabel(detail.kind)}</dd>
-
-      <dt>客户端类型</dt>
-      <dd>{clientTypeLabel(detail.clientType)}</dd>
-
-      <dt>Client ID</dt>
-      <dd><code>{detail.clientId}</code></dd>
+      <dt>受众</dt>
+      <dd>{AUDIENCE_LABELS[detail.audience]}</dd>
 
       <dt>负责人</dt>
       <dd>{detail.ownerName}</dd>
@@ -132,50 +128,76 @@ function BasicInfoTab({ detail }: ApplicationDetailProps) {
   );
 }
 
-function OAuthConfigTab({ detail }: ApplicationDetailProps) {
+function ClientsTab({ detail }: ApplicationDetailProps) {
+  if (detail.clients.length === 0) {
+    return (
+      <Empty
+        title="暂无 OAuth Client"
+        description="此应用尚未配置任何 OAuth Client。"
+      />
+    );
+  }
+
   return (
     <div className={styles.section}>
-      <dl className={styles.descriptionList}>
-        <dt>Client ID</dt>
-        <dd><code>{detail.clientId}</code></dd>
-
-        <dt>客户端类型</dt>
-        <dd>{clientTypeLabel(detail.clientType)}</dd>
-
-        <dt>用户确认授权</dt>
-        <dd>{detail.consentRequired ? "需要用户确认" : "无需确认（可信内部应用）"}</dd>
-
-        <dt>Logout URI</dt>
-        <dd>{detail.logoutUri || "未配置"}</dd>
-      </dl>
-
-      {detail.clientType === "public" ? (
-        <div className={`${styles.notice} ${styles.noticeInfo}`}>
-          <div>
-            <strong>公共客户端安全要求</strong>
-            必须使用 Authorization Code + PKCE 流程。不会生成或存储 Client Secret。
-          </div>
-        </div>
-      ) : (
-        <div className={`${styles.notice} ${styles.noticeInfo}`}>
-          <div>
-            <strong>机密客户端</strong>
-            使用 Authorization Code 流程，Client Secret 存储在服务端密钥系统中，不会在列表或详情页展示明文。
-          </div>
-        </div>
-      )}
+      {detail.clients.map((client) => (
+        <ClientCard key={client.clientId} client={client} />
+      ))}
     </div>
   );
 }
 
-function RedirectUriTab({ detail }: ApplicationDetailProps) {
-  if (detail.redirectUris.length === 0) {
-    return <Empty title="未配置 Redirect URI" description="请添加至少一个已登记的回调地址。" />;
+function ClientCard({ client }: ClientCardProps) {
+  return (
+    <section className={styles.section}>
+      <div className={styles.headerMeta}>
+        <h3>{client.name}</h3>
+        <span>
+          Client ID: <code>{client.clientId}</code>
+        </span>
+        <StatusBadge
+          label={client.status === "active" ? "正常" : "已停用"}
+          tone={client.status === "active" ? "success" : "danger"}
+        />
+      </div>
+
+      <dl className={styles.descriptionList}>
+        <dt>客户端类型</dt>
+        <dd>{clientTypeLabel(client.clientType)}</dd>
+
+        <dt>Grant Types</dt>
+        <dd>{client.grantTypes.map(grantTypeLabel).join(", ")}</dd>
+
+        <dt>令牌端点认证方式</dt>
+        <dd>{client.tokenEndpointAuthMethod}</dd>
+
+        <dt>用户确认授权</dt>
+        <dd>{CONSENT_MODE_LABELS[client.consentMode]}</dd>
+
+        <dt>Logout URI</dt>
+        <dd>{client.logoutUri || "未配置"}</dd>
+      </dl>
+
+      <ClientRedirectUris client={client} />
+      <ClientScopes client={client} />
+      <ClientSecrets client={client} />
+    </section>
+  );
+}
+
+function ClientRedirectUris({ client }: ClientCardProps) {
+  if (client.redirectUris.length === 0) {
+    return (
+      <Empty
+        title="未配置 Redirect URI"
+        description="请添加至少一个已登记的回调地址。"
+      />
+    );
   }
 
   return (
     <div className={styles.uriList}>
-      {detail.redirectUris.map((entry) => (
+      {client.redirectUris.map((entry) => (
         <div key={entry.uri} className={styles.uriRow}>
           <code>{entry.uri}</code>
           <span>
@@ -195,14 +217,14 @@ function RedirectUriTab({ detail }: ApplicationDetailProps) {
   );
 }
 
-function ScopesTab({ detail }: ApplicationDetailProps) {
-  if (detail.allowedScopes.length === 0) {
+function ClientScopes({ client }: ClientCardProps) {
+  if (client.allowedScopes.length === 0) {
     return <Empty title="未配置允许的 Scope" />;
   }
 
   return (
     <div className={styles.scopeGrid}>
-      {detail.allowedScopes.map((scope) => (
+      {client.allowedScopes.map((scope) => (
         <div key={scope.scope} className={styles.scopeRow}>
           <code>{scope.scope}</code>
           <div>
@@ -221,25 +243,68 @@ function ScopesTab({ detail }: ApplicationDetailProps) {
   );
 }
 
-function ClientSecretTab({ detail }: ApplicationDetailProps) {
-  if (detail.clientType === "public") {
+function ClientSecrets({ client }: ClientCardProps) {
+  const router = useRouter();
+  const [rotating, setRotating] = useState(false);
+  const [rotatedSecret, setRotatedSecret] = useState<SecretRotationResult>();
+
+  if (client.clientType === "public") {
     return (
       <div className={`${styles.notice} ${styles.noticeInfo}`}>
         <div>
           <strong>公共客户端不使用 Client Secret</strong>
-          此应用使用 Authorization Code + PKCE 流程，客户端密钥不会存储或展示。
+          此客户端使用 Authorization Code + PKCE 流程，客户端密钥不会存储或展示。
         </div>
       </div>
     );
   }
 
+  function handleRotateSecret() {
+    Modal.warning({
+      title: "轮换 Client Secret",
+      content: (
+        <div>
+          <p>轮换后旧密钥将在 <strong>24 小时</strong>内保持有效，到期后自动失效。</p>
+          <p>新密钥仅在此页面展示一次，离开后无法再次查看。</p>
+          <p>此操作需要重认证。当前为 Mock 实现，不会真实校验。</p>
+        </div>
+      ),
+      okText: "确认轮换",
+      cancelText: "取消",
+      okType: "danger",
+      onOk: async () => {
+        setRotating(true);
+        try {
+          const result = await mockUnitedPassDataSource.rotateClientSecret(client.clientId);
+          setRotatedSecret(result);
+          Toast.success({ content: "密钥已轮换，请立即复制新密钥。" });
+          router.refresh();
+        } catch {
+          Toast.error({ content: "密钥轮换失败，请重试。" });
+          throw new Error("rotation failed");
+        } finally {
+          setRotating(false);
+        }
+      },
+    });
+  }
+
+  async function copyToClipboard(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      Toast.success({ content: "已复制到剪贴板。" });
+    } catch {
+      Toast.error({ content: "复制失败，请手动选择并复制。" });
+    }
+  }
+
   return (
     <div className={styles.section}>
-      {detail.clientSecrets.length === 0 ? (
+      {client.clientSecrets.length === 0 ? (
         <Empty title="暂无密钥记录" />
       ) : (
         <dl className={styles.descriptionList}>
-          {detail.clientSecrets.map((secret) => (
+          {client.clientSecrets.map((secret) => (
             <div key={secret.secretId} style={{ display: "contents" }}>
               <dt>密钥标签</dt>
               <dd>{secret.label}</dd>
@@ -257,6 +322,25 @@ function ClientSecretTab({ detail }: ApplicationDetailProps) {
         </dl>
       )}
 
+      {rotatedSecret && (
+        <div className={`${styles.notice} ${styles.noticeDanger}`}>
+          <div>
+            <strong>新 Client Secret（仅此一次展示）</strong>
+            <p style={{ marginTop: 8, marginBottom: 8 }}>
+              <code>{rotatedSecret.clientSecret}</code>
+              <Button
+                size="small"
+                theme="borderless"
+                onClick={() => copyToClipboard(rotatedSecret.clientSecret)}
+              >
+                复制
+              </Button>
+            </p>
+            <p>旧密钥将在 {formatSecurityDateTime(rotatedSecret.previousSecretExpiresAt)} 后失效。</p>
+          </div>
+        </div>
+      )}
+
       <div className={`${styles.notice} ${styles.noticeDanger}`}>
         <div>
           <strong>Client Secret 不会再次展示</strong>
@@ -268,9 +352,10 @@ function ClientSecretTab({ detail }: ApplicationDetailProps) {
         <Button
           theme="solid"
           type="warning"
-          onClick={() => Toast.info({ content: "密钥轮换需要重认证（当前仅为 Mock）。" })}
+          loading={rotating}
+          onClick={handleRotateSecret}
         >
-          轮换密钥（Mock）
+          轮换密钥
         </Button>
       </div>
     </div>
@@ -343,7 +428,86 @@ function AuditTab({ detail }: ApplicationDetailProps) {
 }
 
 function DangerTab({ detail }: ApplicationDetailProps) {
+  const router = useRouter();
   const isActive = detail.status === "active";
+  const [toggling, setToggling] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDeleteName, setConfirmDeleteName] = useState("");
+
+  function handleToggleStatus() {
+    const warningContent = (
+      <div>
+        {isActive ? (
+          <>
+            <p>停用 <strong>{detail.name}</strong> 后：</p>
+            <ul>
+              <li>用户将无法发起新的授权请求</li>
+              <li>已有授权不会立即失效，但仍受后端策略控制</li>
+              <li>已签发的 Access Token 在过期前仍然有效</li>
+              <li>Refresh Token 的续签将被阻止</li>
+            </ul>
+            <p>此操作需要重认证。当前为 Mock 实现。</p>
+          </>
+        ) : (
+          <p>恢复后用户可重新发起新的授权请求。已过期的授权不会自动恢复。</p>
+        )}
+      </div>
+    );
+
+    const onOk = async () => {
+      setToggling(true);
+      try {
+        await mockUnitedPassDataSource.updateApplicationStatus(
+          detail.applicationId,
+          isActive ? "disabled" : "active",
+        );
+        Toast.success({ content: isActive ? "应用已停用。" : "应用已启用。" });
+        router.refresh();
+      } catch {
+        Toast.error({ content: "操作失败，请重试。" });
+        throw new Error("status change failed");
+      } finally {
+        setToggling(false);
+      }
+    };
+
+    if (isActive) {
+      Modal.warning({
+        title: "停用此应用？",
+        content: warningContent,
+        okText: "确认停用",
+        cancelText: "取消",
+        okType: "danger",
+        onOk,
+      });
+    } else {
+      Modal.info({
+        title: "启用此应用？",
+        content: warningContent,
+        okText: "确认启用",
+        cancelText: "取消",
+        onOk,
+      });
+    }
+  }
+
+  async function handleDeleteApplication() {
+    if (confirmDeleteName !== detail.name) {
+      Toast.warning({ content: "输入的应用名称不匹配。" });
+      return;
+    }
+
+    setDeleting(true);
+    try {
+      await mockUnitedPassDataSource.deleteApplication(detail.applicationId);
+      Toast.success({ content: "应用已删除。" });
+      router.push("/admin/applications");
+    } catch {
+      Toast.error({ content: "删除失败，请重试。" });
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   return (
     <div className={styles.dangerZone}>
@@ -366,23 +530,48 @@ function DangerTab({ detail }: ApplicationDetailProps) {
         <Button
           theme="solid"
           type={isActive ? "danger" : "primary"}
-          onClick={() => Toast.info({ content: `${isActive ? "停用" : "启用"}应用需要重认证（当前仅为 Mock）。` })}
+          loading={toggling}
+          onClick={handleToggleStatus}
         >
-          {isActive ? "停用应用（Mock）" : "启用应用（Mock）"}
+          {isActive ? "停用应用" : "启用应用"}
         </Button>
       </div>
 
       <div className={styles.dangerItem}>
         <div>
           <strong>删除应用</strong>
-          <p>删除后所有授权记录和配置将永久清除，且无法恢复。</p>
+          <p>删除后所有 Client、Secret、授权记录将被永久清除。审计日志将按合规策略保留。此操作不可逆。</p>
+          <p style={{ marginTop: 8 }}>
+            <label>
+              请输入应用名称 <code>{detail.name}</code> 以确认：
+              <input
+                type="text"
+                value={confirmDeleteName}
+                onChange={(e) => setConfirmDeleteName(e.target.value)}
+                placeholder={detail.name}
+                style={{
+                  display: "block",
+                  marginTop: 4,
+                  padding: "6px 10px",
+                  border: "1px solid var(--semi-color-border)",
+                  borderRadius: 4,
+                  background: "var(--semi-color-bg-1)",
+                  color: "var(--semi-color-text-0)",
+                  width: "100%",
+                  maxWidth: 320,
+                }}
+              />
+            </label>
+          </p>
         </div>
         <Button
           theme="solid"
           type="danger"
-          onClick={() => Toast.info({ content: "删除应用需要重认证（当前仅为 Mock）。" })}
+          loading={deleting}
+          disabled={confirmDeleteName !== detail.name}
+          onClick={handleDeleteApplication}
         >
-          删除应用（Mock）
+          永久删除应用
         </Button>
       </div>
     </div>
