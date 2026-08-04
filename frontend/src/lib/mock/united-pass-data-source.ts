@@ -379,6 +379,14 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       const detail = applicationDetails[applicationId];
       return Promise.resolve(detail ?? null);
     },
+    getClientDetail: (applicationId: string, clientId: string) => {
+      const detail = applicationDetails[applicationId];
+      if (!detail) {
+        return Promise.resolve(null);
+      }
+      const client = detail.clients.find((c) => c.clientId === clientId);
+      return Promise.resolve(client ?? null);
+    },
     getAvailableScopes: () => Promise.resolve(availableScopes),
     createApplication: (input: ApplicationCreateInput): Promise<ApplicationCreationResult> => {
       try {

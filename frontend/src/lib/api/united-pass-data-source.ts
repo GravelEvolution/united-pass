@@ -17,6 +17,7 @@ import type {
   ApplicationWithInitialClientResult,
   OAuthApplication,
   OAuthApplicationDetail,
+  OAuthClient,
   OAuthClientCreateInput,
   OAuthClientCreationResult,
   SecretRotationResult,
@@ -50,6 +51,7 @@ export interface UnitedPassQueries {
   getIdentityProviders(): Promise<IdentityProviderRecord[]>;
   getApplications(): Promise<OAuthApplication[]>;
   getApplicationDetail(applicationId: string): Promise<OAuthApplicationDetail | null>;
+  getClientDetail(applicationId: string, clientId: string): Promise<OAuthClient | null>;
   getAvailableScopes(): Promise<AllowedScope[]>;
   getPolicies(): Promise<AuthorizationPolicy[]>;
   getAuditEvents(): Promise<AuditEvent[]>;

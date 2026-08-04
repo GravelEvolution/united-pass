@@ -80,6 +80,41 @@
   color: var(--up-ink-secondary);
 }
 
+.clientSummaryCard {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--up-line);
+  border-radius: var(--up-radius-md);
+  background: var(--up-surface);
+  text-decoration: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.clientSummaryCard:hover {
+  border-color: var(--up-brand);
+  box-shadow: var(--up-card-shadow);
+}
+
+.clientSummaryCard h3 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--up-ink);
+}
+
+.clientSummaryMeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  color: var(--up-muted-soft);
+  font-size: 12px;
+}
+
+.clientSummaryMeta span {
+  white-space: nowrap;
+}
+
 .descriptionList {
   display: grid;
   grid-template-columns: minmax(140px, 0.3fr) 1fr;
