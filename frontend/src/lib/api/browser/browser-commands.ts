@@ -65,4 +65,9 @@ export const browserCommands: UnitedPassCommands = {
   savePolicyDraft: (input) => mockUnitedPassDataSource.savePolicyDraft(input),
   publishPolicy: (policyId) => mockUnitedPassDataSource.publishPolicy(policyId),
   simulatePolicy: (input) => mockUnitedPassDataSource.simulatePolicy(input),
+
+  // Provider management
+  syncProviderDirectory: (providerId) => mockUnitedPassDataSource.syncProviderDirectory(providerId),
+  resolveSyncConflict: (conflictId, userId) => mockUnitedPassDataSource.resolveSyncConflict(conflictId, userId),
+  ignoreSyncConflict: (conflictId) => mockUnitedPassDataSource.ignoreSyncConflict(conflictId),
 };

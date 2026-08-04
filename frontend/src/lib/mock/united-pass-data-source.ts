@@ -22,8 +22,12 @@ import { getClientProfileConfig } from "@/features/applications/types";
 import type { ConsentDecision, ConsentResolution, ConsentRequest } from "@/features/authorization/types";
 import type {
   DepartmentDetail,
+  DirectorySyncHistoryEntry,
+  DirectorySyncResult,
   EmployeeDetail,
   EmployeeLinkInput,
+  ProviderDetail,
+  SyncConflict,
   UserDetail,
 } from "@/features/admin/types";
 import type {
@@ -307,6 +311,62 @@ const identityProviders = [
     updatedAt: "2026-08-05T06:20:00Z",
   },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getIdentityProviders"]>>["items"];
+
+const providerDetails: Record<string, ProviderDetail> = {
+  provider_feishu: {
+    providerId: "provider_feishu",
+    displayName: "飞书",
+    vendor: "feishu",
+    status: "planned",
+    loginEnabled: false,
+    appId: "cli_example_feishu_app",
+    secretConfigured: false,
+    callbackUrl: "https://pass.example.com/oauth2/feishu/callback",
+    contactScope: "contact:user.base:readonly,contact:department.base:readonly",
+    linkedUserCount: 0,
+    lastSyncAt: null,
+    lastSyncResult: null,
+    updatedAt: "2026-08-05T06:20:00Z",
+  },
+};
+
+const syncHistory: DirectorySyncHistoryEntry[] = [
+  {
+    syncId: "sync_001",
+    providerId: "provider_feishu",
+    startedAt: "2026-08-04T02:00:00Z",
+    completedAt: "2026-08-04T02:03:12Z",
+    status: "partial",
+    summary: "新增 12 个部门，更新 3 个部门，新增 45 名员工，检测到 2 个关联冲突",
+  },
+];
+
+const syncConflicts: SyncConflict[] = [
+  {
+    conflictId: "conflict_001",
+    providerId: "provider_feishu",
+    externalSubject: "feishu_user_001",
+    externalName: "陈默",
+    externalEmail: "chen.mo@example.com",
+    matchedUserId: "usr_01JUP8M8B4Q7R4T6PK1D",
+    matchedUserName: "林知行",
+    matchReason: "email",
+    status: "pending",
+    detectedAt: "2026-08-04T02:01:30Z",
+  },
+  {
+    conflictId: "conflict_002",
+    providerId: "provider_feishu",
+    externalSubject: "feishu_user_002",
+    externalName: "程越",
+    externalEmail: "cheng.yue@example.com",
+    matchedUserId: null,
+    matchedUserName: null,
+    matchReason: "name",
+    status: "pending",
+    detectedAt: "2026-08-04T02:02:15Z",
+  },
+];
 
 const initialApplications = [
   { applicationId: "app_workspace", name: "United Workspace", audience: "external", ownerName: "协作产品团队", status: "active", clientCount: 1, updatedAt: "2026-08-01T06:10:00Z" },
@@ -621,6 +681,19 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
     getDepartments: () => Promise.resolve(departments),
     getDepartmentDetail: (departmentId: string) => Promise.resolve(departmentDetails[departmentId] ?? null),
     getIdentityProviders: (query?: PageQuery) => Promise.resolve(toCursorPage(identityProviders, query)),
+    getProviderDetail: (providerId: string): Promise<ProviderDetail | null> => {
+      const detail = providerDetails[providerId];
+      if (!detail) return Promise.resolve(null);
+      return Promise.resolve({ ...detail });
+    },
+    getDirectorySyncHistory: (providerId?: string): Promise<DirectorySyncHistoryEntry[]> => {
+      const filtered = providerId ? syncHistory.filter((e) => e.providerId === providerId) : syncHistory;
+      return Promise.resolve([...filtered]);
+    },
+    getSyncConflicts: (providerId?: string): Promise<SyncConflict[]> => {
+      const filtered = providerId ? syncConflicts.filter((c) => c.providerId === providerId) : syncConflicts;
+      return Promise.resolve([...filtered]);
+    },
     getApplications: (query?: PageQuery) => Promise.resolve(toCursorPage(applications, query)),
     getApplicationDetail: (applicationId: string) => {
       const detail = applicationDetails[applicationId];
@@ -1166,6 +1239,57 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
           `操作：${input.action}`,
         ],
       });
+    },
+
+    syncProviderDirectory: (providerId: string): Promise<DirectorySyncResult> => {
+      const now = new Date().toISOString();
+      const result: DirectorySyncResult = {
+        syncId: `sync_${Date.now().toString(36)}`,
+        startedAt: now,
+        completedAt: now,
+        status: "partial",
+        departmentsAdded: 8,
+        departmentsUpdated: 2,
+        employeesAdded: 32,
+        employeesUpdated: 5,
+        employeesOffboarded: 1,
+        conflictsDetected: syncConflicts.filter((c) => c.providerId === providerId && c.status === "pending").length,
+      };
+
+      const detail = providerDetails[providerId];
+      if (detail) {
+        detail.lastSyncAt = now;
+        detail.lastSyncResult = result;
+      }
+
+      syncHistory.unshift({
+        syncId: result.syncId,
+        providerId,
+        startedAt: result.startedAt,
+        completedAt: result.completedAt,
+        status: result.status,
+        summary: `新增 ${result.departmentsAdded} 个部门，更新 ${result.departmentsUpdated} 个，新增 ${result.employeesAdded} 名员工，检测到 ${result.conflictsDetected} 个冲突`,
+      });
+
+      return Promise.resolve(result);
+    },
+
+    resolveSyncConflict: (conflictId: string, userId: string): Promise<void> => {
+      const conflict = syncConflicts.find((c) => c.conflictId === conflictId);
+      if (conflict) {
+        conflict.status = "resolved";
+        conflict.matchedUserId = userId;
+        conflict.matchReason = "manual";
+      }
+      return Promise.resolve();
+    },
+
+    ignoreSyncConflict: (conflictId: string): Promise<void> => {
+      const conflict = syncConflicts.find((c) => c.conflictId === conflictId);
+      if (conflict) {
+        conflict.status = "ignored";
+      }
+      return Promise.resolve();
     },
   };
 }

@@ -1,7 +1,8 @@
 "use client";
 
 import type { ColumnProps } from "@douyinfe/semi-ui/lib/es/table";
-import { MockActionButton } from "@/components/common/mock-action-button";
+import Link from "next/link";
+import { Button } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import type { IdentityProviderRecord } from "@/features/admin/types";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
@@ -61,7 +62,11 @@ const columns: ColumnProps<IdentityProviderRecord>[] = [
   createScopedColumn({
     title: "操作",
     width: 100,
-    render: (_value: unknown, record: IdentityProviderRecord) => <MockActionButton message={`查看 Provider ${record.displayName}`}>查看</MockActionButton>,
+    render: (_value: unknown, record: IdentityProviderRecord) => (
+      <Link href={`/admin/providers/${record.providerId}`}>
+        <Button theme="borderless">查看</Button>
+      </Link>
+    ),
   }),
 ];
 

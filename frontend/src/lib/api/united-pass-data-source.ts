@@ -3,11 +3,15 @@ import type {
   DashboardMetric,
   DepartmentDetail,
   DepartmentRecord,
+  DirectorySyncHistoryEntry,
+  DirectorySyncResult,
   EmployeeDetail,
   EmployeeLinkInput,
   EmployeeRecord,
   IdentityProviderRecord,
   ManagedUser,
+  ProviderDetail,
+  SyncConflict,
   UserDetail,
 } from "@/features/admin/types";
 import type { SecurityFactor, UserSession, AuthorizedApplication } from "@/features/account/types";
@@ -66,6 +70,9 @@ export interface UnitedPassQueries {
   getDepartments(): Promise<DepartmentRecord[]>;
   getDepartmentDetail(departmentId: string): Promise<DepartmentDetail | null>;
   getIdentityProviders(query?: PageQuery): Promise<CursorPage<IdentityProviderRecord>>;
+  getProviderDetail(providerId: string): Promise<ProviderDetail | null>;
+  getDirectorySyncHistory(providerId?: string): Promise<DirectorySyncHistoryEntry[]>;
+  getSyncConflicts(providerId?: string): Promise<SyncConflict[]>;
   getApplications(query?: PageQuery): Promise<CursorPage<OAuthApplication>>;
   getApplicationDetail(applicationId: string): Promise<OAuthApplicationDetail | null>;
   getClientDetail(applicationId: string, clientId: string): Promise<OAuthClient | null>;
@@ -124,6 +131,11 @@ export interface UnitedPassCommands {
   savePolicyDraft(input: PolicyDraftInput): Promise<{ policyId: string; version: number }>;
   publishPolicy(policyId: string): Promise<{ version: number }>;
   simulatePolicy(input: PolicySimulationInput): Promise<PolicySimulationResult>;
+
+  // Provider management
+  syncProviderDirectory(providerId: string): Promise<DirectorySyncResult>;
+  resolveSyncConflict(conflictId: string, userId: string): Promise<void>;
+  ignoreSyncConflict(conflictId: string): Promise<void>;
 }
 
 /**

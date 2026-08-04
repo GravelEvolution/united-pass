@@ -31,6 +31,9 @@ export const serverQueries: UnitedPassQueries = {
   getDepartments: () => mockUnitedPassDataSource.getDepartments(),
   getDepartmentDetail: (departmentId) => mockUnitedPassDataSource.getDepartmentDetail(departmentId),
   getIdentityProviders: (query?: PageQuery) => mockUnitedPassDataSource.getIdentityProviders(query),
+  getProviderDetail: (providerId) => mockUnitedPassDataSource.getProviderDetail(providerId),
+  getDirectorySyncHistory: (providerId) => mockUnitedPassDataSource.getDirectorySyncHistory(providerId),
+  getSyncConflicts: (providerId) => mockUnitedPassDataSource.getSyncConflicts(providerId),
   getApplications: (query?: PageQuery) => mockUnitedPassDataSource.getApplications(query),
   getApplicationDetail: (applicationId) =>
     mockUnitedPassDataSource.getApplicationDetail(applicationId),

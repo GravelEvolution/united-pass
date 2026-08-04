@@ -126,3 +126,54 @@ export type EmployeeLinkInput = {
   title: string;
   supervisorUserId?: string;
 };
+
+export type ProviderDetail = {
+  providerId: string;
+  displayName: string;
+  vendor: "feishu" | "generic";
+  status: "planned" | "active" | "disabled";
+  loginEnabled: boolean;
+  appId: string;
+  secretConfigured: boolean;
+  callbackUrl: string;
+  contactScope: string;
+  linkedUserCount: number;
+  lastSyncAt: string | null;
+  lastSyncResult: DirectorySyncResult | null;
+  updatedAt: string;
+};
+
+export type DirectorySyncResult = {
+  syncId: string;
+  startedAt: string;
+  completedAt: string;
+  status: "success" | "partial" | "failed";
+  departmentsAdded: number;
+  departmentsUpdated: number;
+  employeesAdded: number;
+  employeesUpdated: number;
+  employeesOffboarded: number;
+  conflictsDetected: number;
+};
+
+export type SyncConflict = {
+  conflictId: string;
+  providerId: string;
+  externalSubject: string;
+  externalName: string;
+  externalEmail: string;
+  matchedUserId: string | null;
+  matchedUserName: string | null;
+  matchReason: "email" | "name" | "manual";
+  status: "pending" | "resolved" | "ignored";
+  detectedAt: string;
+};
+
+export type DirectorySyncHistoryEntry = {
+  syncId: string;
+  providerId: string;
+  startedAt: string;
+  completedAt: string;
+  status: "success" | "partial" | "failed";
+  summary: string;
+};
