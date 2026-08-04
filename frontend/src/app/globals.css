@@ -117,7 +117,8 @@ html {
   color-scheme: light;
 }
 
-body {
+body,
+body[theme-mode="dark"] {
   margin: 0;
   color: var(--up-ink);
   background: var(--up-canvas);

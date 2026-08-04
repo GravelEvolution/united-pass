@@ -115,7 +115,7 @@
 .main {
   min-height: 100vh;
   margin-left: 252px;
-  padding: clamp(34px, 5vw, 64px) clamp(24px, 5vw, 64px);
+  padding: clamp(34px, 5vw, 64px) clamp(24px, 5vw, 64px) clamp(56px, 8vw, 96px);
 }
 
 .mobileHeader,

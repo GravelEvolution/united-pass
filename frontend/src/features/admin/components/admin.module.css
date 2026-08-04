@@ -42,17 +42,17 @@
 .directoryCard { overflow: hidden; }
 .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 18px 20px; border-bottom: 1px solid var(--up-line); }
 .toolbar :global(.semi-input-wrapper) { width: min(100%, 360px); }
-.toolbar > span { flex: none; color: var(--up-muted); font-size: 11px; }
+.toolbar > span { flex: none; color: var(--up-muted); font-size: 12px; }
 .tableScroll { overflow-x: auto; }
 .directoryTable { min-width: 920px; }
 .primaryCell,
 .primaryCell > strong,
 .primaryCell > span,
 .secondaryCell { display: block; }
-.primaryCell > strong { color: var(--up-ink); font-size: 12px; }
-.primaryCell > span { margin-top: 4px; color: var(--up-muted-soft); font-size: 10px; line-height: 1.45; }
-.secondaryCell { color: var(--up-ink-secondary); font-size: 11px; }
-.secondaryCell code { color: var(--up-brand-strong); font-size: 10px; }
+.primaryCell > strong { color: var(--up-ink); font-size: 14px; font-weight: 600; }
+.primaryCell > span { margin-top: 4px; color: var(--up-muted); font-size: 12px; line-height: 1.5; }
+.secondaryCell { color: var(--up-ink-secondary); font-size: 13px; }
+.secondaryCell code { color: var(--up-brand-strong); font-size: 12px; }
 
 @media (max-width: 1050px) {
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
