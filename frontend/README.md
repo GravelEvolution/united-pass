@@ -52,7 +52,7 @@ pnpm typecheck
 pnpm build
 ```
 
-本地运行要求 Node.js 24.x 与 pnpm 10.x；`package.json` 的 `engines` 字段是安装和 CI 的版本边界。
+本地运行要求 Node.js 24.x 与 pnpm 10.x；`package.json` 的 `engines` 字段是安装和 CI 的版本边界。GitHub Actions 工作流 `.github/workflows/frontend.yml` 会在 push 和 pull request 时自动运行上述三项检查。
 
 当前尚未引入测试运行器。Mock 流程稳定后优先覆盖登录凭据匹配、头像文件头与尺寸校验、邮箱与手机号验证、管理列表查询投影，以及 Persona / 员工状态展示；在此之前 `typecheck`、`lint` 与生产构建均为必跑检查。
 
