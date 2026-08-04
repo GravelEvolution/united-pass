@@ -18,6 +18,8 @@ export function CredentialPanel({ mode }: CredentialPanelProps) {
   const isLogin = mode === "login";
   const [confirmPasswordError, setConfirmPasswordError] = useState<string>();
   const [loginError, setLoginError] = useState<string>();
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [termsError, setTermsError] = useState<string>();
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -50,9 +52,15 @@ export function CredentialPanel({ mode }: CredentialPanelProps) {
         setConfirmPasswordError("两次输入的密码不一致，请重新确认。");
         return;
       }
+
+      if (!termsAccepted) {
+        setTermsError("请阅读并同意服务条款。");
+        return;
+      }
     }
 
     setConfirmPasswordError(undefined);
+    setTermsError(undefined);
     router.push("/account");
   }
 
@@ -161,9 +169,32 @@ export function CredentialPanel({ mode }: CredentialPanelProps) {
           </label>
         )}
 
-        <div className={styles.formMeta}>
-          <Checkbox defaultChecked={isLogin}>{isLogin ? "保持登录" : "我已阅读并同意服务条款"}</Checkbox>
-          {isLogin ? <Link href="/login">忘记密码？</Link> : <Link href="/terms">查看服务条款</Link>}
+        <div className={styles.formMetaBlock}>
+          <div className={styles.formMeta}>
+            {isLogin ? (
+              <Checkbox defaultChecked>保持登录</Checkbox>
+            ) : (
+              <Checkbox
+                checked={termsAccepted}
+                onChange={(event) => {
+                  const isAccepted = Boolean(event.target.checked);
+                  setTermsAccepted(isAccepted);
+                  if (isAccepted) setTermsError(undefined);
+                }}
+                aria-required="true"
+                aria-invalid={Boolean(termsError)}
+                aria-errormessage={termsError ? "terms-acceptance-error" : undefined}
+              >
+                我已阅读并同意服务条款
+              </Checkbox>
+            )}
+            {isLogin ? <Link href="/forgot-password">忘记密码？</Link> : <Link href="/terms">查看服务条款</Link>}
+          </div>
+          {termsError && (
+            <small id="terms-acceptance-error" className={styles.fieldError} role="alert">
+              {termsError}
+            </small>
+          )}
         </div>
 
         <Button htmlType="submit" type="primary" theme="solid" size="large" block>

@@ -57,6 +57,8 @@
 | 页面/流程 | 方法与路径 | 用途 | 关键要求 |
 | --- | --- | --- | --- |
 | `/login` | `POST /api/v1/auth/sessions` | 使用凭据建立浏览器会话 | 限速；返回通用凭据错误；支持 MFA challenge，不记录密码 |
+| `/forgot-password` | `POST /api/v1/password-reset-requests` | 请求向已验证联系方式发送重置说明 | 限速；始终返回通用结果，不能泄露账户是否存在 |
+| 密码重置落地页 | `POST /api/v1/password-resets` | 使用一次性令牌设置新密码 | 令牌限时、一次性、不可写入日志；成功后按策略撤销会话 |
 | 全局退出 | `DELETE /api/v1/auth/session` | 撤销当前浏览器会话 | 清除服务端会话与 Cookie |
 | `/register` | `POST /api/v1/registrations` | 创建普通用户账户 | 邮箱验证；稳定 `userId`；不得预建独立员工账户 |
 | 邮箱验证 | `POST /api/v1/registrations/email-verifications` | 验证注册邮箱 | 一次性、限时、限速 |

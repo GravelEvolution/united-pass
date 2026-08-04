@@ -22,14 +22,14 @@ pnpm dev
 
 ## 当前路由
 
-- `/login`、`/register`、`/authorize`、`/privacy`、`/terms`
+- `/login`、`/register`、`/forgot-password`、`/authorize`、`/privacy`、`/terms`
 - `/account`、`/account/security`、`/account/sessions`
 - `/admin`、`/admin/users`、`/admin/employees`、`/admin/departments`
 - `/admin/providers`、`/admin/applications`、`/admin/policies`、`/admin/audit`
 
 ## Mock 状态
 
-当前数据来自 `src/lib/mock/united-pass-data-source.ts`，仅用于界面与领域模型验证。登录、授权和管理操作不会调用后端，也不会持久化。普通用户演示可使用账户名 `app.user`（或邮箱 `app.user@example.com`）和密码 `MockUser123!`；员工管理演示凭据见 Mock 数据说明。
+当前数据来自 `src/lib/mock/united-pass-data-source.ts`，仅用于界面与领域模型验证。登录、注册、密码找回、授权和管理操作不会调用后端，也不会持久化。普通用户演示可使用账户名 `app.user`（或邮箱 `app.user@example.com`）和密码 `MockUser123!`；员工管理演示凭据见 Mock 数据说明。
 
 账户中心支持显示名称、昵称、安全校验后的本地头像上传，以及经过固定验证码 `246810` 验证后的邮箱和手机号页面内修改；所有结果刷新后恢复。管理后台包含 Provider 清单，飞书接入当前仅标记为规划中。
 
