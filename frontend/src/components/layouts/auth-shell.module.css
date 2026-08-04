@@ -34,33 +34,33 @@
 .brandCopy {
   position: relative;
   z-index: 1;
-  max-width: 520px;
+  max-width: 640px;
 }
 
 .kicker {
-  margin: 0 0 20px;
+  margin: 0 0 16px;
   color: var(--up-brand-strong);
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 760;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.16em;
 }
 
 .brandCopy h1 {
   margin: 0;
   color: var(--up-panel-ink);
-  font-size: clamp(36px, 5.2vw, 64px);
+  font-size: clamp(32px, 4vw, 52px);
   font-weight: 660;
-  line-height: 1.12;
-  letter-spacing: -0.055em;
+  line-height: 1.16;
+  letter-spacing: -0.045em;
   text-wrap: balance;
 }
 
 .brandCopy > p:last-child {
-  max-width: 440px;
-  margin: 24px 0 0;
+  max-width: 610px;
+  margin: 18px 0 0;
   color: var(--up-panel-muted);
-  font-size: 16px;
-  line-height: 1.8;
+  font-size: 14px;
+  line-height: 1.7;
 }
 
 .securityNote {
