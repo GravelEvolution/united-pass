@@ -71,7 +71,129 @@
 
 .actions { display: grid; grid-template-columns: 1fr 2fr; gap: 12px; margin-top: 24px; }
 
+.stateCard {
+  width: min(100%, 560px);
+  margin: auto;
+  padding: 34px;
+  border: 1px solid var(--up-line);
+  border-radius: var(--up-radius-lg);
+  background: var(--up-surface);
+  box-shadow: var(--up-shadow);
+  text-align: center;
+}
+
+.stateIcon {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 16px;
+  place-items: center;
+  border-radius: 16px;
+}
+
+.stateIconInfo {
+  color: var(--up-brand);
+  background: var(--up-brand-soft);
+}
+
+.stateIconWarning {
+  color: var(--up-warning, #d97706);
+  background: var(--up-warning-surface, #fef6e7);
+}
+
+.stateIconDanger {
+  color: var(--up-danger);
+  background: rgb(197 59 59 / 9%);
+}
+
+.stateIconSuccess {
+  color: var(--up-success);
+  background: rgb(22 134 92 / 9%);
+}
+
+.stateCard h1 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  letter-spacing: -0.025em;
+}
+
+.stateCard p {
+  margin: 0 0 8px;
+  color: var(--up-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.stateCard code {
+  color: var(--up-brand-strong);
+  font-size: 12px;
+}
+
+.stateActions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.scopeList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin: 12px 0;
+}
+
+.scopeList code {
+  padding: 4px 10px;
+  border: 1px solid var(--up-line);
+  border-radius: 999px;
+  background: var(--up-surface-subtle);
+  font-size: 11px;
+  color: var(--up-ink-secondary);
+}
+
+.decisionResult {
+  display: grid;
+  gap: 16px;
+  text-align: center;
+}
+
+.demoLinks {
+  margin-top: 28px;
+  padding: 14px;
+  border: 1px solid var(--up-line-soft);
+  border-radius: 10px;
+  background: var(--up-surface-subtle);
+}
+
+.demoLinks p {
+  margin: 0 0 8px;
+  color: var(--up-muted);
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.demoLinks ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  text-align: left;
+}
+
+.demoLinks li {
+  color: var(--up-muted-soft);
+  font-size: 11px;
+}
+
+.demoLinks code {
+  color: var(--up-brand-strong);
+  font-size: 10px;
+}
+
 @media (max-width: 520px) {
-  .card { padding: 24px 20px; border: 0; box-shadow: none; }
+  .card, .stateCard { padding: 24px 20px; border: 0; box-shadow: none; }
   .actions { grid-template-columns: 1fr; }
 }

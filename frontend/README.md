@@ -24,7 +24,7 @@ pnpm dev
 ## 当前路由
 
 - `/login`、`/register`、`/forgot-password`、`/authorize`、`/privacy`、`/terms`
-- `/account`、`/account/security`、`/account/sessions`
+- `/account`、`/account/security`、`/account/sessions`、`/account/applications`
 - `/admin`、`/admin/users`、`/admin/employees`、`/admin/departments`
 - `/admin/providers`、`/admin/applications`、`/admin/applications/new`、`/admin/applications/[applicationId]`、`/admin/policies`、`/admin/audit`
 
@@ -32,7 +32,7 @@ pnpm dev
 
 当前数据来自 `src/lib/mock/united-pass-data-source.ts`，仅用于界面与领域模型验证。登录、注册、密码找回、授权和管理操作不会调用后端，也不会持久化。普通用户演示可使用账户名 `app.user`（或邮箱 `app.user@example.com`）和密码 `MockUser123!`；员工管理演示凭据见 Mock 数据说明。
 
-账户中心支持显示名称、昵称、安全校验后的本地头像上传，以及经过固定验证码 `246810` 验证后的邮箱和手机号页面内修改；所有结果刷新后恢复。管理后台包含 Provider 清单，飞书接入当前仅标记为规划中。
+账户中心支持显示名称、昵称、安全校验后的本地头像上传，以及经过固定验证码 `246810` 验证后的邮箱和手机号页面内修改；所有结果刷新后恢复。授权页面 `/authorize?requestId=consent_demo_001` 支持有效请求、过期、Client 不存在、Redirect URI 不匹配、未登录、Scope 不允许和已授权等状态演示。账户中心「授权应用」页面展示已授权的 OAuth 应用、已授予 Scope 与撤销入口。管理后台包含 Provider 清单，飞书接入当前仅标记为规划中。
 
 界面支持亮色与暗色模式。首次访问默认跟随系统偏好，用户通过主题按钮选择后会在浏览器本地保存偏好。
 
