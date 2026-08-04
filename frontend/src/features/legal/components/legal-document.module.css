@@ -18,6 +18,7 @@
 .main {
   width: min(100% - 40px, 980px);
   margin: 32px auto 0;
+  padding-bottom: 24px;
 }
 
 .hero {
@@ -65,8 +66,8 @@
 }
 
 .metadata > div { padding: 14px 16px; background: var(--up-surface-subtle); }
-.metadata dt { color: var(--up-muted-soft); font-size: 10px; }
-.metadata dd { margin: 5px 0 0; color: var(--up-ink-secondary); font-size: 12px; font-weight: 620; }
+.metadata dt { color: var(--up-muted-soft); font-size: 12px; }
+.metadata dd { margin: 5px 0 0; color: var(--up-ink-secondary); font-size: 13px; font-weight: 620; }
 
 .document {
   display: grid;
@@ -86,13 +87,13 @@
 }
 
 .contents strong { font-size: 12px; }
-.contents ol { display: grid; gap: 11px; margin: 14px 0 0; padding-left: 18px; color: var(--up-muted); font-size: 11px; line-height: 1.5; }
+.contents ol { display: grid; gap: 11px; margin: 14px 0 0; padding-left: 18px; color: var(--up-muted); font-size: 12px; line-height: 1.5; }
 .contents a:hover { color: var(--up-brand); }
 
 .sections { min-width: 0; }
 .sections > section { scroll-margin-top: 24px; padding: 0 0 42px; }
 .sections > section + section { padding-top: 42px; border-top: 1px solid var(--up-line); }
-.sectionNumber { color: var(--up-brand); font-size: 10px; font-weight: 760; letter-spacing: 0.12em; }
+.sectionNumber { color: var(--up-brand); font-size: 12px; font-weight: 760; letter-spacing: 0.12em; }
 .sections h2 { margin: 7px 0 0; font-size: 22px; letter-spacing: -0.02em; }
 .sections p,
 .sections li { color: var(--up-muted); font-size: 13px; line-height: 1.9; }
@@ -124,7 +125,7 @@
   margin: 0 auto;
   padding: 42px 0;
   color: var(--up-muted-soft);
-  font-size: 11px;
+  font-size: 12px;
   text-align: center;
 }
 

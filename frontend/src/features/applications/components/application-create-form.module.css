@@ -1,4 +1,4 @@
-.form { display: grid; gap: 24px; }
+.form { display: grid; gap: 24px; padding-bottom: 8px; }
 
 .fieldGroup {
   display: grid;
@@ -18,13 +18,13 @@
 
 .fieldHint {
   color: var(--up-muted-soft);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
 .fieldError {
   color: var(--up-danger);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -75,13 +75,13 @@
 
 .scopeItem p {
   margin: 2px 0 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--up-muted);
   line-height: 1.5;
 }
 
 .scopeItem code {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--up-brand-strong);
 }
 
@@ -154,7 +154,7 @@
 
 .resultField > span {
   color: var(--up-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 620;
 }
 
@@ -195,7 +195,7 @@
   border-radius: 999px;
   color: var(--up-brand);
   background: var(--up-brand-soft);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 760;
   letter-spacing: 0.12em;
 }

@@ -139,7 +139,7 @@
   border: 1px solid var(--up-line);
   border-radius: 999px;
   background: var(--up-surface-subtle);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--up-ink-secondary);
 }
 
@@ -150,7 +150,7 @@
   border-radius: 9px;
   color: var(--up-muted);
   background: var(--up-info-surface);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.6;
 }
 

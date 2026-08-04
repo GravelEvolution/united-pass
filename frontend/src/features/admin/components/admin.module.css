@@ -10,17 +10,17 @@
 }
 
 .metricCard { padding: 21px; }
-.metricCard > span { color: var(--up-muted); font-size: 11px; font-weight: 620; }
+.metricCard > span { color: var(--up-muted); font-size: 13px; font-weight: 620; }
 .metricCard > strong { display: block; margin-top: 12px; font-size: 29px; letter-spacing: -0.035em; }
-.metricCard > p { margin: 7px 0 0; font-size: 10px; }
+.metricCard > p { margin: 7px 0 0; font-size: 12px; }
 .neutral { color: var(--up-muted); }
 .positive { color: var(--up-success); }
 .attention { color: var(--up-warning); }
 
-.dashboardGrid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.8fr); gap: 20px; margin-top: 20px; }
+.dashboardGrid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.8fr); gap: 20px; margin-top: 24px; margin-bottom: 8px; }
 .card { padding: 24px; }
 .cardHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
-.cardHeading span { color: var(--up-muted-soft); font-size: 10px; font-weight: 750; letter-spacing: 0.12em; }
+.cardHeading span { color: var(--up-muted-soft); font-size: 12px; font-weight: 750; letter-spacing: 0.12em; }
 .cardHeading h2 { margin: 4px 0 0; font-size: 17px; }
 .cardHeading a { color: var(--up-brand); font-size: 12px; font-weight: 650; }
 
@@ -30,29 +30,37 @@
 .eventDot { width: 9px; height: 9px; border-radius: 50%; background: var(--up-success); box-shadow: 0 0 0 5px rgb(22 134 92 / 9%); }
 .eventDot[data-result="denied"] { background: var(--up-danger); box-shadow: 0 0 0 5px rgb(197 59 59 / 9%); }
 .eventRow h3 { margin: 0; font-size: 13px; }
-.eventRow p { margin: 4px 0 0; color: var(--up-muted); font-size: 11px; }
+.eventRow p { margin: 4px 0 0; color: var(--up-muted); font-size: 13px; }
 .eventMeta { display: grid; justify-items: end; gap: 6px; }
-.eventMeta > span { color: var(--up-muted-soft); font-size: 9px; }
+.eventMeta > span { color: var(--up-muted-soft); font-size: 12px; }
 
 .readinessCard ol { display: grid; gap: 13px; margin: 0; padding: 0; list-style: none; }
-.readinessCard li { display: flex; align-items: center; gap: 9px; color: var(--up-ink-secondary); font-size: 12px; }
-.readinessCard > p { margin: 21px 0 0; padding-top: 17px; border-top: 1px solid var(--up-line-soft); color: var(--up-muted); font-size: 11px; line-height: 1.6; }
+.readinessCard li { display: flex; align-items: center; gap: 9px; color: var(--up-ink-secondary); font-size: 13px; }
+.readinessCard > p { margin: 21px 0 0; padding-top: 17px; border-top: 1px solid var(--up-line-soft); color: var(--up-muted); font-size: 12px; line-height: 1.6; }
 .readinessCard code { color: var(--up-brand); }
 
-.directoryCard { overflow: hidden; }
+.directoryCard { overflow: hidden; margin-bottom: 8px; }
 .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 18px 20px; border-bottom: 1px solid var(--up-line); }
 .toolbar :global(.semi-input-wrapper) { width: min(100%, 360px); }
-.toolbar > span { flex: none; color: var(--up-muted); font-size: 12px; }
+.toolbar > span { flex: none; color: var(--up-muted); font-size: 13px; }
 .tableScroll { overflow-x: auto; }
 .directoryTable { min-width: 920px; }
+.directoryCard :global(.semi-table-pagination-outer) {
+  padding: 14px 20px;
+  font-size: 13px;
+  justify-content: center !important;
+}
+.directoryCard :global(.semi-table-pagination-info) {
+  font-size: 13px;
+}
 .primaryCell,
 .primaryCell > strong,
 .primaryCell > span,
 .secondaryCell { display: block; }
 .primaryCell > strong { color: var(--up-ink); font-size: 14px; font-weight: 600; }
-.primaryCell > span { margin-top: 4px; color: var(--up-muted); font-size: 12px; line-height: 1.5; }
+.primaryCell > span { margin-top: 4px; color: var(--up-muted); font-size: 13px; line-height: 1.5; }
 .secondaryCell { color: var(--up-ink-secondary); font-size: 13px; }
-.secondaryCell code { color: var(--up-brand-strong); font-size: 12px; }
+.secondaryCell code { color: var(--up-brand-strong); font-size: 13px; }
 
 @media (max-width: 1050px) {
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }

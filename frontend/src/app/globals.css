@@ -118,12 +118,19 @@ html {
 }
 
 body,
+body[theme-mode="light"],
 body[theme-mode="dark"] {
   margin: 0;
   color: var(--up-ink);
   background: var(--up-canvas);
   font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Ensure Semi Design components inherit the project font in both modes */
+body[theme-mode="light"],
+body[theme-mode="dark"] {
+  --semi-font-family: var(--font-sans), system-ui, sans-serif;
 }
 
 button,

@@ -1,6 +1,7 @@
 .detailLayout {
   display: grid;
   gap: 24px;
+  padding-bottom: 8px;
 }
 
 .backLink {
@@ -52,12 +53,12 @@
 
 .headerMeta > span {
   color: var(--up-muted-soft);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .headerMeta code {
   color: var(--up-brand-strong);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .tabContent {
@@ -160,7 +161,7 @@
 
 .uriRow span {
   color: var(--up-muted-soft);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .scopeGrid {
@@ -179,19 +180,19 @@
 }
 
 .scopeRow code {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--up-brand-strong);
   flex-shrink: 0;
 }
 
 .scopeRow strong {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--up-ink-secondary);
 }
 
 .scopeRow p {
   margin: 2px 0 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--up-muted);
   line-height: 1.5;
 }
@@ -230,7 +231,7 @@
 
 .dangerItem p {
   margin: 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--up-muted);
   line-height: 1.5;
 }
@@ -241,7 +242,7 @@
   border-radius: 999px;
   color: var(--up-brand);
   background: var(--up-brand-soft);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 760;
   letter-spacing: 0.12em;
 }

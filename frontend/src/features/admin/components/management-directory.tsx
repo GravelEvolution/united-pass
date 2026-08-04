@@ -102,7 +102,6 @@ export function ManagementDirectory<RecordType extends Data>({
             rowKey={rowKey}
             scroll={{ x: 920 }}
             size="middle"
-            title={`${copy.title}列表`}
           />
         </div>
       </section>

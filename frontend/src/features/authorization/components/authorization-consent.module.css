@@ -32,7 +32,7 @@
 
 .application h1 { margin: 0; font-size: 23px; letter-spacing: -0.025em; }
 .application p { margin: 5px 0 4px; color: var(--up-muted); font-size: 13px; }
-.application span { color: var(--up-muted-soft); font-size: 11px; }
+.application span { color: var(--up-muted-soft); font-size: 12px; }
 
 .identity {
   display: flex;
@@ -47,9 +47,9 @@
 .identity span,
 .identity strong,
 .identity p { display: block; margin: 0; }
-.identity span { color: var(--up-muted); font-size: 11px; }
+.identity span { color: var(--up-muted); font-size: 12px; }
 .identity strong { margin-top: 2px; font-size: 13px; }
-.identity p { margin-top: 2px; color: var(--up-muted); font-size: 11px; }
+.identity p { margin-top: 2px; color: var(--up-muted); font-size: 12px; }
 
 .permissions { margin-top: 28px; }
 .permissions h2 { margin: 0 0 14px; font-size: 14px; }
@@ -65,7 +65,7 @@
   border-radius: 10px;
   color: var(--up-muted);
   background: var(--up-info-surface);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.6;
 }
 
@@ -149,7 +149,7 @@
   border: 1px solid var(--up-line);
   border-radius: 999px;
   background: var(--up-surface-subtle);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--up-ink-secondary);
 }
 
@@ -190,7 +190,7 @@
 
 .demoLinks code {
   color: var(--up-brand-strong);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 @media (max-width: 520px) {

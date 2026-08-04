@@ -51,7 +51,7 @@
 }
 
 .heroCopy { min-width: 0; }
-.label { color: var(--up-muted-soft); font-size: 10px; font-weight: 750; letter-spacing: 0.13em; }
+.label { color: var(--up-muted-soft); font-size: 12px; font-weight: 750; letter-spacing: 0.13em; }
 .heroCopy h2 { margin: 4px 0 2px; font-size: 23px; }
 .heroCopy p { margin: 0; color: var(--up-muted); font-size: 13px; }
 .badges { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; }
@@ -70,8 +70,8 @@
 
 .stableId span,
 .stableId code { display: block; }
-.stableId span { color: var(--up-muted); font-size: 10px; }
-.stableId code { overflow: hidden; margin-top: 4px; color: var(--up-ink-secondary); font-size: 11px; text-overflow: ellipsis; }
+.stableId span { color: var(--up-muted); font-size: 12px; }
+.stableId code { overflow: hidden; margin-top: 4px; color: var(--up-ink-secondary); font-size: 12px; text-overflow: ellipsis; }
 
 .card { padding: 26px; }
 
@@ -88,7 +88,7 @@
 .contactValue span { min-width: 0; overflow-wrap: anywhere; }
 .emptyText { color: var(--up-muted); font-size: 13px; line-height: 1.7; }
 
-.profileForm { display: grid; gap: 18px; }
+.profileForm { display: grid; gap: 18px; padding-bottom: 16px; }
 
 .profilePreview {
   display: flex;
@@ -108,7 +108,7 @@
 
 .profileField { display: grid; gap: 8px; }
 .profileField > span { color: var(--up-ink-secondary); font-size: 12px; font-weight: 620; }
-.profileField > small { color: var(--up-muted-soft); font-size: 10px; line-height: 1.55; }
+.profileField > small { color: var(--up-muted-soft); font-size: 12px; line-height: 1.55; }
 .profileField > .profileError { color: var(--up-danger); }
 
 .visuallyHidden {
@@ -129,13 +129,13 @@
   border-radius: 9px;
   color: var(--up-muted);
   background: var(--up-surface-subtle);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.6;
 }
 
 .profileActions { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }
 
-.contactForm { display: grid; gap: 18px; }
+.contactForm { display: grid; gap: 18px; padding-bottom: 16px; }
 
 .contactCurrent {
   margin: 0;
@@ -143,7 +143,7 @@
   border-radius: 9px;
   color: var(--up-muted);
   background: var(--up-surface-subtle);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.6;
 }
 
@@ -160,7 +160,7 @@
   background: var(--up-brand-soft);
 }
 
-.mockCode span { color: var(--up-muted); font-size: 11px; }
+.mockCode span { color: var(--up-muted); font-size: 12px; }
 .mockCode code { color: var(--up-brand); font-size: 22px; font-weight: 760; letter-spacing: 0.16em; }
 
 .factorList,
@@ -180,9 +180,9 @@
 .factorCopy p,
 .sessionCopy p { margin: 5px 0; color: var(--up-muted); font-size: 12px; line-height: 1.5; }
 .factorCopy > span,
-.sessionCopy > span { color: var(--up-muted-soft); font-size: 10px; }
+.sessionCopy > span { color: var(--up-muted-soft); font-size: 12px; }
 
-.dangerCard { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-top: 20px; border-color: var(--up-danger-line); }
+.dangerCard { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-top: 20px; margin-bottom: 8px; border-color: var(--up-danger-line); }
 .dangerCard p { margin: 7px 0 0; color: var(--up-muted); font-size: 12px; line-height: 1.6; }
 
 @media (max-width: 760px) {
