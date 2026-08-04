@@ -93,6 +93,7 @@
 | --- | --- | --- | --- |
 | `/account` | `GET /api/v1/me` | `userId`、姓名、邮箱、脱敏手机、personas、可选员工档案 | 当前会话用户 |
 | `/account` | `PATCH /api/v1/me` | 修改允许自助维护的公开资料 | 当前会话用户 |
+| `/account` | `POST /api/v1/me/avatar` | multipart 上传头像并返回受控媒体地址 | 当前会话用户；CSRF 防护；文件解码与重编码 |
 | `/account` | `POST /api/v1/me/email-change-requests` | 为新邮箱创建验证请求并发送验证码 | 当前会话用户；限速；可要求重认证 |
 | `/account` | `POST /api/v1/me/email-change-requests/{requestId}/verify` | 校验验证码并原子更新邮箱 | 当前会话用户；一次性、限时验证码 |
 | `/account` | `POST /api/v1/me/phone-change-requests` | 为新手机号创建验证请求并发送验证码 | 当前会话用户；限速；可要求重认证 |
@@ -112,12 +113,11 @@
 ```json
 {
   "displayName": "林知行",
-  "nickname": "知行",
-  "avatarUrl": "https://cdn.example.com/avatars/usr_01JUP8M8B4Q7R4T6PK1D.png"
+  "nickname": "知行"
 }
 ```
 
-后端必须限制字段长度、验证 `avatarUrl` 协议与允许的图片来源，并返回更新后的完整账户资料。邮箱、手机号等安全联系方式不得混入此通用资料接口，应使用带验证挑战的独立流程。
+头像使用独立的 `POST /api/v1/me/avatar` multipart 上传接口，不接受用户提交的外部图片 URL。后端必须重新验证文件大小、真实媒体类型、文件头、解码尺寸和总像素，拒绝 SVG 等主动内容，重新编码并剥离元数据后存储，再返回同源或受控媒体域的头像地址。前端校验只用于即时反馈，不能替代服务端安全处理。邮箱、手机号等安全联系方式不得混入通用资料接口，应使用带验证挑战的独立流程。
 
 联系方式修改的申请请求建议仅传新值：
 
@@ -145,6 +145,18 @@
 | 管理导航/操作能力 | `GET /api/v1/me/permissions` | 后端返回显式 permission capabilities |
 
 前端权限仅用于导航和控件可用性。以下每个请求仍须由后端执行 ABAC 决策，不能依赖角色名称或前端传入的权限结论。
+
+## Identity Provider 管理
+
+| 页面 | 方法与路径 | 用途 | 权限标识建议 |
+| --- | --- | --- | --- |
+| `/admin/providers` | `GET /api/v1/admin/identity-providers` | 分页读取 Provider 状态与非敏感元数据 | `identity_provider.read` |
+| Provider 详情 | `POST /api/v1/admin/identity-providers` | 创建 Provider 草稿 | `identity_provider.manage`；重认证；审计 |
+| Provider 详情 | `PATCH /api/v1/admin/identity-providers/{providerId}` | 更新允许的非密钥配置 | `identity_provider.manage`；重认证；审计 |
+| Provider 详情 | `POST /api/v1/admin/identity-providers/{providerId}/enable` | 完成后端校验后启用登录 | `identity_provider.enable`；重认证；审计 |
+| Provider 详情 | `POST /api/v1/admin/identity-providers/{providerId}/disable` | 停止新的 Provider 登录并说明已有账户影响 | `identity_provider.enable`；重认证；审计 |
+
+飞书是首个计划支持的厂商 Provider，但当前前端只展示规划记录。正式接入前需以后端确认飞书开放平台协议、回调和字段合同；客户端密钥只能保存在服务端密钥系统中。授权回调必须由后端校验请求关联、防重放参数、精确回调地址和供应商响应，不得由前端直接交换凭据。外部身份必须显式关联到既有稳定 `userId`，不得仅凭邮箱或手机号自动合并，也不得根据飞书组织信息直接授予员工或管理权限。
 
 ## 用户与员工
 
@@ -212,6 +224,7 @@
 | `getUsers` | `GET /api/v1/admin/users` |
 | `getEmployees` | `GET /api/v1/admin/employees` |
 | `getDepartments` | `GET /api/v1/admin/departments` |
+| `getIdentityProviders` | `GET /api/v1/admin/identity-providers` |
 | `getApplications` | `GET /api/v1/admin/applications` |
 | `getPolicies` | `GET /api/v1/admin/policies` |
 | `getAuditEvents` | `GET /api/v1/admin/audit-events` |

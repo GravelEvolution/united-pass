@@ -30,6 +30,7 @@ The frontend may eventually include:
 * Security and session management
 * Employee and department management
 * OAuth application management
+* External identity Provider management
 * Fine-grained authorization policy management
 * Audit and security event views
 
@@ -519,6 +520,24 @@ OAuth authorization and consent pages must display:
 
 Do not claim that a Scope grants a business permission. OAuth Scopes and application-level ABAC permissions are separate concepts.
 
+### External Identity Provider Management
+
+The administration surface includes `/admin/providers` for external identity Provider inventory and lifecycle management.
+
+The first planned vendor Provider is **Feishu (飞书)**. Until a backend contract and security review are complete:
+
+* Represent Feishu as `planned` and keep login disabled.
+* Do not claim that Feishu authentication, account linking, or organization synchronization is implemented.
+* Keep Provider management separate from OAuth application management; an external identity source is not a client application registered against United Pass.
+* Never expose Provider client secrets, vendor access tokens, signing material, callback credentials, or raw claims to browser code.
+* Perform authorization redirects, callback validation, code exchange, replay protection, and credential rotation on the backend.
+* Require exact allowlisted callback URLs and the protocol protections applicable to the reviewed integration.
+* Link external subjects to the existing stable `userId` through an explicit, auditable flow. Never merge accounts solely by email address, phone number, domain, or display name.
+* Never infer employee status, department membership, roles, or management permissions directly from Feishu attributes without an explicit backend policy and reviewed mapping.
+* Treat frontend Provider visibility and controls as UX only; the backend remains authoritative for configuration access, activation, linking, and authorization.
+
+Do not expand the Provider scope to SAML, CAS, LDAP, SCIM, directory synchronization, or other federation protocols without a further explicit request and a new or updated ADR.
+
 ## 15. Authorization UI Requirements
 
 United Pass intends to support fine-grained attribute-based access control.
@@ -697,6 +716,8 @@ Do not:
 * Build redirect URLs from unvalidated user input
 * Display sensitive employee fields to unauthorized users
 * Persist sensitive data longer than necessary
+
+User-managed avatars must be file uploads, not user-entered external URLs. Accept only the explicitly supported raster formats, constrain bytes, dimensions, and total pixels, verify the actual file signature, and re-encode before preview or storage. SVG and other active formats are not allowed. Frontend validation is for early rejection only; the backend must independently decode, validate, strip metadata, re-encode, and serve the result from a controlled origin.
 
 For links opened in a new tab, use the appropriate `rel` protection.
 

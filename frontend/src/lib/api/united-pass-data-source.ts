@@ -3,6 +3,7 @@ import type {
   DashboardMetric,
   DepartmentRecord,
   EmployeeRecord,
+  IdentityProviderRecord,
   ManagedUser,
 } from "@/features/admin/types";
 import type { SecurityFactor, UserSession } from "@/features/account/types";
@@ -26,6 +27,7 @@ export interface UnitedPassDataSource {
   getUsers(): Promise<ManagedUser[]>;
   getEmployees(): Promise<EmployeeRecord[]>;
   getDepartments(): Promise<DepartmentRecord[]>;
+  getIdentityProviders(): Promise<IdentityProviderRecord[]>;
   getApplications(): Promise<OAuthApplication[]>;
   getPolicies(): Promise<AuthorizationPolicy[]>;
   getAuditEvents(): Promise<AuditEvent[]>;

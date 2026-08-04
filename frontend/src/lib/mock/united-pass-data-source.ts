@@ -68,6 +68,19 @@ const departments = [
   { departmentId: "dep_success", name: "客户成功", parentName: "商业化中心", memberCount: 24, ownerName: "沈叙" },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getDepartments"]>>;
 
+const identityProviders = [
+  {
+    providerId: "provider_feishu",
+    displayName: "飞书",
+    vendor: "feishu",
+    integrationLabel: "飞书开放平台（待技术评审）",
+    status: "planned",
+    loginEnabled: false,
+    linkedUserCount: 0,
+    updatedAt: "2026-08-05T06:20:00Z",
+  },
+] satisfies Awaited<ReturnType<UnitedPassDataSource["getIdentityProviders"]>>;
+
 const applications = [
   { applicationId: "app_workspace", name: "United Workspace", clientType: "confidential", ownerName: "协作产品团队", status: "active", redirectUriCount: 3, updatedAt: "2026-08-01T06:10:00Z" },
   { applicationId: "app_mobile", name: "United Mobile", clientType: "public", ownerName: "移动端团队", status: "active", redirectUriCount: 2, updatedAt: "2026-07-28T02:32:00Z" },
@@ -105,6 +118,7 @@ export const mockUnitedPassDataSource: UnitedPassDataSource = {
   getUsers: () => Promise.resolve(users),
   getEmployees: () => Promise.resolve(employees),
   getDepartments: () => Promise.resolve(departments),
+  getIdentityProviders: () => Promise.resolve(identityProviders),
   getApplications: () => Promise.resolve(applications),
   getPolicies: () => Promise.resolve(policies),
   getAuditEvents: () => Promise.resolve(auditEvents),

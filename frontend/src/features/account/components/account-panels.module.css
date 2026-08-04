@@ -111,6 +111,18 @@
 .profileField > small { color: var(--up-muted-soft); font-size: 10px; line-height: 1.55; }
 .profileField > .profileError { color: var(--up-danger); }
 
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.avatarUploadActions { display: flex; flex-wrap: wrap; gap: 8px; }
+
 .profileNotice {
   margin: 0;
   padding: 11px 13px;

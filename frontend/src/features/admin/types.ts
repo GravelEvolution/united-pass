@@ -31,6 +31,17 @@ export type DepartmentRecord = {
   ownerName: string;
 };
 
+export type IdentityProviderRecord = {
+  providerId: string;
+  displayName: string;
+  vendor: "feishu" | "generic";
+  integrationLabel: string;
+  status: "planned" | "active" | "disabled";
+  loginEnabled: boolean;
+  linkedUserCount: number;
+  updatedAt: string;
+};
+
 export type AuditEvent = {
   eventId: string;
   eventType: string;
