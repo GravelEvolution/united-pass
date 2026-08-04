@@ -2,8 +2,9 @@
 
 import type { FormEvent } from "react";
 import { useState } from "react";
-import { Button, Input, Modal } from "@douyinfe/semi-ui";
+import { Button, Input, Modal, Toast } from "@douyinfe/semi-ui";
 import { validateContactValue, type ContactKind } from "../utils/contact-validation";
+import { browserCommands } from "@/lib/api/browser/browser-commands";
 import styles from "./account-panels.module.css";
 
 type ContactVerificationModalProps = {
@@ -25,11 +26,13 @@ export function ContactVerificationModal({
   const [contactValue, setContactValue] = useState("");
   const [verificationCode, setVerificationCode] = useState("");
   const [fieldError, setFieldError] = useState<string>();
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [requestId, setRequestId] = useState<string>();
   const isEmail = kind === "email";
   const contactLabel = isEmail ? "邮箱地址" : "手机号码";
   const normalizedContactValue = contactValue.trim();
 
-  function handleRequestCode(event: FormEvent<HTMLFormElement>) {
+  async function handleRequestCode(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const validationError = validateContactValue(kind, normalizedContactValue);
 
@@ -44,10 +47,21 @@ export function ContactVerificationModal({
     }
 
     setFieldError(undefined);
-    setStep("verify");
+    setIsSubmitting(true);
+    try {
+      const result = isEmail
+        ? await browserCommands.requestEmailChange(normalizedContactValue)
+        : await browserCommands.requestPhoneChange(normalizedContactValue);
+      setRequestId(result.requestId);
+      setStep("verify");
+    } catch {
+      Toast.error({ content: `发送验证码失败，请稍后重试。` });
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
-  function handleVerifyCode(event: FormEvent<HTMLFormElement>) {
+  async function handleVerifyCode(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     if (verificationCode.trim() !== MOCK_VERIFICATION_CODE) {
@@ -55,7 +69,25 @@ export function ContactVerificationModal({
       return;
     }
 
-    onVerified(normalizedContactValue);
+    if (!requestId) {
+      setFieldError("验证请求已失效，请重新发起。");
+      return;
+    }
+
+    setFieldError(undefined);
+    setIsSubmitting(true);
+    try {
+      if (isEmail) {
+        await browserCommands.verifyEmailChange(requestId, verificationCode.trim());
+      } else {
+        await browserCommands.verifyPhoneChange(requestId, verificationCode.trim());
+      }
+      onVerified(normalizedContactValue);
+    } catch {
+      setFieldError("验证失败，请检查验证码或稍后重试。");
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -85,6 +117,7 @@ export function ContactVerificationModal({
               validateStatus={fieldError ? "error" : "default"}
               aria-invalid={Boolean(fieldError)}
               aria-errormessage={fieldError ? `new-${kind}-error` : undefined}
+              disabled={isSubmitting}
               required
             />
             {fieldError && (
@@ -94,11 +127,13 @@ export function ContactVerificationModal({
             )}
           </label>
           <p className={styles.profileNotice}>
-            这是 Mock 验证流程，不会真的发送邮件或短信，也不会持久化联系方式。
+            这是 Mock 验证流程，不会真的发送邮件或短信。后端接入后将通过安全渠道发送验证码。
           </p>
           <div className={styles.profileActions}>
-            <Button theme="outline" onClick={onCancel}>取消</Button>
-            <Button htmlType="submit" type="primary" theme="solid">发送 Mock 验证码</Button>
+            <Button theme="outline" onClick={onCancel} disabled={isSubmitting}>取消</Button>
+            <Button htmlType="submit" type="primary" theme="solid" loading={isSubmitting} disabled={isSubmitting}>
+              发送验证码
+            </Button>
           </div>
         </form>
       ) : (
@@ -124,6 +159,7 @@ export function ContactVerificationModal({
               validateStatus={fieldError ? "error" : "default"}
               aria-invalid={Boolean(fieldError)}
               aria-errormessage={fieldError ? `${kind}-verification-code-error` : undefined}
+              disabled={isSubmitting}
               required
             />
             {fieldError && (
@@ -137,10 +173,13 @@ export function ContactVerificationModal({
               setStep("request");
               setVerificationCode("");
               setFieldError(undefined);
+              setRequestId(undefined);
             }}>
               返回修改
             </Button>
-            <Button htmlType="submit" type="primary" theme="solid">验证并更新</Button>
+            <Button htmlType="submit" type="primary" theme="solid" loading={isSubmitting} disabled={isSubmitting}>
+              验证并更新
+            </Button>
           </div>
         </form>
       )}

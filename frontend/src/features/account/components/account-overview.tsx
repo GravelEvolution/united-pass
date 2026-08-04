@@ -10,6 +10,7 @@ import type { CurrentUser } from "@/types/identity";
 import { ContactVerificationModal } from "./contact-verification-modal";
 import type { ContactKind } from "../utils/contact-validation";
 import { AvatarValidationError, sanitizeAvatarFile } from "../utils/avatar-file";
+import { browserCommands } from "@/lib/api/browser/browser-commands";
 import styles from "./account-panels.module.css";
 
 type AccountOverviewProps = {
@@ -64,8 +65,10 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
   const [verificationKind, setVerificationKind] = useState<ContactKind>();
   const [isEditorVisible, setIsEditorVisible] = useState(false);
   const [isAvatarProcessing, setIsAvatarProcessing] = useState(false);
+  const [isSubmittingProfile, setIsSubmittingProfile] = useState(false);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const avatarRequestIdRef = useRef(0);
+  const selectedFileRef = useRef<File | null>(null);
   const preferredName = profile.nickname?.trim() || profile.displayName;
 
   function openProfileEditor() {
@@ -79,6 +82,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
     setIsAvatarProcessing(false);
     setIsEditorVisible(false);
     setProfileErrors({});
+    selectedFileRef.current = null;
   }
 
   async function handleAvatarSelection(event: ChangeEvent<HTMLInputElement>) {
@@ -89,6 +93,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
     const requestId = avatarRequestIdRef.current + 1;
     avatarRequestIdRef.current = requestId;
     setIsAvatarProcessing(true);
+    selectedFileRef.current = selectedFile;
     setProfileErrors((currentErrors) => ({ ...currentErrors, avatarFile: undefined }));
 
     try {
@@ -110,7 +115,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
     }
   }
 
-  function handleProfileSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleProfileSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const normalizedDisplayName = profileDraft.displayName.trim();
     const normalizedNickname = profileDraft.nickname?.trim();
@@ -125,24 +130,45 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
       return;
     }
 
-    setProfile({
-      displayName: normalizedDisplayName,
-      nickname: normalizedNickname,
-      avatarFileName: profileDraft.avatarFileName,
-      avatarPreviewUrl: profileDraft.avatarPreviewUrl,
-    });
-    setProfileErrors({});
-    setIsEditorVisible(false);
-    Toast.success({ content: "资料已在当前 Mock 页面更新，刷新后会恢复。" });
+    setIsSubmittingProfile(true);
+    try {
+      await browserCommands.updateProfile({
+        displayName: normalizedDisplayName,
+        nickname: normalizedNickname,
+      });
+      let avatarUrl = profileDraft.avatarPreviewUrl;
+      if (selectedFileRef.current && profileDraft.avatarPreviewUrl?.startsWith("data:")) {
+        try {
+          const uploadResult = await browserCommands.uploadAvatar(selectedFileRef.current);
+          avatarUrl = uploadResult.avatarUrl;
+        } catch {
+          Toast.warning({ content: "头像上传失败，资料已更新但头像未变更。" });
+        }
+      }
+      setProfile({
+        displayName: normalizedDisplayName,
+        nickname: normalizedNickname,
+        avatarFileName: profileDraft.avatarFileName,
+        avatarPreviewUrl: avatarUrl,
+      });
+      selectedFileRef.current = null;
+      setProfileErrors({});
+      setIsEditorVisible(false);
+      Toast.success({ content: "资料已更新。" });
+    } catch {
+      Toast.error({ content: "资料更新失败，请稍后重试。" });
+    } finally {
+      setIsSubmittingProfile(false);
+    }
   }
 
   function handleContactVerified(nextValue: string) {
     if (verificationKind === "email") {
       setContactDetails((currentDetails) => ({ ...currentDetails, email: nextValue }));
-      Toast.success({ content: "邮箱已在当前 Mock 页面更新，刷新后会恢复。" });
+      Toast.success({ content: "邮箱已更新。" });
     } else if (verificationKind === "phone") {
       setContactDetails((currentDetails) => ({ ...currentDetails, phoneMasked: maskPhoneNumber(nextValue) }));
-      Toast.success({ content: "手机号已在当前 Mock 页面更新，刷新后会恢复。" });
+      Toast.success({ content: "手机号已更新。" });
     }
 
     setVerificationKind(undefined);
@@ -338,8 +364,8 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
           <p className={styles.profileNotice}>邮箱和手机号码属于安全联系方式，请返回基本资料卡片通过独立验证流程修改。</p>
 
           <div className={styles.profileActions}>
-            <Button theme="outline" onClick={closeProfileEditor}>取消</Button>
-            <Button htmlType="submit" type="primary" theme="solid" disabled={isAvatarProcessing}>保存 Mock 修改</Button>
+            <Button theme="outline" onClick={closeProfileEditor} disabled={isSubmittingProfile}>取消</Button>
+            <Button htmlType="submit" type="primary" theme="solid" disabled={isAvatarProcessing || isSubmittingProfile} loading={isSubmittingProfile}>保存修改</Button>
           </div>
         </form>
       </Modal>

@@ -1,15 +1,36 @@
-import { MockActionButton } from "@/components/common/mock-action-button";
+"use client";
+
+import { useState } from "react";
+import { Button, Popconfirm, Toast } from "@douyinfe/semi-ui";
+import { IconDelete } from "@douyinfe/semi-icons";
 import { PageHeader } from "@/components/common/page-header";
 import { StatusBadge } from "@/components/common/status-badge";
 import type { UserSession } from "@/features/account/types";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
+import { browserCommands } from "@/lib/api/browser/browser-commands";
 import styles from "./account-panels.module.css";
 
 type SessionListProps = {
   sessions: UserSession[];
 };
 
-export function SessionList({ sessions }: SessionListProps) {
+export function SessionList({ sessions: initialSessions }: SessionListProps) {
+  const [sessions, setSessions] = useState<UserSession[]>(initialSessions);
+  const [revokingId, setRevokingId] = useState<string | null>(null);
+
+  async function handleRevoke(sessionId: string): Promise<void> {
+    setRevokingId(sessionId);
+    try {
+      await browserCommands.revokeSession(sessionId);
+      setSessions((current) => current.filter((session) => session.sessionId !== sessionId));
+      Toast.success({ content: "会话已撤销。" });
+    } catch {
+      Toast.error({ content: "撤销会话失败，请稍后重试。" });
+    } finally {
+      setRevokingId(null);
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -30,7 +51,25 @@ export function SessionList({ sessions }: SessionListProps) {
                 <p>{session.clientName}</p>
                 <span>{session.approximateLocation} · {session.ipAddressMasked} · {formatSecurityDateTime(session.lastActiveAt)}</span>
               </div>
-              {!session.isCurrent && <MockActionButton danger message={`撤销 ${session.deviceName} 的会话`}>撤销会话</MockActionButton>}
+              {!session.isCurrent && (
+                <Popconfirm
+                  title={`撤销 ${session.deviceName} 的会话？`}
+                  content="该设备上的登录会话将立即失效，用户需要重新登录。"
+                  type="warning"
+                  onConfirm={() => handleRevoke(session.sessionId)}
+                  disabled={revokingId === session.sessionId}
+                >
+                  <Button
+                    type="danger"
+                    theme="outline"
+                    icon={<IconDelete />}
+                    loading={revokingId === session.sessionId}
+                    disabled={revokingId === session.sessionId}
+                  >
+                    撤销会话
+                  </Button>
+                </Popconfirm>
+              )}
             </article>
           ))}
         </div>
