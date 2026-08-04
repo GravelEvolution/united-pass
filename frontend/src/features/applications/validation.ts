@@ -74,6 +74,13 @@ export function validateClientProfileConstraints(
     );
   }
 
+  if (profileConfig.openidRequired && !scopes.includes("openid")) {
+    throw new ApplicationValidationError(
+      "allowedScopes",
+      `${profileConfig.label} Profile 必须包含 openid Scope。`,
+    );
+  }
+
   if (profileConfig.redirectUriRequired && redirectUris.length === 0) {
     throw new ApplicationValidationError(
       "redirectUris",
@@ -97,13 +104,6 @@ export function validateConsentMode(
     throw new ApplicationValidationError("consentMode", `未知的同意模式: ${consentMode}`);
   }
 
-  if (consentMode === "trusted_first_party") {
-    throw new ApplicationValidationError(
-      "consentMode",
-      "trusted_first_party 同意模式仅限内部可信应用，由后端策略授予，不可由调用方直接指定。",
-    );
-  }
-
   if (!profileConfig.consentApplicable && consentMode !== "always") {
     throw new ApplicationValidationError(
       "consentMode",
@@ -114,17 +114,13 @@ export function validateConsentMode(
 
 export function validateConsentModeWithAudience(
   consentMode: ConsentMode,
-  audience: ApplicationAudience,
+  _audience: ApplicationAudience,
   profileConfig: ClientProfileConfig,
 ): void {
   validateConsentMode(consentMode, profileConfig);
 
-  if (consentMode === "trusted_first_party" && audience !== "internal") {
-    throw new ApplicationValidationError(
-      "consentMode",
-      "trusted_first_party 同意模式仅限内部应用。",
-    );
-  }
+  // `trusted_first_party` was removed from MVP; when the backend implements
+  // trust policies, re-add it here with audience + permission checks.
 }
 
 export function validateRequestedScopes(
@@ -145,6 +141,13 @@ export function validateRequestedScopes(
     throw new ApplicationValidationError(
       "allowedScopes",
       `${profileConfig.label} Profile 不支持 openid Scope。`,
+    );
+  }
+
+  if (profileConfig.openidRequired && !requestedScopes.includes("openid")) {
+    throw new ApplicationValidationError(
+      "allowedScopes",
+      `${profileConfig.label} Profile 必须包含 openid Scope。`,
     );
   }
 }
@@ -190,7 +193,7 @@ function isValidAudience(audience: string): boolean {
 }
 
 function isValidConsentMode(mode: string): boolean {
-  return mode === "always" || mode === "first_authorization" || mode === "trusted_first_party";
+  return mode === "always" || mode === "first_authorization";
 }
 
 function isValidRedirectUri(uri: string): boolean {

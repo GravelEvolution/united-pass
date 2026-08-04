@@ -107,6 +107,31 @@ describe("OAuth application lifecycle", () => {
     expect(detail?.clients[0]?.tokenEndpointAuthMethod).toBe("none");
   });
 
+  it("creates a web_server client without openid (OAuth-only authorization)", async () => {
+    const app = await dataSource.createApplication({
+      name: "OAuth-Only App",
+      description: "",
+      audience: "internal",
+      ownerName: "Owner",
+    });
+
+    const client = await dataSource.createOAuthClient({
+      applicationId: app.applicationId,
+      name: "API Client",
+      profile: "web_server",
+      redirectUris: ["https://example.com/cb"],
+      logoutUri: "",
+      allowedScopes: ["reporting:read"],
+      consentMode: "always",
+    });
+
+    expect(client.clientSecret).toBeDefined();
+
+    const detail = await dataSource.getApplicationDetail(app.applicationId);
+    expect(detail?.clients[0]?.allowedScopes.map((s) => s.scope)).toEqual(["reporting:read"]);
+    expect(detail?.clients[0]?.allowedScopes.some((s) => s.scope === "openid")).toBe(false);
+  });
+
   it("creates a server-to-server client without redirect URIs or openid", async () => {
     const app = await dataSource.createApplication({
       name: "M2M Test App",
@@ -403,7 +428,7 @@ describe("OAuth client invariant enforcement", () => {
     ).rejects.toThrow("openid");
   });
 
-  it("rejects trusted_first_party consent mode from caller", async () => {
+  it("rejects trusted_first_party consent mode as unknown in MVP", async () => {
     const app = await dataSource.createApplication({
       name: "Consent Test App",
       description: "",
@@ -419,9 +444,9 @@ describe("OAuth client invariant enforcement", () => {
         redirectUris: ["https://example.com/cb"],
         logoutUri: "",
         allowedScopes: ["openid"],
-        consentMode: "trusted_first_party",
+        consentMode: "trusted_first_party" as never,
       }),
-    ).rejects.toThrow("trusted_first_party");
+    ).rejects.toThrow("未知");
   });
 
   it("rejects redirect URIs with non-https scheme (except localhost)", async () => {
@@ -508,7 +533,7 @@ describe("OAuth client invariant enforcement", () => {
     ).rejects.toThrow("openid");
   });
 
-  it("rejects atomic creation with trusted_first_party on external audience", async () => {
+  it("rejects atomic creation with trusted_first_party as unknown in MVP", async () => {
     await expect(
       dataSource.createApplicationWithInitialClient({
         application: {
@@ -523,10 +548,10 @@ describe("OAuth client invariant enforcement", () => {
           redirectUris: ["https://example.com/cb"],
           logoutUri: "",
           allowedScopes: ["openid"],
-          consentMode: "trusted_first_party",
+          consentMode: "trusted_first_party" as never,
         },
       }),
-    ).rejects.toThrow("trusted_first_party");
+    ).rejects.toThrow("未知");
   });
 });
 

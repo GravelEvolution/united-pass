@@ -288,7 +288,7 @@ const initialApplicationDetails: Record<string, OAuthApplicationDetail> = {
           { scope: "email", label: "邮箱地址", description: "读取当前账户绑定的邮箱地址。", required: false },
           { scope: "reporting:read", label: "报表读取", description: "读取应用关联的业务报表。", required: false },
         ],
-        consentMode: "trusted_first_party",
+        consentMode: "first_authorization",
         status: "disabled",
         clientSecrets: [
           { secretId: "sec_lr_001", label: "原始密钥", createdAt: "2026-05-01T08:00:00Z", lastRotatedAt: null },

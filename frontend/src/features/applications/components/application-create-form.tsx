@@ -46,7 +46,6 @@ const audienceOptions: Array<{ value: ApplicationAudience; description: string }
 const consentModeOrder: ConsentMode[] = [
   "always",
   "first_authorization",
-  "trusted_first_party",
 ];
 
 function isApplicationAudience(value: unknown): value is ApplicationAudience {
@@ -58,11 +57,7 @@ function isClientProfile(value: unknown): value is ClientProfile {
 }
 
 function isConsentMode(value: unknown): value is ConsentMode {
-  return (
-    value === "always" ||
-    value === "first_authorization" ||
-    value === "trusted_first_party"
-  );
+  return value === "always" || value === "first_authorization";
 }
 
 export function ApplicationCreateForm({ availableScopes }: ApplicationCreateFormProps) {
@@ -91,23 +86,20 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
   const [formError, setFormError] = useState<string>();
 
   const profileConfig = getClientProfileConfig(profile);
-  const openidForced = profileConfig.openidAllowed;
+  const openidForced = profileConfig.openidRequired;
   const hasUserInteraction = profile !== "server_to_server";
 
-  // openid is forced for interactive profiles and unavailable for server-to-server.
+  // openid is forced when required by the profile; unavailable for server-to-server;
+  // optional (admin's choice) when allowed but not required.
   const effectiveScopes = openidForced
     ? selectedScopes.includes("openid")
       ? selectedScopes
       : [...selectedScopes, "openid"]
-    : selectedScopes.filter((scope) => scope !== "openid");
+    : profileConfig.openidAllowed
+      ? selectedScopes
+      : selectedScopes.filter((scope) => scope !== "openid");
 
-  const consentModeOptions = consentModeOrder.filter((mode) =>
-    mode === "trusted_first_party" ? audience === "internal" : true,
-  );
-
-  // derived: if trusted_first_party is no longer valid for the current audience, fall back.
-  const effectiveConsentMode =
-    consentMode === "trusted_first_party" && audience !== "internal" ? "always" : consentMode;
+  const consentModeOptions = consentModeOrder;
 
   function addRedirectUri() {
     setRedirectUris((uris) => [...uris, ""]);
@@ -191,7 +183,7 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
           redirectUris: validRedirectUris,
           logoutUri: hasUserInteraction ? logoutUri.trim() : "",
           allowedScopes: effectiveScopes,
-          consentMode: hasUserInteraction ? effectiveConsentMode : "always",
+          consentMode: hasUserInteraction ? consentMode : "always",
         },
       });
       setCreationResult(result);
@@ -479,19 +471,22 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
           <small className={styles.fieldHint}>
             {openidForced
               ? "OpenID 在当前 Profile 下为必选项。"
-              : "当前 Profile 为机器对机器通信，不支持 OpenID。"}
+              : profileConfig.openidAllowed
+                ? "OpenID 为可选项，按需勾选。"
+                : "当前 Profile 为机器对机器通信，不支持 OpenID。"}
           </small>
           <div className={styles.scopeList}>
             {availableScopes.map((scopeOption) => {
               const isOpenid = scopeOption.scope === "openid";
-              const checked = isOpenid
-                ? openidForced
+              const openidDisabled = isOpenid && !profileConfig.openidAllowed;
+              const openidChecked = isOpenid
+                ? openidForced || (profileConfig.openidAllowed && selectedScopes.includes("openid"))
                 : effectiveScopes.includes(scopeOption.scope);
-              const disabled = isOpenid;
+              const disabled = isOpenid ? openidForced || openidDisabled : false;
               return (
                 <div key={scopeOption.scope} className={styles.scopeItem}>
                   <Checkbox
-                    checked={checked}
+                    checked={openidChecked}
                     disabled={disabled}
                     onChange={() => toggleScope(scopeOption.scope)}
                     aria-label={scopeOption.label}
@@ -500,6 +495,9 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
                       <strong>{scopeOption.label}</strong>
                       {isOpenid && openidForced && (
                         <span className={styles.fieldHint} style={{ marginLeft: 6 }}>（必选）</span>
+                      )}
+                      {isOpenid && !openidForced && profileConfig.openidAllowed && (
+                        <span className={styles.fieldHint} style={{ marginLeft: 6 }}>（可选）</span>
                       )}
                       <p>
                         <code>{scopeOption.scope}</code> — {scopeOption.description}
@@ -517,7 +515,7 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
             <label>
               <span className={styles.fieldLabel}>授权确认模式</span>
               <Select
-                value={effectiveConsentMode}
+                value={consentMode}
                 onChange={(value) => {
                   if (isConsentMode(value)) {
                     setConsentMode(value);
@@ -532,9 +530,7 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
                 ))}
               </Select>
               <small className={styles.fieldHint}>
-                {audience === "internal"
-                  ? "内部应用可选择跳过确认（仅限可信第一方）。"
-                  : "非内部应用不可使用跳过确认模式。"}
+                选择每次授权都确认，或仅首次授权确认。跳过确认模式将在后端实现信任策略后开放。
               </small>
             </label>
           </div>

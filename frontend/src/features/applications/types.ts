@@ -18,10 +18,12 @@ export type ClientProfile =
   | "spa_mobile"
   | "server_to_server";
 
+/**
+ * MVP 同意模式。`trusted_first_party` 暂不支持，待后端实现信任策略后再加。
+ */
 export type ConsentMode =
   | "always"
-  | "first_authorization"
-  | "trusted_first_party";
+  | "first_authorization";
 
 export type RedirectUriEntry = {
   uri: string;
@@ -161,7 +163,16 @@ export type ClientProfileConfig = {
   grantTypes: OAuthGrantType[];
   tokenEndpointAuthMethod: TokenEndpointAuthMethod;
   redirectUriRequired: boolean;
+  /**
+   * 该 Profile 是否允许选择 `openid` Scope。
+   * `server_to_server` 不允许，因为 Client Credentials Grant 无用户参与。
+   */
   openidAllowed: boolean;
+  /**
+   * 该 Profile 是否强制要求 `openid` Scope。
+   * MVP 中所有 Profile 均为 `false`，由管理员按需选择。
+   */
+  openidRequired: boolean;
   consentApplicable: boolean;
 };
 
@@ -175,6 +186,7 @@ export const CLIENT_PROFILES: readonly ClientProfileConfig[] = [
     tokenEndpointAuthMethod: "client_secret_basic",
     redirectUriRequired: true,
     openidAllowed: true,
+    openidRequired: false,
     consentApplicable: true,
   },
   {
@@ -186,6 +198,7 @@ export const CLIENT_PROFILES: readonly ClientProfileConfig[] = [
     tokenEndpointAuthMethod: "none",
     redirectUriRequired: true,
     openidAllowed: true,
+    openidRequired: false,
     consentApplicable: true,
   },
   {
@@ -197,6 +210,7 @@ export const CLIENT_PROFILES: readonly ClientProfileConfig[] = [
     tokenEndpointAuthMethod: "client_secret_basic",
     redirectUriRequired: false,
     openidAllowed: false,
+    openidRequired: false,
     consentApplicable: false,
   },
 ] as const;
@@ -212,7 +226,6 @@ export function getClientProfileConfig(profile: ClientProfile): ClientProfileCon
 export const CONSENT_MODE_LABELS: Record<ConsentMode, string> = {
   always: "每次授权都确认",
   first_authorization: "仅首次授权确认",
-  trusted_first_party: "跳过确认（仅内部可信应用）",
 };
 
 export const AUDIENCE_LABELS: Record<ApplicationAudience, string> = {
