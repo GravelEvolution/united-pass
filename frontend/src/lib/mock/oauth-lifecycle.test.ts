@@ -384,6 +384,9 @@ describe("consent resolution and decision", () => {
   it("resolves unauthenticated and scope_not_allowed states", async () => {
     const unauth = await mockUnitedPassDataSource.getConsentResolution("consent_demo_005");
     expect(unauth.status).toBe("unauthenticated");
+    if (unauth.status === "unauthenticated") {
+      expect(unauth.requestId).toBe("consent_demo_005");
+    }
 
     const scopeNotAllowed = await mockUnitedPassDataSource.getConsentResolution("consent_demo_006");
     expect(scopeNotAllowed.status).toBe("scope_not_allowed");
@@ -400,9 +403,11 @@ describe("consent resolution and decision", () => {
   it("decideConsent returns a redirect URL for allow and deny", async () => {
     const allowResult = await mockUnitedPassDataSource.decideConsent("consent_demo_001", "allow");
     expect(allowResult.redirectUrl).toContain("callback");
+    expect(allowResult.redirectUrl.startsWith("http")).toBe(true);
 
     const denyResult = await mockUnitedPassDataSource.decideConsent("consent_demo_001", "deny");
     expect(denyResult.redirectUrl).toBe("/account");
+    expect(denyResult.redirectUrl.startsWith("/")).toBe(true);
   });
 });
 

@@ -11,9 +11,16 @@ import styles from "./credential-panel.module.css";
 
 type CredentialPanelProps = {
   mode: "login" | "register";
+  /**
+   * Authorization transaction ID to resume after successful login.
+   * When present, login redirects to /authorize?requestId=... instead
+   * of the default account/admin destination. Only an opaque server-issued
+   * transaction ID is accepted — never a raw returnTo URL.
+   */
+  resumeRequestId?: string;
 };
 
-export function CredentialPanel({ mode }: CredentialPanelProps) {
+export function CredentialPanel({ mode, resumeRequestId }: CredentialPanelProps) {
   const router = useRouter();
   const isLogin = mode === "login";
   const [confirmPasswordError, setConfirmPasswordError] = useState<string>();
@@ -40,7 +47,12 @@ export function CredentialPanel({ mode }: CredentialPanelProps) {
       }
 
       setLoginError(undefined);
-      router.push(destination);
+
+      if (resumeRequestId) {
+        router.push(`/authorize?requestId=${encodeURIComponent(resumeRequestId)}`);
+      } else {
+        router.push(destination);
+      }
       return;
     }
 

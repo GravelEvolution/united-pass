@@ -74,12 +74,19 @@ export function AuthorizationConsent({ currentUser, resolution }: AuthorizationC
     }
 
     if (decisionState.phase === "done") {
+      const { redirectUrl, decision } = decisionState;
       return (
         <DecisionResult
-          decision={decisionState.decision}
+          decision={decision}
           applicationName={resolution.request.applicationName}
-          redirectHost={resolution.request.redirectHost}
-          onContinue={() => router.push(decisionState.decision === "allow" ? "/account/applications" : "/account")}
+          redirectUrl={redirectUrl}
+          onContinue={() => {
+            if (redirectUrl.startsWith("/")) {
+              router.push(redirectUrl);
+            } else {
+              window.open(redirectUrl, "_blank", "noopener,noreferrer");
+            }
+          }}
         />
       );
     }
@@ -304,15 +311,16 @@ function DecisionPending({
 function DecisionResult({
   decision,
   applicationName,
-  redirectHost,
+  redirectUrl,
   onContinue,
 }: {
   decision: ConsentDecision;
   applicationName: string;
-  redirectHost: string;
+  redirectUrl: string;
   onContinue: () => void;
 }) {
   const isAllowed = decision === "allow";
+  const isExternalRedirect = isAllowed && !redirectUrl.startsWith("/");
 
   return (
     <div className={styles.stateCard}>
@@ -324,7 +332,11 @@ function DecisionResult({
         {isAllowed ? (
           <>
             <p>你已授权 <strong>{applicationName}</strong> 访问请求的数据。</p>
-            <p>点击下方按钮继续（Mock，不会真实跳转至 <code>{redirectHost}</code>）。</p>
+            <p>
+              {isExternalRedirect
+                ? <>授权完成后将跳转至 <code>{redirectUrl}</code>（Mock，不会真实跳转至外部地址）。</>
+                : <>点击下方按钮继续。</>}
+            </p>
           </>
         ) : (
           <p>你已拒绝 <strong>{applicationName}</strong> 的授权请求。应用不会获得任何数据访问权限。</p>
@@ -332,7 +344,7 @@ function DecisionResult({
       </div>
       <div className={styles.stateActions}>
         <Button theme="solid" type="primary" onClick={onContinue}>
-          {isAllowed ? "查看授权应用" : "返回账户中心"}
+          {isAllowed ? "完成并跳转" : "返回账户中心"}
         </Button>
       </div>
     </div>
