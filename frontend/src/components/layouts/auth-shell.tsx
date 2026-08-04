@@ -15,9 +15,9 @@ export function AuthShell({ children }: AuthShellProps) {
       <section className={styles.brandPanel} aria-label={`${SYSTEM_NAME}产品介绍`}>
         <Link href="/login"><BrandMark /></Link>
         <div className={styles.brandCopy}>
-          <p className={styles.kicker}>IDENTITY, SIMPLIFIED</p>
-          <h1>一个身份，连接每一次可信访问。</h1>
-          <p>统一管理你的账户、员工身份、应用授权与安全会话。</p>
+          <p className={styles.kicker}>HIGH-TECH ENTERPRISE, YOUTH-DEVELOP</p>
+          <h1>我们始终相信老登和小登一起能迸发出最强的力量</h1>
+          <p>We’ve always believed that the combination of the experienced and the young can burst forth with the strongest energy together.</p>
         </div>
         <div className={styles.securityNote}>
           <span className={styles.securityDot} />
