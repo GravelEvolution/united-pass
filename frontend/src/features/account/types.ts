@@ -15,3 +15,16 @@ export type UserSession = {
   lastActiveAt: string;
   isCurrent: boolean;
 };
+
+export type AuthorizedApplication = {
+  grantId: string;
+  applicationId: string;
+  applicationName: string;
+  applicationOwner: string;
+  clientType: "public" | "confidential";
+  grantedAt: string;
+  lastUsedAt: string | null;
+  scopes: string[];
+  hasOfflineAccess: boolean;
+  status: "active" | "revoked";
+};

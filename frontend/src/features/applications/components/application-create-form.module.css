@@ -1,0 +1,207 @@
+.form { display: grid; gap: 24px; }
+
+.fieldGroup {
+  display: grid;
+  gap: 8px;
+}
+
+.fieldGroup > label {
+  display: grid;
+  gap: 8px;
+}
+
+.fieldLabel {
+  color: var(--up-ink-secondary);
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.fieldHint {
+  color: var(--up-muted-soft);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.fieldError {
+  color: var(--up-danger);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.twoColumns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.redirectList {
+  display: grid;
+  gap: 8px;
+}
+
+.redirectRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.redirectRow :global(.semi-input-wrapper) {
+  flex: 1;
+}
+
+.scopeList {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--up-line);
+  border-radius: var(--up-radius-md);
+  background: var(--up-surface-subtle);
+}
+
+.scopeItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.scopeItem > div {
+  flex: 1;
+}
+
+.scopeItem strong {
+  font-size: 12px;
+  color: var(--up-ink-secondary);
+}
+
+.scopeItem p {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--up-muted);
+  line-height: 1.5;
+}
+
+.scopeItem code {
+  font-size: 10px;
+  color: var(--up-brand-strong);
+}
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: var(--up-radius-md);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.noticeInfo {
+  border: 1px solid var(--up-info-line);
+  background: var(--up-info-surface);
+  color: var(--up-ink-secondary);
+}
+
+.noticeWarning {
+  border: 1px solid var(--up-warning-line, #f9c44e);
+  background: var(--up-warning-surface, #fef6e7);
+  color: var(--up-ink-secondary);
+}
+
+.noticeDanger {
+  border: 1px solid var(--up-danger);
+  background: rgb(197 59 59 / 6%);
+  color: var(--up-ink-secondary);
+}
+
+.notice strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--up-line-soft);
+}
+
+.resultPanel {
+  display: grid;
+  gap: 20px;
+  padding: 24px;
+  border: 1px solid var(--up-line);
+  border-radius: var(--up-radius-md);
+  background: var(--up-surface);
+  box-shadow: var(--up-card-shadow);
+}
+
+.resultHeader {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.resultHeader h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.resultField {
+  display: grid;
+  gap: 6px;
+}
+
+.resultField > span {
+  color: var(--up-muted);
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.resultField > code {
+  padding: 10px 12px;
+  border: 1px solid var(--up-line);
+  border-radius: 8px;
+  background: var(--up-surface-subtle);
+  font-size: 13px;
+  color: var(--up-ink);
+  overflow-wrap: anywhere;
+}
+
+.secretWarning {
+  padding: 14px 16px;
+  border: 1px solid var(--up-danger);
+  border-radius: var(--up-radius-md);
+  background: rgb(197 59 59 / 6%);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--up-ink-secondary);
+}
+
+.secretWarning strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--up-danger);
+}
+
+.resultActions {
+  display: flex;
+  gap: 12px;
+}
+
+.mockBadge {
+  display: inline-flex;
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: var(--up-brand);
+  background: var(--up-brand-soft);
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.12em;
+}
+
+@media (max-width: 640px) {
+  .twoColumns {
+    grid-template-columns: 1fr;
+  }
+}

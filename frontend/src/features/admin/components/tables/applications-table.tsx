@@ -1,7 +1,8 @@
 "use client";
 
 import type { ColumnProps } from "@douyinfe/semi-ui/lib/es/table";
-import { MockActionButton } from "@/components/common/mock-action-button";
+import Link from "next/link";
+import { Button } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import type { OAuthApplication } from "@/features/applications/types";
 import {
@@ -24,7 +25,11 @@ const columns: ColumnProps<OAuthApplication>[] = [
     title: "应用",
     dataIndex: "name",
     width: 220,
-    render: (_value: unknown, record: OAuthApplication) => <PrimaryCell primary={record.name} secondary={record.applicationId} />,
+    render: (_value: unknown, record: OAuthApplication) => (
+      <Link href={`/admin/applications/${record.applicationId}`}>
+        <PrimaryCell primary={record.name} secondary={record.applicationId} />
+      </Link>
+    ),
   }),
   createScopedColumn({
     title: "客户端类型",
@@ -50,7 +55,11 @@ const columns: ColumnProps<OAuthApplication>[] = [
   createScopedColumn({
     title: "操作",
     width: 100,
-    render: (_value: unknown, record: OAuthApplication) => <MockActionButton message={`查看应用 ${record.name}`}>查看</MockActionButton>,
+    render: (_value: unknown, record: OAuthApplication) => (
+      <Link href={`/admin/applications/${record.applicationId}`}>
+        <Button size="small" theme="borderless">查看</Button>
+      </Link>
+    ),
   }),
 ];
 
@@ -62,6 +71,11 @@ export function ApplicationsTable({ records }: { records: OAuthApplication[] }) 
       getSearchText={(record) => [record.name, record.ownerName, record.applicationId].join(" ")}
       records={records}
       rowKey="applicationId"
+      action={
+        <Link href="/admin/applications/new">
+          <Button type="primary" theme="solid">{copy.actionLabel}</Button>
+        </Link>
+      }
     />
   );
 }

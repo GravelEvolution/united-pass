@@ -26,7 +26,7 @@ pnpm dev
 - `/login`、`/register`、`/forgot-password`、`/authorize`、`/privacy`、`/terms`
 - `/account`、`/account/security`、`/account/sessions`
 - `/admin`、`/admin/users`、`/admin/employees`、`/admin/departments`
-- `/admin/providers`、`/admin/applications`、`/admin/policies`、`/admin/audit`
+- `/admin/providers`、`/admin/applications`、`/admin/applications/new`、`/admin/applications/[applicationId]`、`/admin/policies`、`/admin/audit`
 
 ## Mock 状态
 

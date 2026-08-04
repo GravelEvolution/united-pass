@@ -1,5 +1,13 @@
 import type { UnitedPassDataSource } from "@/lib/api/united-pass-data-source";
 import { SYSTEM_NAME } from "@/lib/branding";
+import type { AuthorizedApplication } from "@/features/account/types";
+import type {
+  AllowedScope,
+  ApplicationCreateInput,
+  ApplicationCreationResult,
+  OAuthApplicationDetail,
+} from "@/features/applications/types";
+import type { ConsentResolution, ConsentRequest } from "@/features/authorization/types";
 
 const externalAppUser = {
   userId: "usr_06APPUSER7N2X4Q8K5M9",
@@ -47,7 +55,65 @@ const consentRequest = {
     { scope: "profile", label: "查看基本资料", description: "查看姓名、头像和账户类型。" },
     { scope: "email", label: "查看邮箱地址", description: "读取当前账户绑定的邮箱地址。" },
   ],
-} satisfies Awaited<ReturnType<UnitedPassDataSource["getConsentRequest"]>>;
+} satisfies ConsentRequest;
+
+const consentResolutions: Record<string, ConsentResolution> = {
+  consent_demo_001: { status: "valid", request: consentRequest },
+  consent_demo_002: { status: "expired", requestId: "consent_demo_002", expiredAt: "2026-08-04T12:00:00Z" },
+  consent_demo_003: { status: "client_not_found", requestId: "consent_demo_003" },
+  consent_demo_004: { status: "redirect_mismatch", requestId: "consent_demo_004", attemptedRedirect: "https://evil.example/callback" },
+  consent_demo_005: { status: "unauthenticated", requestId: "consent_demo_005" },
+  consent_demo_006: { status: "scope_not_allowed", requestId: "consent_demo_006", disallowedScopes: ["admin:read", "admin:write"] },
+  consent_demo_007: { status: "already_authorized", requestId: "consent_demo_007", applicationName: "United Mobile", redirectHost: "mobile.united.example" },
+};
+
+const authorizedApplications: AuthorizedApplication[] = [
+  {
+    grantId: "grant_001",
+    applicationId: "app_workspace",
+    applicationName: "United Workspace",
+    applicationOwner: "协作产品团队",
+    clientType: "confidential",
+    grantedAt: "2026-07-15T08:30:00Z",
+    lastUsedAt: "2026-08-04T05:42:00Z",
+    scopes: ["openid", "profile", "email"],
+    hasOfflineAccess: false,
+    status: "active",
+  },
+  {
+    grantId: "grant_002",
+    applicationId: "app_mobile",
+    applicationName: "United Mobile",
+    applicationOwner: "移动端团队",
+    clientType: "public",
+    grantedAt: "2026-06-20T10:15:00Z",
+    lastUsedAt: "2026-08-03T13:16:00Z",
+    scopes: ["openid", "profile", "offline_access"],
+    hasOfflineAccess: true,
+    status: "active",
+  },
+  {
+    grantId: "grant_003",
+    applicationId: "app_legacy",
+    applicationName: "Legacy Reports",
+    applicationOwner: "数据团队",
+    clientType: "confidential",
+    grantedAt: "2026-05-10T14:00:00Z",
+    lastUsedAt: "2026-06-16T12:00:00Z",
+    scopes: ["openid", "profile", "email", "reporting:read"],
+    hasOfflineAccess: false,
+    status: "revoked",
+  },
+];
+
+const availableScopes: AllowedScope[] = [
+  { scope: "openid", label: "OpenID", description: "获取稳定用户标识，完成 OIDC 登录。", required: true },
+  { scope: "profile", label: "基本资料", description: "查看姓名、头像和账户类型。", required: false },
+  { scope: "email", label: "邮箱地址", description: "读取当前账户绑定的邮箱地址。", required: false },
+  { scope: "phone", label: "手机号", description: "读取脱敏后的手机号。", required: false },
+  { scope: "offline_access", label: "离线访问", description: "在用户不活跃时通过 Refresh Token 继续访问已授权数据。", required: false },
+  { scope: "reporting:read", label: "报表读取", description: "读取应用关联的业务报表。", required: false },
+];
 
 const users = [
   { userId: externalAppUser.userId, displayName: externalAppUser.displayName, email: externalAppUser.email, personaLabel: "外部用户", status: "active", lastActiveAt: "2026-08-04T05:48:00Z" },
@@ -88,6 +154,109 @@ const applications = [
   { applicationId: "app_legacy", name: "Legacy Reports", clientType: "confidential", ownerName: "数据团队", status: "disabled", redirectUriCount: 1, updatedAt: "2026-06-16T12:00:00Z" },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getApplications"]>>;
 
+const applicationDetails: Record<string, OAuthApplicationDetail> = {
+  app_workspace: {
+    applicationId: "app_workspace",
+    name: "United Workspace",
+    description: "团队协作与项目管理工作台，支持任务、文档和日程整合。",
+    logoUrl: null,
+    kind: "public-app",
+    clientType: "confidential",
+    clientId: "ws_9f3a8b2c1e7d4600",
+    status: "active",
+    ownerName: "协作产品团队",
+    redirectUris: [
+      { uri: "https://workspace.united.example/auth/callback", isLoopback: false, addedAt: "2026-07-01T03:00:00Z" },
+      { uri: "https://staging.workspace.united.example/auth/callback", isLoopback: false, addedAt: "2026-07-15T06:20:00Z" },
+      { uri: "http://localhost:3000/callback", isLoopback: true, addedAt: "2026-07-20T08:00:00Z" },
+    ],
+    logoutUri: "https://workspace.united.example/auth/logout",
+    allowedScopes: [
+      { scope: "openid", label: "OpenID", description: "获取稳定用户标识，完成 OIDC 登录。", required: true },
+      { scope: "profile", label: "基本资料", description: "查看姓名、头像和账户类型。", required: false },
+      { scope: "email", label: "邮箱地址", description: "读取当前账户绑定的邮箱地址。", required: false },
+    ],
+    consentRequired: true,
+    clientSecrets: [
+      { secretId: "sec_ws_001", label: "生产环境密钥", createdAt: "2026-07-01T03:00:00Z", lastRotatedAt: "2026-07-15T06:20:00Z" },
+    ],
+    grants: [
+      { grantId: "grant_001", userLabel: "陆晴", scopes: ["openid", "profile", "email"], grantedAt: "2026-07-15T08:30:00Z", lastUsedAt: "2026-08-04T05:42:00Z", status: "active" },
+      { grantId: "grant_004", userLabel: "周予安", scopes: ["openid", "profile"], grantedAt: "2026-07-20T11:00:00Z", lastUsedAt: "2026-08-03T09:15:00Z", status: "active" },
+    ],
+    auditEntries: [
+      { eventId: "app_evt_001", eventType: "密钥轮换", actorName: "林知行", occurredAt: "2026-07-15T06:20:00Z", result: "success" },
+      { eventId: "app_evt_002", eventType: "Redirect URI 新增", actorName: "林知行", occurredAt: "2026-07-20T08:00:00Z", result: "success" },
+    ],
+    createdAt: "2026-07-01T03:00:00Z",
+    updatedAt: "2026-08-01T06:10:00Z",
+  },
+  app_mobile: {
+    applicationId: "app_mobile",
+    name: "United Mobile",
+    description: "移动端应用，使用 PKCE 公共客户端。",
+    logoUrl: null,
+    kind: "public-app",
+    clientType: "public",
+    clientId: "mb_2c7f4e8a1b9d0300",
+    status: "active",
+    ownerName: "移动端团队",
+    redirectUris: [
+      { uri: "com.united.mobile:/oauth2callback", isLoopback: false, addedAt: "2026-06-20T10:00:00Z" },
+      { uri: "http://localhost:8081/callback", isLoopback: true, addedAt: "2026-06-25T14:00:00Z" },
+    ],
+    logoutUri: null,
+    allowedScopes: [
+      { scope: "openid", label: "OpenID", description: "获取稳定用户标识，完成 OIDC 登录。", required: true },
+      { scope: "profile", label: "基本资料", description: "查看姓名、头像和账户类型。", required: false },
+      { scope: "offline_access", label: "离线访问", description: "在用户不活跃时通过 Refresh Token 继续访问已授权数据。", required: false },
+    ],
+    consentRequired: true,
+    clientSecrets: [],
+    grants: [
+      { grantId: "grant_002", userLabel: "陆晴", scopes: ["openid", "profile", "offline_access"], grantedAt: "2026-06-20T10:15:00Z", lastUsedAt: "2026-08-03T13:16:00Z", status: "active" },
+    ],
+    auditEntries: [
+      { eventId: "app_evt_003", eventType: "应用创建", actorName: "程越", occurredAt: "2026-06-20T10:00:00Z", result: "success" },
+    ],
+    createdAt: "2026-06-20T10:00:00Z",
+    updatedAt: "2026-07-28T02:32:00Z",
+  },
+  app_legacy: {
+    applicationId: "app_legacy",
+    name: "Legacy Reports",
+    description: "已停用的旧版报表应用。",
+    logoUrl: null,
+    kind: "internal",
+    clientType: "confidential",
+    clientId: "lr_8a1b3c5d7e9f2000",
+    status: "disabled",
+    ownerName: "数据团队",
+    redirectUris: [
+      { uri: "https://reports.united.example/auth/callback", isLoopback: false, addedAt: "2026-05-01T08:00:00Z" },
+    ],
+    logoutUri: "https://reports.united.example/auth/logout",
+    allowedScopes: [
+      { scope: "openid", label: "OpenID", description: "获取稳定用户标识，完成 OIDC 登录。", required: true },
+      { scope: "profile", label: "基本资料", description: "查看姓名、头像和账户类型。", required: false },
+      { scope: "email", label: "邮箱地址", description: "读取当前账户绑定的邮箱地址。", required: false },
+      { scope: "reporting:read", label: "报表读取", description: "读取应用关联的业务报表。", required: false },
+    ],
+    consentRequired: false,
+    clientSecrets: [
+      { secretId: "sec_lr_001", label: "原始密钥", createdAt: "2026-05-01T08:00:00Z", lastRotatedAt: null },
+    ],
+    grants: [
+      { grantId: "grant_003", userLabel: "陆晴", scopes: ["openid", "profile", "email", "reporting:read"], grantedAt: "2026-05-10T14:00:00Z", lastUsedAt: "2026-06-16T12:00:00Z", status: "revoked" },
+    ],
+    auditEntries: [
+      { eventId: "app_evt_004", eventType: "应用停用", actorName: "周予安", occurredAt: "2026-06-16T12:00:00Z", result: "success" },
+    ],
+    createdAt: "2026-05-01T08:00:00Z",
+    updatedAt: "2026-06-16T12:00:00Z",
+  },
+};
+
 const policies = [
   { policyId: "pol_application_manage", name: "应用管理员维护 OAuth 应用", resource: "application:*", version: 7, status: "published", updatedBy: "周予安", updatedAt: "2026-08-03T07:45:00Z" },
   { policyId: "pol_employee_read", name: "部门负责人查看直属员工", resource: "employee:*", version: 3, status: "published", updatedBy: "林知行", updatedAt: "2026-07-30T03:20:00Z" },
@@ -107,6 +276,14 @@ export const mockUnitedPassDataSource: UnitedPassDataSource = {
   getSecurityFactors: () => Promise.resolve(securityFactors),
   getSessions: () => Promise.resolve(sessions),
   getConsentRequest: () => Promise.resolve(consentRequest),
+  getConsentResolution: (requestId: string) => {
+    const resolution = consentResolutions[requestId];
+    if (resolution) {
+      return Promise.resolve(resolution);
+    }
+    return Promise.resolve({ status: "client_not_found", requestId });
+  },
+  getAuthorizedApplications: () => Promise.resolve(authorizedApplications),
   getAdminDashboard: () => Promise.resolve({
     metrics: [
       { label: "活跃用户", value: "12,840", change: "近 30 天 +8.4%", tone: "positive" },
@@ -121,6 +298,23 @@ export const mockUnitedPassDataSource: UnitedPassDataSource = {
   getDepartments: () => Promise.resolve(departments),
   getIdentityProviders: () => Promise.resolve(identityProviders),
   getApplications: () => Promise.resolve(applications),
+  getApplicationDetail: (applicationId: string) => {
+    const detail = applicationDetails[applicationId];
+    return Promise.resolve(detail ?? null);
+  },
+  getAvailableScopes: () => Promise.resolve(availableScopes),
+  createApplication: (input: ApplicationCreateInput): Promise<ApplicationCreationResult> => {
+    const applicationId = `app_${Math.random().toString(36).slice(2, 10)}`;
+    const clientId = `${input.name.slice(0, 2).toLowerCase()}_${Math.random().toString(36).slice(2, 16)}`;
+    const result: ApplicationCreationResult = {
+      applicationId,
+      clientId,
+    };
+    if (input.clientType === "confidential") {
+      result.clientSecret = `sec_${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
+    }
+    return Promise.resolve(result);
+  },
   getPolicies: () => Promise.resolve(policies),
   getAuditEvents: () => Promise.resolve(auditEvents),
 };

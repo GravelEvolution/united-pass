@@ -23,6 +23,7 @@ type ManagementDirectoryProps<RecordType extends Data> = {
   getSearchText: (record: RecordType) => string;
   records: RecordType[];
   rowKey: string;
+  action?: ReactNode;
 };
 
 type PrimaryCellProps = {
@@ -58,6 +59,7 @@ export function ManagementDirectory<RecordType extends Data>({
   getSearchText,
   records,
   rowKey,
+  action,
 }: ManagementDirectoryProps<RecordType>) {
   const [searchQuery, setSearchQuery] = useState("");
   const normalizedQuery = searchQuery.trim().toLocaleLowerCase("zh-CN");
@@ -75,7 +77,7 @@ export function ManagementDirectory<RecordType extends Data>({
         eyebrow={copy.eyebrow}
         title={copy.title}
         description={copy.description}
-        action={<MockActionButton primary message={copy.actionLabel}>{copy.actionLabel}</MockActionButton>}
+        action={action ?? <MockActionButton primary message={copy.actionLabel}>{copy.actionLabel}</MockActionButton>}
       />
 
       <section className={styles.directoryCard} aria-label={`${copy.title}目录`}>
