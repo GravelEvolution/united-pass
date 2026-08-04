@@ -4,12 +4,7 @@ import { Suspense } from "react";
 import { ApplicationDetail } from "@/features/applications/components/application-detail";
 import { serverQueries } from "@/lib/api/server/server-queries";
 
-export async function generateStaticParams() {
-  const applications = await serverQueries.getApplications();
-  return applications.map((application) => ({
-    applicationId: application.applicationId,
-  }));
-}
+export const dynamic = "force-dynamic";
 
 export async function generateMetadata({
   params,

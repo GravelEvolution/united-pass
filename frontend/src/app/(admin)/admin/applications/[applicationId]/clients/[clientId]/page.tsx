@@ -4,19 +4,7 @@ import { Suspense } from "react";
 import { ClientDetail } from "@/features/applications/components/client-detail";
 import { serverQueries } from "@/lib/api/server/server-queries";
 
-export async function generateStaticParams() {
-  const applications = await serverQueries.getApplications();
-  const params: { applicationId: string; clientId: string }[] = [];
-  for (const app of applications) {
-    const detail = await serverQueries.getApplicationDetail(app.applicationId);
-    if (detail) {
-      for (const client of detail.clients) {
-        params.push({ applicationId: app.applicationId, clientId: client.clientId });
-      }
-    }
-  }
-  return params;
-}
+export const dynamic = "force-dynamic";
 
 export async function generateMetadata({
   params,
