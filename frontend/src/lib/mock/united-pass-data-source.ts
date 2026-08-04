@@ -148,13 +148,15 @@ const identityProviders = [
   },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getIdentityProviders"]>>;
 
-const applications = [
+const initialApplications = [
   { applicationId: "app_workspace", name: "United Workspace", clientType: "confidential", ownerName: "协作产品团队", status: "active", redirectUriCount: 3, updatedAt: "2026-08-01T06:10:00Z" },
   { applicationId: "app_mobile", name: "United Mobile", clientType: "public", ownerName: "移动端团队", status: "active", redirectUriCount: 2, updatedAt: "2026-07-28T02:32:00Z" },
   { applicationId: "app_legacy", name: "Legacy Reports", clientType: "confidential", ownerName: "数据团队", status: "disabled", redirectUriCount: 1, updatedAt: "2026-06-16T12:00:00Z" },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getApplications"]>>;
 
-const applicationDetails: Record<string, OAuthApplicationDetail> = {
+const mutableApplications: typeof initialApplications = [...initialApplications];
+
+const initialApplicationDetails: Record<string, OAuthApplicationDetail> = {
   app_workspace: {
     applicationId: "app_workspace",
     name: "United Workspace",
@@ -257,6 +259,8 @@ const applicationDetails: Record<string, OAuthApplicationDetail> = {
   },
 };
 
+const mutableApplicationDetails: Record<string, OAuthApplicationDetail> = { ...initialApplicationDetails };
+
 const policies = [
   { policyId: "pol_application_manage", name: "应用管理员维护 OAuth 应用", resource: "application:*", version: 7, status: "published", updatedBy: "周予安", updatedAt: "2026-08-03T07:45:00Z" },
   { policyId: "pol_employee_read", name: "部门负责人查看直属员工", resource: "employee:*", version: 3, status: "published", updatedBy: "林知行", updatedAt: "2026-07-30T03:20:00Z" },
@@ -297,15 +301,62 @@ export const mockUnitedPassDataSource: UnitedPassDataSource = {
   getEmployees: () => Promise.resolve(employees),
   getDepartments: () => Promise.resolve(departments),
   getIdentityProviders: () => Promise.resolve(identityProviders),
-  getApplications: () => Promise.resolve(applications),
+  getApplications: () => Promise.resolve(mutableApplications),
   getApplicationDetail: (applicationId: string) => {
-    const detail = applicationDetails[applicationId];
+    const detail = mutableApplicationDetails[applicationId];
     return Promise.resolve(detail ?? null);
   },
   getAvailableScopes: () => Promise.resolve(availableScopes),
   createApplication: (input: ApplicationCreateInput): Promise<ApplicationCreationResult> => {
     const applicationId = `app_${Math.random().toString(36).slice(2, 10)}`;
     const clientId = `${input.name.slice(0, 2).toLowerCase()}_${Math.random().toString(36).slice(2, 16)}`;
+    const now = new Date().toISOString();
+
+    const scopeMap = new Map(availableScopes.map((scope) => [scope.scope, scope]));
+    const allowedScopes = input.allowedScopes
+      .map((scopeId) => scopeMap.get(scopeId))
+      .filter((scope): scope is AllowedScope => scope !== undefined);
+
+    const redirectUris = input.redirectUris.map((uri) => ({
+      uri,
+      isLoopback: uri.startsWith("http://localhost") || uri.startsWith("http://127.0.0.1"),
+      addedAt: now,
+    }));
+
+    const detail: OAuthApplicationDetail = {
+      applicationId,
+      name: input.name,
+      description: input.description,
+      logoUrl: null,
+      kind: input.kind,
+      clientType: input.clientType,
+      clientId,
+      status: "active",
+      ownerName: input.ownerName,
+      redirectUris,
+      logoutUri: input.logoutUri || null,
+      allowedScopes,
+      consentRequired: input.consentRequired,
+      clientSecrets: [],
+      grants: [],
+      auditEntries: [
+        { eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`, eventType: "应用创建", actorName: "林知行", occurredAt: now, result: "success" },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    mutableApplicationDetails[applicationId] = detail;
+    mutableApplications.unshift({
+      applicationId,
+      name: input.name,
+      clientType: input.clientType,
+      ownerName: input.ownerName,
+      status: "active",
+      redirectUriCount: redirectUris.length,
+      updatedAt: now,
+    });
+
     const result: ApplicationCreationResult = {
       applicationId,
       clientId,

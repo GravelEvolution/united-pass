@@ -111,7 +111,7 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
         consentRequired,
       });
       setCreationResult(result);
-      Toast.success({ content: "应用注册成功（Mock，刷新后不保留）。" });
+      Toast.success({ content: "应用注册成功。" });
     } catch {
       setFormError("创建失败，请重试。");
     } finally {
@@ -119,9 +119,13 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
     }
   }
 
-  function copyToClipboard(text: string) {
-    void navigator.clipboard?.writeText(text);
-    Toast.info({ content: "已复制到剪贴板。" });
+  async function copyToClipboard(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      Toast.success({ content: "已复制到剪贴板。" });
+    } catch {
+      Toast.error({ content: "复制失败，请手动选择并复制。" });
+    }
   }
 
   if (creationResult) {
