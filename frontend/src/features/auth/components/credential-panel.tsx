@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, Checkbox, Input } from "@douyinfe/semi-ui";
 import { IconKey, IconMail, IconUser } from "@douyinfe/semi-icons";
+import { authenticateMockAccount, MOCK_LOGIN_ACCOUNTS } from "@/lib/mock/mock-auth";
 import styles from "./credential-panel.module.css";
 
 type CredentialPanelProps = {
@@ -16,12 +17,32 @@ export function CredentialPanel({ mode }: CredentialPanelProps) {
   const router = useRouter();
   const isLogin = mode === "login";
   const [confirmPasswordError, setConfirmPasswordError] = useState<string>();
+  const [loginError, setLoginError] = useState<string>();
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
+    const formData = new FormData(event.currentTarget);
+
+    if (isLogin) {
+      const identifier = formData.get("identifier");
+      const password = formData.get("password");
+      const destination =
+        typeof identifier === "string" && typeof password === "string"
+          ? authenticateMockAccount(identifier, password)
+          : undefined;
+
+      if (!destination) {
+        setLoginError("账户名、邮箱或密码错误，请使用页面提供的 Mock 凭据。");
+        return;
+      }
+
+      setLoginError(undefined);
+      router.push(destination);
+      return;
+    }
+
     if (!isLogin) {
-      const formData = new FormData(event.currentTarget);
       const password = formData.get("password");
       const confirmPassword = formData.get("confirmPassword");
 
@@ -54,6 +75,10 @@ export function CredentialPanel({ mode }: CredentialPanelProps) {
               prefix={<IconUser />}
               placeholder="账户名或 name@example.com"
               autoComplete="username"
+              validateStatus={loginError ? "error" : "default"}
+              aria-invalid={Boolean(loginError)}
+              aria-errormessage={loginError ? "mock-login-error" : undefined}
+              onChange={() => setLoginError(undefined)}
               required
             />
           </label>
@@ -98,9 +123,18 @@ export function CredentialPanel({ mode }: CredentialPanelProps) {
             placeholder={isLogin ? "输入密码" : "至少 12 个字符"}
             autoComplete={isLogin ? "current-password" : "new-password"}
             minLength={12}
+            validateStatus={isLogin && loginError ? "error" : "default"}
+            aria-invalid={isLogin && Boolean(loginError)}
+            aria-errormessage={isLogin && loginError ? "mock-login-error" : undefined}
+            onChange={isLogin ? () => setLoginError(undefined) : undefined}
             required
           />
           {!isLogin && <small>至少 12 个字符，请勿使用其他服务的密码。</small>}
+          {isLogin && loginError && (
+            <small id="mock-login-error" className={styles.fieldError} role="alert">
+              {loginError}
+            </small>
+          )}
         </label>
         {!isLogin && (
           <label className={styles.field}>
@@ -133,9 +167,21 @@ export function CredentialPanel({ mode }: CredentialPanelProps) {
         </div>
 
         <Button htmlType="submit" type="primary" theme="solid" size="large" block>
-          {isLogin ? "进入账户中心（Mock）" : "创建演示账户（Mock）"}
+          {isLogin ? "登录（Mock）" : "创建演示账户（Mock）"}
         </Button>
       </form>
+
+      {isLogin && (
+        <div className={styles.demoCredential}>
+          <strong>普通用户演示凭据</strong>
+          <span>账户名</span>
+          <code>{MOCK_LOGIN_ACCOUNTS.externalUser.username}</code>
+          <span>邮箱</span>
+          <code>{MOCK_LOGIN_ACCOUNTS.externalUser.email}</code>
+          <span>密码</span>
+          <code>{MOCK_LOGIN_ACCOUNTS.externalUser.password}</code>
+        </div>
+      )}
 
       <p className={styles.notice}>当前为界面 mock，不会提交密码或创建真实账户。</p>
       <p className={styles.switchMode}>

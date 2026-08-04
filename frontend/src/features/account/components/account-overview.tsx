@@ -7,6 +7,7 @@ import { IconEdit } from "@douyinfe/semi-icons";
 import { PageHeader } from "@/components/common/page-header";
 import { StatusBadge } from "@/components/common/status-badge";
 import type { CurrentUser } from "@/types/identity";
+import { ContactVerificationModal, type ContactKind } from "./contact-verification-modal";
 import styles from "./account-panels.module.css";
 
 type AccountOverviewProps = {
@@ -19,6 +20,8 @@ type ProfileErrors = {
   displayName?: string;
   avatarUrl?: string;
 };
+
+type ContactDetails = Pick<CurrentUser, "email" | "phoneMasked">;
 
 function createProfileDraft(currentProfile: EditableProfile): EditableProfile {
   return {
@@ -43,10 +46,23 @@ function normalizeAvatarUrl(avatarUrl: string): { normalizedUrl?: string; error?
   }
 }
 
+function maskPhoneNumber(phoneNumber: string): string {
+  if (phoneNumber.startsWith("+86") && phoneNumber.length === 14) {
+    return `+86 ${phoneNumber.slice(3, 6)} **** ${phoneNumber.slice(-4)}`;
+  }
+
+  return `${phoneNumber.slice(0, Math.max(3, phoneNumber.length - 8))} **** ${phoneNumber.slice(-4)}`;
+}
+
 export function AccountOverview({ currentUser }: AccountOverviewProps) {
   const [profile, setProfile] = useState<EditableProfile>(createProfileDraft(currentUser));
   const [profileDraft, setProfileDraft] = useState<EditableProfile>(createProfileDraft(currentUser));
   const [profileErrors, setProfileErrors] = useState<ProfileErrors>({});
+  const [contactDetails, setContactDetails] = useState<ContactDetails>({
+    email: currentUser.email,
+    phoneMasked: currentUser.phoneMasked,
+  });
+  const [verificationKind, setVerificationKind] = useState<ContactKind>();
   const [isEditorVisible, setIsEditorVisible] = useState(false);
   const preferredName = profile.nickname?.trim() || profile.displayName;
   const draftPreviewAvatarUrl = normalizeAvatarUrl(profileDraft.avatarUrl ?? "").normalizedUrl;
@@ -90,6 +106,18 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
     Toast.success({ content: "资料已在当前 Mock 页面更新，刷新后会恢复。" });
   }
 
+  function handleContactVerified(nextValue: string) {
+    if (verificationKind === "email") {
+      setContactDetails((currentDetails) => ({ ...currentDetails, email: nextValue }));
+      Toast.success({ content: "邮箱已在当前 Mock 页面更新，刷新后会恢复。" });
+    } else if (verificationKind === "phone") {
+      setContactDetails((currentDetails) => ({ ...currentDetails, phoneMasked: maskPhoneNumber(nextValue) }));
+      Toast.success({ content: "手机号已在当前 Mock 页面更新，刷新后会恢复。" });
+    }
+
+    setVerificationKind(undefined);
+  }
+
   return (
     <>
       <PageHeader
@@ -116,7 +144,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
           <div className={styles.heroCopy}>
             <span className={styles.label}>统一账户</span>
             <h2>{profile.displayName}</h2>
-            <p>{profile.nickname ? `${profile.nickname} · ${currentUser.email}` : currentUser.email}</p>
+            <p>{profile.nickname ? `${profile.nickname} · ${contactDetails.email}` : contactDetails.email}</p>
             <div className={styles.badges}>
               <StatusBadge label="外部用户能力" tone="info" />
               {currentUser.employeeProfile && <StatusBadge label="员工档案已关联" tone="success" />}
@@ -140,8 +168,20 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
             <div><dt>显示名称</dt><dd>{profile.displayName}</dd></div>
             <div><dt>昵称</dt><dd>{profile.nickname || "未设置"}</dd></div>
             <div><dt>头像 URL</dt><dd className={styles.urlValue}>{profile.avatarUrl || "未设置"}</dd></div>
-            <div><dt>邮箱地址</dt><dd>{currentUser.email}</dd></div>
-            <div><dt>手机号码</dt><dd>{currentUser.phoneMasked}</dd></div>
+            <div>
+              <dt>邮箱地址</dt>
+              <dd className={styles.contactValue}>
+                <span>{contactDetails.email}</span>
+                <Button size="small" type="primary" theme="borderless" onClick={() => setVerificationKind("email")}>修改邮箱</Button>
+              </dd>
+            </div>
+            <div>
+              <dt>手机号码</dt>
+              <dd className={styles.contactValue}>
+                <span>{contactDetails.phoneMasked}</span>
+                <Button size="small" type="primary" theme="borderless" onClick={() => setVerificationKind("phone")}>修改手机号</Button>
+              </dd>
+            </div>
           </dl>
         </section>
 
@@ -237,7 +277,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
             </small>
           </label>
 
-          <p className={styles.profileNotice}>邮箱和手机号码属于安全联系方式，接入后端后需要通过独立验证流程修改。</p>
+          <p className={styles.profileNotice}>邮箱和手机号码属于安全联系方式，请返回基本资料卡片通过独立验证流程修改。</p>
 
           <div className={styles.profileActions}>
             <Button theme="outline" onClick={closeProfileEditor}>取消</Button>
@@ -245,6 +285,16 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
           </div>
         </form>
       </Modal>
+
+      {verificationKind && (
+        <ContactVerificationModal
+          key={verificationKind}
+          kind={verificationKind}
+          currentValue={verificationKind === "email" ? contactDetails.email : contactDetails.phoneMasked}
+          onCancel={() => setVerificationKind(undefined)}
+          onVerified={handleContactVerified}
+        />
+      )}
     </>
   );
 }

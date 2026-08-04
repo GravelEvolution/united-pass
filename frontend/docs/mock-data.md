@@ -6,11 +6,24 @@
 
 - 数据源接口位于 `src/lib/api/united-pass-data-source.ts`。
 - mock 实现位于 `src/lib/mock/united-pass-data-source.ts`。
+- 公开演示凭据及浏览器端校验位于 `src/lib/mock/mock-auth.ts`。
 - 页面只调用数据源接口暴露的方法，不直接维护硬编码记录。
 - 搜索仅在浏览器内过滤当前 mock 列表；真实大数据集必须改为服务端分页和搜索。
-- 登录、注册、授权、撤销会话和管理变更均不持久化。界面会明确显示 Mock 提示。
+- 登录只在浏览器中校验下方公开的演示凭据并跳转，不会创建 Cookie 或真实会话。注册、授权、撤销会话和管理变更均不持久化。
 - `/account` 的显示名称、昵称与头像 URL 可在当前页面内修改，用于验证表单和展示效果；刷新页面后恢复初始 mock，不会写入浏览器存储或后端。
-- mock 账户同时包含 `consumer` 人格和可选 `employeeProfile`，稳定 `userId` 不因员工档案关联而变化。
+- `/account` 的邮箱和手机号使用“发送 Mock 验证码 → 校验 → 更新”的独立流程。固定验证码为 `246810`，不会真的发送邮件或短信，更新结果同样只保留到刷新前。
+- 普通用户仅包含 `consumer` 人格；员工演示用户同时包含 `consumer` 和 `employee` 人格及 `employeeProfile`。稳定 `userId` 不因员工档案关联而变化。
+
+## 演示凭据
+
+这些凭据公开用于本地界面演示，不是秘密，也不得复用于真实环境。
+
+| 身份 | 账户名 | 邮箱 | 密码 | 登录后页面 |
+| --- | --- | --- | --- | --- |
+| 普通外部应用用户 | `app.user` | `app.user@example.com` | `MockUser123!` | `/account` |
+| 员工管理用户 | `zhixing.lin` | `zhixing.lin@example.com` | `MockAdmin123!` | `/admin` |
+
+登录标识可填写对应的账户名或邮箱。凭据错误时只显示通用错误，避免根据提示判断账户是否存在。
 
 ## 替换流程
 

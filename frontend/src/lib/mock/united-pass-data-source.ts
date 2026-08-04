@@ -1,6 +1,15 @@
 import type { UnitedPassDataSource } from "@/lib/api/united-pass-data-source";
 
-const currentUser = {
+const externalAppUser = {
+  userId: "usr_06APPUSER7N2X4Q8K5M9",
+  displayName: "陆晴",
+  nickname: "小陆",
+  email: "app.user@example.com",
+  phoneMasked: "+86 139 **** 2048",
+  personas: ["consumer"],
+} satisfies Awaited<ReturnType<UnitedPassDataSource["getCurrentUser"]>>;
+
+const employeeAdminUser = {
   userId: "usr_01JUP8M8B4Q7R4T6PK1D",
   displayName: "林知行",
   nickname: "知行",
@@ -12,7 +21,7 @@ const currentUser = {
     departmentName: "产品与体验 / 身份平台",
     title: "产品设计师",
   },
-} satisfies Awaited<ReturnType<UnitedPassDataSource["getCurrentUser"]>>;
+} satisfies Awaited<ReturnType<UnitedPassDataSource["getAdminCurrentUser"]>>;
 
 const securityFactors = [
   { factorId: "factor_password", kind: "password", label: "账户密码", status: "active", updatedAt: "2026-07-12T03:20:00Z" },
@@ -40,15 +49,16 @@ const consentRequest = {
 } satisfies Awaited<ReturnType<UnitedPassDataSource["getConsentRequest"]>>;
 
 const users = [
-  { userId: "usr_01JUP8M8B4Q7R4T6PK1D", displayName: "林知行", email: "zhixing.lin@example.com", personaLabel: "外部用户 · 员工", status: "active", lastActiveAt: "2026-08-04T05:42:00Z" },
+  { userId: externalAppUser.userId, displayName: externalAppUser.displayName, email: externalAppUser.email, personaLabel: "外部用户", status: "active", lastActiveAt: "2026-08-04T05:48:00Z" },
+  { userId: employeeAdminUser.userId, displayName: employeeAdminUser.displayName, email: employeeAdminUser.email, personaLabel: "外部用户 · 员工", status: "active", lastActiveAt: "2026-08-04T05:42:00Z" },
   { userId: "usr_02F4PXKQ0EZP5F7B9V3C", displayName: "周予安", email: "yuan.zhou@example.com", personaLabel: "员工", status: "active", lastActiveAt: "2026-08-04T04:18:00Z" },
   { userId: "usr_03D1KMM3AGX8G2QW5T9N", displayName: "陈默", email: "mo.chen@example.net", personaLabel: "外部用户", status: "pending", lastActiveAt: "2026-08-02T11:03:00Z" },
   { userId: "usr_04ABT7S6HHQ1N8K2YM0E", displayName: "苏晚", email: "wan.su@example.org", personaLabel: "外部用户", status: "disabled", lastActiveAt: "2026-07-21T08:44:00Z" },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getUsers"]>>;
 
 const employees = [
-  { userId: users[0].userId, displayName: "林知行", employeeId: "UP-1042", departmentName: "身份平台", title: "产品设计师", status: "active" },
-  { userId: users[1].userId, displayName: "周予安", employeeId: "UP-0928", departmentName: "基础架构", title: "高级工程师", status: "active" },
+  { userId: employeeAdminUser.userId, displayName: "林知行", employeeId: "UP-1042", departmentName: "身份平台", title: "产品设计师", status: "active" },
+  { userId: "usr_02F4PXKQ0EZP5F7B9V3C", displayName: "周予安", employeeId: "UP-0928", departmentName: "基础架构", title: "高级工程师", status: "active" },
   { userId: "usr_05QG6E8W4NR7Y2Z1PC9S", displayName: "顾言", employeeId: "UP-0815", departmentName: "客户成功", title: "客户成功经理", status: "offboarding" },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getEmployees"]>>;
 
@@ -78,7 +88,8 @@ const auditEvents = [
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getAuditEvents"]>>;
 
 export const mockUnitedPassDataSource: UnitedPassDataSource = {
-  getCurrentUser: () => Promise.resolve(currentUser),
+  getCurrentUser: () => Promise.resolve(externalAppUser),
+  getAdminCurrentUser: () => Promise.resolve(employeeAdminUser),
   getSecurityFactors: () => Promise.resolve(securityFactors),
   getSessions: () => Promise.resolve(sessions),
   getConsentRequest: () => Promise.resolve(consentRequest),

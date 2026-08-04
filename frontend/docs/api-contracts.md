@@ -1,7 +1,7 @@
 # United Pass 前端 API 接入清单
 
 - 状态：Draft，等待前后端评审
-- 日期：2026-08-04
+- 日期：2026-08-05
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect
 
@@ -92,7 +92,11 @@
 | 页面 | 方法与路径 | 数据/操作 | 权限 |
 | --- | --- | --- | --- |
 | `/account` | `GET /api/v1/me` | `userId`、姓名、邮箱、脱敏手机、personas、可选员工档案 | 当前会话用户 |
-| `/account` | `PATCH /api/v1/me` | 修改允许自助维护的资料 | 当前会话用户；敏感字段需验证 |
+| `/account` | `PATCH /api/v1/me` | 修改允许自助维护的公开资料 | 当前会话用户 |
+| `/account` | `POST /api/v1/me/email-change-requests` | 为新邮箱创建验证请求并发送验证码 | 当前会话用户；限速；可要求重认证 |
+| `/account` | `POST /api/v1/me/email-change-requests/{requestId}/verify` | 校验验证码并原子更新邮箱 | 当前会话用户；一次性、限时验证码 |
+| `/account` | `POST /api/v1/me/phone-change-requests` | 为新手机号创建验证请求并发送验证码 | 当前会话用户；限速；可要求重认证 |
+| `/account` | `POST /api/v1/me/phone-change-requests/{requestId}/verify` | 校验验证码并原子更新手机号 | 当前会话用户；一次性、限时验证码 |
 | `/account/security` | `GET /api/v1/me/security/factors` | 密码、TOTP、Passkey 状态 | 当前会话用户 |
 | `/account/security` | `POST /api/v1/me/security/totp/enrollments` | 开始 TOTP 绑定 | 重认证；密钥只在绑定阶段返回 |
 | `/account/security` | `POST /api/v1/me/security/passkeys/options` | 获取 WebAuthn 注册选项 | 重认证；服务端 challenge |
@@ -114,6 +118,24 @@
 ```
 
 后端必须限制字段长度、验证 `avatarUrl` 协议与允许的图片来源，并返回更新后的完整账户资料。邮箱、手机号等安全联系方式不得混入此通用资料接口，应使用带验证挑战的独立流程。
+
+联系方式修改的申请请求建议仅传新值：
+
+```json
+{
+  "email": "new-address@example.com"
+}
+```
+
+或：
+
+```json
+{
+  "phone": "+8613800138000"
+}
+```
+
+申请响应返回不含验证码的 `requestId`、脱敏目标值和 `expiresAt`。验证请求使用 `{ "code": "user-entered-code" }`；后端必须校验请求归属、过期时间和尝试次数，并在成功后原子更新联系方式、使请求失效、按安全策略撤销相关会话或通知原联系方式。验证码和完整联系方式不得写入 URL、客户端日志或审计事件。
 
 ## 管理工作台与权限
 
@@ -182,6 +204,7 @@
 | 当前数据源方法 | 目标接口 |
 | --- | --- |
 | `getCurrentUser` | `GET /api/v1/me` |
+| `getAdminCurrentUser` | `GET /api/v1/me`（Mock 中用于固定管理身份；真实实现仍由当前服务端会话决定） |
 | `getSecurityFactors` | `GET /api/v1/me/security/factors` |
 | `getSessions` | `GET /api/v1/me/sessions` |
 | `getConsentRequest` | `GET /api/v1/authorization/requests/{requestId}` |

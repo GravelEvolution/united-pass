@@ -84,6 +84,8 @@
 .detailList dt { color: var(--up-muted); font-size: 12px; }
 .detailList dd { margin: 0; font-size: 13px; font-weight: 560; }
 .urlValue { overflow-wrap: anywhere; }
+.contactValue { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.contactValue span { min-width: 0; overflow-wrap: anywhere; }
 .emptyText { color: var(--up-muted); font-size: 13px; line-height: 1.7; }
 
 .profileForm { display: grid; gap: 18px; }
@@ -121,6 +123,34 @@
 
 .profileActions { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }
 
+.contactForm { display: grid; gap: 18px; }
+
+.contactCurrent {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 9px;
+  color: var(--up-muted);
+  background: var(--up-surface-subtle);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.contactCurrent strong { color: var(--up-ink-secondary); overflow-wrap: anywhere; }
+
+.mockCode {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid var(--up-line);
+  border-radius: 11px;
+  background: var(--up-brand-soft);
+}
+
+.mockCode span { color: var(--up-muted); font-size: 11px; }
+.mockCode code { color: var(--up-brand); font-size: 22px; font-weight: 760; letter-spacing: 0.16em; }
+
 .factorList,
 .sessionList { display: grid; }
 .factorRow,
@@ -148,6 +178,8 @@
   .heroCard { align-items: flex-start; flex-wrap: wrap; padding: 24px 20px; }
   .stableId { width: 100%; min-width: 0; margin-left: 0; }
   .card { padding: 22px 18px; }
+  .detailList > div { grid-template-columns: 1fr; gap: 7px; }
+  .contactValue { align-items: flex-start; }
   .factorRow,
   .sessionRow { align-items: flex-start; flex-wrap: wrap; }
   .factorRow > button,

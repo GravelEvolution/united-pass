@@ -18,6 +18,7 @@ export type AdminDashboard = {
 
 export interface UnitedPassDataSource {
   getCurrentUser(): Promise<CurrentUser>;
+  getAdminCurrentUser(): Promise<CurrentUser>;
   getSecurityFactors(): Promise<SecurityFactor[]>;
   getSessions(): Promise<UserSession[]>;
   getConsentRequest(): Promise<ConsentRequest>;

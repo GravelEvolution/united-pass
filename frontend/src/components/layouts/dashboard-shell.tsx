@@ -62,7 +62,13 @@ export function DashboardShell({ mode, currentUser, children }: DashboardShellPr
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const navigation = mode === "account" ? accountNavigation : adminNavigation;
   const alternateHref = mode === "account" ? "/admin" : "/account";
-  const alternateLabel = mode === "account" ? "进入管理后台" : "返回账户中心";
+  const alternateLabel = mode === "account" ? "进入管理后台" : "查看普通用户示例";
+  const canShowAlternateSurface = mode === "admin" || Boolean(currentUser.employeeProfile);
+  const profileDescription = mode === "admin"
+    ? currentUser.email
+    : currentUser.employeeProfile
+      ? "外部用户 · 员工"
+      : "普通外部用户";
 
   return (
     <div className={styles.shell}>
@@ -108,12 +114,14 @@ export function DashboardShell({ mode, currentUser, children }: DashboardShellPr
           })}
         </nav>
         <div className={styles.sidebarFooter}>
-          <Link className={styles.alternateLink} href={alternateHref}>{alternateLabel}</Link>
+          {canShowAlternateSurface && (
+            <Link className={styles.alternateLink} href={alternateHref}>{alternateLabel}</Link>
+          )}
           <div className={styles.profile}>
             <Avatar size="small" color="blue">{currentUser.displayName.slice(0, 1)}</Avatar>
             <div>
               <strong>{currentUser.displayName}</strong>
-              <span>{currentUser.email}</span>
+              <span>{profileDescription}</span>
             </div>
           </div>
         </div>
