@@ -60,4 +60,9 @@ export const browserCommands: UnitedPassCommands = {
     mockUnitedPassDataSource.linkEmployeeProfile(input),
   offboardEmployee: (userId) =>
     mockUnitedPassDataSource.offboardEmployee(userId),
+
+  // Policy management
+  savePolicyDraft: (input) => mockUnitedPassDataSource.savePolicyDraft(input),
+  publishPolicy: (policyId) => mockUnitedPassDataSource.publishPolicy(policyId),
+  simulatePolicy: (input) => mockUnitedPassDataSource.simulatePolicy(input),
 };

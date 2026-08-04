@@ -38,5 +38,6 @@ export const serverQueries: UnitedPassQueries = {
     mockUnitedPassDataSource.getClientDetail(applicationId, clientId),
   getAvailableScopes: () => mockUnitedPassDataSource.getAvailableScopes(),
   getPolicies: (query?: PageQuery) => mockUnitedPassDataSource.getPolicies(query),
+  getPolicyDetail: (policyId) => mockUnitedPassDataSource.getPolicyDetail(policyId),
   getAuditEvents: (query?: PageQuery) => mockUnitedPassDataSource.getAuditEvents(query),
 };

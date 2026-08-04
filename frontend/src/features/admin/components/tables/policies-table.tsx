@@ -1,7 +1,8 @@
 "use client";
 
 import type { ColumnProps } from "@douyinfe/semi-ui/lib/es/table";
-import { MockActionButton } from "@/components/common/mock-action-button";
+import Link from "next/link";
+import { Button } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import type { AuthorizationPolicy } from "@/features/policies/types";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
@@ -59,11 +60,21 @@ const columns: ColumnProps<AuthorizationPolicy>[] = [
   createScopedColumn({
     title: "操作",
     width: 100,
-    render: (_value: unknown, record: AuthorizationPolicy) => <MockActionButton message={`查看策略 ${record.name}`}>查看</MockActionButton>,
+    render: (_value: unknown, record: AuthorizationPolicy) => (
+      <Link href={`/admin/policies/${record.policyId}`}>
+        <Button theme="borderless">查看</Button>
+      </Link>
+    ),
   }),
 ];
 
-export function PoliciesTable({ records }: { records: AuthorizationPolicy[] }) {
+export function PoliciesTable({ records, actionHref }: { records: AuthorizationPolicy[]; actionHref?: string }) {
+  const action = actionHref ? (
+    <Link href={actionHref}>
+      <Button theme="solid" type="primary">新建策略</Button>
+    </Link>
+  ) : undefined;
+
   return (
     <ManagementDirectory
       columns={columns}
@@ -71,6 +82,7 @@ export function PoliciesTable({ records }: { records: AuthorizationPolicy[] }) {
       getSearchText={(record) => [record.name, record.resource, record.policyId].join(" ")}
       records={records}
       rowKey="policyId"
+      action={action}
     />
   );
 }

@@ -18,5 +18,5 @@ export default async function PoliciesPage({
     cursor: params.cursor,
   };
   const page = await serverQueries.getPolicies(query);
-  return <PoliciesTable records={page.items} />;
+  return <PoliciesTable records={page.items} actionHref="/admin/policies/new" />;
 }

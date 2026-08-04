@@ -26,6 +26,12 @@ import type {
   EmployeeLinkInput,
   UserDetail,
 } from "@/features/admin/types";
+import type {
+  PolicyDetail,
+  PolicyDraftInput,
+  PolicySimulationInput,
+  PolicySimulationResult,
+} from "@/features/policies/types";
 import {
   validateApplicationCreateInput,
   validateOAuthClientCreateInput,
@@ -453,6 +459,76 @@ const policies = [
   { policyId: "pol_audit_export", name: "安全审计导出限制", resource: "audit:export", version: 1, status: "draft", updatedBy: "程越", updatedAt: "2026-08-04T01:14:00Z" },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getPolicies"]>>["items"];
 
+const policyDetails: Record<string, PolicyDetail> = {
+  pol_application_manage: {
+    policyId: "pol_application_manage",
+    name: "应用管理员维护 OAuth 应用",
+    description: "允许应用管理员创建、编辑、停用和删除 OAuth 应用及其 Client。",
+    resource: "application:*",
+    action: "application.manage",
+    effect: "allow",
+    version: 7,
+    status: "published",
+    principals: [
+      { attribute: "role", operator: "eq", value: "application_admin" },
+    ],
+    conditions: [
+      { attribute: "department", operator: "in", value: "identity_platform,security" },
+    ],
+    updatedBy: "周予安",
+    updatedAt: "2026-08-03T07:45:00Z",
+    versionHistory: [
+      { version: 7, status: "published", updatedBy: "周予安", updatedAt: "2026-08-03T07:45:00Z", changeSummary: "增加 security 部门到条件范围" },
+      { version: 6, status: "published", updatedBy: "周予安", updatedAt: "2026-07-28T03:12:00Z", changeSummary: "收紧 principal 属性" },
+      { version: 5, status: "published", updatedBy: "林知行", updatedAt: "2026-07-15T08:30:00Z", changeSummary: "初始发布版本" },
+    ],
+  },
+  pol_employee_read: {
+    policyId: "pol_employee_read",
+    name: "部门负责人查看直属员工",
+    description: "允许部门负责人查看本部门成员的资料和状态。",
+    resource: "employee:*",
+    action: "employee.read",
+    effect: "allow",
+    version: 3,
+    status: "published",
+    principals: [
+      { attribute: "role", operator: "eq", value: "department_owner" },
+    ],
+    conditions: [
+      { attribute: "target_department", operator: "eq", value: "${principal.department}" },
+    ],
+    updatedBy: "林知行",
+    updatedAt: "2026-07-30T03:20:00Z",
+    versionHistory: [
+      { version: 3, status: "published", updatedBy: "林知行", updatedAt: "2026-07-30T03:20:00Z", changeSummary: "修正部门匹配条件" },
+      { version: 2, status: "published", updatedBy: "周予安", updatedAt: "2026-07-20T06:00:00Z", changeSummary: "调整 principal 定义" },
+      { version: 1, status: "published", updatedBy: "周予安", updatedAt: "2026-07-10T02:00:00Z", changeSummary: "初始版本" },
+    ],
+  },
+  pol_audit_export: {
+    policyId: "pol_audit_export",
+    name: "安全审计导出限制",
+    description: "仅允许安全团队成员导出审计日志，且不允许导出包含 Token 的字段。",
+    resource: "audit:export",
+    action: "audit.export",
+    effect: "allow",
+    version: 1,
+    status: "draft",
+    principals: [
+      { attribute: "role", operator: "in", value: "security_admin,compliance_auditor" },
+    ],
+    conditions: [
+      { attribute: "export_scope", operator: "neq", value: "token_fields" },
+    ],
+    updatedBy: "程越",
+    updatedAt: "2026-08-04T01:14:00Z",
+    versionHistory: [
+      { version: 1, status: "draft", updatedBy: "程越", updatedAt: "2026-08-04T01:14:00Z", changeSummary: "草稿创建" },
+    ],
+  },
+};
+
 const auditEvents = [
   { eventId: "evt_001", eventType: "用户登录", actorName: "林知行", targetLabel: SYSTEM_NAME, occurredAt: "2026-08-04T05:42:00Z", result: "success" },
   { eventId: "evt_002", eventType: "策略发布", actorName: "周予安", targetLabel: "应用管理员维护 OAuth 应用", occurredAt: "2026-08-03T07:45:00Z", result: "success" },
@@ -851,6 +927,11 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       return Promise.resolve();
     },
     getPolicies: (query?: PageQuery) => Promise.resolve(toCursorPage(policies, query)),
+    getPolicyDetail: (policyId: string): Promise<PolicyDetail | null> => {
+      const detail = policyDetails[policyId];
+      if (!detail) return Promise.resolve(null);
+      return Promise.resolve({ ...detail, principals: [...detail.principals], conditions: [...detail.conditions], versionHistory: [...detail.versionHistory] });
+    },
     getAuditEvents: (query?: PageQuery) => Promise.resolve(toCursorPage(auditEvents, query)),
 
     updateProfile: (input: { displayName?: string; nickname?: string }): Promise<void> => {
@@ -944,6 +1025,147 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
         employee.status = "offboarding";
       }
       return Promise.resolve();
+    },
+
+    savePolicyDraft: (input: PolicyDraftInput): Promise<{ policyId: string; version: number }> => {
+      const now = new Date().toISOString();
+      if (input.policyId) {
+        const existing = policyDetails[input.policyId];
+        if (existing) {
+          const nextVersion = existing.version + 1;
+          existing.name = input.name;
+          existing.description = input.description;
+          existing.resource = input.resource;
+          existing.action = input.action;
+          existing.effect = input.effect;
+          existing.principals = [...input.principals];
+          existing.conditions = [...input.conditions];
+          existing.version = nextVersion;
+          existing.status = "draft";
+          existing.updatedBy = "当前管理员";
+          existing.updatedAt = now;
+          existing.versionHistory.unshift({
+            version: nextVersion,
+            status: "draft",
+            updatedBy: "当前管理员",
+            updatedAt: now,
+            changeSummary: "编辑草稿",
+          });
+
+          const summary = policies.find((p) => p.policyId === input.policyId);
+          if (summary) {
+            summary.version = nextVersion;
+            summary.status = "draft";
+            summary.updatedBy = "当前管理员";
+            summary.updatedAt = now;
+          }
+
+          return Promise.resolve({ policyId: input.policyId, version: nextVersion });
+        }
+      }
+
+      const newPolicyId = `pol_${Date.now().toString(36)}`;
+      const newDetail: PolicyDetail = {
+        policyId: newPolicyId,
+        name: input.name,
+        description: input.description,
+        resource: input.resource,
+        action: input.action,
+        effect: input.effect,
+        version: 1,
+        status: "draft",
+        principals: [...input.principals],
+        conditions: [...input.conditions],
+        updatedBy: "当前管理员",
+        updatedAt: now,
+        versionHistory: [
+          { version: 1, status: "draft", updatedBy: "当前管理员", updatedAt: now, changeSummary: "草稿创建" },
+        ],
+      };
+      policyDetails[newPolicyId] = newDetail;
+      policies.push({
+        policyId: newPolicyId,
+        name: input.name,
+        resource: input.resource,
+        version: 1,
+        status: "draft",
+        updatedBy: "当前管理员",
+        updatedAt: now,
+      });
+
+      return Promise.resolve({ policyId: newPolicyId, version: 1 });
+    },
+
+    publishPolicy: (policyId: string): Promise<{ version: number }> => {
+      const detail = policyDetails[policyId];
+      if (!detail) {
+        return Promise.reject(new Error("策略不存在"));
+      }
+      detail.status = "published";
+      detail.updatedAt = new Date().toISOString();
+      detail.versionHistory.unshift({
+        version: detail.version,
+        status: "published",
+        updatedBy: "当前管理员",
+        updatedAt: detail.updatedAt,
+        changeSummary: `发布版本 v${detail.version}`,
+      });
+
+      const summary = policies.find((p) => p.policyId === policyId);
+      if (summary) {
+        summary.status = "published";
+        summary.updatedAt = detail.updatedAt;
+        summary.updatedBy = "当前管理员";
+      }
+
+      return Promise.resolve({ version: detail.version });
+    },
+
+    simulatePolicy: (input: PolicySimulationInput): Promise<PolicySimulationResult> => {
+      const now = new Date().toISOString();
+      const role = input.principalAttributes["role"] ?? "";
+      const department = input.principalAttributes["department"] ?? "";
+
+      for (const policyId of Object.keys(policyDetails)) {
+        const detail = policyDetails[policyId];
+        if (detail.action !== input.action) continue;
+        if (detail.effect !== "allow") continue;
+
+        const principalMatch = detail.principals.every((p) => {
+          const attrValue = p.attribute === "role" ? role : department;
+          if (p.operator === "eq") return attrValue === p.value;
+          if (p.operator === "in") return p.value.split(",").map((v) => v.trim()).includes(attrValue);
+          if (p.operator === "neq") return attrValue !== p.value;
+          return false;
+        });
+
+        if (principalMatch) {
+          return Promise.resolve({
+            decision: "allow",
+            matchedPolicyId: detail.policyId,
+            matchedPolicyName: detail.name,
+            evaluatedAt: now,
+            reasons: [
+              `Principal 属性匹配：role=${role}, department=${department}`,
+              `策略效果：${detail.effect}`,
+              `资源：${detail.resource}`,
+              `操作：${detail.action}`,
+            ],
+          });
+        }
+      }
+
+      return Promise.resolve({
+        decision: "deny",
+        matchedPolicyId: null,
+        matchedPolicyName: null,
+        evaluatedAt: now,
+        reasons: [
+          `未找到匹配的允许策略`,
+          `Principal 属性：role=${role}, department=${department}`,
+          `操作：${input.action}`,
+        ],
+      });
     },
   };
 }

@@ -27,7 +27,13 @@ import type {
   SecretRotationResult,
 } from "@/features/applications/types";
 import type { ConsentResolution, ConsentDecision } from "@/features/authorization/types";
-import type { AuthorizationPolicy } from "@/features/policies/types";
+import type {
+  AuthorizationPolicy,
+  PolicyDetail,
+  PolicyDraftInput,
+  PolicySimulationInput,
+  PolicySimulationResult,
+} from "@/features/policies/types";
 import type { CurrentUser } from "@/types/identity";
 import type { CursorPage, PageQuery } from "@/types/pagination";
 import type { PermissionCapabilities } from "@/types/permissions";
@@ -65,6 +71,7 @@ export interface UnitedPassQueries {
   getClientDetail(applicationId: string, clientId: string): Promise<OAuthClient | null>;
   getAvailableScopes(): Promise<AllowedScope[]>;
   getPolicies(query?: PageQuery): Promise<CursorPage<AuthorizationPolicy>>;
+  getPolicyDetail(policyId: string): Promise<PolicyDetail | null>;
   getAuditEvents(query?: PageQuery): Promise<CursorPage<AuditEvent>>;
 }
 
@@ -112,6 +119,11 @@ export interface UnitedPassCommands {
   revokeUserSessions(userId: string): Promise<void>;
   linkEmployeeProfile(input: EmployeeLinkInput): Promise<void>;
   offboardEmployee(userId: string): Promise<void>;
+
+  // Policy management
+  savePolicyDraft(input: PolicyDraftInput): Promise<{ policyId: string; version: number }>;
+  publishPolicy(policyId: string): Promise<{ version: number }>;
+  simulatePolicy(input: PolicySimulationInput): Promise<PolicySimulationResult>;
 }
 
 /**
