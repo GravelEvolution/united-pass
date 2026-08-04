@@ -77,7 +77,7 @@ describe("OAuth application lifecycle", () => {
     expect(detail?.clients[0]?.name).toBe("Web Client");
     expect(detail?.clients[0]?.clientType).toBe("confidential");
     expect(detail?.clients[0]?.grantTypes).toEqual(["authorization_code", "refresh_token"]);
-    expect(detail?.clients[0]?.tokenEndpointAuthMethod).toBe("client_secret_post");
+    expect(detail?.clients[0]?.tokenEndpointAuthMethod).toBe("client_secret_basic");
     expect(detail?.clients[0]?.clientSecrets).toHaveLength(1);
     expect(detail?.clients[0]?.redirectUris).toHaveLength(1);
     expect(detail?.clients[0]?.redirectUris[0]?.uri).toBe("https://example.com/callback");

@@ -172,7 +172,7 @@ export const CLIENT_PROFILES: readonly ClientProfileConfig[] = [
     description: "服务端渲染或 BFF 架构，可安全存储 Client Secret。",
     clientType: "confidential",
     grantTypes: ["authorization_code", "refresh_token"],
-    tokenEndpointAuthMethod: "client_secret_post",
+    tokenEndpointAuthMethod: "client_secret_basic",
     redirectUriRequired: true,
     openidAllowed: true,
     consentApplicable: true,
