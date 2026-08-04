@@ -45,7 +45,7 @@ const employeeAdminUser = {
     departmentName: "产品与体验 / 身份平台",
     title: "产品设计师",
   },
-} satisfies Awaited<ReturnType<UnitedPassDataSource["getAdminCurrentUser"]>>;
+} satisfies Awaited<ReturnType<UnitedPassDataSource["getCurrentUser"]>>;
 
 const securityFactors = [
   { factorId: "factor_password", kind: "password", label: "账户密码", status: "active", updatedAt: "2026-07-12T03:20:00Z" },
@@ -348,11 +348,9 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
   const authorizedApplications: AuthorizedApplication[] = structuredClone(initialAuthorizedApplications);
 
   return {
-    getCurrentUser: () => Promise.resolve(externalAppUser),
-    getAdminCurrentUser: () => Promise.resolve(employeeAdminUser),
+    getCurrentUser: () => Promise.resolve(employeeAdminUser),
     getSecurityFactors: () => Promise.resolve(securityFactors),
     getSessions: () => Promise.resolve(sessions),
-    getConsentRequest: () => Promise.resolve(consentRequest),
     getConsentResolution: (requestId: string) => {
       const resolution = consentResolutions[requestId];
       if (resolution) {

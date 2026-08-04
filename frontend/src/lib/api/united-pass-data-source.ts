@@ -22,7 +22,7 @@ import type {
   OAuthClientCreationResult,
   SecretRotationResult,
 } from "@/features/applications/types";
-import type { ConsentResolution, ConsentRequest, ConsentDecision } from "@/features/authorization/types";
+import type { ConsentResolution, ConsentDecision } from "@/features/authorization/types";
 import type { AuthorizationPolicy } from "@/features/policies/types";
 import type { CurrentUser } from "@/types/identity";
 
@@ -38,10 +38,8 @@ export type AdminDashboard = {
  */
 export interface UnitedPassQueries {
   getCurrentUser(): Promise<CurrentUser>;
-  getAdminCurrentUser(): Promise<CurrentUser>;
   getSecurityFactors(): Promise<SecurityFactor[]>;
   getSessions(): Promise<UserSession[]>;
-  getConsentRequest(): Promise<ConsentRequest>;
   getConsentResolution(requestId: string): Promise<ConsentResolution>;
   getAuthorizedApplications(): Promise<AuthorizedApplication[]>;
   getAdminDashboard(): Promise<AdminDashboard>;

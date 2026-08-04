@@ -13,10 +13,8 @@ import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
  */
 export const serverQueries: UnitedPassQueries = {
   getCurrentUser: () => mockUnitedPassDataSource.getCurrentUser(),
-  getAdminCurrentUser: () => mockUnitedPassDataSource.getAdminCurrentUser(),
   getSecurityFactors: () => mockUnitedPassDataSource.getSecurityFactors(),
   getSessions: () => mockUnitedPassDataSource.getSessions(),
-  getConsentRequest: () => mockUnitedPassDataSource.getConsentRequest(),
   getConsentResolution: (requestId) => mockUnitedPassDataSource.getConsentResolution(requestId),
   getAuthorizedApplications: () => mockUnitedPassDataSource.getAuthorizedApplications(),
   getAdminDashboard: () => mockUnitedPassDataSource.getAdminDashboard(),

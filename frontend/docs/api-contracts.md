@@ -1,7 +1,7 @@
 # United Pass 前端 API 接入清单
 
 - 状态：Draft，等待前后端评审
-- 日期：2026-08-05
+- 日期：2026-08-05（v2，与 ADR-0004/0005 对齐）
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect
 
@@ -15,15 +15,17 @@
 - 所有写操作需要 CSRF 防护；高风险操作应支持后端发起的重认证挑战。
 - API 仅返回界面必要字段，员工内部字段由后端权限过滤。
 - 所有时间为 ISO 8601 UTC 字符串，前端展示时明确本地时区。
-- 列表使用服务端分页，不允许生产环境一次加载完整用户或审计集合。
+- 列表使用服务端游标分页，不允许生产环境一次加载完整用户或审计集合。
 
-### 列表查询
+### 游标分页
+
+请求参数：
 
 ```text
-?page[cursor]=opaque_cursor&page[limit]=20&filter[query]=lin&sort=-updatedAt
+?cursor=opaque_cursor&limit=20&query=lin&sort=-updatedAt&status=active
 ```
 
-建议响应：
+响应体：
 
 ```json
 {
@@ -35,6 +37,26 @@
 }
 ```
 
+前端类型：
+
+```ts
+type PageQuery = {
+  cursor?: string;
+  limit?: number;
+  query?: string;
+  sort?: string;
+  status?: string;
+};
+
+type CursorPage<T> = {
+  items: T[];
+  page: {
+    nextCursor: string | null;
+    hasMore: boolean;
+  };
+};
+```
+
 ### 错误响应
 
 ```json
@@ -43,35 +65,87 @@
     "code": "session.reauthentication_required",
     "message": "请重新验证身份后继续。",
     "requestId": "req_01...",
-    "fieldErrors": {
-      "redirectUri": "该重定向地址未登记。"
-    }
+    "fieldErrors": [
+      { "field": "redirectUris[0]", "message": "该重定向地址未登记。" }
+    ]
   }
 }
 ```
 
-前端可安全展示 `message` 和字段错误；不得显示堆栈、SQL、内部主机名、令牌或原始异常。建议至少统一处理 `400`、`401`、`403`、`404`、`409`、`422`、`429` 和 `5xx`。
+`fieldErrors` 使用数组格式，支持同一字段返回多个错误。前端 `ApiError` 类型：
+
+```ts
+type FieldError = { field: string; message: string };
+
+type ApiError = {
+  kind: "network" | "unauthorized" | "forbidden" | "not_found"
+      | "conflict" | "validation" | "rate_limited"
+      | "reauthentication_required" | "server_error";
+  message: string;
+  requestId?: string;
+  fieldErrors?: FieldError[];
+  retryAfter?: number;
+  challenge?: {
+    methods: ReadonlyArray<"password" | "totp" | "passkey">;
+    requestId: string;
+  };
+};
+```
+
+前端可安全展示 `message` 和 `fieldErrors`；不得显示堆栈、SQL、内部主机名、令牌或原始异常。建议至少统一处理 `400`、`401`、`403`、`404`、`409`、`422`、`429` 和 `5xx`。
+
+### 权限能力
+
+```ts
+type PermissionCapabilities = {
+  userRead: boolean;
+  userDisable: boolean;
+  employeeManage: boolean;
+  employeeOffboard: boolean;
+  departmentManage: boolean;
+  applicationRead: boolean;
+  applicationManage: boolean;
+  applicationSecretRotate: boolean;
+  policyRead: boolean;
+  policyManage: boolean;
+  policyPublish: boolean;
+  auditRead: boolean;
+  auditExport: boolean;
+  providerRead: boolean;
+  providerManage: boolean;
+};
+```
+
+前端按能力过滤导航和控件可用性，不依赖角色名称。每个请求仍须由后端执行 ABAC 决策。
 
 ## 认证、注册与 OIDC
 
 | 页面/流程 | 方法与路径 | 用途 | 关键要求 |
 | --- | --- | --- | --- |
 | `/login` | `POST /api/v1/auth/sessions` | 使用凭据建立浏览器会话 | 限速；返回通用凭据错误；支持 MFA challenge，不记录密码 |
+| MFA 挑战 | `POST /api/v1/auth/sessions/mfa` | 提交 TOTP / Passkey / 恢复码 | challenge 限时；限速；过多尝试锁定 |
 | `/forgot-password` | `POST /api/v1/password-reset-requests` | 请求向已验证联系方式发送重置说明 | 限速；始终返回通用结果，不能泄露账户是否存在 |
 | 密码重置落地页 | `POST /api/v1/password-resets` | 使用一次性令牌设置新密码 | 令牌限时、一次性、不可写入日志；成功后按策略撤销会话 |
+| 邮箱验证落地页 | `POST /api/v1/email-verifications` | 使用一次性令牌验证邮箱 | 令牌限时、一次性、限速 |
 | 全局退出 | `DELETE /api/v1/auth/session` | 撤销当前浏览器会话 | 清除服务端会话与 Cookie |
 | `/register` | `POST /api/v1/registrations` | 创建普通用户账户 | 邮箱验证；稳定 `userId`；不得预建独立员工账户 |
-| 邮箱验证 | `POST /api/v1/registrations/email-verifications` | 验证注册邮箱 | 一次性、限时、限速 |
-| `/authorize` | `GET /oauth/authorize` | 发起 OAuth/OIDC 授权请求 | 后端校验 client、redirect URI、state、nonce、PKCE；不得把校验责任交给页面 |
-| `/authorize` | `GET /api/v1/authorization/requests/{requestId}` | 获取已校验的应用、当前身份和请求 Scope | 不接受前端自行拼装应用名称或任意回跳地址 |
-| `/authorize` | `POST /api/v1/authorization/requests/{requestId}/decision` | 提交 allow/deny | body: `{ "decision": "allow" | "deny" }`；后端生成安全重定向 |
 
-登录请求使用统一标识字段，允许用户输入账户名或邮箱：
+登录请求使用统一标识字段：
 
 ```json
 {
   "identifier": "zhixing.lin",
   "password": "user-entered-password"
+}
+```
+
+MFA 挑战请求：
+
+```json
+{
+  "mfaToken": "opaque_mfa_token",
+  "method": "totp",
+  "code": "user-entered-code"
 }
 ```
 
@@ -87,7 +161,17 @@
 
 `confirmPassword` 仅用于浏览器即时校验，不应进入传输合同或日志。后端必须独立验证账户名格式与唯一性、邮箱格式、密码强度和凭据泄露风险，并返回字段级错误；登录失败不得泄露账户名或邮箱是否存在。
 
-授权请求响应至少包含：`requestId`、应用显示名/说明/负责人、已验证 `redirectHost`、当前用户最小身份信息及逐项 Scope 描述。授权完成响应建议返回后端验证过的 `redirectUrl` 或直接通过受控 303 重定向完成流程。
+## OAuth 授权与同意
+
+| 页面/流程 | 方法与路径 | 用途 | 关键要求 |
+| --- | --- | --- | --- |
+| `/authorize` | `GET /oauth/authorize` | 发起 OAuth/OIDC 授权请求 | 后端校验 client、redirect URI、state、nonce、PKCE；不得把校验责任交给页面 |
+| `/authorize` | `GET /api/v1/authorization/requests/{requestId}` | 获取已校验的应用、当前身份和请求 Scope | 不接受前端自行拼装应用名称或任意回跳地址 |
+| `/authorize` | `POST /api/v1/authorization/requests/{requestId}/decision` | 提交 allow/deny | body: `{ "decision": "allow" \| "deny" }`；后端生成安全重定向 |
+
+授权请求响应至少包含：`requestId`、应用显示名/说明/负责人、已验证 `redirectHost`、当前用户最小身份信息及逐项 Scope 描述。
+
+授权完成响应返回后端验证过的 `redirectUrl`，前端使用 `window.location.assign` 在当前窗口跳转。拒绝也应返回已验证的 Client Redirect URI 并携带 OAuth 错误参数（`error=access_denied`），而不是默认进入 `/account`。
 
 ## 当前账户
 
@@ -102,11 +186,17 @@
 | `/account` | `POST /api/v1/me/phone-change-requests/{requestId}/verify` | 校验验证码并原子更新手机号 | 当前会话用户；一次性、限时验证码 |
 | `/account/security` | `GET /api/v1/me/security/factors` | 密码、TOTP、Passkey 状态 | 当前会话用户 |
 | `/account/security` | `POST /api/v1/me/security/totp/enrollments` | 开始 TOTP 绑定 | 重认证；密钥只在绑定阶段返回 |
+| `/account/security` | `POST /api/v1/me/security/totp` | 确认 TOTP 绑定 | 验证首次 TOTP 码 |
+| `/account/security` | `DELETE /api/v1/me/security/totp` | 删除 TOTP 因子 | 重认证；审计 |
 | `/account/security` | `POST /api/v1/me/security/passkeys/options` | 获取 WebAuthn 注册选项 | 重认证；服务端 challenge |
 | `/account/security` | `POST /api/v1/me/security/passkeys` | 完成 Passkey 注册 | 服务端验证 origin、RP ID、challenge |
+| `/account/security` | `DELETE /api/v1/me/security/passkeys/{credentialId}` | 删除指定 Passkey | 重认证；审计 |
+| `/account/security` | `POST /api/v1/me/security/recovery-codes` | 生成新的恢复码 | 重认证；旧码失效；只显示一次 |
 | `/account/sessions` | `GET /api/v1/me/sessions` | 设备、客户端、脱敏 IP、大致位置、最近活动和当前会话标记 | 当前会话用户 |
 | `/account/sessions` | `DELETE /api/v1/me/sessions/{sessionId}` | 撤销指定会话 | 明确确认；不能误撤当前事务 |
 | `/account/security` | `POST /api/v1/me/sessions/revoke-others` | 撤销除当前会话外的全部会话 | 重认证与明确确认 |
+| `/account/applications` | `GET /api/v1/me/authorized-applications` | 已授权应用列表 | 当前会话用户 |
+| `/account/applications` | `DELETE /api/v1/me/authorized-applications/{grantId}` | 撤销指定应用授权 | 当前会话用户 |
 
 `GET /me` 必须以稳定 `userId` 作为身份主键。`employeeProfile` 可为空；外部用户关联员工档案后仍使用原 `userId`，且保留普通用户能力。
 
@@ -121,34 +211,75 @@
 
 头像使用独立的 `POST /api/v1/me/avatar` multipart 上传接口，不接受用户提交的外部图片 URL。后端必须重新验证文件大小、真实媒体类型、文件头、解码尺寸和总像素，拒绝 SVG 等主动内容，重新编码并剥离元数据后存储，再返回同源或受控媒体域的头像地址。前端校验只用于即时反馈，不能替代服务端安全处理。邮箱、手机号等安全联系方式不得混入通用资料接口，应使用带验证挑战的独立流程。
 
-联系方式修改的申请请求建议仅传新值：
-
-```json
-{
-  "email": "new-address@example.com"
-}
-```
-
-或：
-
-```json
-{
-  "phone": "+8613800138000"
-}
-```
-
-申请响应返回不含验证码的 `requestId`、脱敏目标值和 `expiresAt`。验证请求使用 `{ "code": "user-entered-code" }`；后端必须校验请求归属、过期时间和尝试次数，并在成功后原子更新联系方式、使请求失效、按安全策略撤销相关会话或通知原联系方式。验证码和完整联系方式不得写入 URL、客户端日志或审计事件。
-
 ## 管理工作台与权限
 
 | 页面 | 方法与路径 | 权限标识建议 |
 | --- | --- | --- |
 | `/admin` | `GET /api/v1/admin/dashboard` | `admin.dashboard.read` |
-| 管理导航/操作能力 | `GET /api/v1/me/permissions` | 后端返回显式 permission capabilities |
+| 管理导航/操作能力 | `GET /api/v1/me/permissions` | 后端返回显式 `PermissionCapabilities` |
 
 前端权限仅用于导航和控件可用性。以下每个请求仍须由后端执行 ABAC 决策，不能依赖角色名称或前端传入的权限结论。
 
 当前管理表格仅对 Mock 返回的显式展示字段执行浏览器内搜索。接入真实 API 后，搜索词、游标、页容量、排序和筛选必须随对应 `GET /api/v1/admin/*` 请求发送，由服务端在权限过滤和字段裁剪后返回当前页；不得先把完整用户、员工或审计集合传入浏览器再过滤。
+
+## OAuth Application 与 Client
+
+Application 和 OAuth Client 是分离的实体。一个 Application 可以有多个 Client。
+
+### Application
+
+| 方法与路径 | 用途 | 权限标识建议 |
+| --- | --- | --- |
+| `POST /api/v1/admin/applications/with-initial-client` | 原子创建应用和初始 Client | `application.manage` |
+| `GET /api/v1/admin/applications` | 分页搜索 OAuth 应用 | `application.read` |
+| `GET /api/v1/admin/applications/{applicationId}` | 获取应用元数据和 Client 列表 | `application.read` |
+| `PATCH /api/v1/admin/applications/{applicationId}` | 修改应用名称、说明、受众、负责人 | `application.manage` |
+| `POST /api/v1/admin/applications/{applicationId}/enable` | 启用应用 | `application.manage`；审计 |
+| `POST /api/v1/admin/applications/{applicationId}/disable` | 停用应用并说明影响 | `application.manage`；审计 |
+| `DELETE /api/v1/admin/applications/{applicationId}` | 删除应用及其所有 Client | `application.manage`；重认证；审计 |
+
+### OAuth Client
+
+| 方法与路径 | 用途 | 权限标识建议 |
+| --- | --- | --- |
+| `POST /api/v1/admin/applications/{applicationId}/clients` | 为应用添加新 Client | `application.manage` |
+| `GET /api/v1/admin/applications/{applicationId}/clients/{clientId}` | 获取 Client 详情 | `application.read` |
+| `PATCH /api/v1/admin/applications/{applicationId}/clients/{clientId}` | 修改 Client 名称、Redirect URI、Scope、Consent Mode | `application.manage` |
+| `POST /api/v1/admin/applications/{applicationId}/clients/{clientId}/enable` | 启用 Client | `application.manage` |
+| `POST /api/v1/admin/applications/{applicationId}/clients/{clientId}/disable` | 停用 Client | `application.manage` |
+| `DELETE /api/v1/admin/applications/{applicationId}/clients/{clientId}` | 删除 Client | `application.manage`；重认证 |
+| `POST /api/v1/admin/applications/{applicationId}/clients/{clientId}/secret-rotations` | 轮换机密客户端 Secret | `application.secret.rotate`；重认证；新 Secret 只显示一次 |
+
+Client Profile（`web_server`、`spa_mobile`、`server_to_server`）决定 Grant Types、Token Endpoint Auth Method、是否需要 Redirect URI、是否允许 `openid` Scope。MVP 中 `openid` 对所有交互式 Profile 为可选，管理员按需勾选。`trusted_first_party` 同意模式暂不支持，待后端实现信任策略后加入。
+
+重定向 URI 必须由后端按精确安全语义校验；前端不得静默归一化。公共客户端必须使用 PKCE，浏览器代码不得持有 Client Secret。
+
+## 用户与员工
+
+| 页面 | 方法与路径 | 用途 | 权限标识建议 |
+| --- | --- | --- | --- |
+| `/admin/users` | `GET /api/v1/admin/users` | 分页搜索统一用户 | `user.read` |
+| 用户详情 | `GET /api/v1/admin/users/{userId}` | 获取授权范围内的用户资料、Persona、外部身份关联、活跃会话、授权应用 | `user.read` |
+| 用户详情 | `POST /api/v1/admin/users/{userId}/disable` | 停用用户并声明是否撤销会话 | `user.disable`；重认证；审计 |
+| 用户详情 | `POST /api/v1/admin/users/{userId}/enable` | 恢复已停用用户 | `user.enable`；审计 |
+| 用户详情 | `DELETE /api/v1/admin/users/{userId}/sessions` | 撤销用户所有会话 | `user.disable`；重认证 |
+| `/admin/employees` | `GET /api/v1/admin/employees` | 分页搜索员工档案 | `employee.read` |
+| 员工详情 | `GET /api/v1/admin/users/{userId}/employee-profile` | 获取员工档案 | `employee.read` |
+| 员工详情 | `PUT /api/v1/admin/users/{userId}/employee-profile` | 为既有用户关联/更新员工档案 | `employee.manage`；不得创建第二身份 |
+| `/admin/employees/link` | `POST /api/v1/admin/employees/link` | 搜索已有普通用户并为其建立员工档案 | `employee.manage` |
+| 员工详情 | `POST /api/v1/admin/users/{userId}/offboarding` | 启动离职并声明访问撤销范围 | `employee.offboard`；重认证；审计 |
+
+用户与员工共用同一 `userId`。外部用户关联员工档案后保留 Consumer Persona。不得仅凭邮箱、手机号、域名或显示名合并账户。
+
+## 部门
+
+| 页面 | 方法与路径 | 用途 | 权限标识建议 |
+| --- | --- | --- | --- |
+| `/admin/departments` | `GET /api/v1/admin/departments` | 获取树形或分页部门数据 | `department.read` |
+| 部门详情 | `GET /api/v1/admin/departments/{departmentId}` | 获取部门信息、负责人和成员 | `department.read` |
+| 部门详情 | `POST /api/v1/admin/departments` | 创建部门 | `department.manage` |
+| 部门详情 | `PATCH /api/v1/admin/departments/{departmentId}` | 修改名称、负责人或上级 | `department.manage`；防止循环层级 |
+| 部门详情 | `DELETE /api/v1/admin/departments/{departmentId}` | 删除空部门 | `department.manage`；审计 |
 
 ## Identity Provider 管理
 
@@ -156,46 +287,14 @@
 | --- | --- | --- | --- |
 | `/admin/providers` | `GET /api/v1/admin/identity-providers` | 分页读取 Provider 状态与非敏感元数据 | `identity_provider.read` |
 | Provider 详情 | `POST /api/v1/admin/identity-providers` | 创建 Provider 草稿 | `identity_provider.manage`；重认证；审计 |
+| Provider 详情 | `GET /api/v1/admin/identity-providers/{providerId}` | 获取 Provider 配置（不含密钥明文） | `identity_provider.read` |
 | Provider 详情 | `PATCH /api/v1/admin/identity-providers/{providerId}` | 更新允许的非密钥配置 | `identity_provider.manage`；重认证；审计 |
 | Provider 详情 | `POST /api/v1/admin/identity-providers/{providerId}/enable` | 完成后端校验后启用登录 | `identity_provider.enable`；重认证；审计 |
 | Provider 详情 | `POST /api/v1/admin/identity-providers/{providerId}/disable` | 停止新的 Provider 登录并说明已有账户影响 | `identity_provider.enable`；重认证；审计 |
 
 飞书是首个计划支持的厂商 Provider，但当前前端只展示规划记录。正式接入前需以后端确认飞书开放平台协议、回调和字段合同；客户端密钥只能保存在服务端密钥系统中。授权回调必须由后端校验请求关联、防重放参数、精确回调地址和供应商响应，不得由前端直接交换凭据。外部身份必须显式关联到既有稳定 `userId`，不得仅凭邮箱或手机号自动合并，也不得根据飞书组织信息直接授予员工或管理权限。
 
-## 用户与员工
-
-| 页面 | 方法与路径 | 用途 | 权限标识建议 |
-| --- | --- | --- | --- |
-| `/admin/users` | `GET /api/v1/admin/users` | 分页搜索统一用户 | `user.read` |
-| 用户详情 | `GET /api/v1/admin/users/{userId}` | 获取授权范围内的用户资料 | `user.read` |
-| 用户详情 | `POST /api/v1/admin/users/{userId}/disable` | 停用用户并声明是否撤销会话 | `user.disable`；重认证；审计 |
-| 用户详情 | `POST /api/v1/admin/users/{userId}/enable` | 恢复已停用用户 | `user.enable`；审计 |
-| `/admin/employees` | `GET /api/v1/admin/employees` | 分页搜索员工档案 | `employee.read` |
-| 员工详情 | `PUT /api/v1/admin/users/{userId}/employee-profile` | 为既有用户关联/更新员工档案 | `employee.manage`；不得创建第二身份 |
-| 员工详情 | `POST /api/v1/admin/users/{userId}/offboarding` | 启动离职并声明访问撤销范围 | `employee.offboard`；重认证；审计 |
-
-## 部门
-
-| 页面 | 方法与路径 | 用途 | 权限标识建议 |
-| --- | --- | --- | --- |
-| `/admin/departments` | `GET /api/v1/admin/departments` | 获取分页或树形部门数据 | `department.read` |
-| 部门详情 | `POST /api/v1/admin/departments` | 创建部门 | `department.manage` |
-| 部门详情 | `PATCH /api/v1/admin/departments/{departmentId}` | 修改名称、负责人或上级 | `department.manage`；防止循环层级 |
-
-## OAuth 应用
-
-| 页面 | 方法与路径 | 用途 | 权限标识建议 |
-| --- | --- | --- | --- |
-| `/admin/applications` | `GET /api/v1/admin/applications` | 分页搜索 OAuth 应用 | `application.read` |
-| 应用详情 | `POST /api/v1/admin/applications` | 注册 public/confidential client | `application.manage` |
-| 应用详情 | `GET /api/v1/admin/applications/{applicationId}` | 获取元数据和登记的 redirect URIs | `application.read` |
-| 应用详情 | `PATCH /api/v1/admin/applications/{applicationId}` | 修改允许字段 | `application.manage` |
-| 应用详情 | `POST /api/v1/admin/applications/{applicationId}/client-secret-rotations` | 轮换机密客户端 secret | `application.secret.rotate`；重认证；新 secret 只显示一次 |
-| 应用详情 | `POST /api/v1/admin/applications/{applicationId}/disable` | 停用应用并说明影响 | `application.manage`；审计 |
-
-重定向 URI 必须由后端按精确安全语义校验；前端不得静默归一化。公共客户端必须使用 PKCE，浏览器代码不得持有 client secret。
-
-## 授权策略
+## 授权策略 (ABAC)
 
 | 页面 | 方法与路径 | 用途 | 权限标识建议 |
 | --- | --- | --- | --- |
@@ -204,6 +303,8 @@
 | 策略详情 | `POST /api/v1/admin/policies` | 创建草稿 | `policy.manage` |
 | 策略详情 | `PATCH /api/v1/admin/policies/{policyId}` | 更新草稿 | `policy.manage`；乐观锁版本号 |
 | 策略详情 | `POST /api/v1/admin/policies/{policyId}/publish` | 发布策略版本 | `policy.publish`；重认证；审计 |
+| 策略模拟 | `POST /api/v1/admin/policies/{policyId}/simulate` | 模拟 Allow/Deny | `policy.read` |
+| 策略版本 | `GET /api/v1/admin/policies/{policyId}/versions` | 发布后的版本历史 | `policy.read` |
 
 ## 审计
 
@@ -215,20 +316,46 @@
 
 审计事件建议包含 `eventId`、`eventType`、受控的 actor/target 摘要、`occurredAt`、`result` 和 `requestId`。不得把令牌、密码、授权码、完整私密策略或敏感员工字段写入事件展示载荷。
 
-## Mock 到 API 的映射
+## 数据源方法到 API 映射
 
-| 当前数据源方法 | 目标接口 |
+### Queries（只读）
+
+| 数据源方法 | 目标接口 | 返回类型 |
+| --- | --- | --- |
+| `getCurrentUser()` | `GET /api/v1/me` | `CurrentUser` |
+| `getCurrentPermissions()` | `GET /api/v1/me/permissions` | `PermissionCapabilities` |
+| `getSecurityFactors()` | `GET /api/v1/me/security/factors` | `SecurityFactor[]` |
+| `getSessions()` | `GET /api/v1/me/sessions` | `UserSession[]` |
+| `getAuthorizedApplications()` | `GET /api/v1/me/authorized-applications` | `AuthorizedApplication[]` |
+| `getConsentResolution(requestId)` | `GET /api/v1/authorization/requests/{requestId}` | `ConsentResolution` |
+| `getAdminDashboard()` | `GET /api/v1/admin/dashboard` | `AdminDashboard` |
+| `getUsers(query)` | `GET /api/v1/admin/users` | `CursorPage<ManagedUser>` |
+| `getEmployees(query)` | `GET /api/v1/admin/employees` | `CursorPage<EmployeeRecord>` |
+| `getDepartments()` | `GET /api/v1/admin/departments` | `DepartmentRecord[]`（树形） |
+| `getIdentityProviders(query)` | `GET /api/v1/admin/identity-providers` | `CursorPage<IdentityProviderRecord>` |
+| `getApplications(query)` | `GET /api/v1/admin/applications` | `CursorPage<OAuthApplication>` |
+| `getApplicationDetail(applicationId)` | `GET /api/v1/admin/applications/{applicationId}` | `OAuthApplicationDetail \| null` |
+| `getClientDetail(applicationId, clientId)` | `GET /api/v1/admin/applications/{applicationId}/clients/{clientId}` | `OAuthClient \| null` |
+| `getAvailableScopes()` | `GET /api/v1/admin/scopes` | `AllowedScope[]` |
+| `getPolicies(query)` | `GET /api/v1/admin/policies` | `CursorPage<AuthorizationPolicy>` |
+| `getAuditEvents(query)` | `GET /api/v1/admin/audit-events` | `CursorPage<AuditEvent>` |
+
+### Commands（写操作）
+
+| 数据源方法 | 目标接口 |
 | --- | --- |
-| `getCurrentUser` | `GET /api/v1/me` |
-| `getAdminCurrentUser` | `GET /api/v1/me`（Mock 中用于固定管理身份；真实实现仍由当前服务端会话决定） |
-| `getSecurityFactors` | `GET /api/v1/me/security/factors` |
-| `getSessions` | `GET /api/v1/me/sessions` |
-| `getConsentRequest` | `GET /api/v1/authorization/requests/{requestId}` |
-| `getAdminDashboard` | `GET /api/v1/admin/dashboard` |
-| `getUsers` | `GET /api/v1/admin/users` |
-| `getEmployees` | `GET /api/v1/admin/employees` |
-| `getDepartments` | `GET /api/v1/admin/departments` |
-| `getIdentityProviders` | `GET /api/v1/admin/identity-providers` |
-| `getApplications` | `GET /api/v1/admin/applications` |
-| `getPolicies` | `GET /api/v1/admin/policies` |
-| `getAuditEvents` | `GET /api/v1/admin/audit-events` |
+| `createApplicationWithInitialClient(input)` | `POST /api/v1/admin/applications/with-initial-client` |
+| `createOAuthClient(input)` | `POST /api/v1/admin/applications/{applicationId}/clients` |
+| `updateApplication(applicationId, input)` | `PATCH /api/v1/admin/applications/{applicationId}` |
+| `updateApplicationStatus(applicationId, status)` | `POST /api/v1/admin/applications/{applicationId}/enable\|disable` |
+| `deleteApplication(applicationId)` | `DELETE /api/v1/admin/applications/{applicationId}` |
+| `rotateClientSecret(applicationId, clientId)` | `POST /api/v1/admin/applications/{applicationId}/clients/{clientId}/secret-rotations` |
+| `decideConsent(requestId, decision)` | `POST /api/v1/authorization/requests/{requestId}/decision` |
+| `revokeGrant(grantId)` | `DELETE /api/v1/me/authorized-applications/{grantId}` |
+
+### 已移除的 Mock 专用接口
+
+| 旧 Mock 方法 | 替代方案 |
+| --- | --- |
+| `getAdminCurrentUser()` | `getCurrentUser()`；管理员能力由 `getCurrentPermissions()` 返回的 `PermissionCapabilities` 决定 |
+| `getConsentRequest()` | `getConsentResolution(requestId)`；统一为解析已校验的授权请求 |
