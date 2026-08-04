@@ -121,8 +121,6 @@ const initialAuthorizedApplications: AuthorizedApplication[] = [
   },
 ];
 
-const mutableAuthorizedApplications: AuthorizedApplication[] = [...initialAuthorizedApplications];
-
 const availableScopes: AllowedScope[] = [
   { scope: "openid", label: "OpenID", description: "获取稳定用户标识，完成 OIDC 登录。", required: true },
   { scope: "profile", label: "基本资料", description: "查看姓名、头像和账户类型。", required: false },
@@ -170,8 +168,6 @@ const initialApplications = [
   { applicationId: "app_mobile", name: "United Mobile", audience: "external", ownerName: "移动端团队", status: "active", clientCount: 1, updatedAt: "2026-07-28T02:32:00Z" },
   { applicationId: "app_legacy", name: "Legacy Reports", audience: "internal", ownerName: "数据团队", status: "disabled", clientCount: 1, updatedAt: "2026-06-16T12:00:00Z" },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getApplications"]>>;
-
-const mutableApplications: OAuthApplication[] = [...initialApplications];
 
 const initialApplicationDetails: Record<string, OAuthApplicationDetail> = {
   app_workspace: {
@@ -312,8 +308,6 @@ const initialApplicationDetails: Record<string, OAuthApplicationDetail> = {
   },
 };
 
-const mutableApplicationDetails: Record<string, OAuthApplicationDetail> = { ...initialApplicationDetails };
-
 const policies = [
   { policyId: "pol_application_manage", name: "应用管理员维护 OAuth 应用", resource: "application:*", version: 7, status: "published", updatedBy: "周予安", updatedAt: "2026-08-03T07:45:00Z" },
   { policyId: "pol_employee_read", name: "部门负责人查看直属员工", resource: "employee:*", version: 3, status: "published", updatedBy: "林知行", updatedAt: "2026-07-30T03:20:00Z" },
@@ -348,330 +342,338 @@ function buildRedirectUris(uris: string[], now: string) {
   }));
 }
 
-export const mockUnitedPassDataSource: UnitedPassDataSource = {
-  getCurrentUser: () => Promise.resolve(externalAppUser),
-  getAdminCurrentUser: () => Promise.resolve(employeeAdminUser),
-  getSecurityFactors: () => Promise.resolve(securityFactors),
-  getSessions: () => Promise.resolve(sessions),
-  getConsentRequest: () => Promise.resolve(consentRequest),
-  getConsentResolution: (requestId: string) => {
-    const resolution = consentResolutions[requestId];
-    if (resolution) {
-      return Promise.resolve(resolution);
-    }
-    return Promise.resolve({ status: "client_not_found", requestId });
-  },
-  getAuthorizedApplications: () => Promise.resolve(mutableAuthorizedApplications),
-  getAdminDashboard: () => Promise.resolve({
-    metrics: [
-      { label: "活跃用户", value: "12,840", change: "近 30 天 +8.4%", tone: "positive" },
-      { label: "员工账户", value: "486", change: "3 个待完成入职", tone: "attention" },
-      { label: "OAuth 应用", value: "24", change: "22 个正常运行", tone: "neutral" },
-      { label: "高风险事件", value: "2", change: "需要安全团队复核", tone: "attention" },
-    ],
-    recentEvents: auditEvents.slice(0, 3),
-  }),
-  getUsers: () => Promise.resolve(users),
-  getEmployees: () => Promise.resolve(employees),
-  getDepartments: () => Promise.resolve(departments),
-  getIdentityProviders: () => Promise.resolve(identityProviders),
-  getApplications: () => Promise.resolve(mutableApplications),
-  getApplicationDetail: (applicationId: string) => {
-    const detail = mutableApplicationDetails[applicationId];
-    return Promise.resolve(detail ?? null);
-  },
-  getAvailableScopes: () => Promise.resolve(availableScopes),
-  createApplication: (input: ApplicationCreateInput): Promise<ApplicationCreationResult> => {
-    try {
-      validateApplicationCreateInput(input);
-    } catch (error) {
-      return Promise.reject(error);
-    }
+export function createMockUnitedPassDataSource(): UnitedPassDataSource {
+  const applications: OAuthApplication[] = structuredClone(initialApplications);
+  const applicationDetails: Record<string, OAuthApplicationDetail> = structuredClone(initialApplicationDetails);
+  const authorizedApplications: AuthorizedApplication[] = structuredClone(initialAuthorizedApplications);
 
-    const applicationId = `app_${Math.random().toString(36).slice(2, 10)}`;
-    const now = new Date().toISOString();
-
-    const detail: OAuthApplicationDetail = {
-      applicationId,
-      name: input.name,
-      description: input.description,
-      logoUrl: null,
-      audience: input.audience,
-      ownerId: `owner_${Math.random().toString(36).slice(2, 10)}`,
-      ownerName: input.ownerName,
-      status: "active",
-      clients: [],
-      grants: [],
-      auditEntries: [
-        { eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`, eventType: "应用创建", actorName: "林知行", occurredAt: now, result: "success" },
+  return {
+    getCurrentUser: () => Promise.resolve(externalAppUser),
+    getAdminCurrentUser: () => Promise.resolve(employeeAdminUser),
+    getSecurityFactors: () => Promise.resolve(securityFactors),
+    getSessions: () => Promise.resolve(sessions),
+    getConsentRequest: () => Promise.resolve(consentRequest),
+    getConsentResolution: (requestId: string) => {
+      const resolution = consentResolutions[requestId];
+      if (resolution) {
+        return Promise.resolve(resolution);
+      }
+      return Promise.resolve({ status: "client_not_found", requestId });
+    },
+    getAuthorizedApplications: () => Promise.resolve(authorizedApplications),
+    getAdminDashboard: () => Promise.resolve({
+      metrics: [
+        { label: "活跃用户", value: "12,840", change: "近 30 天 +8.4%", tone: "positive" },
+        { label: "员工账户", value: "486", change: "3 个待完成入职", tone: "attention" },
+        { label: "OAuth 应用", value: "24", change: "22 个正常运行", tone: "neutral" },
+        { label: "高风险事件", value: "2", change: "需要安全团队复核", tone: "attention" },
       ],
-      createdAt: now,
-      updatedAt: now,
-    };
+      recentEvents: auditEvents.slice(0, 3),
+    }),
+    getUsers: () => Promise.resolve(users),
+    getEmployees: () => Promise.resolve(employees),
+    getDepartments: () => Promise.resolve(departments),
+    getIdentityProviders: () => Promise.resolve(identityProviders),
+    getApplications: () => Promise.resolve(applications),
+    getApplicationDetail: (applicationId: string) => {
+      const detail = applicationDetails[applicationId];
+      return Promise.resolve(detail ?? null);
+    },
+    getAvailableScopes: () => Promise.resolve(availableScopes),
+    createApplication: (input: ApplicationCreateInput): Promise<ApplicationCreationResult> => {
+      try {
+        validateApplicationCreateInput(input);
+      } catch (error) {
+        return Promise.reject(error);
+      }
 
-    mutableApplicationDetails[applicationId] = detail;
-    mutableApplications.unshift({
-      applicationId,
-      name: input.name,
-      audience: input.audience,
-      ownerName: input.ownerName,
-      status: "active",
-      clientCount: 0,
-      updatedAt: now,
-    });
+      const applicationId = `app_${Math.random().toString(36).slice(2, 10)}`;
+      const now = new Date().toISOString();
 
-    return Promise.resolve({ applicationId });
-  },
-  createOAuthClient: (input: OAuthClientCreateInput): Promise<OAuthClientCreationResult> => {
-    try {
-      validateOAuthClientCreateInput(input);
-    } catch (error) {
-      return Promise.reject(error);
-    }
+      const detail: OAuthApplicationDetail = {
+        applicationId,
+        name: input.name,
+        description: input.description,
+        logoUrl: null,
+        audience: input.audience,
+        ownerId: `owner_${Math.random().toString(36).slice(2, 10)}`,
+        ownerName: input.ownerName,
+        status: "active",
+        clients: [],
+        grants: [],
+        auditEntries: [
+          { eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`, eventType: "应用创建", actorName: "林知行", occurredAt: now, result: "success" },
+        ],
+        createdAt: now,
+        updatedAt: now,
+      };
 
-    const detail = mutableApplicationDetails[input.applicationId];
-    if (!detail) {
-      return Promise.reject(
-        new Error(`应用 ${input.applicationId} 不存在，无法创建 OAuth 客户端。`),
-      );
-    }
-
-    const profileConfig = getClientProfileConfig(input.profile);
-    try {
-      validateConsentModeWithAudience(input.consentMode, detail.audience, profileConfig);
-    } catch (error) {
-      return Promise.reject(error);
-    }
-
-    const clientId = `${input.name.slice(0, 2).toLowerCase()}_${Math.random().toString(36).slice(2, 16)}`;
-    const now = new Date().toISOString();
-
-    const clientSecrets = profileConfig.clientType === "confidential"
-      ? [{ secretId: `sec_${Math.random().toString(36).slice(2, 8)}`, label: "初始密钥", createdAt: now, lastRotatedAt: null }]
-      : [];
-
-    const client: OAuthClient = {
-      clientId,
-      applicationId: input.applicationId,
-      name: input.name,
-      clientType: profileConfig.clientType,
-      grantTypes: [...profileConfig.grantTypes],
-      tokenEndpointAuthMethod: profileConfig.tokenEndpointAuthMethod,
-      redirectUris: buildRedirectUris(input.redirectUris, now),
-      logoutUri: input.logoutUri || null,
-      allowedScopes: resolveScopes(input.allowedScopes),
-      consentMode: input.consentMode,
-      status: "active",
-      clientSecrets,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    detail.clients.push(client);
-    detail.updatedAt = now;
-
-    const app = mutableApplications.find((item) => item.applicationId === input.applicationId);
-    if (app) {
-      app.clientCount += 1;
-      app.updatedAt = now;
-    }
-
-    const result: OAuthClientCreationResult = { clientId };
-    if (profileConfig.clientType === "confidential") {
-      result.clientSecret = `sec_${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
-    }
-    return Promise.resolve(result);
-  },
-  createApplicationWithInitialClient: (input: ApplicationWithInitialClientInput): Promise<ApplicationWithInitialClientResult> => {
-    const profileConfig = getClientProfileConfig(input.initialClient.profile);
-    try {
-      validateApplicationCreateInput(input.application);
-      validateOAuthClientCreateInput({
-        applicationId: "__pending__",
-        ...input.initialClient,
+      applicationDetails[applicationId] = detail;
+      applications.unshift({
+        applicationId,
+        name: input.name,
+        audience: input.audience,
+        ownerName: input.ownerName,
+        status: "active",
+        clientCount: 0,
+        updatedAt: now,
       });
-      validateConsentModeWithAudience(
-        input.initialClient.consentMode,
-        input.application.audience,
-        profileConfig,
-      );
-    } catch (error) {
-      return Promise.reject(error);
-    }
 
-    const now = new Date().toISOString();
-    const applicationId = `app_${Math.random().toString(36).slice(2, 10)}`;
-
-    const detail: OAuthApplicationDetail = {
-      applicationId,
-      name: input.application.name,
-      description: input.application.description,
-      logoUrl: null,
-      audience: input.application.audience,
-      ownerId: `owner_${Math.random().toString(36).slice(2, 10)}`,
-      ownerName: input.application.ownerName,
-      status: "active",
-      clients: [],
-      grants: [],
-      auditEntries: [
-        { eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`, eventType: "应用创建", actorName: "林知行", occurredAt: now, result: "success" },
-      ],
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    mutableApplicationDetails[applicationId] = detail;
-
-    const clientId = `${input.initialClient.name.slice(0, 2).toLowerCase()}_${Math.random().toString(36).slice(2, 16)}`;
-
-    const clientSecrets = profileConfig.clientType === "confidential"
-      ? [{ secretId: `sec_${Math.random().toString(36).slice(2, 8)}`, label: "初始密钥", createdAt: now, lastRotatedAt: null }]
-      : [];
-
-    const client: OAuthClient = {
-      clientId,
-      applicationId,
-      name: input.initialClient.name,
-      clientType: profileConfig.clientType,
-      grantTypes: [...profileConfig.grantTypes],
-      tokenEndpointAuthMethod: profileConfig.tokenEndpointAuthMethod,
-      redirectUris: buildRedirectUris(input.initialClient.redirectUris, now),
-      logoutUri: input.initialClient.logoutUri || null,
-      allowedScopes: resolveScopes(input.initialClient.allowedScopes),
-      consentMode: input.initialClient.consentMode,
-      status: "active",
-      clientSecrets,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    detail.clients.push(client);
-    detail.auditEntries.push({
-      eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`,
-      eventType: "OAuth 客户端创建",
-      actorName: "林知行",
-      occurredAt: now,
-      result: "success",
-    });
-
-    mutableApplications.unshift({
-      applicationId,
-      name: input.application.name,
-      audience: input.application.audience,
-      ownerName: input.application.ownerName,
-      status: "active",
-      clientCount: 1,
-      updatedAt: now,
-    });
-
-    const result: ApplicationWithInitialClientResult = { applicationId, clientId };
-    if (profileConfig.clientType === "confidential") {
-      result.clientSecret = `sec_${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
-    }
-    return Promise.resolve(result);
-  },
-  decideConsent: (_requestId: string, decision: ConsentDecision): Promise<{ redirectUrl: string }> => {
-    const redirectUrl = decision === "allow"
-      ? "https://workspace.united.example/callback"
-      : "/account";
-    return Promise.resolve({ redirectUrl });
-  },
-  revokeGrant: (grantId: string): Promise<void> => {
-    const index = mutableAuthorizedApplications.findIndex((grant) => grant.grantId === grantId);
-    if (index !== -1) {
-      mutableAuthorizedApplications.splice(index, 1);
-    }
-    for (const detail of Object.values(mutableApplicationDetails)) {
-      const grantIndex = detail.grants.findIndex((grant) => grant.grantId === grantId);
-      if (grantIndex !== -1) {
-        detail.grants[grantIndex] = { ...detail.grants[grantIndex], status: "revoked" as const };
+      return Promise.resolve({ applicationId });
+    },
+    createOAuthClient: (input: OAuthClientCreateInput): Promise<OAuthClientCreationResult> => {
+      try {
+        validateOAuthClientCreateInput(input);
+      } catch (error) {
+        return Promise.reject(error);
       }
-    }
-    return Promise.resolve();
-  },
-  rotateClientSecret: (clientId: string): Promise<SecretRotationResult> => {
-    const now = new Date().toISOString();
-    const expiryMs = Date.now() + 24 * 60 * 60 * 1000;
-    const previousSecretExpiresAt = new Date(expiryMs).toISOString();
 
-    for (const detail of Object.values(mutableApplicationDetails)) {
-      const client = detail.clients.find((c) => c.clientId === clientId);
-      if (client) {
-        if (client.clientType !== "confidential") {
-          return Promise.reject(new Error("Public clients do not use client secrets."));
+      const detail = applicationDetails[input.applicationId];
+      if (!detail) {
+        return Promise.reject(
+          new Error(`应用 ${input.applicationId} 不存在，无法创建 OAuth 客户端。`),
+        );
+      }
+
+      const profileConfig = getClientProfileConfig(input.profile);
+      try {
+        validateConsentModeWithAudience(input.consentMode, detail.audience, profileConfig);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+
+      const clientId = `${input.name.slice(0, 2).toLowerCase()}_${Math.random().toString(36).slice(2, 16)}`;
+      const now = new Date().toISOString();
+
+      const clientSecrets = profileConfig.clientType === "confidential"
+        ? [{ secretId: `sec_${Math.random().toString(36).slice(2, 8)}`, label: "初始密钥", createdAt: now, lastRotatedAt: null }]
+        : [];
+
+      const client: OAuthClient = {
+        clientId,
+        applicationId: input.applicationId,
+        name: input.name,
+        clientType: profileConfig.clientType,
+        grantTypes: [...profileConfig.grantTypes],
+        tokenEndpointAuthMethod: profileConfig.tokenEndpointAuthMethod,
+        redirectUris: buildRedirectUris(input.redirectUris, now),
+        logoutUri: input.logoutUri || null,
+        allowedScopes: resolveScopes(input.allowedScopes),
+        consentMode: input.consentMode,
+        status: "active",
+        clientSecrets,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      detail.clients.push(client);
+      detail.updatedAt = now;
+
+      const app = applications.find((item) => item.applicationId === input.applicationId);
+      if (app) {
+        app.clientCount += 1;
+        app.updatedAt = now;
+      }
+
+      const result: OAuthClientCreationResult = { clientId };
+      if (profileConfig.clientType === "confidential") {
+        result.clientSecret = `sec_${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
+      }
+      return Promise.resolve(result);
+    },
+    createApplicationWithInitialClient: (input: ApplicationWithInitialClientInput): Promise<ApplicationWithInitialClientResult> => {
+      const profileConfig = getClientProfileConfig(input.initialClient.profile);
+      try {
+        validateApplicationCreateInput(input.application);
+        validateOAuthClientCreateInput({
+          applicationId: "__pending__",
+          ...input.initialClient,
+        });
+        validateConsentModeWithAudience(
+          input.initialClient.consentMode,
+          input.application.audience,
+          profileConfig,
+        );
+      } catch (error) {
+        return Promise.reject(error);
+      }
+
+      const now = new Date().toISOString();
+      const applicationId = `app_${Math.random().toString(36).slice(2, 10)}`;
+
+      const detail: OAuthApplicationDetail = {
+        applicationId,
+        name: input.application.name,
+        description: input.application.description,
+        logoUrl: null,
+        audience: input.application.audience,
+        ownerId: `owner_${Math.random().toString(36).slice(2, 10)}`,
+        ownerName: input.application.ownerName,
+        status: "active",
+        clients: [],
+        grants: [],
+        auditEntries: [
+          { eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`, eventType: "应用创建", actorName: "林知行", occurredAt: now, result: "success" },
+        ],
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      applicationDetails[applicationId] = detail;
+
+      const clientId = `${input.initialClient.name.slice(0, 2).toLowerCase()}_${Math.random().toString(36).slice(2, 16)}`;
+
+      const clientSecrets = profileConfig.clientType === "confidential"
+        ? [{ secretId: `sec_${Math.random().toString(36).slice(2, 8)}`, label: "初始密钥", createdAt: now, lastRotatedAt: null }]
+        : [];
+
+      const client: OAuthClient = {
+        clientId,
+        applicationId,
+        name: input.initialClient.name,
+        clientType: profileConfig.clientType,
+        grantTypes: [...profileConfig.grantTypes],
+        tokenEndpointAuthMethod: profileConfig.tokenEndpointAuthMethod,
+        redirectUris: buildRedirectUris(input.initialClient.redirectUris, now),
+        logoutUri: input.initialClient.logoutUri || null,
+        allowedScopes: resolveScopes(input.initialClient.allowedScopes),
+        consentMode: input.initialClient.consentMode,
+        status: "active",
+        clientSecrets,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      detail.clients.push(client);
+      detail.auditEntries.push({
+        eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`,
+        eventType: "OAuth 客户端创建",
+        actorName: "林知行",
+        occurredAt: now,
+        result: "success",
+      });
+
+      applications.unshift({
+        applicationId,
+        name: input.application.name,
+        audience: input.application.audience,
+        ownerName: input.application.ownerName,
+        status: "active",
+        clientCount: 1,
+        updatedAt: now,
+      });
+
+      const result: ApplicationWithInitialClientResult = { applicationId, clientId };
+      if (profileConfig.clientType === "confidential") {
+        result.clientSecret = `sec_${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
+      }
+      return Promise.resolve(result);
+    },
+    decideConsent: (_requestId: string, decision: ConsentDecision): Promise<{ redirectUrl: string }> => {
+      const redirectUrl = decision === "allow"
+        ? "https://workspace.united.example/callback"
+        : "/account";
+      return Promise.resolve({ redirectUrl });
+    },
+    revokeGrant: (grantId: string): Promise<void> => {
+      const index = authorizedApplications.findIndex((grant) => grant.grantId === grantId);
+      if (index !== -1) {
+        authorizedApplications.splice(index, 1);
+      }
+      for (const detail of Object.values(applicationDetails)) {
+        const grantIndex = detail.grants.findIndex((grant) => grant.grantId === grantId);
+        if (grantIndex !== -1) {
+          detail.grants[grantIndex] = { ...detail.grants[grantIndex], status: "revoked" as const };
         }
-        const newSecretId = `sec_${Math.random().toString(36).slice(2, 8)}`;
-        client.clientSecrets.push({
-          secretId: newSecretId,
-          label: `轮换密钥 ${new Date().toLocaleString("zh-CN")}`,
-          createdAt: now,
-          lastRotatedAt: now,
-        });
-        client.updatedAt = now;
-        detail.updatedAt = now;
-
-        const newSecret = `sec_${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
-        return Promise.resolve({
-          secretId: newSecretId,
-          clientSecret: newSecret,
-          previousSecretExpiresAt,
-        });
       }
-    }
-    return Promise.reject(new Error(`Client ${clientId} not found.`));
-  },
-  updateApplicationStatus: (applicationId: string, status: ApplicationStatus): Promise<void> => {
-    const now = new Date().toISOString();
-    const detail = mutableApplicationDetails[applicationId];
-    if (!detail) {
-      return Promise.reject(new Error(`Application ${applicationId} not found.`));
-    }
-    detail.status = status;
-    detail.updatedAt = now;
-    detail.auditEntries.push({
-      eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`,
-      eventType: status === "disabled" ? "应用停用" : "应用启用",
-      actorName: "林知行",
-      occurredAt: now,
-      result: "success",
-    });
+      return Promise.resolve();
+    },
+    rotateClientSecret: (clientId: string): Promise<SecretRotationResult> => {
+      const now = new Date().toISOString();
+      const expiryMs = Date.now() + 24 * 60 * 60 * 1000;
+      const previousSecretExpiresAt = new Date(expiryMs).toISOString();
 
-    const app = mutableApplications.find((item) => item.applicationId === applicationId);
-    if (app) {
-      app.status = status;
-      app.updatedAt = now;
-    }
-    return Promise.resolve();
-  },
-  deleteApplication: (applicationId: string): Promise<void> => {
-    delete mutableApplicationDetails[applicationId];
-    const index = mutableApplications.findIndex((item) => item.applicationId === applicationId);
-    if (index !== -1) {
-      mutableApplications.splice(index, 1);
-    }
-    return Promise.resolve();
-  },
-  updateApplication: (applicationId: string, input: ApplicationUpdateInput): Promise<void> => {
-    const now = new Date().toISOString();
-    const detail = mutableApplicationDetails[applicationId];
-    if (!detail) {
-      return Promise.reject(new Error(`Application ${applicationId} not found.`));
-    }
-    if (input.name !== undefined) detail.name = input.name;
-    if (input.description !== undefined) detail.description = input.description;
-    if (input.audience !== undefined) detail.audience = input.audience;
-    if (input.ownerName !== undefined) detail.ownerName = input.ownerName;
-    detail.updatedAt = now;
+      for (const detail of Object.values(applicationDetails)) {
+        const client = detail.clients.find((c) => c.clientId === clientId);
+        if (client) {
+          if (client.clientType !== "confidential") {
+            return Promise.reject(new Error("Public clients do not use client secrets."));
+          }
+          const newSecretId = `sec_${Math.random().toString(36).slice(2, 8)}`;
+          client.clientSecrets.push({
+            secretId: newSecretId,
+            label: `轮换密钥 ${new Date().toLocaleString("zh-CN")}`,
+            createdAt: now,
+            lastRotatedAt: now,
+          });
+          client.updatedAt = now;
+          detail.updatedAt = now;
 
-    const app = mutableApplications.find((item) => item.applicationId === applicationId);
-    if (app) {
-      if (input.name !== undefined) app.name = input.name;
-      if (input.audience !== undefined) app.audience = input.audience;
-      if (input.ownerName !== undefined) app.ownerName = input.ownerName;
-      app.updatedAt = now;
-    }
-    return Promise.resolve();
-  },
-  getPolicies: () => Promise.resolve(policies),
-  getAuditEvents: () => Promise.resolve(auditEvents),
-};
+          const newSecret = `sec_${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
+          return Promise.resolve({
+            secretId: newSecretId,
+            clientSecret: newSecret,
+            previousSecretExpiresAt,
+          });
+        }
+      }
+      return Promise.reject(new Error(`Client ${clientId} not found.`));
+    },
+    updateApplicationStatus: (applicationId: string, status: ApplicationStatus): Promise<void> => {
+      const now = new Date().toISOString();
+      const detail = applicationDetails[applicationId];
+      if (!detail) {
+        return Promise.reject(new Error(`Application ${applicationId} not found.`));
+      }
+      detail.status = status;
+      detail.updatedAt = now;
+      detail.auditEntries.push({
+        eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`,
+        eventType: status === "disabled" ? "应用停用" : "应用启用",
+        actorName: "林知行",
+        occurredAt: now,
+        result: "success",
+      });
+
+      const app = applications.find((item) => item.applicationId === applicationId);
+      if (app) {
+        app.status = status;
+        app.updatedAt = now;
+      }
+      return Promise.resolve();
+    },
+    deleteApplication: (applicationId: string): Promise<void> => {
+      delete applicationDetails[applicationId];
+      const index = applications.findIndex((item) => item.applicationId === applicationId);
+      if (index !== -1) {
+        applications.splice(index, 1);
+      }
+      return Promise.resolve();
+    },
+    updateApplication: (applicationId: string, input: ApplicationUpdateInput): Promise<void> => {
+      const now = new Date().toISOString();
+      const detail = applicationDetails[applicationId];
+      if (!detail) {
+        return Promise.reject(new Error(`Application ${applicationId} not found.`));
+      }
+      if (input.name !== undefined) detail.name = input.name;
+      if (input.description !== undefined) detail.description = input.description;
+      if (input.audience !== undefined) detail.audience = input.audience;
+      if (input.ownerName !== undefined) detail.ownerName = input.ownerName;
+      detail.updatedAt = now;
+
+      const app = applications.find((item) => item.applicationId === applicationId);
+      if (app) {
+        if (input.name !== undefined) app.name = input.name;
+        if (input.audience !== undefined) app.audience = input.audience;
+        if (input.ownerName !== undefined) app.ownerName = input.ownerName;
+        app.updatedAt = now;
+      }
+      return Promise.resolve();
+    },
+    getPolicies: () => Promise.resolve(policies),
+    getAuditEvents: () => Promise.resolve(auditEvents),
+  };
+}
+
+export const mockUnitedPassDataSource: UnitedPassDataSource = createMockUnitedPassDataSource();
