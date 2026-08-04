@@ -1,4 +1,5 @@
 import type { UnitedPassDataSource } from "@/lib/api/united-pass-data-source";
+import { SYSTEM_NAME } from "@/lib/branding";
 
 const externalAppUser = {
   userId: "usr_06APPUSER7N2X4Q8K5M9",
@@ -31,7 +32,7 @@ const securityFactors = [
 
 const sessions = [
   { sessionId: "ses_current", deviceName: "MacBook Pro", clientName: "Chrome 138 · macOS", approximateLocation: "上海市", ipAddressMasked: "203.0.113.*", lastActiveAt: "2026-08-04T05:42:00Z", isCurrent: true },
-  { sessionId: "ses_mobile", deviceName: "iPhone 17", clientName: "United Pass · iOS", approximateLocation: "上海市", ipAddressMasked: "198.51.100.*", lastActiveAt: "2026-08-03T13:16:00Z", isCurrent: false },
+  { sessionId: "ses_mobile", deviceName: "iPhone 17", clientName: `${SYSTEM_NAME} · iOS`, approximateLocation: "上海市", ipAddressMasked: "198.51.100.*", lastActiveAt: "2026-08-03T13:16:00Z", isCurrent: false },
   { sessionId: "ses_edge", deviceName: "Windows 设备", clientName: "Edge 138 · Windows", approximateLocation: "杭州市", ipAddressMasked: "192.0.2.*", lastActiveAt: "2026-07-29T01:05:00Z", isCurrent: false },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getSessions"]>>;
 
@@ -94,7 +95,7 @@ const policies = [
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getPolicies"]>>;
 
 const auditEvents = [
-  { eventId: "evt_001", eventType: "用户登录", actorName: "林知行", targetLabel: "United Pass", occurredAt: "2026-08-04T05:42:00Z", result: "success" },
+  { eventId: "evt_001", eventType: "用户登录", actorName: "林知行", targetLabel: SYSTEM_NAME, occurredAt: "2026-08-04T05:42:00Z", result: "success" },
   { eventId: "evt_002", eventType: "策略发布", actorName: "周予安", targetLabel: "应用管理员维护 OAuth 应用", occurredAt: "2026-08-03T07:45:00Z", result: "success" },
   { eventId: "evt_003", eventType: "管理操作拒绝", actorName: "陈默", targetLabel: "员工目录", occurredAt: "2026-08-03T02:18:00Z", result: "denied" },
   { eventId: "evt_004", eventType: "会话撤销", actorName: "林知行", targetLabel: "Windows 设备", occurredAt: "2026-08-02T10:07:00Z", result: "success" },

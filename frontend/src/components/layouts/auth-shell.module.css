@@ -108,10 +108,17 @@
 }
 
 .footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
   margin: 32px 0 0;
   color: var(--up-muted-soft);
   font-size: 12px;
 }
+
+.footer a { color: var(--up-muted); }
+.footer a:hover { color: var(--up-brand); }
 
 @media (max-width: 900px) {
   .page { grid-template-columns: 1fr; }

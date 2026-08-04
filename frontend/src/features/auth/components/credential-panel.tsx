@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { Button, Checkbox, Input } from "@douyinfe/semi-ui";
 import { IconKey, IconMail, IconUser } from "@douyinfe/semi-icons";
 import { authenticateMockAccount, MOCK_LOGIN_ACCOUNTS } from "@/lib/mock/mock-auth";
+import { SYSTEM_NAME } from "@/lib/branding";
 import styles from "./credential-panel.module.css";
 
 type CredentialPanelProps = {
@@ -60,7 +61,7 @@ export function CredentialPanel({ mode }: CredentialPanelProps) {
     <div className={styles.panel}>
       <div className={styles.heading}>
         <span className={styles.mockBadge}>MOCK PREVIEW</span>
-        <h1>{isLogin ? "欢迎回来" : "创建 United Pass"}</h1>
+        <h1>{isLogin ? "欢迎回来" : `创建${SYSTEM_NAME}账户`}</h1>
         <p>{isLogin ? "使用你的统一账户继续访问。" : "创建后，你的稳定用户身份可关联员工档案。"}</p>
       </div>
 
@@ -163,7 +164,7 @@ export function CredentialPanel({ mode }: CredentialPanelProps) {
 
         <div className={styles.formMeta}>
           <Checkbox defaultChecked={isLogin}>{isLogin ? "保持登录" : "我已阅读并同意服务条款"}</Checkbox>
-          {isLogin && <Link href="/login">忘记密码？</Link>}
+          {isLogin ? <Link href="/login">忘记密码？</Link> : <Link href="/terms">查看服务条款</Link>}
         </div>
 
         <Button htmlType="submit" type="primary" theme="solid" size="large" block>

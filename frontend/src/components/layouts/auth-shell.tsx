@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { BrandMark } from "@/components/common/brand-mark";
 import { ThemeToggle } from "@/components/common/theme-toggle";
+import { SYSTEM_NAME } from "@/lib/branding";
 import styles from "./auth-shell.module.css";
 
 type AuthShellProps = {
@@ -11,7 +12,7 @@ type AuthShellProps = {
 export function AuthShell({ children }: AuthShellProps) {
   return (
     <main className={styles.page}>
-      <section className={styles.brandPanel} aria-label="United Pass 产品介绍">
+      <section className={styles.brandPanel} aria-label={`${SYSTEM_NAME}产品介绍`}>
         <Link href="/login"><BrandMark /></Link>
         <div className={styles.brandCopy}>
           <p className={styles.kicker}>IDENTITY, SIMPLIFIED</p>
@@ -27,7 +28,13 @@ export function AuthShell({ children }: AuthShellProps) {
         <ThemeToggle className={styles.themeToggle} />
         <div className={styles.mobileBrand}><BrandMark /></div>
         <div className={styles.content}>{children}</div>
-        <p className={styles.footer}>© 2026 United Pass · 隐私 · 服务条款</p>
+        <footer className={styles.footer}>
+          <span>© 2026 {SYSTEM_NAME}</span>
+          <span aria-hidden="true">·</span>
+          <Link href="/privacy">隐私政策</Link>
+          <span aria-hidden="true">·</span>
+          <Link href="/terms">服务条款</Link>
+        </footer>
       </section>
     </main>
   );

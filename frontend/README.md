@@ -1,6 +1,6 @@
-# United Pass Frontend
+# 砾石进化统一登陆门户平台 Frontend
 
-United Pass 的 Next.js 前端，覆盖统一账户、OAuth 2.0 / OpenID Connect 授权、账户安全与管理后台的初始化框架。
+砾石进化统一登陆门户平台的 Next.js 前端，覆盖统一账户、OAuth 2.0 / OpenID Connect 授权、账户安全与管理后台的初始化框架。代码中的部分 `UnitedPass` 标识保留为内部技术命名，用户界面统一使用正式系统名称。
 
 ## 技术栈
 
@@ -22,7 +22,7 @@ pnpm dev
 
 ## 当前路由
 
-- `/login`、`/register`、`/authorize`
+- `/login`、`/register`、`/authorize`、`/privacy`、`/terms`
 - `/account`、`/account/security`、`/account/sessions`
 - `/admin`、`/admin/users`、`/admin/employees`、`/admin/departments`
 - `/admin/providers`、`/admin/applications`、`/admin/policies`、`/admin/audit`
@@ -35,9 +35,13 @@ pnpm dev
 
 界面支持亮色与暗色模式。首次访问默认跟随系统偏好，用户通过主题按钮选择后会在浏览器本地保存偏好。
 
+品牌名称与 Logo 由 `src/lib/branding.ts` 和 `public/brand/gravel-evolution-logo.png` 统一维护。隐私政策与服务条款为仓库内固定静态文本，不依赖 API 或用户数据。
+
 - [Mock 数据说明](./docs/mock-data.md)
 - [待接入 API 清单](./docs/api-contracts.md)
 - [ADR-0001：路由、服务端边界与数据源](./docs/adr-0001.md)
+- [ADR-0002：Identity Provider 管理边界与飞书规划](./docs/adr-0002.md)
+- [ADR-0003：头像上传校验与安全预览](./docs/adr-0003.md)
 
 ## 质量检查
 

@@ -11,6 +11,8 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 This directory contains the frontend for **United Pass**, the company's unified identity, account, application, and access-management product.
 
+The official user-facing system name is **砾石进化统一登陆门户平台**. Keep internal `UnitedPass` code identifiers when renaming them would create unrelated churn, but do not show "United Pass" as the product name in user-facing UI, metadata, legal pages, notifications, or mock display records.
+
 These instructions apply to all files under `frontend/` unless a more specific `AGENTS.md` exists in a nested directory.
 
 ## 1. Product Context

@@ -3,6 +3,7 @@ import { Noto_Sans_SC } from "next/font/google";
 import Script from "next/script";
 import "@douyinfe/semi-ui/lib/es/_base/base.css";
 import { SemiDesignProvider } from "@/components/providers/semi-design-provider";
+import { SYSTEM_NAME } from "@/lib/branding";
 import { THEME_INITIALIZATION_SCRIPT } from "@/lib/theme/theme";
 import "./globals.css";
 
@@ -14,10 +15,10 @@ const notoSansSc = Noto_Sans_SC({
 
 export const metadata: Metadata = {
   title: {
-    default: "United Pass",
-    template: "%s | United Pass",
+    default: SYSTEM_NAME,
+    template: `%s | ${SYSTEM_NAME}`,
   },
-  description: "统一、安全、清晰的身份与访问管理平台",
+  description: `${SYSTEM_NAME}提供统一、安全、清晰的身份与访问管理能力。`,
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
