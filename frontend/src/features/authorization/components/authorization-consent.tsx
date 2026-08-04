@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Avatar, Button } from "@douyinfe/semi-ui";
+import { Avatar, Button, Toast } from "@douyinfe/semi-ui";
 import {
   IconAlertTriangle,
   IconKey,
@@ -15,10 +15,11 @@ import {
 } from "@douyinfe/semi-icons";
 import type { ConsentDecision, ConsentResolution } from "@/features/authorization/types";
 import type { CurrentUser } from "@/types/identity";
+import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
 import styles from "./authorization-consent.module.css";
 
 type AuthorizationConsentProps = {
-  currentUser: CurrentUser;
+  currentUser?: CurrentUser;
   resolution: ConsentResolution;
 };
 
@@ -32,24 +33,69 @@ const consentStateDemos = [
   { requestId: "consent_demo_007", label: "已经授权过" },
 ];
 
+type DecisionState =
+  | { phase: "idle" }
+  | { phase: "submitting"; decision: ConsentDecision }
+  | { phase: "done"; decision: ConsentDecision; redirectUrl: string }
+  | { phase: "error"; decision: ConsentDecision; message: string };
+
 export function AuthorizationConsent({ currentUser, resolution }: AuthorizationConsentProps) {
-  const [decision, setDecision] = useState<ConsentDecision | null>(null);
+  const [decisionState, setDecisionState] = useState<DecisionState>({ phase: "idle" });
   const router = useRouter();
 
-  function handleDecision(choice: ConsentDecision) {
-    setDecision(choice);
+  async function handleDecision(choice: ConsentDecision) {
+    if (resolution.status !== "valid") return;
+
+    setDecisionState({ phase: "submitting", decision: choice });
+    try {
+      const result = await mockUnitedPassDataSource.decideConsent(
+        resolution.request.requestId,
+        choice,
+      );
+      setDecisionState({ phase: "done", decision: choice, redirectUrl: result.redirectUrl });
+    } catch {
+      setDecisionState({
+        phase: "error",
+        decision: choice,
+        message: "提交授权决定失败，请重试。",
+      });
+      Toast.error({ content: "授权决定提交失败。" });
+    }
   }
 
   if (resolution.status === "valid") {
-    if (decision) {
+    if (decisionState.phase === "submitting") {
       return (
-        <DecisionResult
-          decision={decision}
+        <DecisionPending
+          decision={decisionState.decision}
           applicationName={resolution.request.applicationName}
-          redirectHost={resolution.request.redirectHost}
-          onContinue={() => router.push(decision === "allow" ? "/account/applications" : "/account")}
         />
       );
+    }
+
+    if (decisionState.phase === "done") {
+      return (
+        <DecisionResult
+          decision={decisionState.decision}
+          applicationName={resolution.request.applicationName}
+          redirectHost={resolution.request.redirectHost}
+          onContinue={() => router.push(decisionState.decision === "allow" ? "/account/applications" : "/account")}
+        />
+      );
+    }
+
+    if (decisionState.phase === "error") {
+      return (
+        <DecisionError
+          decision={decisionState.decision}
+          message={decisionState.message}
+          onRetry={() => setDecisionState({ phase: "idle" })}
+        />
+      );
+    }
+
+    if (!currentUser) {
+      return null;
     }
 
     return (
@@ -189,9 +235,9 @@ function ConsentStateCard({ resolution }: { resolution: ConsentResolution }) {
           </div>
           <h1>需要登录</h1>
           <p>请求 <code>{resolution.requestId}</code> 需要已登录的用户身份才能完成授权。</p>
-          <p>请先登录后再返回此页面继续授权流程。</p>
+          <p>登录成功后将自动返回此授权页面继续流程。</p>
           <div className={styles.stateActions}>
-            <Link href="/login"><Button theme="solid" type="primary">前往登录</Button></Link>
+            <Link href={`/login?requestId=${resolution.requestId}`}><Button theme="solid" type="primary">前往登录</Button></Link>
           </div>
         </div>
       );
@@ -224,7 +270,7 @@ function ConsentStateCard({ resolution }: { resolution: ConsentResolution }) {
           </div>
           <h1>已经授权过此应用</h1>
           <p>你此前已授权 <strong>{resolution.applicationName}</strong> 访问相关数据。</p>
-          <p>无需再次确认，将自动跳转回 <code>{resolution.redirectHost}</code>。</p>
+          <p>无需再次确认。点击下方按钮返回应用。</p>
           <div className={styles.stateActions}>
             <Link href="/account/applications"><Button theme="solid" type="primary">查看授权应用</Button></Link>
             <Link href="/account"><Button theme="outline">返回账户中心</Button></Link>
@@ -235,6 +281,24 @@ function ConsentStateCard({ resolution }: { resolution: ConsentResolution }) {
     default:
       return null;
   }
+}
+
+function DecisionPending({
+  decision,
+  applicationName,
+}: {
+  decision: ConsentDecision;
+  applicationName: string;
+}) {
+  return (
+    <div className={styles.stateCard}>
+      <div className={styles.stateIcon}>
+        <IconHourglass size="extra-large" />
+      </div>
+      <h1>{decision === "allow" ? "正在授权…" : "正在拒绝…"}</h1>
+      <p>正在向 <strong>{applicationName}</strong> 提交你的授权决定。</p>
+    </div>
+  );
 }
 
 function DecisionResult({
@@ -270,6 +334,30 @@ function DecisionResult({
         <Button theme="solid" type="primary" onClick={onContinue}>
           {isAllowed ? "查看授权应用" : "返回账户中心"}
         </Button>
+      </div>
+    </div>
+  );
+}
+
+function DecisionError({
+  decision,
+  message,
+  onRetry,
+}: {
+  decision: ConsentDecision;
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className={styles.stateCard}>
+      <div className={`${styles.stateIcon} ${styles.stateIconDanger}`}>
+        <IconAlertTriangle size="extra-large" />
+      </div>
+      <h1>提交失败</h1>
+      <p>{message}</p>
+      <p>你的{decision === "allow" ? "授权" : "拒绝"}决定尚未提交。</p>
+      <div className={styles.stateActions}>
+        <Button theme="solid" type="primary" onClick={onRetry}>返回重试</Button>
       </div>
     </div>
   );
