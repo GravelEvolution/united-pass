@@ -70,4 +70,7 @@ export const browserCommands: UnitedPassCommands = {
   syncProviderDirectory: (providerId) => mockUnitedPassDataSource.syncProviderDirectory(providerId),
   resolveSyncConflict: (conflictId, userId) => mockUnitedPassDataSource.resolveSyncConflict(conflictId, userId),
   ignoreSyncConflict: (conflictId) => mockUnitedPassDataSource.ignoreSyncConflict(conflictId),
+
+  // Audit export
+  exportAuditEvents: (query) => mockUnitedPassDataSource.exportAuditEvents(query),
 };

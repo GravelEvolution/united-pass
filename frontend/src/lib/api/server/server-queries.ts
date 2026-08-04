@@ -1,4 +1,5 @@
 import type { UnitedPassQueries } from "@/lib/api/united-pass-data-source";
+import type { AuditQuery } from "@/features/admin/types";
 import type { PageQuery } from "@/types/pagination";
 import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
 
@@ -42,5 +43,5 @@ export const serverQueries: UnitedPassQueries = {
   getAvailableScopes: () => mockUnitedPassDataSource.getAvailableScopes(),
   getPolicies: (query?: PageQuery) => mockUnitedPassDataSource.getPolicies(query),
   getPolicyDetail: (policyId) => mockUnitedPassDataSource.getPolicyDetail(policyId),
-  getAuditEvents: (query?: PageQuery) => mockUnitedPassDataSource.getAuditEvents(query),
+  getAuditEvents: (query?: AuditQuery) => mockUnitedPassDataSource.getAuditEvents(query),
 };

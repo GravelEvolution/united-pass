@@ -46,9 +46,34 @@ export type AuditEvent = {
   eventId: string;
   eventType: string;
   actorName: string;
+  actorId: string;
   targetLabel: string;
+  targetId: string;
   occurredAt: string;
   result: "success" | "denied";
+  requestId: string;
+  details: string;
+};
+
+export type AuditQuery = {
+  cursor?: string;
+  limit?: number;
+  query?: string;
+  eventType?: string;
+  result?: string;
+  actorName?: string;
+  requestId?: string;
+  from?: string;
+  to?: string;
+};
+
+export type AuditExportResult = {
+  exportId: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  downloadUrl: string | null;
+  requestedAt: string;
+  completedAt: string | null;
+  totalEvents: number;
 };
 
 export type UserDetail = {

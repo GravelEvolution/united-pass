@@ -21,6 +21,8 @@ import type {
 import { getClientProfileConfig } from "@/features/applications/types";
 import type { ConsentDecision, ConsentResolution, ConsentRequest } from "@/features/authorization/types";
 import type {
+  AuditExportResult,
+  AuditQuery,
   DepartmentDetail,
   DirectorySyncHistoryEntry,
   DirectorySyncResult,
@@ -191,7 +193,7 @@ const userDetails: Record<string, UserDetail> = {
       { applicationName: "United Workspace", scopes: ["openid", "profile", "email"], grantedAt: "2026-07-15T08:30:00Z", status: "active" },
     ],
     recentAuditEvents: [
-      { eventId: "evt_001", eventType: "用户登录", actorName: "林知行", targetLabel: SYSTEM_NAME, occurredAt: "2026-08-04T05:42:00Z", result: "success" },
+      { eventId: "evt_001", eventType: "用户登录", actorName: "林知行", actorId: "usr_01JUP8M8B4Q7R4T6PK1D", targetLabel: SYSTEM_NAME, targetId: "system_united_pass", occurredAt: "2026-08-04T05:42:00Z", result: "success" as const, requestId: "req_login_001", details: "通过密码 + TOTP 完成登录。客户端：Chrome 138 · macOS。" },
     ],
   },
   usr_06APPUSER7N2X4Q8K5M9: {
@@ -590,10 +592,126 @@ const policyDetails: Record<string, PolicyDetail> = {
 };
 
 const auditEvents = [
-  { eventId: "evt_001", eventType: "用户登录", actorName: "林知行", targetLabel: SYSTEM_NAME, occurredAt: "2026-08-04T05:42:00Z", result: "success" },
-  { eventId: "evt_002", eventType: "策略发布", actorName: "周予安", targetLabel: "应用管理员维护 OAuth 应用", occurredAt: "2026-08-03T07:45:00Z", result: "success" },
-  { eventId: "evt_003", eventType: "管理操作拒绝", actorName: "陈默", targetLabel: "员工目录", occurredAt: "2026-08-03T02:18:00Z", result: "denied" },
-  { eventId: "evt_004", eventType: "会话撤销", actorName: "林知行", targetLabel: "Windows 设备", occurredAt: "2026-08-02T10:07:00Z", result: "success" },
+  {
+    eventId: "evt_001",
+    eventType: "用户登录",
+    actorName: "林知行",
+    actorId: "usr_01JUP8M8B4Q7R4T6PK1D",
+    targetLabel: SYSTEM_NAME,
+    targetId: "system_united_pass",
+    occurredAt: "2026-08-04T05:42:00Z",
+    result: "success" as const,
+    requestId: "req_login_001",
+    details: "通过密码 + TOTP 完成登录。客户端：Chrome 138 · macOS。",
+  },
+  {
+    eventId: "evt_002",
+    eventType: "策略发布",
+    actorName: "周予安",
+    actorId: "usr_02F4PXKQ0EZP5F7B9V3C",
+    targetLabel: "应用管理员维护 OAuth 应用",
+    targetId: "pol_app_manage",
+    occurredAt: "2026-08-03T07:45:00Z",
+    result: "success" as const,
+    requestId: "req_publish_001",
+    details: "策略 v2 发布。影响范围：application:*。决策效果：allow。",
+  },
+  {
+    eventId: "evt_003",
+    eventType: "管理操作拒绝",
+    actorName: "陈默",
+    actorId: "usr_03D1KMM3AGX8G2QW5T9N",
+    targetLabel: "员工目录",
+    targetId: "admin_employees",
+    occurredAt: "2026-08-03T02:18:00Z",
+    result: "denied" as const,
+    requestId: "req_deny_001",
+    details: "ABAC 策略拒绝。用户缺少 employee.manage 权限。",
+  },
+  {
+    eventId: "evt_004",
+    eventType: "会话撤销",
+    actorName: "林知行",
+    actorId: "usr_01JUP8M8B4Q7R4T6PK1D",
+    targetLabel: "Windows 设备",
+    targetId: "ses_edge",
+    occurredAt: "2026-08-02T10:07:00Z",
+    result: "success" as const,
+    requestId: "req_revoke_001",
+    details: "用户主动撤销非当前会话。设备：Edge 138 · Windows。",
+  },
+  {
+    eventId: "evt_005",
+    eventType: "OAuth 授权同意",
+    actorName: "陆晴",
+    actorId: "usr_06APPUSER7N2X4Q8K5M9",
+    targetLabel: "United Workspace",
+    targetId: "app_workspace",
+    occurredAt: "2026-08-01T14:20:00Z",
+    result: "success" as const,
+    requestId: "req_consent_001",
+    details: "用户授权 openid, profile, email。Client: confidential。",
+  },
+  {
+    eventId: "evt_006",
+    eventType: "Client Secret 轮换",
+    actorName: "林知行",
+    actorId: "usr_01JUP8M8B4Q7R4T6PK1D",
+    targetLabel: "United Workspace · Web Client",
+    targetId: "cli_workspace_web",
+    occurredAt: "2026-07-30T09:15:00Z",
+    result: "success" as const,
+    requestId: "req_rotate_001",
+    details: "管理员轮换 Client Secret。旧 Secret 立即失效。",
+  },
+  {
+    eventId: "evt_007",
+    eventType: "应用停用",
+    actorName: "周予安",
+    actorId: "usr_02F4PXKQ0EZP5F7B9V3C",
+    targetLabel: "Legacy Reports",
+    targetId: "app_legacy",
+    occurredAt: "2026-07-28T16:30:00Z",
+    result: "success" as const,
+    requestId: "req_disable_001",
+    details: "管理员停用应用。所有活跃授权和会话已撤销。",
+  },
+  {
+    eventId: "evt_008",
+    eventType: "员工入职",
+    actorName: "许清和",
+    actorId: "usr_0A1",
+    targetLabel: "陈思远",
+    targetId: "usr_0A2",
+    occurredAt: "2026-07-25T08:00:00Z",
+    result: "success" as const,
+    requestId: "req_onboard_001",
+    details: "为既有外部用户创建员工档案。部门：身份平台。职位：前端工程师。保留 Consumer Persona。",
+  },
+  {
+    eventId: "evt_009",
+    eventType: "Provider 同步",
+    actorName: "系统",
+    actorId: "system",
+    targetLabel: "飞书",
+    targetId: "provider_feishu",
+    occurredAt: "2026-08-04T02:03:12Z",
+    result: "success" as const,
+    requestId: "req_sync_001",
+    details: "目录同步完成。新增 12 部门，45 名员工。检测到 2 个身份关联冲突。",
+  },
+  {
+    eventId: "evt_010",
+    eventType: "密码修改",
+    actorName: "林知行",
+    actorId: "usr_01JUP8M8B4Q7R4T6PK1D",
+    targetLabel: "自身账户",
+    targetId: "usr_01JUP8M8B4Q7R4T6PK1D",
+    occurredAt: "2026-07-20T11:22:00Z",
+    result: "success" as const,
+    requestId: "req_pwd_001",
+    details: "用户修改账户密码。重认证后完成。",
+  },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getAuditEvents"]>>["items"];
 
 function resolveScopes(scopeIds: string[]): AllowedScope[] {
@@ -640,6 +758,47 @@ function toCursorPage<T>(items: T[], query?: PageQuery): CursorPage<T> {
         "status" in item &&
         String((item as Record<string, unknown>).status) === query.status,
     );
+  }
+  return {
+    items: filtered,
+    page: { nextCursor: null, hasMore: false },
+  };
+}
+
+/**
+ * Filters audit events by AuditQuery fields.
+ * Supports eventType, result, actorName, requestId, and date range.
+ */
+function filterAuditEvents(items: typeof auditEvents, query?: AuditQuery): CursorPage<typeof auditEvents[number]> {
+  let filtered = [...items];
+  if (query?.query) {
+    const q = query.query.trim().toLocaleLowerCase("zh-CN");
+    if (q) {
+      filtered = filtered.filter((item) =>
+        JSON.stringify(item).toLocaleLowerCase("zh-CN").includes(q),
+      );
+    }
+  }
+  if (query?.eventType) {
+    filtered = filtered.filter((item) => item.eventType === query.eventType);
+  }
+  if (query?.result) {
+    filtered = filtered.filter((item) => item.result === query.result);
+  }
+  if (query?.actorName) {
+    const actor = query.actorName.trim().toLocaleLowerCase("zh-CN");
+    filtered = filtered.filter((item) =>
+      item.actorName.toLocaleLowerCase("zh-CN").includes(actor),
+    );
+  }
+  if (query?.requestId) {
+    filtered = filtered.filter((item) => item.requestId === query.requestId);
+  }
+  if (query?.from) {
+    filtered = filtered.filter((item) => item.occurredAt >= query.from!);
+  }
+  if (query?.to) {
+    filtered = filtered.filter((item) => item.occurredAt <= query.to!);
   }
   return {
     items: filtered,
@@ -1005,7 +1164,20 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       if (!detail) return Promise.resolve(null);
       return Promise.resolve({ ...detail, principals: [...detail.principals], conditions: [...detail.conditions], versionHistory: [...detail.versionHistory] });
     },
-    getAuditEvents: (query?: PageQuery) => Promise.resolve(toCursorPage(auditEvents, query)),
+    getAuditEvents: (query?: AuditQuery) => Promise.resolve(filterAuditEvents(auditEvents, query)),
+
+    exportAuditEvents: (query: AuditQuery): Promise<AuditExportResult> => {
+      const filtered = filterAuditEvents(auditEvents, query);
+      const now = new Date().toISOString();
+      return Promise.resolve({
+        exportId: `export_${Date.now().toString(36)}`,
+        status: "completed",
+        downloadUrl: null,
+        requestedAt: now,
+        completedAt: now,
+        totalEvents: filtered.items.length,
+      });
+    },
 
     updateProfile: (input: { displayName?: string; nickname?: string }): Promise<void> => {
       if (input.displayName !== undefined) {

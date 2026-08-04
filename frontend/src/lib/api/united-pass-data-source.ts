@@ -1,5 +1,7 @@
 import type {
   AuditEvent,
+  AuditExportResult,
+  AuditQuery,
   DashboardMetric,
   DepartmentDetail,
   DepartmentRecord,
@@ -79,7 +81,7 @@ export interface UnitedPassQueries {
   getAvailableScopes(): Promise<AllowedScope[]>;
   getPolicies(query?: PageQuery): Promise<CursorPage<AuthorizationPolicy>>;
   getPolicyDetail(policyId: string): Promise<PolicyDetail | null>;
-  getAuditEvents(query?: PageQuery): Promise<CursorPage<AuditEvent>>;
+  getAuditEvents(query?: AuditQuery): Promise<CursorPage<AuditEvent>>;
 }
 
 /**
@@ -136,6 +138,9 @@ export interface UnitedPassCommands {
   syncProviderDirectory(providerId: string): Promise<DirectorySyncResult>;
   resolveSyncConflict(conflictId: string, userId: string): Promise<void>;
   ignoreSyncConflict(conflictId: string): Promise<void>;
+
+  // Audit export
+  exportAuditEvents(query: AuditQuery): Promise<AuditExportResult>;
 }
 
 /**
