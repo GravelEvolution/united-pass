@@ -64,6 +64,27 @@
 | `/authorize` | `GET /api/v1/authorization/requests/{requestId}` | 获取已校验的应用、当前身份和请求 Scope | 不接受前端自行拼装应用名称或任意回跳地址 |
 | `/authorize` | `POST /api/v1/authorization/requests/{requestId}/decision` | 提交 allow/deny | body: `{ "decision": "allow" | "deny" }`；后端生成安全重定向 |
 
+登录请求使用统一标识字段，允许用户输入账户名或邮箱：
+
+```json
+{
+  "identifier": "zhixing.lin",
+  "password": "user-entered-password"
+}
+```
+
+注册请求至少包含账户名、邮箱和密码：
+
+```json
+{
+  "username": "zhixing.lin",
+  "email": "zhixing.lin@example.com",
+  "password": "user-entered-password"
+}
+```
+
+`confirmPassword` 仅用于浏览器即时校验，不应进入传输合同或日志。后端必须独立验证账户名格式与唯一性、邮箱格式、密码强度和凭据泄露风险，并返回字段级错误；登录失败不得泄露账户名或邮箱是否存在。
+
 授权请求响应至少包含：`requestId`、应用显示名/说明/负责人、已验证 `redirectHost`、当前用户最小身份信息及逐项 Scope 描述。授权完成响应建议返回后端验证过的 `redirectUrl` 或直接通过受控 303 重定向完成流程。
 
 ## 当前账户
