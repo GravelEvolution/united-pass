@@ -37,13 +37,50 @@ export type ApiError = {
   challenge?: ReauthenticationChallenge;
 };
 
-export function isApiError(value: unknown): value is ApiError {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "kind" in value &&
-    "message" in value
+const API_ERROR_KINDS: ReadonlySet<string> = new Set<ApiErrorKind>([
+  "network",
+  "unauthorized",
+  "forbidden",
+  "not_found",
+  "conflict",
+  "validation",
+  "rate_limited",
+  "reauthentication_required",
+  "server_error",
+]);
+
+function isFieldErrorArray(value: unknown): value is FieldError[] {
+  if (!Array.isArray(value)) return false;
+  return value.every(
+    (item) =>
+      typeof item === "object" &&
+      item !== null &&
+      typeof (item as Record<string, unknown>).field === "string" &&
+      typeof (item as Record<string, unknown>).message === "string",
   );
+}
+
+function isReauthenticationChallenge(value: unknown): value is ReauthenticationChallenge {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record.methods)) return false;
+  if (!record.methods.every((m) => m === "password" || m === "totp" || m === "passkey")) return false;
+  return typeof record.requestId === "string";
+}
+
+export function isApiError(value: unknown): value is ApiError {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+
+  if (typeof record.kind !== "string" || !API_ERROR_KINDS.has(record.kind)) return false;
+  if (typeof record.message !== "string") return false;
+
+  if (record.requestId !== undefined && typeof record.requestId !== "string") return false;
+  if (record.fieldErrors !== undefined && !isFieldErrorArray(record.fieldErrors)) return false;
+  if (record.retryAfter !== undefined && typeof record.retryAfter !== "number") return false;
+  if (record.challenge !== undefined && !isReauthenticationChallenge(record.challenge)) return false;
+
+  return true;
 }
 
 export function getFieldError(apiError: ApiError, fieldName: string): string | undefined {

@@ -7,8 +7,24 @@ describe("isApiError", () => {
     expect(isApiError(error)).toBe(true);
   });
 
+  it("returns true for a complete ApiError with all optional fields", () => {
+    const error: ApiError = {
+      kind: "reauthentication_required",
+      message: "Reauthentication required",
+      requestId: "req_001",
+      fieldErrors: [{ field: "email", message: "邮箱已被占用。" }],
+      retryAfter: 30,
+      challenge: { methods: ["password", "totp"], requestId: "ch_001" },
+    };
+    expect(isApiError(error)).toBe(true);
+  });
+
   it("returns false for null", () => {
     expect(isApiError(null)).toBe(false);
+  });
+
+  it("returns false for undefined", () => {
+    expect(isApiError(undefined)).toBe(false);
   });
 
   it("returns false for string", () => {
@@ -17,6 +33,68 @@ describe("isApiError", () => {
 
   it("returns false for object without kind", () => {
     expect(isApiError({ message: "error" })).toBe(false);
+  });
+
+  it("returns false for object without message", () => {
+    expect(isApiError({ kind: "network" })).toBe(false);
+  });
+
+  it("returns false when kind is not a string", () => {
+    expect(isApiError({ kind: 123, message: "error" })).toBe(false);
+  });
+
+  it("returns false when message is not a string", () => {
+    expect(isApiError({ kind: "network", message: null })).toBe(false);
+  });
+
+  it("returns false when kind is not a valid ApiErrorKind", () => {
+    expect(isApiError({ kind: "whatever", message: "error" })).toBe(false);
+  });
+
+  it("returns false when fieldErrors is not an array", () => {
+    expect(isApiError({ kind: "validation", message: "error", fieldErrors: "not array" })).toBe(false);
+  });
+
+  it("returns false when fieldErrors contains non-object items", () => {
+    expect(isApiError({ kind: "validation", message: "error", fieldErrors: ["string"] })).toBe(false);
+  });
+
+  it("returns false when fieldErrors has wrong field type", () => {
+    expect(
+      isApiError({ kind: "validation", message: "error", fieldErrors: [{ field: 123, message: "x" }] }),
+    ).toBe(false);
+  });
+
+  it("returns false when retryAfter is not a number", () => {
+    expect(isApiError({ kind: "rate_limited", message: "error", retryAfter: "30" })).toBe(false);
+  });
+
+  it("returns false when challenge has invalid methods", () => {
+    expect(
+      isApiError({
+        kind: "reauthentication_required",
+        message: "error",
+        challenge: { methods: ["sms"], requestId: "ch_001" },
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false when challenge is missing requestId", () => {
+    expect(
+      isApiError({
+        kind: "reauthentication_required",
+        message: "error",
+        challenge: { methods: ["password"] },
+      }),
+    ).toBe(false);
+  });
+
+  it("returns true when requestId is a string", () => {
+    expect(isApiError({ kind: "not_found", message: "error", requestId: "req_123" })).toBe(true);
+  });
+
+  it("returns false when requestId is not a string", () => {
+    expect(isApiError({ kind: "not_found", message: "error", requestId: 123 })).toBe(false);
   });
 });
 
