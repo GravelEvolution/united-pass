@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { BrandMark } from "@/components/common/brand-mark";
 import { ThemeToggle } from "@/components/common/theme-toggle";
@@ -13,7 +14,35 @@ export function AuthShell({ children }: AuthShellProps) {
   return (
     <main className={styles.page}>
       <section className={styles.brandPanel} aria-label={`${SYSTEM_NAME}产品介绍`}>
-        <Link href="/login"><BrandMark /></Link>
+        <div className={styles.brandCarousel} aria-hidden="true">
+          <Image
+            className={styles.brandSlide}
+            src="/brand/auth-carousel-1.jpg"
+            alt=""
+            fill
+            sizes="60vw"
+            loading="eager"
+          />
+          <Image
+            className={styles.brandSlide}
+            src="/brand/auth-carousel-2-v2.jpg"
+            alt=""
+            fill
+            sizes="60vw"
+            loading="eager"
+          />
+          <Image
+            className={styles.brandSlide}
+            src="/brand/auth-carousel-3.jpg"
+            alt=""
+            fill
+            sizes="60vw"
+            loading="eager"
+          />
+        </div>
+        <Link className={styles.brandLogoLink} href="/login">
+          <BrandMark inverse />
+        </Link>
         <div className={styles.brandCopy}>
           <p className={styles.kicker}>HIGH-TECH ENTERPRISE, YOUTH-DEVELOP</p>
           <h1>我们始终相信老登和小登一起能迸发出最强的力量</h1>

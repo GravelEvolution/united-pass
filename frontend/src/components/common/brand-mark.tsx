@@ -4,11 +4,12 @@ import styles from "./brand-mark.module.css";
 
 type BrandMarkProps = {
   compact?: boolean;
+  inverse?: boolean;
 };
 
-export function BrandMark({ compact = false }: BrandMarkProps) {
+export function BrandMark({ compact = false, inverse = false }: BrandMarkProps) {
   return (
-    <span className={styles.brand} aria-label={SYSTEM_NAME}>
+    <span className={`${styles.brand} ${inverse ? styles.inverse : ""}`} aria-label={SYSTEM_NAME}>
       <Image
         className={styles.logo}
         src="/brand/gravel-evolution-logo.png"

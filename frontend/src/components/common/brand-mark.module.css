@@ -9,6 +9,11 @@
   letter-spacing: -0.01em;
 }
 
+.inverse {
+  color: white;
+  text-shadow: 0 1px 10px rgb(0 0 0 / 28%);
+}
+
 .logo {
   width: 42px;
   height: 42px;
