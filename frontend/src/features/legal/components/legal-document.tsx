@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { BrandMark } from "@/components/common/brand-mark";
 import { ThemeToggle } from "@/components/common/theme-toggle";
-import { SYSTEM_NAME } from "@/lib/branding";
+import { COMPANY_LEGAL_NAME, SYSTEM_NAME } from "@/lib/branding";
 import styles from "./legal-document.module.css";
 
 export type LegalSection = {
@@ -85,7 +85,7 @@ export function LegalDocument({
         </nav>
       </main>
 
-      <footer className={styles.footer}>© 2026 {SYSTEM_NAME}</footer>
+      <footer className={styles.footer}>© 2026 {COMPANY_LEGAL_NAME}</footer>
     </div>
   );
 }

@@ -7,7 +7,6 @@ import { useRouter } from "next/navigation";
 import { Button, Checkbox, Input } from "@douyinfe/semi-ui";
 import { IconKey, IconMail, IconUser } from "@douyinfe/semi-icons";
 import { authenticateMockAccount, MOCK_LOGIN_ACCOUNTS } from "@/lib/mock/mock-auth";
-import { SYSTEM_NAME } from "@/lib/branding";
 import styles from "./credential-panel.module.css";
 
 type CredentialPanelProps = {
@@ -61,8 +60,8 @@ export function CredentialPanel({ mode }: CredentialPanelProps) {
     <div className={styles.panel}>
       <div className={styles.heading}>
         <span className={styles.mockBadge}>MOCK PREVIEW</span>
-        <h1>{isLogin ? "欢迎回来" : `创建${SYSTEM_NAME}账户`}</h1>
-        <p>{isLogin ? "使用你的统一账户继续访问。" : "创建后，你的稳定用户身份可关联员工档案。"}</p>
+        <h1>{isLogin ? "欢迎回来" : "创建你的统一门户账号"}</h1>
+        <p>{isLogin ? "使用你的统一账户继续访问。" : "一站式登陆砾石进化服务"}</p>
       </div>
 
       <form className={styles.form} onSubmit={handleSubmit}>

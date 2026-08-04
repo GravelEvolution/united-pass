@@ -3,7 +3,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { BrandMark } from "@/components/common/brand-mark";
 import { ThemeToggle } from "@/components/common/theme-toggle";
-import { SYSTEM_NAME } from "@/lib/branding";
+import { COMPANY_LEGAL_NAME, SYSTEM_NAME } from "@/lib/branding";
 import styles from "./auth-shell.module.css";
 
 type AuthShellProps = {
@@ -58,7 +58,7 @@ export function AuthShell({ children }: AuthShellProps) {
         <div className={styles.mobileBrand}><BrandMark /></div>
         <div className={styles.content}>{children}</div>
         <footer className={styles.footer}>
-          <span>© 2026 {SYSTEM_NAME}</span>
+          <span>© 2026 {COMPANY_LEGAL_NAME}</span>
           <span aria-hidden="true">·</span>
           <Link href="/privacy">隐私政策</Link>
           <span aria-hidden="true">·</span>
