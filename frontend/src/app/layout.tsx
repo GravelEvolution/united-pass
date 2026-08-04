@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import type { PropsWithChildren } from "react";
 import { Noto_Sans_SC } from "next/font/google";
 import Script from "next/script";
 import "@douyinfe/semi-ui/lib/es/_base/base.css";
@@ -21,7 +22,7 @@ export const metadata: Metadata = {
   description: `${SYSTEM_NAME}提供统一、安全、清晰的身份与访问管理能力。`,
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({ children }: PropsWithChildren) {
   return (
     <html lang="zh-CN" className={notoSansSc.variable} data-theme="light" suppressHydrationWarning>
       <body theme-mode="light" suppressHydrationWarning>
