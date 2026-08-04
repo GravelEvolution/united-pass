@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   quality:
-    name: Lint, Typecheck and Build
+    name: Lint, Typecheck, Test and Build
     runs-on: ubuntu-latest
 
     steps:

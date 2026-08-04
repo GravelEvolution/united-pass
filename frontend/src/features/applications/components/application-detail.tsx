@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button, Empty, Modal, Tabs, Toast } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import { PageHeader } from "@/components/common/page-header";
@@ -42,7 +42,30 @@ const grantTypeLabel = (grantType: OAuthGrantType) => {
   }
 };
 
+const VALID_TABS = ["basic", "clients", "grants", "audit", "danger"] as const;
+type TabKey = (typeof VALID_TABS)[number];
+
+function isTabKey(value: string | null): value is TabKey {
+  return value !== null && (VALID_TABS as readonly string[]).includes(value);
+}
+
 export function ApplicationDetail({ detail }: ApplicationDetailProps) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const tabParam = searchParams.get("tab");
+  const activeTab: TabKey = isTabKey(tabParam) ? tabParam : "basic";
+
+  function handleTabChange(itemKey: string) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (itemKey === "basic") {
+      params.delete("tab");
+    } else {
+      params.set("tab", itemKey);
+    }
+    const queryString = params.toString();
+    router.replace(`/admin/applications/${detail.applicationId}${queryString ? `?${queryString}` : ""}`);
+  }
+
   return (
     <>
       <Link href="/admin/applications" className={styles.backLink}>
@@ -70,7 +93,7 @@ export function ApplicationDetail({ detail }: ApplicationDetailProps) {
       </div>
 
       <div className={styles.tabContent}>
-        <Tabs type="line">
+        <Tabs type="line" activeKey={activeTab} onChange={handleTabChange}>
           <Tabs.TabPane tab="基本信息" itemKey="basic">
             <BasicInfoTab detail={detail} />
           </Tabs.TabPane>

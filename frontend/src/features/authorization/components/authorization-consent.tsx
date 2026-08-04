@@ -235,7 +235,7 @@ function ConsentStateCard({ resolution }: { resolution: ConsentResolution }) {
           </div>
           <h1>需要登录</h1>
           <p>请求 <code>{resolution.requestId}</code> 需要已登录的用户身份才能完成授权。</p>
-          <p>登录成功后将自动返回此授权页面继续流程。</p>
+          <p>登录后请使用原授权链接返回此页面继续流程。</p>
           <div className={styles.stateActions}>
             <Link href={`/login?requestId=${resolution.requestId}`}><Button theme="solid" type="primary">前往登录</Button></Link>
           </div>
@@ -324,7 +324,7 @@ function DecisionResult({
         {isAllowed ? (
           <>
             <p>你已授权 <strong>{applicationName}</strong> 访问请求的数据。</p>
-            <p>正在跳转回 <code>{redirectHost}</code>（Mock，不会真实跳转外部地址）。</p>
+            <p>点击下方按钮继续（Mock，不会真实跳转至 <code>{redirectHost}</code>）。</p>
           </>
         ) : (
           <p>你已拒绝 <strong>{applicationName}</strong> 的授权请求。应用不会获得任何数据访问权限。</p>

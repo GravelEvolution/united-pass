@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { Suspense } from "react";
 import { ApplicationDetail } from "@/features/applications/components/application-detail";
 import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
 
@@ -34,5 +35,9 @@ export default async function ApplicationDetailPage({
     notFound();
   }
 
-  return <ApplicationDetail detail={detail} />;
+  return (
+    <Suspense>
+      <ApplicationDetail detail={detail} />
+    </Suspense>
+  );
 }
