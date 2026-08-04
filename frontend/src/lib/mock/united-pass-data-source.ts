@@ -18,6 +18,11 @@ import type {
 } from "@/features/applications/types";
 import { getClientProfileConfig } from "@/features/applications/types";
 import type { ConsentDecision, ConsentResolution, ConsentRequest } from "@/features/authorization/types";
+import {
+  validateApplicationCreateInput,
+  validateOAuthClientCreateInput,
+  validateConsentModeWithAudience,
+} from "@/features/applications/validation";
 
 const externalAppUser = {
   userId: "usr_06APPUSER7N2X4Q8K5M9",
@@ -324,9 +329,15 @@ const auditEvents = [
 
 function resolveScopes(scopeIds: string[]): AllowedScope[] {
   const scopeMap = new Map(availableScopes.map((scope) => [scope.scope, scope]));
-  return scopeIds
-    .map((scopeId) => scopeMap.get(scopeId))
-    .filter((scope): scope is AllowedScope => scope !== undefined);
+  const resolved: AllowedScope[] = [];
+  for (const scopeId of scopeIds) {
+    const scope = scopeMap.get(scopeId);
+    if (!scope) {
+      throw new Error(`未知的 Scope: ${scopeId}`);
+    }
+    resolved.push(scope);
+  }
+  return resolved;
 }
 
 function buildRedirectUris(uris: string[], now: string) {
@@ -371,6 +382,12 @@ export const mockUnitedPassDataSource: UnitedPassDataSource = {
   },
   getAvailableScopes: () => Promise.resolve(availableScopes),
   createApplication: (input: ApplicationCreateInput): Promise<ApplicationCreationResult> => {
+    try {
+      validateApplicationCreateInput(input);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
     const applicationId = `app_${Math.random().toString(36).slice(2, 10)}`;
     const now = new Date().toISOString();
 
@@ -406,7 +423,26 @@ export const mockUnitedPassDataSource: UnitedPassDataSource = {
     return Promise.resolve({ applicationId });
   },
   createOAuthClient: (input: OAuthClientCreateInput): Promise<OAuthClientCreationResult> => {
+    try {
+      validateOAuthClientCreateInput(input);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
+    const detail = mutableApplicationDetails[input.applicationId];
+    if (!detail) {
+      return Promise.reject(
+        new Error(`应用 ${input.applicationId} 不存在，无法创建 OAuth 客户端。`),
+      );
+    }
+
     const profileConfig = getClientProfileConfig(input.profile);
+    try {
+      validateConsentModeWithAudience(input.consentMode, detail.audience, profileConfig);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
     const clientId = `${input.name.slice(0, 2).toLowerCase()}_${Math.random().toString(36).slice(2, 16)}`;
     const now = new Date().toISOString();
 
@@ -431,11 +467,8 @@ export const mockUnitedPassDataSource: UnitedPassDataSource = {
       updatedAt: now,
     };
 
-    const detail = mutableApplicationDetails[input.applicationId];
-    if (detail) {
-      detail.clients.push(client);
-      detail.updatedAt = now;
-    }
+    detail.clients.push(client);
+    detail.updatedAt = now;
 
     const app = mutableApplications.find((item) => item.applicationId === input.applicationId);
     if (app) {
@@ -450,6 +483,22 @@ export const mockUnitedPassDataSource: UnitedPassDataSource = {
     return Promise.resolve(result);
   },
   createApplicationWithInitialClient: (input: ApplicationWithInitialClientInput): Promise<ApplicationWithInitialClientResult> => {
+    const profileConfig = getClientProfileConfig(input.initialClient.profile);
+    try {
+      validateApplicationCreateInput(input.application);
+      validateOAuthClientCreateInput({
+        applicationId: "__pending__",
+        ...input.initialClient,
+      });
+      validateConsentModeWithAudience(
+        input.initialClient.consentMode,
+        input.application.audience,
+        profileConfig,
+      );
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
     const now = new Date().toISOString();
     const applicationId = `app_${Math.random().toString(36).slice(2, 10)}`;
 
@@ -473,7 +522,6 @@ export const mockUnitedPassDataSource: UnitedPassDataSource = {
 
     mutableApplicationDetails[applicationId] = detail;
 
-    const profileConfig = getClientProfileConfig(input.initialClient.profile);
     const clientId = `${input.initialClient.name.slice(0, 2).toLowerCase()}_${Math.random().toString(36).slice(2, 16)}`;
 
     const clientSecrets = profileConfig.clientType === "confidential"

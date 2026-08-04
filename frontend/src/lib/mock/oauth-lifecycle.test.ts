@@ -354,6 +354,208 @@ describe("OAuth application lifecycle", () => {
   });
 });
 
+describe("OAuth client invariant enforcement", () => {
+  const createdAppIds: string[] = [];
+
+  afterEach(async () => {
+    for (const appId of createdAppIds.splice(0)) {
+      try {
+        await mockUnitedPassDataSource.deleteApplication(appId);
+      } catch {
+        // already deleted or never existed
+      }
+    }
+  });
+
+  it("rejects createOAuthClient for a non-existent parent application", async () => {
+    await expect(
+      mockUnitedPassDataSource.createOAuthClient({
+        applicationId: "app_nonexistent",
+        name: "Orphan Client",
+        profile: "web_server",
+        redirectUris: ["https://example.com/cb"],
+        logoutUri: "",
+        allowedScopes: ["openid"],
+        consentMode: "always",
+      }),
+    ).rejects.toThrow("不存在");
+  });
+
+  it("rejects unknown scopes", async () => {
+    const app = await mockUnitedPassDataSource.createApplication({
+      name: "Scope Test App",
+      description: "",
+      audience: "internal",
+      ownerName: "Owner",
+    });
+    createdAppIds.push(app.applicationId);
+
+    await expect(
+      mockUnitedPassDataSource.createOAuthClient({
+        applicationId: app.applicationId,
+        name: "Bad Scope Client",
+        profile: "web_server",
+        redirectUris: ["https://example.com/cb"],
+        logoutUri: "",
+        allowedScopes: ["openid", "admin:read"],
+        consentMode: "always",
+      }),
+    ).rejects.toThrow("未知");
+  });
+
+  it("rejects openid on server_to_server profile", async () => {
+    const app = await mockUnitedPassDataSource.createApplication({
+      name: "M2M Scope Test",
+      description: "",
+      audience: "internal",
+      ownerName: "Owner",
+    });
+    createdAppIds.push(app.applicationId);
+
+    await expect(
+      mockUnitedPassDataSource.createOAuthClient({
+        applicationId: app.applicationId,
+        name: "M2M with openid",
+        profile: "server_to_server",
+        redirectUris: [],
+        logoutUri: "",
+        allowedScopes: ["openid"],
+        consentMode: "always",
+      }),
+    ).rejects.toThrow("openid");
+  });
+
+  it("rejects trusted_first_party consent mode from caller", async () => {
+    const app = await mockUnitedPassDataSource.createApplication({
+      name: "Consent Test App",
+      description: "",
+      audience: "internal",
+      ownerName: "Owner",
+    });
+    createdAppIds.push(app.applicationId);
+
+    await expect(
+      mockUnitedPassDataSource.createOAuthClient({
+        applicationId: app.applicationId,
+        name: "Trusted Client",
+        profile: "web_server",
+        redirectUris: ["https://example.com/cb"],
+        logoutUri: "",
+        allowedScopes: ["openid"],
+        consentMode: "trusted_first_party",
+      }),
+    ).rejects.toThrow("trusted_first_party");
+  });
+
+  it("rejects redirect URIs with non-https scheme (except localhost)", async () => {
+    const app = await mockUnitedPassDataSource.createApplication({
+      name: "URI Test App",
+      description: "",
+      audience: "internal",
+      ownerName: "Owner",
+    });
+    createdAppIds.push(app.applicationId);
+
+    await expect(
+      mockUnitedPassDataSource.createOAuthClient({
+        applicationId: app.applicationId,
+        name: "Bad URI Client",
+        profile: "web_server",
+        redirectUris: ["ftp://evil.example/callback"],
+        logoutUri: "",
+        allowedScopes: ["openid"],
+        consentMode: "always",
+      }),
+    ).rejects.toThrow("Redirect URI");
+  });
+
+  it("accepts localhost http redirect URIs", async () => {
+    const app = await mockUnitedPassDataSource.createApplication({
+      name: "Localhost Test",
+      description: "",
+      audience: "internal",
+      ownerName: "Owner",
+    });
+    createdAppIds.push(app.applicationId);
+
+    const client = await mockUnitedPassDataSource.createOAuthClient({
+      applicationId: app.applicationId,
+      name: "Dev Client",
+      profile: "web_server",
+      redirectUris: ["http://localhost:3000/callback"],
+      logoutUri: "",
+      allowedScopes: ["openid"],
+      consentMode: "always",
+    });
+
+    expect(client.clientId).toMatch(/^de_/);
+  });
+
+  it("rejects redirect URIs on server_to_server profile", async () => {
+    const app = await mockUnitedPassDataSource.createApplication({
+      name: "M2M URI Test",
+      description: "",
+      audience: "internal",
+      ownerName: "Owner",
+    });
+    createdAppIds.push(app.applicationId);
+
+    await expect(
+      mockUnitedPassDataSource.createOAuthClient({
+        applicationId: app.applicationId,
+        name: "M2M with URIs",
+        profile: "server_to_server",
+        redirectUris: ["https://example.com/cb"],
+        logoutUri: "",
+        allowedScopes: [],
+        consentMode: "always",
+      }),
+    ).rejects.toThrow("不需要");
+  });
+
+  it("rejects atomic creation with server_to_server and openid", async () => {
+    await expect(
+      mockUnitedPassDataSource.createApplicationWithInitialClient({
+        application: {
+          name: "Bad Atomic App",
+          description: "",
+          audience: "internal",
+          ownerName: "Owner",
+        },
+        initialClient: {
+          name: "M2M with openid",
+          profile: "server_to_server",
+          redirectUris: [],
+          logoutUri: "",
+          allowedScopes: ["openid"],
+          consentMode: "always",
+        },
+      }),
+    ).rejects.toThrow("openid");
+  });
+
+  it("rejects atomic creation with trusted_first_party on external audience", async () => {
+    await expect(
+      mockUnitedPassDataSource.createApplicationWithInitialClient({
+        application: {
+          name: "External Trusted",
+          description: "",
+          audience: "external",
+          ownerName: "Owner",
+        },
+        initialClient: {
+          name: "Trusted External",
+          profile: "web_server",
+          redirectUris: ["https://example.com/cb"],
+          logoutUri: "",
+          allowedScopes: ["openid"],
+          consentMode: "trusted_first_party",
+        },
+      }),
+    ).rejects.toThrow("trusted_first_party");
+  });
+});
+
 describe("consent resolution and decision", () => {
   it("resolves a valid consent request with scopes and redirect host", async () => {
     const resolution = await mockUnitedPassDataSource.getConsentResolution("consent_demo_001");
