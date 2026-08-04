@@ -1,6 +1,7 @@
 export type ColorTheme = "light" | "dark";
 
 export const THEME_STORAGE_KEY = "united-pass-color-theme";
+export const THEME_CHANGE_EVENT = "united-pass-theme-change";
 
 export const THEME_INITIALIZATION_SCRIPT = `
 (function () {
@@ -34,4 +35,14 @@ export function applyColorTheme(theme: ColorTheme): void {
   document.documentElement.setAttribute("data-theme", theme);
   document.body.setAttribute("theme-mode", theme);
   localStorage.setItem(THEME_STORAGE_KEY, theme);
+  window.dispatchEvent(new Event(THEME_CHANGE_EVENT));
+}
+
+export function getAppliedColorTheme(): ColorTheme {
+  return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+}
+
+export function subscribeToColorTheme(onStoreChange: () => void): () => void {
+  window.addEventListener(THEME_CHANGE_EVENT, onStoreChange);
+  return () => window.removeEventListener(THEME_CHANGE_EVENT, onStoreChange);
 }

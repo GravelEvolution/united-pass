@@ -1,8 +1,13 @@
 "use client";
 
+import { useSyncExternalStore } from "react";
 import { Button } from "@douyinfe/semi-ui";
 import { IconMoon, IconSun } from "@douyinfe/semi-icons";
-import { applyColorTheme } from "@/lib/theme/theme";
+import {
+  applyColorTheme,
+  getAppliedColorTheme,
+  subscribeToColorTheme,
+} from "@/lib/theme/theme";
 import styles from "./theme-toggle.module.css";
 
 type ThemeToggleProps = {
@@ -10,9 +15,12 @@ type ThemeToggleProps = {
 };
 
 export function ThemeToggle({ className }: ThemeToggleProps) {
+  const theme = useSyncExternalStore(subscribeToColorTheme, getAppliedColorTheme, () => "light");
+  const isDarkTheme = theme === "dark";
+  const accessibleLabel = isDarkTheme ? "切换到亮色模式" : "切换到暗色模式";
+
   function toggleTheme() {
-    const currentTheme = document.documentElement.getAttribute("data-theme");
-    applyColorTheme(currentTheme === "dark" ? "light" : "dark");
+    applyColorTheme(isDarkTheme ? "light" : "dark");
   }
 
   return (
@@ -20,8 +28,9 @@ export function ThemeToggle({ className }: ThemeToggleProps) {
       className={`${styles.toggle} ${className ?? ""}`}
       theme="light"
       type="tertiary"
-      aria-label="切换亮色或暗色模式"
-      title="切换亮色或暗色模式"
+      aria-label={accessibleLabel}
+      aria-pressed={isDarkTheme}
+      title={accessibleLabel}
       icon={
         <span className={styles.icons} aria-hidden="true">
           <IconMoon className={styles.moon} />

@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
-import Image from "next/image";
 import Link from "next/link";
 import { BrandMark } from "@/components/common/brand-mark";
 import { ThemeToggle } from "@/components/common/theme-toggle";
+import { AuthBrandCarousel } from "@/components/layouts/auth-brand-carousel";
 import { COMPANY_LEGAL_NAME, SYSTEM_NAME } from "@/lib/branding";
 import styles from "./auth-shell.module.css";
 
@@ -14,32 +14,7 @@ export function AuthShell({ children }: AuthShellProps) {
   return (
     <main className={styles.page}>
       <section className={styles.brandPanel} aria-label={`${SYSTEM_NAME}产品介绍`}>
-        <div className={styles.brandCarousel} aria-hidden="true">
-          <Image
-            className={styles.brandSlide}
-            src="/brand/auth-carousel-1.jpg"
-            alt=""
-            fill
-            sizes="60vw"
-            loading="eager"
-          />
-          <Image
-            className={styles.brandSlide}
-            src="/brand/auth-carousel-2-v2.jpg"
-            alt=""
-            fill
-            sizes="60vw"
-            loading="eager"
-          />
-          <Image
-            className={styles.brandSlide}
-            src="/brand/auth-carousel-3.jpg"
-            alt=""
-            fill
-            sizes="60vw"
-            loading="eager"
-          />
-        </div>
+        <AuthBrandCarousel />
         <Link className={styles.brandLogoLink} href="/login">
           <BrandMark inverse />
         </Link>
