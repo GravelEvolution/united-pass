@@ -136,6 +136,8 @@ function validateImageDimensions({ width, height }: ImageDimensions): void {
   }
 }
 
+export { inspectImageHeader, validateImageDimensions };
+
 export async function sanitizeAvatarFile(file: File): Promise<SanitizedAvatar> {
   const allowedMimeTypes = new Set<AllowedAvatarMimeType>(["image/jpeg", "image/png", "image/webp"]);
   if (!allowedMimeTypes.has(file.type as AllowedAvatarMimeType)) {

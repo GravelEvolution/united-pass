@@ -7,7 +7,8 @@ import { IconDelete, IconEdit, IconUpload } from "@douyinfe/semi-icons";
 import { PageHeader } from "@/components/common/page-header";
 import { StatusBadge } from "@/components/common/status-badge";
 import type { CurrentUser } from "@/types/identity";
-import { ContactVerificationModal, type ContactKind } from "./contact-verification-modal";
+import { ContactVerificationModal } from "./contact-verification-modal";
+import type { ContactKind } from "../utils/contact-validation";
 import { AvatarValidationError, sanitizeAvatarFile } from "../utils/avatar-file";
 import styles from "./account-panels.module.css";
 

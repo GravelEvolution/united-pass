@@ -3,9 +3,8 @@
 import type { FormEvent } from "react";
 import { useState } from "react";
 import { Button, Input, Modal } from "@douyinfe/semi-ui";
+import { validateContactValue, type ContactKind } from "../utils/contact-validation";
 import styles from "./account-panels.module.css";
-
-export type ContactKind = "email" | "phone";
 
 type ContactVerificationModalProps = {
   kind: ContactKind;
@@ -15,15 +14,6 @@ type ContactVerificationModalProps = {
 };
 
 const MOCK_VERIFICATION_CODE = "246810";
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const PHONE_PATTERN = /^\+[1-9]\d{7,14}$/;
-
-function validateContactValue(kind: ContactKind, value: string): string | undefined {
-  if (!value) return kind === "email" ? "请输入新邮箱地址。" : "请输入新手机号码。";
-  if (kind === "email" && !EMAIL_PATTERN.test(value)) return "请输入有效的邮箱地址。";
-  if (kind === "phone" && !PHONE_PATTERN.test(value)) return "请输入含国家代码的手机号码，例如 +8613800138000。";
-  return undefined;
-}
 
 export function ContactVerificationModal({
   kind,
