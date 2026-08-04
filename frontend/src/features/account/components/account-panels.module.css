@@ -44,6 +44,12 @@
   box-shadow: 0 12px 28px rgb(36 87 214 / 22%);
 }
 
+.avatarWithImage {
+  background-color: var(--up-brand-soft);
+  background-position: center;
+  background-size: cover;
+}
+
 .heroCopy { min-width: 0; }
 .label { color: var(--up-muted-soft); font-size: 10px; font-weight: 750; letter-spacing: 0.13em; }
 .heroCopy h2 { margin: 4px 0 2px; font-size: 23px; }
@@ -77,7 +83,43 @@
 .detailList > div { display: grid; grid-template-columns: 110px 1fr; gap: 14px; padding: 13px 0; border-top: 1px solid var(--up-line-soft); }
 .detailList dt { color: var(--up-muted); font-size: 12px; }
 .detailList dd { margin: 0; font-size: 13px; font-weight: 560; }
+.urlValue { overflow-wrap: anywhere; }
 .emptyText { color: var(--up-muted); font-size: 13px; line-height: 1.7; }
+
+.profileForm { display: grid; gap: 18px; }
+
+.profilePreview {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--up-line);
+  border-radius: 12px;
+  background: var(--up-surface-subtle);
+}
+
+.profilePreview .avatar { width: 54px; height: 54px; border-radius: 16px; font-size: 20px; }
+.profilePreview strong,
+.profilePreview span { display: block; }
+.profilePreview strong { font-size: 14px; }
+.profilePreview span { margin-top: 3px; color: var(--up-muted); font-size: 11px; }
+
+.profileField { display: grid; gap: 8px; }
+.profileField > span { color: var(--up-ink-secondary); font-size: 12px; font-weight: 620; }
+.profileField > small { color: var(--up-muted-soft); font-size: 10px; line-height: 1.55; }
+.profileField > .profileError { color: var(--up-danger); }
+
+.profileNotice {
+  margin: 0;
+  padding: 11px 13px;
+  border-radius: 9px;
+  color: var(--up-muted);
+  background: var(--up-surface-subtle);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.profileActions { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }
 
 .factorList,
 .sessionList { display: grid; }

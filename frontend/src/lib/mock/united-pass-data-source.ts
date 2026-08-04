@@ -3,6 +3,7 @@ import type { UnitedPassDataSource } from "@/lib/api/united-pass-data-source";
 const currentUser = {
   userId: "usr_01JUP8M8B4Q7R4T6PK1D",
   displayName: "林知行",
+  nickname: "知行",
   email: "zhixing.lin@example.com",
   phoneMasked: "+86 138 **** 5621",
   personas: ["consumer", "employee"],

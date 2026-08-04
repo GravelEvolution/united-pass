@@ -9,6 +9,8 @@ export type EmployeeProfile = {
 export type CurrentUser = {
   userId: string;
   displayName: string;
+  nickname?: string;
+  avatarUrl?: string;
   email: string;
   phoneMasked: string;
   personas: UserPersona[];

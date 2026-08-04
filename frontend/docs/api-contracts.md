@@ -103,6 +103,18 @@
 
 `GET /me` 必须以稳定 `userId` 作为身份主键。`employeeProfile` 可为空；外部用户关联员工档案后仍使用原 `userId`，且保留普通用户能力。
 
+`PATCH /me` 当前页面需要支持以下公开资料字段，未提供的字段保持不变：
+
+```json
+{
+  "displayName": "林知行",
+  "nickname": "知行",
+  "avatarUrl": "https://cdn.example.com/avatars/usr_01JUP8M8B4Q7R4T6PK1D.png"
+}
+```
+
+后端必须限制字段长度、验证 `avatarUrl` 协议与允许的图片来源，并返回更新后的完整账户资料。邮箱、手机号等安全联系方式不得混入此通用资料接口，应使用带验证挑战的独立流程。
+
 ## 管理工作台与权限
 
 | 页面 | 方法与路径 | 权限标识建议 |
