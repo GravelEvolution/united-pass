@@ -27,7 +27,7 @@ describe("OAuth application lifecycle", () => {
 
     expect(result.applicationId).toMatch(/^app_/);
 
-    const apps = await dataSource.getApplications();
+    const apps = (await dataSource.getApplications()).items;
     const found = apps.find((a) => a.applicationId === result.applicationId);
     expect(found).toBeDefined();
     expect(found?.name).toBe("Lifecycle Test App");
@@ -76,7 +76,7 @@ describe("OAuth application lifecycle", () => {
     expect(detail?.clients[0]?.redirectUris).toHaveLength(1);
     expect(detail?.clients[0]?.redirectUris[0]?.uri).toBe("https://example.com/callback");
 
-    const apps = await dataSource.getApplications();
+    const apps = (await dataSource.getApplications()).items;
     const found = apps.find((a) => a.applicationId === app.applicationId);
     expect(found?.clientCount).toBe(1);
   });
@@ -181,7 +181,7 @@ describe("OAuth application lifecycle", () => {
     expect(detail?.audience).toBe("hybrid");
     expect(detail?.ownerName).toBe("New Owner");
 
-    const apps = await dataSource.getApplications();
+    const apps = (await dataSource.getApplications()).items;
     const found = apps.find((a) => a.applicationId === app.applicationId);
     expect(found?.name).toBe("Updated Name");
     expect(found?.audience).toBe("hybrid");
@@ -200,7 +200,7 @@ describe("OAuth application lifecycle", () => {
     let detail = await dataSource.getApplicationDetail(app.applicationId);
     expect(detail?.status).toBe("disabled");
 
-    const apps = await dataSource.getApplications();
+    const apps = (await dataSource.getApplications()).items;
     const found = apps.find((a) => a.applicationId === app.applicationId);
     expect(found?.status).toBe("disabled");
 
@@ -284,7 +284,7 @@ describe("OAuth application lifecycle", () => {
     const detail = await dataSource.getApplicationDetail(app.applicationId);
     expect(detail).toBeNull();
 
-    const apps = await dataSource.getApplications();
+    const apps = (await dataSource.getApplications()).items;
     const found = apps.find((a) => a.applicationId === app.applicationId);
     expect(found).toBeUndefined();
   });
@@ -335,7 +335,7 @@ describe("OAuth application lifecycle", () => {
     expect(detail?.clients[0]?.name).toBe("Web Client");
     expect(detail?.clients[0]?.clientType).toBe("confidential");
 
-    const apps = await dataSource.getApplications();
+    const apps = (await dataSource.getApplications()).items;
     const found = apps.find((a) => a.applicationId === result.applicationId);
     expect(found?.clientCount).toBe(1);
   });

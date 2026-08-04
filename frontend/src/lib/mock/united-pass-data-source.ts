@@ -1,6 +1,8 @@
 import type { UnitedPassDataSource } from "@/lib/api/united-pass-data-source";
 import { SYSTEM_NAME } from "@/lib/branding";
 import type { AuthorizedApplication } from "@/features/account/types";
+import type { CursorPage, PageQuery } from "@/types/pagination";
+import { FULL_PERMISSIONS } from "@/types/permissions";
 import type {
   AllowedScope,
   ApplicationCreateInput,
@@ -136,13 +138,13 @@ const users = [
   { userId: "usr_02F4PXKQ0EZP5F7B9V3C", displayName: "周予安", email: "yuan.zhou@example.com", personaLabel: "员工", status: "active", lastActiveAt: "2026-08-04T04:18:00Z" },
   { userId: "usr_03D1KMM3AGX8G2QW5T9N", displayName: "陈默", email: "mo.chen@example.net", personaLabel: "外部用户", status: "pending", lastActiveAt: "2026-08-02T11:03:00Z" },
   { userId: "usr_04ABT7S6HHQ1N8K2YM0E", displayName: "苏晚", email: "wan.su@example.org", personaLabel: "外部用户", status: "disabled", lastActiveAt: "2026-07-21T08:44:00Z" },
-] satisfies Awaited<ReturnType<UnitedPassDataSource["getUsers"]>>;
+] satisfies Awaited<ReturnType<UnitedPassDataSource["getUsers"]>>["items"];
 
 const employees = [
   { userId: employeeAdminUser.userId, displayName: "林知行", employeeId: "UP-1042", departmentName: "身份平台", title: "产品设计师", status: "active" },
   { userId: "usr_02F4PXKQ0EZP5F7B9V3C", displayName: "周予安", employeeId: "UP-0928", departmentName: "基础架构", title: "高级工程师", status: "active" },
   { userId: "usr_05QG6E8W4NR7Y2Z1PC9S", displayName: "顾言", employeeId: "UP-0815", departmentName: "客户成功", title: "客户成功经理", status: "offboarding" },
-] satisfies Awaited<ReturnType<UnitedPassDataSource["getEmployees"]>>;
+] satisfies Awaited<ReturnType<UnitedPassDataSource["getEmployees"]>>["items"];
 
 const departments = [
   { departmentId: "dep_identity", name: "身份平台", parentName: "产品与体验", memberCount: 18, ownerName: "许清和" },
@@ -161,13 +163,13 @@ const identityProviders = [
     linkedUserCount: 0,
     updatedAt: "2026-08-05T06:20:00Z",
   },
-] satisfies Awaited<ReturnType<UnitedPassDataSource["getIdentityProviders"]>>;
+] satisfies Awaited<ReturnType<UnitedPassDataSource["getIdentityProviders"]>>["items"];
 
 const initialApplications = [
   { applicationId: "app_workspace", name: "United Workspace", audience: "external", ownerName: "协作产品团队", status: "active", clientCount: 1, updatedAt: "2026-08-01T06:10:00Z" },
   { applicationId: "app_mobile", name: "United Mobile", audience: "external", ownerName: "移动端团队", status: "active", clientCount: 1, updatedAt: "2026-07-28T02:32:00Z" },
   { applicationId: "app_legacy", name: "Legacy Reports", audience: "internal", ownerName: "数据团队", status: "disabled", clientCount: 1, updatedAt: "2026-06-16T12:00:00Z" },
-] satisfies Awaited<ReturnType<UnitedPassDataSource["getApplications"]>>;
+] satisfies Awaited<ReturnType<UnitedPassDataSource["getApplications"]>>["items"];
 
 const initialApplicationDetails: Record<string, OAuthApplicationDetail> = {
   app_workspace: {
@@ -312,14 +314,14 @@ const policies = [
   { policyId: "pol_application_manage", name: "应用管理员维护 OAuth 应用", resource: "application:*", version: 7, status: "published", updatedBy: "周予安", updatedAt: "2026-08-03T07:45:00Z" },
   { policyId: "pol_employee_read", name: "部门负责人查看直属员工", resource: "employee:*", version: 3, status: "published", updatedBy: "林知行", updatedAt: "2026-07-30T03:20:00Z" },
   { policyId: "pol_audit_export", name: "安全审计导出限制", resource: "audit:export", version: 1, status: "draft", updatedBy: "程越", updatedAt: "2026-08-04T01:14:00Z" },
-] satisfies Awaited<ReturnType<UnitedPassDataSource["getPolicies"]>>;
+] satisfies Awaited<ReturnType<UnitedPassDataSource["getPolicies"]>>["items"];
 
 const auditEvents = [
   { eventId: "evt_001", eventType: "用户登录", actorName: "林知行", targetLabel: SYSTEM_NAME, occurredAt: "2026-08-04T05:42:00Z", result: "success" },
   { eventId: "evt_002", eventType: "策略发布", actorName: "周予安", targetLabel: "应用管理员维护 OAuth 应用", occurredAt: "2026-08-03T07:45:00Z", result: "success" },
   { eventId: "evt_003", eventType: "管理操作拒绝", actorName: "陈默", targetLabel: "员工目录", occurredAt: "2026-08-03T02:18:00Z", result: "denied" },
   { eventId: "evt_004", eventType: "会话撤销", actorName: "林知行", targetLabel: "Windows 设备", occurredAt: "2026-08-02T10:07:00Z", result: "success" },
-] satisfies Awaited<ReturnType<UnitedPassDataSource["getAuditEvents"]>>;
+] satisfies Awaited<ReturnType<UnitedPassDataSource["getAuditEvents"]>>["items"];
 
 function resolveScopes(scopeIds: string[]): AllowedScope[] {
   const scopeMap = new Map(availableScopes.map((scope) => [scope.scope, scope]));
@@ -342,6 +344,36 @@ function buildRedirectUris(uris: string[], now: string) {
   }));
 }
 
+/**
+ * Wraps an array into a CursorPage for mock list queries.
+ * The mock returns all items in a single page; the real backend will
+ * return actual cursor-paginated results.
+ */
+function toCursorPage<T>(items: T[], query?: PageQuery): CursorPage<T> {
+  let filtered = items;
+  if (query?.query) {
+    const q = query.query.trim().toLocaleLowerCase("zh-CN");
+    if (q) {
+      filtered = items.filter((item) =>
+        JSON.stringify(item).toLocaleLowerCase("zh-CN").includes(q),
+      );
+    }
+  }
+  if (query?.status) {
+    filtered = filtered.filter(
+      (item) =>
+        typeof item === "object" &&
+        item !== null &&
+        "status" in item &&
+        String((item as Record<string, unknown>).status) === query.status,
+    );
+  }
+  return {
+    items: filtered,
+    page: { nextCursor: null, hasMore: false },
+  };
+}
+
 export function createMockUnitedPassDataSource(): UnitedPassDataSource {
   const applications: OAuthApplication[] = structuredClone(initialApplications);
   const applicationDetails: Record<string, OAuthApplicationDetail> = structuredClone(initialApplicationDetails);
@@ -349,6 +381,7 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
 
   return {
     getCurrentUser: () => Promise.resolve(employeeAdminUser),
+    getCurrentPermissions: () => Promise.resolve(FULL_PERMISSIONS),
     getSecurityFactors: () => Promise.resolve(securityFactors),
     getSessions: () => Promise.resolve(sessions),
     getConsentResolution: (requestId: string) => {
@@ -368,11 +401,11 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       ],
       recentEvents: auditEvents.slice(0, 3),
     }),
-    getUsers: () => Promise.resolve(users),
-    getEmployees: () => Promise.resolve(employees),
+    getUsers: (query?: PageQuery) => Promise.resolve(toCursorPage(users, query)),
+    getEmployees: (query?: PageQuery) => Promise.resolve(toCursorPage(employees, query)),
     getDepartments: () => Promise.resolve(departments),
-    getIdentityProviders: () => Promise.resolve(identityProviders),
-    getApplications: () => Promise.resolve(applications),
+    getIdentityProviders: (query?: PageQuery) => Promise.resolve(toCursorPage(identityProviders, query)),
+    getApplications: (query?: PageQuery) => Promise.resolve(toCursorPage(applications, query)),
     getApplicationDetail: (applicationId: string) => {
       const detail = applicationDetails[applicationId];
       return Promise.resolve(detail ?? null);
@@ -677,8 +710,8 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       }
       return Promise.resolve();
     },
-    getPolicies: () => Promise.resolve(policies),
-    getAuditEvents: () => Promise.resolve(auditEvents),
+    getPolicies: (query?: PageQuery) => Promise.resolve(toCursorPage(policies, query)),
+    getAuditEvents: (query?: PageQuery) => Promise.resolve(toCursorPage(auditEvents, query)),
   };
 }
 

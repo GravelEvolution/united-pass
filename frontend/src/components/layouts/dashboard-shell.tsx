@@ -20,6 +20,8 @@ import {
 import { BrandMark } from "@/components/common/brand-mark";
 import { ThemeToggle } from "@/components/common/theme-toggle";
 import type { CurrentUser } from "@/types/identity";
+import type { PermissionCapabilities } from "@/types/permissions";
+import { FULL_PERMISSIONS } from "@/types/permissions";
 import styles from "./dashboard-shell.module.css";
 
 type ShellMode = "account" | "admin";
@@ -27,6 +29,8 @@ type ShellMode = "account" | "admin";
 type DashboardShellProps = {
   mode: ShellMode;
   currentUser: CurrentUser;
+  /** Permission capabilities for filtering admin navigation. Account mode ignores this. */
+  permissions?: PermissionCapabilities;
   children: ReactNode;
 };
 
@@ -34,6 +38,8 @@ type NavigationItem = {
   href: string;
   label: string;
   icon: typeof IconHome;
+  /** Required permission to show this item; undefined means always visible. */
+  requiresPermission?: keyof PermissionCapabilities;
 };
 
 const accountNavigation = [
@@ -45,13 +51,13 @@ const accountNavigation = [
 
 const adminNavigation = [
   { href: "/admin", label: "工作台", icon: IconHome },
-  { href: "/admin/users", label: "用户", icon: IconUser },
-  { href: "/admin/employees", label: "员工", icon: IconUserGroup },
-  { href: "/admin/departments", label: "部门", icon: IconUserGroup },
-  { href: "/admin/providers", label: "Provider", icon: IconGlobe },
-  { href: "/admin/applications", label: "OAuth 应用", icon: IconApps },
-  { href: "/admin/policies", label: "授权策略", icon: IconShield },
-  { href: "/admin/audit", label: "审计事件", icon: IconHistory },
+  { href: "/admin/users", label: "用户", icon: IconUser, requiresPermission: "userRead" as const },
+  { href: "/admin/employees", label: "员工", icon: IconUserGroup, requiresPermission: "employeeManage" as const },
+  { href: "/admin/departments", label: "部门", icon: IconUserGroup, requiresPermission: "departmentManage" as const },
+  { href: "/admin/providers", label: "Provider", icon: IconGlobe, requiresPermission: "providerRead" as const },
+  { href: "/admin/applications", label: "OAuth 应用", icon: IconApps, requiresPermission: "applicationRead" as const },
+  { href: "/admin/policies", label: "授权策略", icon: IconShield, requiresPermission: "policyRead" as const },
+  { href: "/admin/audit", label: "审计事件", icon: IconHistory, requiresPermission: "auditRead" as const },
 ] satisfies NavigationItem[];
 
 function isNavigationActive(pathname: string, href: string): boolean {
@@ -60,10 +66,22 @@ function isNavigationActive(pathname: string, href: string): boolean {
     : pathname.startsWith(href);
 }
 
-export function DashboardShell({ mode, currentUser, children }: DashboardShellProps) {
+function filterByPermissions(
+  items: NavigationItem[],
+  permissions: PermissionCapabilities,
+): NavigationItem[] {
+  return items.filter(
+    (item) => !item.requiresPermission || permissions[item.requiresPermission],
+  );
+}
+
+export function DashboardShell({ mode, currentUser, permissions, children }: DashboardShellProps) {
   const pathname = usePathname();
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const navigation = mode === "account" ? accountNavigation : adminNavigation;
+  const effectivePermissions = permissions ?? FULL_PERMISSIONS;
+  const navigation = mode === "account"
+    ? accountNavigation
+    : filterByPermissions(adminNavigation, effectivePermissions);
   const alternateHref = mode === "account" ? "/admin" : "/account";
   const alternateLabel = mode === "account" ? "进入管理后台" : "查看普通用户示例";
   const canShowAlternateSurface = mode === "admin" || Boolean(currentUser.employeeProfile);

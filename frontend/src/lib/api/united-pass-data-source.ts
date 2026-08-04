@@ -25,6 +25,8 @@ import type {
 import type { ConsentResolution, ConsentDecision } from "@/features/authorization/types";
 import type { AuthorizationPolicy } from "@/features/policies/types";
 import type { CurrentUser } from "@/types/identity";
+import type { CursorPage, PageQuery } from "@/types/pagination";
+import type { PermissionCapabilities } from "@/types/permissions";
 
 export type AdminDashboard = {
   metrics: DashboardMetric[];
@@ -35,24 +37,28 @@ export type AdminDashboard = {
  * Read-only data access for Server Components and pages.
  * Implementations may run on the server (reading cookies, forwarding auth)
  * or in the browser (for client-side mutations that call back to the API).
+ *
+ * List endpoints use cursor pagination (CursorPage<T>) so the backend can
+ * return partial results without the frontend loading all records.
  */
 export interface UnitedPassQueries {
   getCurrentUser(): Promise<CurrentUser>;
+  getCurrentPermissions(): Promise<PermissionCapabilities>;
   getSecurityFactors(): Promise<SecurityFactor[]>;
   getSessions(): Promise<UserSession[]>;
   getConsentResolution(requestId: string): Promise<ConsentResolution>;
   getAuthorizedApplications(): Promise<AuthorizedApplication[]>;
   getAdminDashboard(): Promise<AdminDashboard>;
-  getUsers(): Promise<ManagedUser[]>;
-  getEmployees(): Promise<EmployeeRecord[]>;
+  getUsers(query?: PageQuery): Promise<CursorPage<ManagedUser>>;
+  getEmployees(query?: PageQuery): Promise<CursorPage<EmployeeRecord>>;
   getDepartments(): Promise<DepartmentRecord[]>;
-  getIdentityProviders(): Promise<IdentityProviderRecord[]>;
-  getApplications(): Promise<OAuthApplication[]>;
+  getIdentityProviders(query?: PageQuery): Promise<CursorPage<IdentityProviderRecord>>;
+  getApplications(query?: PageQuery): Promise<CursorPage<OAuthApplication>>;
   getApplicationDetail(applicationId: string): Promise<OAuthApplicationDetail | null>;
   getClientDetail(applicationId: string, clientId: string): Promise<OAuthClient | null>;
   getAvailableScopes(): Promise<AllowedScope[]>;
-  getPolicies(): Promise<AuthorizationPolicy[]>;
-  getAuditEvents(): Promise<AuditEvent[]>;
+  getPolicies(query?: PageQuery): Promise<CursorPage<AuthorizationPolicy>>;
+  getAuditEvents(query?: PageQuery): Promise<CursorPage<AuditEvent>>;
 }
 
 /**
