@@ -27,7 +27,7 @@ import {
   type ApplicationAudience,
   type ClientProfile,
   type ConsentMode,
-  type OAuthClientCreationResult,
+  type ApplicationWithInitialClientResult,
 } from "@/features/applications/types";
 import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
 import { PageHeader } from "@/components/common/page-header";
@@ -85,8 +85,7 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
   const [consentMode, setConsentMode] = useState<ConsentMode>("always");
 
   // results
-  const [applicationId, setApplicationId] = useState<string>();
-  const [clientResult, setClientResult] = useState<OAuthClientCreationResult>();
+  const [creationResult, setCreationResult] = useState<ApplicationWithInitialClientResult>();
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string>();
@@ -130,7 +129,7 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
     );
   }
 
-  async function handleStepOneSubmit(event: FormEvent<HTMLFormElement>) {
+  function handleStepOneSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setFormError(undefined);
 
@@ -144,30 +143,20 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
       return;
     }
 
-    setIsSubmitting(true);
-    try {
-      const result = await mockUnitedPassDataSource.createApplication({
-        name: appName.trim(),
-        description: appDescription.trim(),
-        audience,
-        ownerName: ownerName.trim(),
-      });
-      setApplicationId(result.applicationId);
-      setStep(2);
-      Toast.success({ content: "应用已创建，请继续配置首个客户端。" });
-    } catch {
-      setFormError("创建应用失败，请重试。");
-    } finally {
-      setIsSubmitting(false);
-    }
+    setStep(2);
   }
 
   async function handleStepTwoSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setFormError(undefined);
 
-    if (!applicationId) {
-      setFormError("缺少应用上下文，请返回上一步。");
+    if (appName.trim().length < 2) {
+      setFormError("应用名称至少需要 2 个字符。");
+      return;
+    }
+
+    if (ownerName.trim().length < 2) {
+      setFormError("请填写负责人名称。");
       return;
     }
 
@@ -189,19 +178,26 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
 
     setIsSubmitting(true);
     try {
-      const result = await mockUnitedPassDataSource.createOAuthClient({
-        applicationId,
-        name: clientName.trim(),
-        profile,
-        redirectUris: validRedirectUris,
-        logoutUri: hasUserInteraction ? logoutUri.trim() : "",
-        allowedScopes: effectiveScopes,
-        consentMode: hasUserInteraction ? effectiveConsentMode : "always",
+      const result = await mockUnitedPassDataSource.createApplicationWithInitialClient({
+        application: {
+          name: appName.trim(),
+          description: appDescription.trim(),
+          audience,
+          ownerName: ownerName.trim(),
+        },
+        initialClient: {
+          name: clientName.trim(),
+          profile,
+          redirectUris: validRedirectUris,
+          logoutUri: hasUserInteraction ? logoutUri.trim() : "",
+          allowedScopes: effectiveScopes,
+          consentMode: hasUserInteraction ? effectiveConsentMode : "always",
+        },
       });
-      setClientResult(result);
-      Toast.success({ content: "客户端创建成功。" });
+      setCreationResult(result);
+      Toast.success({ content: "应用与客户端已创建。" });
     } catch {
-      setFormError("创建客户端失败，请重试。");
+      setFormError("创建失败，请重试。");
     } finally {
       setIsSubmitting(false);
     }
@@ -216,8 +212,8 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
     }
   }
 
-  if (clientResult && applicationId) {
-    const clientSecret = clientResult.clientSecret;
+  if (creationResult) {
+    const clientSecret = creationResult.clientSecret;
     return (
       <>
         <PageHeader
@@ -233,19 +229,19 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
 
           <div className={styles.resultField}>
             <span>Application ID</span>
-            <code>{applicationId}</code>
+            <code>{creationResult.applicationId}</code>
           </div>
 
           <div className={styles.resultField}>
             <span>Client ID</span>
             <div className={styles.redirectRow}>
-              <code>{clientResult.clientId}</code>
+              <code>{creationResult.clientId}</code>
               <Button
                 size="small"
                 theme="borderless"
                 icon={<IconCopy />}
                 aria-label="复制 Client ID"
-                onClick={() => copyToClipboard(clientResult.clientId)}
+                onClick={() => copyToClipboard(creationResult.clientId)}
               />
             </div>
           </div>
@@ -278,7 +274,7 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
           )}
 
           <div className={styles.resultActions}>
-            <Link href={`/admin/applications/${applicationId}`}>
+            <Link href={`/admin/applications/${creationResult.applicationId}`}>
               <Button type="primary" theme="solid">查看应用详情</Button>
             </Link>
             <Button theme="outline" onClick={() => router.push("/admin/applications")}>
@@ -371,9 +367,9 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
           )}
 
           <div className={styles.actions}>
-            <Button htmlType="submit" type="primary" theme="solid" size="large" loading={isSubmitting}>
-              创建应用并继续（Mock）
-            </Button>
+            <Button htmlType="submit" type="primary" theme="solid" size="large">
+            继续配置客户端
+          </Button>
             <Link href="/admin/applications">
               <Button size="large" theme="outline">取消</Button>
             </Link>

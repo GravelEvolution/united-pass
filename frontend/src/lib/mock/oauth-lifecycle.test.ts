@@ -293,6 +293,65 @@ describe("OAuth application lifecycle", () => {
       mockUnitedPassDataSource.rotateClientSecret("client_nonexistent"),
     ).rejects.toThrow();
   });
+
+  it("atomically creates an application with an initial OAuth client", async () => {
+    const result = await mockUnitedPassDataSource.createApplicationWithInitialClient({
+      application: {
+        name: "Atomic Test App",
+        description: "Created atomically",
+        audience: "internal",
+        ownerName: "Test Owner",
+      },
+      initialClient: {
+        name: "Web Client",
+        profile: "web_server",
+        redirectUris: ["https://example.com/callback"],
+        logoutUri: "",
+        allowedScopes: ["openid", "profile"],
+        consentMode: "always",
+      },
+    });
+    createdAppIds.push(result.applicationId);
+
+    expect(result.applicationId).toMatch(/^app_/);
+    expect(result.clientId).toMatch(/^we_/);
+    expect(result.clientSecret).toBeDefined();
+
+    const detail = await mockUnitedPassDataSource.getApplicationDetail(result.applicationId);
+    expect(detail).not.toBeNull();
+    expect(detail?.clients).toHaveLength(1);
+    expect(detail?.clients[0]?.name).toBe("Web Client");
+    expect(detail?.clients[0]?.clientType).toBe("confidential");
+
+    const apps = await mockUnitedPassDataSource.getApplications();
+    const found = apps.find((a) => a.applicationId === result.applicationId);
+    expect(found?.clientCount).toBe(1);
+  });
+
+  it("atomically creates with a public client and no secret", async () => {
+    const result = await mockUnitedPassDataSource.createApplicationWithInitialClient({
+      application: {
+        name: "Atomic SPA App",
+        description: "",
+        audience: "external",
+        ownerName: "Owner",
+      },
+      initialClient: {
+        name: "SPA Client",
+        profile: "spa_mobile",
+        redirectUris: ["https://app.example.com/auth"],
+        logoutUri: "",
+        allowedScopes: ["openid"],
+        consentMode: "always",
+      },
+    });
+    createdAppIds.push(result.applicationId);
+
+    expect(result.clientSecret).toBeUndefined();
+
+    const detail = await mockUnitedPassDataSource.getApplicationDetail(result.applicationId);
+    expect(detail?.clients[0]?.clientType).toBe("public");
+  });
 });
 
 describe("consent resolution and decision", () => {

@@ -7,6 +7,8 @@ import type {
   ApplicationCreationResult,
   ApplicationStatus,
   ApplicationUpdateInput,
+  ApplicationWithInitialClientInput,
+  ApplicationWithInitialClientResult,
   OAuthApplication,
   OAuthApplicationDetail,
   OAuthClient,
@@ -442,6 +444,79 @@ export const mockUnitedPassDataSource: UnitedPassDataSource = {
     }
 
     const result: OAuthClientCreationResult = { clientId };
+    if (profileConfig.clientType === "confidential") {
+      result.clientSecret = `sec_${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
+    }
+    return Promise.resolve(result);
+  },
+  createApplicationWithInitialClient: (input: ApplicationWithInitialClientInput): Promise<ApplicationWithInitialClientResult> => {
+    const now = new Date().toISOString();
+    const applicationId = `app_${Math.random().toString(36).slice(2, 10)}`;
+
+    const detail: OAuthApplicationDetail = {
+      applicationId,
+      name: input.application.name,
+      description: input.application.description,
+      logoUrl: null,
+      audience: input.application.audience,
+      ownerId: `owner_${Math.random().toString(36).slice(2, 10)}`,
+      ownerName: input.application.ownerName,
+      status: "active",
+      clients: [],
+      grants: [],
+      auditEntries: [
+        { eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`, eventType: "应用创建", actorName: "林知行", occurredAt: now, result: "success" },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    mutableApplicationDetails[applicationId] = detail;
+
+    const profileConfig = getClientProfileConfig(input.initialClient.profile);
+    const clientId = `${input.initialClient.name.slice(0, 2).toLowerCase()}_${Math.random().toString(36).slice(2, 16)}`;
+
+    const clientSecrets = profileConfig.clientType === "confidential"
+      ? [{ secretId: `sec_${Math.random().toString(36).slice(2, 8)}`, label: "初始密钥", createdAt: now, lastRotatedAt: null }]
+      : [];
+
+    const client: OAuthClient = {
+      clientId,
+      applicationId,
+      name: input.initialClient.name,
+      clientType: profileConfig.clientType,
+      grantTypes: [...profileConfig.grantTypes],
+      tokenEndpointAuthMethod: profileConfig.tokenEndpointAuthMethod,
+      redirectUris: buildRedirectUris(input.initialClient.redirectUris, now),
+      logoutUri: input.initialClient.logoutUri || null,
+      allowedScopes: resolveScopes(input.initialClient.allowedScopes),
+      consentMode: input.initialClient.consentMode,
+      status: "active",
+      clientSecrets,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    detail.clients.push(client);
+    detail.auditEntries.push({
+      eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`,
+      eventType: "OAuth 客户端创建",
+      actorName: "林知行",
+      occurredAt: now,
+      result: "success",
+    });
+
+    mutableApplications.unshift({
+      applicationId,
+      name: input.application.name,
+      audience: input.application.audience,
+      ownerName: input.application.ownerName,
+      status: "active",
+      clientCount: 1,
+      updatedAt: now,
+    });
+
+    const result: ApplicationWithInitialClientResult = { applicationId, clientId };
     if (profileConfig.clientType === "confidential") {
       result.clientSecret = `sec_${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
     }

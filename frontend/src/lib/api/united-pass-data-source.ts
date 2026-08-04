@@ -13,6 +13,8 @@ import type {
   ApplicationCreationResult,
   ApplicationStatus,
   ApplicationUpdateInput,
+  ApplicationWithInitialClientInput,
+  ApplicationWithInitialClientResult,
   OAuthApplication,
   OAuthApplicationDetail,
   OAuthClientCreateInput,
@@ -61,6 +63,7 @@ export interface UnitedPassQueries {
 export interface UnitedPassCommands {
   createApplication(input: ApplicationCreateInput): Promise<ApplicationCreationResult>;
   createOAuthClient(input: OAuthClientCreateInput): Promise<OAuthClientCreationResult>;
+  createApplicationWithInitialClient(input: ApplicationWithInitialClientInput): Promise<ApplicationWithInitialClientResult>;
   decideConsent(requestId: string, decision: ConsentDecision): Promise<{ redirectUrl: string }>;
   revokeGrant(grantId: string): Promise<void>;
   rotateClientSecret(clientId: string): Promise<SecretRotationResult>;

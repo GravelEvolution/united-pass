@@ -129,6 +129,17 @@ export type OAuthClientCreationResult = {
   clientSecret?: string;
 };
 
+export type ApplicationWithInitialClientInput = {
+  application: ApplicationCreateInput;
+  initialClient: Omit<OAuthClientCreateInput, "applicationId">;
+};
+
+export type ApplicationWithInitialClientResult = {
+  applicationId: string;
+  clientId: string;
+  clientSecret?: string;
+};
+
 export type SecretRotationResult = {
   secretId: string;
   clientSecret: string;
