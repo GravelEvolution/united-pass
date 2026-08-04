@@ -1397,6 +1397,21 @@ When a custom theme is requested:
 5. Avoid per-page token overrides.
 6. Test major forms, tables, dialogs, navigation, and status colors.
 
+### Light and Dark Modes
+
+United Pass must support both light and dark color modes across authentication, account, authorization, and administration surfaces.
+
+Follow these rules:
+
+1. Use centralized semantic CSS variables for product colors; do not maintain separate per-page palettes.
+2. Store only the explicit `light` or `dark` preference in browser storage. When no preference exists, follow `prefers-color-scheme`.
+3. Apply the resolved theme before first paint so server-rendered pages do not flash the wrong color mode.
+4. Keep the project theme attribute and Semi Design's `theme-mode` attribute synchronized.
+5. Theme initialization scripts must be static, contain no user-controlled interpolation, and be reviewed again when a Content Security Policy is introduced.
+6. Theme controls must be keyboard accessible, have an accessible name, and communicate through more than color alone.
+7. New components must be reviewed in both modes, including focus states, text contrast, status colors, tables, forms, overlays, empty states, and destructive actions.
+8. Do not use a dark-mode implementation that weakens Server Component boundaries or forces the root layout to become dynamic solely to read a theme cookie.
+
 ### Documentation
 
 When introducing a reusable design pattern, record it in the appropriate project documentation.

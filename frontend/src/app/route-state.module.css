@@ -36,7 +36,7 @@
 .loader {
   width: 34px;
   height: 34px;
-  border: 3px solid #dce5f8;
+  border: 3px solid var(--up-info-line);
   border-top-color: var(--up-brand);
   border-radius: 50%;
   animation: spin 700ms linear infinite;

@@ -27,12 +27,12 @@
   place-items: center;
   border-radius: 16px;
   color: white;
-  background: linear-gradient(145deg, #386dea, #173ea5);
+  background: linear-gradient(145deg, var(--up-brand-gradient-start), var(--up-brand-gradient-end));
 }
 
 .application h1 { margin: 0; font-size: 23px; letter-spacing: -0.025em; }
 .application p { margin: 5px 0 4px; color: var(--up-muted); font-size: 13px; }
-.application span { color: #949baa; font-size: 11px; }
+.application span { color: var(--up-muted-soft); font-size: 11px; }
 
 .identity {
   display: flex;
@@ -41,7 +41,7 @@
   margin-top: 28px;
   padding: 15px;
   border-radius: 12px;
-  background: #f7f8fa;
+  background: var(--up-surface-subtle);
 }
 
 .identity span,
@@ -61,10 +61,10 @@
 .redirectNotice {
   margin: 24px 0 0;
   padding: 12px 14px;
-  border: 1px solid #dce5f9;
+  border: 1px solid var(--up-info-line);
   border-radius: 10px;
-  color: #5c6880;
-  background: #f7f9fe;
+  color: var(--up-muted);
+  background: var(--up-info-surface);
   font-size: 11px;
   line-height: 1.6;
 }

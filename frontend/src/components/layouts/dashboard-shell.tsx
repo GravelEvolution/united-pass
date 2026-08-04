@@ -17,6 +17,7 @@ import {
   IconUserGroup,
 } from "@douyinfe/semi-icons";
 import { BrandMark } from "@/components/common/brand-mark";
+import { ThemeToggle } from "@/components/common/theme-toggle";
 import type { CurrentUser } from "@/types/identity";
 import styles from "./dashboard-shell.module.css";
 
@@ -67,12 +68,15 @@ export function DashboardShell({ mode, currentUser, children }: DashboardShellPr
     <div className={styles.shell}>
       <header className={styles.mobileHeader}>
         <BrandMark />
-        <Button
-          aria-label={isMenuOpen ? "关闭导航" : "打开导航"}
-          theme="borderless"
-          icon={isMenuOpen ? <IconClose /> : <IconMenu />}
-          onClick={() => setIsMenuOpen((open) => !open)}
-        />
+        <div className={styles.mobileActions}>
+          <ThemeToggle />
+          <Button
+            aria-label={isMenuOpen ? "关闭导航" : "打开导航"}
+            theme="borderless"
+            icon={isMenuOpen ? <IconClose /> : <IconMenu />}
+            onClick={() => setIsMenuOpen((open) => !open)}
+          />
+        </div>
       </header>
 
       {isMenuOpen && <button className={styles.backdrop} aria-label="关闭导航" onClick={() => setIsMenuOpen(false)} />}
@@ -81,7 +85,10 @@ export function DashboardShell({ mode, currentUser, children }: DashboardShellPr
         <Link className={styles.brandLink} href={mode === "account" ? "/account" : "/admin"}>
           <BrandMark />
         </Link>
-        <div className={styles.surfaceLabel}>{mode === "account" ? "账户中心" : "管理控制台"}</div>
+        <div className={styles.surfaceRow}>
+          <div className={styles.surfaceLabel}>{mode === "account" ? "账户中心" : "管理控制台"}</div>
+          <ThemeToggle />
+        </div>
         <nav className={styles.navigation} aria-label={mode === "account" ? "账户中心导航" : "管理后台导航"}>
           {navigation.map((navigationItem) => {
             const Icon = navigationItem.icon;

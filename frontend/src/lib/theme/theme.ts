@@ -1,0 +1,37 @@
+export type ColorTheme = "light" | "dark";
+
+export const THEME_STORAGE_KEY = "united-pass-color-theme";
+
+export const THEME_INITIALIZATION_SCRIPT = `
+(function () {
+  var resolvedTheme = "light";
+  try {
+    var storedTheme = localStorage.getItem("${THEME_STORAGE_KEY}");
+    resolvedTheme = storedTheme === "light" || storedTheme === "dark"
+      ? storedTheme
+      : window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  } catch (error) {
+    resolvedTheme = "light";
+  }
+
+  document.documentElement.setAttribute("data-theme", resolvedTheme);
+
+  function synchronizeSemiTheme() {
+    if (!document.body) return false;
+    document.body.setAttribute("theme-mode", resolvedTheme);
+    return true;
+  }
+
+  if (!synchronizeSemiTheme()) {
+    var bodyObserver = new MutationObserver(function () {
+      if (synchronizeSemiTheme()) bodyObserver.disconnect();
+    });
+    bodyObserver.observe(document.documentElement, { childList: true });
+  }
+})();`;
+
+export function applyColorTheme(theme: ColorTheme): void {
+  document.documentElement.setAttribute("data-theme", theme);
+  document.body.setAttribute("theme-mode", theme);
+  localStorage.setItem(THEME_STORAGE_KEY, theme);
+}

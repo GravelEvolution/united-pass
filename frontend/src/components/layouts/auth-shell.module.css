@@ -16,7 +16,7 @@
   background:
     radial-gradient(circle at 85% 15%, rgb(255 255 255 / 18%), transparent 28%),
     radial-gradient(circle at 20% 80%, rgb(116 160 255 / 24%), transparent 28%),
-    linear-gradient(145deg, #eaf1ff 0%, #cddcff 48%, #98b5f6 100%);
+    linear-gradient(145deg, var(--up-panel-start) 0%, var(--up-panel-middle) 48%, var(--up-panel-end) 100%);
 }
 
 .brandPanel::after {
@@ -47,7 +47,7 @@
 
 .brandCopy h1 {
   margin: 0;
-  color: #102758;
+  color: var(--up-panel-ink);
   font-size: clamp(36px, 5.2vw, 64px);
   font-weight: 660;
   line-height: 1.12;
@@ -58,7 +58,7 @@
 .brandCopy > p:last-child {
   max-width: 440px;
   margin: 24px 0 0;
-  color: #40577e;
+  color: var(--up-panel-muted);
   font-size: 16px;
   line-height: 1.8;
 }
@@ -69,7 +69,7 @@
   display: flex;
   align-items: center;
   gap: 9px;
-  color: #385177;
+  color: var(--up-panel-soft);
   font-size: 13px;
 }
 
@@ -83,12 +83,19 @@
 }
 
 .contentPanel {
+  position: relative;
   display: flex;
   min-width: 0;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   padding: 40px 28px 24px;
+}
+
+.themeToggle {
+  position: absolute;
+  top: 28px;
+  right: 28px;
 }
 
 .content {
@@ -102,7 +109,7 @@
 
 .footer {
   margin: 32px 0 0;
-  color: #9097a6;
+  color: var(--up-muted-soft);
   font-size: 12px;
 }
 
@@ -111,4 +118,5 @@
   .brandPanel { display: none; }
   .contentPanel { min-height: 100vh; justify-content: flex-start; }
   .mobileBrand { display: block; width: min(100%, 430px); margin-bottom: 56px; }
+  .themeToggle { top: 20px; right: 20px; }
 }

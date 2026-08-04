@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { BrandMark } from "@/components/common/brand-mark";
+import { ThemeToggle } from "@/components/common/theme-toggle";
 import styles from "./auth-shell.module.css";
 
 type AuthShellProps = {
@@ -23,6 +24,7 @@ export function AuthShell({ children }: AuthShellProps) {
         </div>
       </section>
       <section className={styles.contentPanel}>
+        <ThemeToggle className={styles.themeToggle} />
         <div className={styles.mobileBrand}><BrandMark /></div>
         <div className={styles.content}>{children}</div>
         <p className={styles.footer}>© 2026 United Pass · 隐私 · 服务条款</p>

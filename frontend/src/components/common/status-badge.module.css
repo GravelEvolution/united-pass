@@ -9,8 +9,8 @@
   white-space: nowrap;
 }
 
-.success { color: #08764e; background: #e7f8f1; }
-.warning { color: #9a5b06; background: #fff4dc; }
-.danger { color: #b82e36; background: #ffebed; }
-.neutral { color: #5e6778; background: #eff1f5; }
-.info { color: #2457d6; background: #edf3ff; }
+.success { color: var(--up-status-success-ink); background: var(--up-status-success-bg); }
+.warning { color: var(--up-status-warning-ink); background: var(--up-status-warning-bg); }
+.danger { color: var(--up-status-danger-ink); background: var(--up-status-danger-bg); }
+.neutral { color: var(--up-status-neutral-ink); background: var(--up-status-neutral-bg); }
+.info { color: var(--up-status-info-ink); background: var(--up-status-info-bg); }

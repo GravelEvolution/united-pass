@@ -6,7 +6,7 @@
   border: 1px solid var(--up-line);
   border-radius: var(--up-radius-md);
   background: var(--up-surface);
-  box-shadow: 0 10px 30px rgb(35 55 90 / 4%);
+  box-shadow: var(--up-card-shadow);
 }
 
 .metricCard { padding: 21px; }
@@ -20,23 +20,23 @@
 .dashboardGrid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.8fr); gap: 20px; margin-top: 20px; }
 .card { padding: 24px; }
 .cardHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
-.cardHeading span { color: #929aaa; font-size: 10px; font-weight: 750; letter-spacing: 0.12em; }
+.cardHeading span { color: var(--up-muted-soft); font-size: 10px; font-weight: 750; letter-spacing: 0.12em; }
 .cardHeading h2 { margin: 4px 0 0; font-size: 17px; }
 .cardHeading a { color: var(--up-brand); font-size: 12px; font-weight: 650; }
 
 .eventList { display: grid; }
-.eventRow { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 13px; padding: 15px 0; border-top: 1px solid #edf0f4; }
+.eventRow { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 13px; padding: 15px 0; border-top: 1px solid var(--up-line-soft); }
 .eventRow:first-child { border-top: 0; }
 .eventDot { width: 9px; height: 9px; border-radius: 50%; background: var(--up-success); box-shadow: 0 0 0 5px rgb(22 134 92 / 9%); }
 .eventDot[data-result="denied"] { background: var(--up-danger); box-shadow: 0 0 0 5px rgb(197 59 59 / 9%); }
 .eventRow h3 { margin: 0; font-size: 13px; }
 .eventRow p { margin: 4px 0 0; color: var(--up-muted); font-size: 11px; }
 .eventMeta { display: grid; justify-items: end; gap: 6px; }
-.eventMeta > span { color: #949baa; font-size: 9px; }
+.eventMeta > span { color: var(--up-muted-soft); font-size: 9px; }
 
 .readinessCard ol { display: grid; gap: 13px; margin: 0; padding: 0; list-style: none; }
-.readinessCard li { display: flex; align-items: center; gap: 9px; color: #4d5668; font-size: 12px; }
-.readinessCard > p { margin: 21px 0 0; padding-top: 17px; border-top: 1px solid #edf0f4; color: var(--up-muted); font-size: 11px; line-height: 1.6; }
+.readinessCard li { display: flex; align-items: center; gap: 9px; color: var(--up-ink-secondary); font-size: 12px; }
+.readinessCard > p { margin: 21px 0 0; padding-top: 17px; border-top: 1px solid var(--up-line-soft); color: var(--up-muted); font-size: 11px; line-height: 1.6; }
 .readinessCard code { color: var(--up-brand); }
 
 .directoryCard { overflow: hidden; }
@@ -45,12 +45,12 @@
 .toolbar > span { flex: none; color: var(--up-muted); font-size: 11px; }
 .tableScroll { overflow-x: auto; }
 .tableScroll table { width: 100%; min-width: 820px; border-collapse: collapse; }
-.tableScroll th { padding: 12px 18px; color: #7b8495; background: #f8f9fb; font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-align: left; white-space: nowrap; }
-.tableScroll td { padding: 15px 18px; border-top: 1px solid #edf0f4; color: #4b5568; font-size: 11px; vertical-align: middle; }
+.tableScroll th { padding: 12px 18px; color: var(--up-muted); background: var(--up-table-head); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-align: left; white-space: nowrap; }
+.tableScroll td { padding: 15px 18px; border-top: 1px solid var(--up-line-soft); color: var(--up-ink-secondary); font-size: 11px; vertical-align: middle; }
 .tableScroll td strong,
 .tableScroll td span { display: block; }
 .tableScroll td strong { color: var(--up-ink); font-size: 12px; }
-.tableScroll td span { margin-top: 4px; color: #959caa; font-size: 9px; line-height: 1.45; }
+.tableScroll td span { margin-top: 4px; color: var(--up-muted-soft); font-size: 9px; line-height: 1.45; }
 .tableScroll code { color: var(--up-brand-strong); font-size: 10px; }
 .emptyState { padding: 52px 24px; text-align: center; }
 .emptyState strong { font-size: 14px; }

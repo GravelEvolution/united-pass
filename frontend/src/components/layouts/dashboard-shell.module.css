@@ -13,7 +13,7 @@
   width: 252px;
   flex-direction: column;
   border-right: 1px solid var(--up-line);
-  background: rgb(255 255 255 / 94%);
+  background: var(--up-glass);
   backdrop-filter: blur(20px);
 }
 
@@ -22,12 +22,25 @@
   margin: 28px 28px 26px;
 }
 
+.surfaceRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 18px 12px 28px;
+}
+
 .surfaceLabel {
-  margin: 0 28px 12px;
-  color: #9aa1af;
+  color: var(--up-muted-soft);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.11em;
+}
+
+.mobileActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .navigation {
@@ -44,7 +57,7 @@
   gap: 12px;
   padding: 0 14px;
   border-radius: 10px;
-  color: #5e6778;
+  color: var(--up-muted);
   font-size: 14px;
   font-weight: 520;
   transition: color 160ms ease, background 160ms ease;
@@ -52,7 +65,7 @@
 
 .navigationItem:hover {
   color: var(--up-ink);
-  background: #f5f7fa;
+  background: var(--up-surface-hover);
 }
 
 .navigationItemActive {
@@ -81,7 +94,7 @@
   padding: 12px;
   border: 1px solid var(--up-line);
   border-radius: 12px;
-  background: #fafbfc;
+  background: var(--up-surface-muted);
 }
 
 .profile > div {
@@ -121,7 +134,7 @@
     justify-content: space-between;
     padding: 0 20px;
     border-bottom: 1px solid var(--up-line);
-    background: rgb(255 255 255 / 92%);
+    background: var(--up-glass);
     backdrop-filter: blur(18px);
   }
 
@@ -140,7 +153,7 @@
     inset: 0;
     width: 100%;
     border: 0;
-    background: rgb(17 28 51 / 42%);
+    background: var(--up-overlay);
   }
 
   .main {

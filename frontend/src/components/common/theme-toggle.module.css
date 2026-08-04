@@ -1,0 +1,39 @@
+.toggle {
+  flex: none;
+  border: 1px solid var(--up-line);
+  color: var(--up-ink);
+  background: var(--up-surface-muted);
+}
+
+.icons {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+}
+
+.moon,
+.sun {
+  grid-area: 1 / 1;
+  transition: opacity 160ms ease, transform 180ms ease;
+}
+
+.sun {
+  opacity: 0;
+  transform: rotate(-30deg) scale(0.7);
+}
+
+:global(html[data-theme="dark"]) .moon {
+  opacity: 0;
+  transform: rotate(30deg) scale(0.7);
+}
+
+:global(html[data-theme="dark"]) .sun {
+  opacity: 1;
+  transform: rotate(0) scale(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .moon,
+  .sun { transition: none; }
+}

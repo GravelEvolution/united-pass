@@ -31,6 +31,8 @@ pnpm dev
 
 当前数据来自 `src/lib/mock/united-pass-data-source.ts`，仅用于界面与领域模型验证。登录、授权和管理操作不会调用后端，也不会持久化。
 
+界面支持亮色与暗色模式。首次访问默认跟随系统偏好，用户通过主题按钮选择后会在浏览器本地保存偏好。
+
 - [Mock 数据说明](./docs/mock-data.md)
 - [待接入 API 清单](./docs/api-contracts.md)
 - [ADR-0001：路由、服务端边界与数据源](./docs/adr-0001.md)
