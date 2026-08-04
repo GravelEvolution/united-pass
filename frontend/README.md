@@ -43,6 +43,7 @@ pnpm dev
 - [ADR-0001：路由、服务端边界与数据源](./docs/adr-0001.md)
 - [ADR-0002：Identity Provider 管理边界与飞书规划](./docs/adr-0002.md)
 - [ADR-0003：头像上传校验与安全预览](./docs/adr-0003.md)
+- [ADR-0004：API 客户端、浏览器会话与错误处理边界](./docs/adr-0004.md)
 
 ## 质量检查
 
