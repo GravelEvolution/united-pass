@@ -14,6 +14,8 @@
   overflow: hidden;
   padding: clamp(32px, 5vw, 64px);
   background: #10192a;
+  /* Keep the full brand panel stable while the application web font finishes loading. */
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
 .brandPanel::before {
@@ -116,7 +118,7 @@
   height: 8px;
   border: 2px solid rgb(255 255 255 / 75%);
   border-radius: 50%;
-  background: var(--up-success);
+  background: #3fcf91;
   box-shadow: 0 0 0 4px rgb(22 134 92 / 12%);
 }
 
