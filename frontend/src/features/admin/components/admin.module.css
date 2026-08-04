@@ -44,17 +44,15 @@
 .toolbar :global(.semi-input-wrapper) { width: min(100%, 360px); }
 .toolbar > span { flex: none; color: var(--up-muted); font-size: 11px; }
 .tableScroll { overflow-x: auto; }
-.tableScroll table { width: 100%; min-width: 820px; border-collapse: collapse; }
-.tableScroll th { padding: 12px 18px; color: var(--up-muted); background: var(--up-table-head); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-align: left; white-space: nowrap; }
-.tableScroll td { padding: 15px 18px; border-top: 1px solid var(--up-line-soft); color: var(--up-ink-secondary); font-size: 11px; vertical-align: middle; }
-.tableScroll td strong,
-.tableScroll td span { display: block; }
-.tableScroll td strong { color: var(--up-ink); font-size: 12px; }
-.tableScroll td span { margin-top: 4px; color: var(--up-muted-soft); font-size: 9px; line-height: 1.45; }
-.tableScroll code { color: var(--up-brand-strong); font-size: 10px; }
-.emptyState { padding: 52px 24px; text-align: center; }
-.emptyState strong { font-size: 14px; }
-.emptyState p { margin: 7px 0 0; color: var(--up-muted); font-size: 11px; }
+.directoryTable { min-width: 920px; }
+.primaryCell,
+.primaryCell > strong,
+.primaryCell > span,
+.secondaryCell { display: block; }
+.primaryCell > strong { color: var(--up-ink); font-size: 12px; }
+.primaryCell > span { margin-top: 4px; color: var(--up-muted-soft); font-size: 10px; line-height: 1.45; }
+.secondaryCell { color: var(--up-ink-secondary); font-size: 11px; }
+.secondaryCell code { color: var(--up-brand-strong); font-size: 10px; }
 
 @media (max-width: 1050px) {
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }

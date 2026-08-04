@@ -1,0 +1,78 @@
+"use client";
+
+import type { ColumnProps } from "@douyinfe/semi-ui/lib/es/table";
+import { MockActionButton } from "@/components/common/mock-action-button";
+import { StatusBadge } from "@/components/common/status-badge";
+import type { IdentityProviderRecord } from "@/features/admin/types";
+import { formatSecurityDateTime } from "@/lib/utils/date-time";
+import {
+  createScopedColumn,
+  ManagementDirectory,
+  PrimaryCell,
+  SecondaryCell,
+  type DirectoryCopy,
+} from "../management-directory";
+
+const copy = {
+  eyebrow: "Identity connections",
+  title: "Provider 管理",
+  description: "管理外部身份提供方的接入状态。飞书目前仅记录为未来能力，尚未启用登录。",
+  searchPlaceholder: "搜索 Provider、厂商或接入方式",
+  actionLabel: "新增 Provider",
+} satisfies DirectoryCopy;
+
+function providerStatus(record: IdentityProviderRecord) {
+  if (record.status === "active") return <StatusBadge label="正常" tone="success" />;
+  if (record.status === "disabled") return <StatusBadge label="已停用" tone="danger" />;
+  return <StatusBadge label="规划中" tone="warning" />;
+}
+
+const columns: ColumnProps<IdentityProviderRecord>[] = [
+  createScopedColumn({
+    title: "Provider",
+    dataIndex: "displayName",
+    width: 220,
+    render: (_value: unknown, record: IdentityProviderRecord) => (
+      <PrimaryCell primary={record.displayName} secondary={`${record.providerId} · ${record.vendor}`} />
+    ),
+  }),
+  createScopedColumn({ title: "接入方式", dataIndex: "integrationLabel", width: 230 }),
+  createScopedColumn({
+    title: "状态",
+    dataIndex: "status",
+    width: 110,
+    render: (_value: unknown, record: IdentityProviderRecord) => providerStatus(record),
+  }),
+  createScopedColumn({
+    title: "登录",
+    dataIndex: "loginEnabled",
+    width: 110,
+    render: (_value: unknown, record: IdentityProviderRecord) => (
+      <StatusBadge label={record.loginEnabled ? "已启用" : "未启用"} tone={record.loginEnabled ? "success" : "neutral"} />
+    ),
+  }),
+  createScopedColumn({ title: "已关联用户", dataIndex: "linkedUserCount", width: 120 }),
+  createScopedColumn({
+    title: "最近更新",
+    dataIndex: "updatedAt",
+    width: 190,
+    render: (_value: unknown, record: IdentityProviderRecord) => <SecondaryCell>{formatSecurityDateTime(record.updatedAt)}</SecondaryCell>,
+  }),
+  createScopedColumn({
+    title: "操作",
+    width: 100,
+    render: (_value: unknown, record: IdentityProviderRecord) => <MockActionButton message={`查看 Provider ${record.displayName}`}>查看</MockActionButton>,
+  }),
+];
+
+export function ProvidersTable({ records }: { records: IdentityProviderRecord[] }) {
+  return (
+    <ManagementDirectory
+      columns={columns}
+      copy={copy}
+      getSearchText={(record) => [record.displayName, record.vendor, record.integrationLabel].join(" ")}
+      records={records}
+      rowKey="providerId"
+    />
+  );
+}
