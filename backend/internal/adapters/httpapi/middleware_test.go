@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
+	"github.com/GravelEvolution/united-pass/backend/internal/config"
 )
 
 func TestRequestIDGeneratedWhenAbsent(t *testing.T) {
@@ -78,7 +79,8 @@ func TestRequestIDRegeneratesWhenInvalid(t *testing.T) {
 
 func TestRecoveryReturnsSafeEnvelope(t *testing.T) {
 	logger := newTestLogger()
-	h := Recovery(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	cfg := config.Config{Environment: config.EnvironmentDevelopment}
+	h := Recovery(logger, cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		panic("boom")
 	}))
 
@@ -102,6 +104,192 @@ func TestRecoveryReturnsSafeEnvelope(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "boom") {
 		t.Errorf("response leaked panic detail: %s", rec.Body.String())
+	}
+}
+
+// TestRecoveryAfterPartialWrite verifies that when a handler panics after
+// already writing part of the response, Recovery does NOT overwrite the
+// committed status or body with a 500 envelope. Pretending to change the
+// status after bytes are already sent would corrupt the response.
+func TestRecoveryAfterPartialWrite(t *testing.T) {
+	logger := newTestLogger()
+	cfg := config.Config{Environment: config.EnvironmentDevelopment}
+
+	h := Recovery(logger, cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		panic("late panic")
+	}))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(request.WithID(req.Context(), "req_partial_write_1"))
+	h.ServeHTTP(rec, req)
+
+	// Status should remain 200, not 500 — the response was already committed.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (response was already committed)", rec.Code, http.StatusOK)
+	}
+	// Body should contain the partial content, not the 500 envelope.
+	if !strings.HasPrefix(rec.Body.String(), "partial") {
+		t.Errorf("body was overwritten after commit: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), CodeInternal) {
+		t.Errorf("500 envelope leaked into committed response: %s", rec.Body.String())
+	}
+}
+
+// TestRecoveryProductionRedactsPanic verifies that in production the raw panic
+// value is not logged, because it may contain sensitive data.
+func TestRecoveryProductionRedactsPanic(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	cfg := config.Config{Environment: config.EnvironmentProduction}
+
+	h := Recovery(logger, cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("super_secret_token_value")
+	}))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	h.ServeHTTP(rec, req)
+
+	logOutput := logBuf.String()
+	if strings.Contains(logOutput, "super_secret_token_value") {
+		t.Errorf("production log leaked raw panic value: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "redacted") {
+		t.Errorf("production log should contain 'redacted' for panic value: %s", logOutput)
+	}
+}
+
+// TestRecoveryDevelopmentIncludesPanic verifies that in development the raw
+// panic value IS logged for faster diagnosis.
+func TestRecoveryDevelopmentIncludesPanic(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	cfg := config.Config{Environment: config.EnvironmentDevelopment}
+
+	h := Recovery(logger, cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("diagnostic_value")
+	}))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	h.ServeHTTP(rec, req)
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "diagnostic_value") {
+		t.Errorf("development log should include raw panic value: %s", logOutput)
+	}
+}
+
+// TestStatusRecorderWriteHeaderOnce verifies that only the first WriteHeader
+// call is recorded and forwarded, matching net/http semantics.
+func TestStatusRecorderWriteHeaderOnce(t *testing.T) {
+	inner := httptest.NewRecorder()
+	rec := newStatusRecorder(inner)
+
+	rec.WriteHeader(http.StatusCreated)
+	rec.WriteHeader(http.StatusInternalServerError)
+
+	if rec.status != http.StatusCreated {
+		t.Errorf("recorded status = %d, want %d", rec.status, http.StatusCreated)
+	}
+	if !rec.wroteHeader {
+		t.Error("wroteHeader should be true after WriteHeader")
+	}
+	if inner.Code != http.StatusCreated {
+		t.Errorf("forwarded status = %d, want %d", inner.Code, http.StatusCreated)
+	}
+}
+
+// TestStatusRecorderWriteRecordsDefault200 verifies that calling Write without
+// WriteHeader records the default 200 status, matching net/http behavior.
+func TestStatusRecorderWriteRecordsDefault200(t *testing.T) {
+	inner := httptest.NewRecorder()
+	rec := newStatusRecorder(inner)
+
+	_, _ = rec.Write([]byte("hello"))
+
+	if rec.status != http.StatusOK {
+		t.Errorf("recorded status = %d, want %d", rec.status, http.StatusOK)
+	}
+	if !rec.wroteHeader {
+		t.Error("wroteHeader should be true after Write")
+	}
+}
+
+// TestStatusRecorderUnwrap verifies that Unwrap returns the underlying writer
+// so http.ResponseController can access interfaces like http.Flusher.
+func TestStatusRecorderUnwrap(t *testing.T) {
+	inner := httptest.NewRecorder()
+	rec := newStatusRecorder(inner)
+
+	if rec.Unwrap() != http.ResponseWriter(inner) {
+		t.Error("Unwrap did not return the underlying ResponseWriter")
+	}
+}
+
+// TestAccessLogRecordsDefault200 verifies the access log captures status 200
+// when the handler writes a body without calling WriteHeader.
+func TestAccessLogRecordsDefault200(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	h := AccessLog(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(request.WithID(req.Context(), "req_accesslog_200"))
+	h.ServeHTTP(rec, req)
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "status=200") {
+		t.Errorf("access log should contain status=200: %s", logOutput)
+	}
+}
+
+// TestAccessLogRecordsExplicitStatus verifies the access log captures an
+// explicit status code set by the handler.
+func TestAccessLogRecordsExplicitStatus(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	h := AccessLog(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	h.ServeHTTP(rec, req)
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "status=201") {
+		t.Errorf("access log should contain status=201: %s", logOutput)
+	}
+}
+
+// TestAccessLogRecordsPanicRecoveryStatus verifies that when Recovery (wrapped
+// inside AccessLog) writes a 500 after a panic, the access log records 500.
+func TestAccessLogRecordsPanicRecoveryStatus(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	cfg := config.Config{Environment: config.EnvironmentDevelopment}
+
+	h := AccessLog(logger)(Recovery(logger, cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	})))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	h.ServeHTTP(rec, req)
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "status=500") {
+		t.Errorf("access log should contain status=500 after panic recovery: %s", logOutput)
 	}
 }
 

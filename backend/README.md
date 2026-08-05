@@ -69,16 +69,17 @@ Implemented:
 - `http.Server` with configurable timeouts
 - Chi router with standard `net/http` middleware interfaces
 - Request ID middleware (accepts valid upstream IDs or generates cryptographically random ones)
-- Panic recovery middleware
-- Structured access logging middleware
+- Panic recovery middleware (production-safe: redacts raw panic values, detects committed responses)
+- Structured access logging middleware (captures actual response status including default 200)
 - Security response headers
-- Request body size limit
+- Request body size limit (handlers map `*http.MaxBytesError` to 413)
 - Unified API error envelope matching the frontend contract
 - `GET /healthz` and `GET /readyz` (extensible readiness checks, no dependencies in Phase 0)
 - Graceful shutdown via `SIGINT`/`SIGTERM`
 - ADR-0001 documenting the foundation architecture
-- GitHub Actions CI workflow
-- Tests covering health endpoints, request IDs, error envelope, panic recovery, body limits, config validation and graceful shutdown
+- GitHub Actions CI workflow at repository root `.github/workflows/backend.yml`
+- OpenAPI 3.1 specification for operational endpoints (`openapi/openapi.yaml`)
+- Tests covering health endpoints, request IDs, error envelope, panic recovery (including partial-write and production redaction), body limits, config validation and graceful shutdown
 
 Not yet implemented (later phases):
 
@@ -90,11 +91,16 @@ Not yet implemented (later phases):
 - Feishu Provider synchronization
 - Cerbos policies and audit
 - PostgreSQL persistence and migrations
-- OpenAPI specification
 
 ## Relationship with `../frontend/`
 
 The frontend directory is the frozen source of truth for API contracts, request/response field names, error structures, cursor pagination, permission capabilities, OAuth Application/Client models, cookie and CSRF conventions. The backend implements to that contract.
+
+Contract priority:
+
+1. `backend/openapi/openapi.yaml` — machine-readable contract (authoritative once established)
+2. `../frontend/docs/api-contracts.md` — human-readable detailed contract (Frozen v1)
+3. `../frontend/docs/frontend-freeze-v1.md` — handoff summary (defers to api-contracts.md for paths)
 
 Key references:
 

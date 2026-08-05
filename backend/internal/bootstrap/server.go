@@ -31,7 +31,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) *Server {
 	router.Use(httpapi.MaxBodyBytes(cfg.MaxRequestBodyBytes))
 	router.Use(httpapi.RequestID)
 	router.Use(httpapi.SecurityHeaders)
-	router.Use(httpapi.Recovery(logger))
+	router.Use(httpapi.Recovery(logger, cfg))
 	router.Use(httpapi.AccessLog(logger))
 
 	health := httpapi.NewHealthHandlers()
