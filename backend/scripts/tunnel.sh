@@ -57,12 +57,25 @@ SSH_HOST="${UP_SSH_HOST:-}"
 SSH_PORT="${UP_SSH_PORT:-22}"
 SSH_USER="${UP_SSH_USER:-}"
 SSH_KEY="${UP_SSH_KEY:-${HOME}/.ssh/id_ed25519}"
+SSH_PASSWORD="${UP_SSH_PASSWORD:-}"
 
 # Expand a leading "~/" in the key path; the shell does not expand "~" inside
 # variable values.
 case "${SSH_KEY}" in
   "~/"*) SSH_KEY="${HOME}/${SSH_KEY#\~/}" ;;
 esac
+
+# Password authentication requires sshpass. When UP_SSH_PASSWORD is set,
+# prefer it over key-based auth (the key path may still be a placeholder).
+USE_SSHPASS=0
+if [[ -n "${SSH_PASSWORD}" ]]; then
+  if command -v sshpass >/dev/null 2>&1; then
+    USE_SSHPASS=1
+  else
+    echo "error: UP_SSH_PASSWORD is set but sshpass is not installed (brew install sshpass)" >&2
+    exit 1
+  fi
+fi
 
 LOCAL_PG_PORT="${UP_LOCAL_PG_PORT:-15432}"
 LOCAL_REDIS_PORT="${UP_LOCAL_REDIS_PORT:-16379}"
@@ -84,8 +97,9 @@ require_config() {
     echo "error: SSH tunnel requires UP_SSH_HOST and UP_SSH_USER (set them in .env)" >&2
     exit 1
   fi
-  if [[ ! -f "${SSH_KEY}" ]]; then
-    echo "error: SSH key not found: ${SSH_KEY} (set UP_SSH_KEY)" >&2
+  # Key-based auth requires the key file; password auth via sshpass does not.
+  if [[ "${USE_SSHPASS}" -eq 0 && ! -f "${SSH_KEY}" ]]; then
+    echo "error: SSH key not found: ${SSH_KEY} (set UP_SSH_KEY or UP_SSH_PASSWORD)" >&2
     exit 1
   fi
 }
@@ -134,8 +148,15 @@ start() {
   echo "  postgres 127.0.0.1:${LOCAL_PG_PORT} -> ${REMOTE_DB_BIND}:${REMOTE_PG_PORT}"
   echo "  redis    127.0.0.1:${LOCAL_REDIS_PORT} -> ${REMOTE_REDIS_BIND}:${REMOTE_REDIS_PORT}"
 
-  nohup ssh \
-    -i "${SSH_KEY}" \
+  local ssh_cmd
+  if [[ "${USE_SSHPASS}" -eq 1 ]]; then
+    # Password auth: BatchMode must be off, and the key path is not used.
+    ssh_cmd=(sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=accept-new)
+  else
+    ssh_cmd=(ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o BatchMode=yes)
+  fi
+
+  nohup "${ssh_cmd[@]}" \
     -p "${SSH_PORT}" \
     -N \
     -L "127.0.0.1:${LOCAL_PG_PORT}:${REMOTE_DB_BIND}:${REMOTE_PG_PORT}" \
@@ -145,8 +166,6 @@ start() {
     -o ServerAliveCountMax=3 \
     -o ControlMaster=no \
     -o ConnectTimeout=10 \
-    -o BatchMode=yes \
-    -o IdentitiesOnly=yes \
     "${SSH_USER}@${SSH_HOST}" >"${LOG_FILE}" 2>&1 &
 
   echo $! > "${PID_FILE}"
