@@ -85,15 +85,26 @@ func main() {
 	}
 	defer db.Close()
 
+	// The schema name comes from an environment variable and is interpolated
+	// into SQL below, so it must pass strict identifier validation before it
+	// is used in any statement.
+	if !config.ValidSchemaIdentifier(cfg.Database.Schema) {
+		fmt.Fprintf(os.Stderr, "error: schema %q is not a valid PostgreSQL identifier\n", cfg.Database.Schema)
+		os.Exit(1)
+	}
+
 	// Create the configured schema if it doesn't exist. The migration files
 	// no longer create the schema; the runner is responsible for creating it.
-	if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", cfg.Database.Schema)); err != nil {
+	// pgx.Identifier quoting prevents injection even though the name has
+	// already passed identifier validation.
+	quotedSchema := pgx.Identifier{cfg.Database.Schema}.Sanitize()
+	if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quotedSchema)); err != nil {
 		fmt.Fprintf(os.Stderr, "error creating schema: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Configure goose to use the configured schema for its version table.
-	goose.SetTableName(fmt.Sprintf("%s.goose_db_version", cfg.Database.Schema))
+	goose.SetTableName(pgx.Identifier{cfg.Database.Schema, "goose_db_version"}.Sanitize())
 
 	if err := goose.SetDialect("postgres"); err != nil {
 		fmt.Fprintf(os.Stderr, "error setting dialect: %v\n", err)

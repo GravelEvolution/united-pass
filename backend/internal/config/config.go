@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -323,6 +324,8 @@ func (c Config) Validate() error {
 	if c.Database.URL != "" {
 		if c.Database.Schema == "" {
 			errs = append(errs, errors.New("database schema must not be empty when database URL is set"))
+		} else if !ValidSchemaIdentifier(c.Database.Schema) {
+			errs = append(errs, fmt.Errorf("database schema %q is not a valid PostgreSQL identifier", c.Database.Schema))
 		}
 		if c.Database.MaxConns <= 0 {
 			errs = append(errs, errors.New("database max connections must be positive"))
@@ -345,6 +348,15 @@ func (c Config) Validate() error {
 		}
 		if c.Redis.ConnectTimeout <= 0 {
 			errs = append(errs, errors.New("redis connect timeout must be positive"))
+		}
+	}
+
+	// Integration test validation (when configured).
+	if c.Test.DatabaseURL != "" {
+		if c.Test.DatabaseSchema == "" {
+			errs = append(errs, errors.New("test database schema must not be empty when test database URL is set"))
+		} else if !ValidSchemaIdentifier(c.Test.DatabaseSchema) {
+			errs = append(errs, fmt.Errorf("test database schema %q is not a valid PostgreSQL identifier", c.Test.DatabaseSchema))
 		}
 	}
 
@@ -399,6 +411,20 @@ func (c Config) HasRedis() bool {
 // HasAuthProvider reports whether an authentication provider is configured.
 func (c Config) HasAuthProvider() bool {
 	return c.Auth.Provider != "" && c.Auth.BaseURL != ""
+}
+
+// schemaIdentifierPattern restricts schema names to safe PostgreSQL
+// identifiers: lowercase ASCII letters, digits and underscores, at most 63
+// characters (PostgreSQL's NAMEDATALEN limit). Schema names from environment
+// variables must never be interpolated into SQL without this check.
+var schemaIdentifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+
+// ValidSchemaIdentifier reports whether s is a safe PostgreSQL schema
+// identifier. Schema names are interpolated into SQL (CREATE SCHEMA, goose
+// version table name, cleanup statements), so they must be validated before
+// use and quoted with pgx.Identifier when concatenated into statements.
+func ValidSchemaIdentifier(s string) bool {
+	return schemaIdentifierPattern.MatchString(s)
 }
 
 func parseLogLevel(raw string) (slog.Level, error) {

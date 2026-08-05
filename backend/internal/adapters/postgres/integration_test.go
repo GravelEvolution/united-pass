@@ -42,6 +42,11 @@ func mustLoadTestDBConfig(t *testing.T) (string, string) {
 	if url == "" {
 		t.Skip("UP_TEST_DATABASE_URL not set; skipping PostgreSQL integration tests")
 	}
+	// The schema name is interpolated into SQL below, so it must pass strict
+	// identifier validation before any statement is built.
+	if !config.ValidSchemaIdentifier(schema) {
+		t.Fatalf("test schema %q is not a valid PostgreSQL identifier", schema)
+	}
 	return url, schema
 }
 
@@ -65,12 +70,15 @@ func setupTestDB(t *testing.T) *UserRepository {
 	db := stdlib.OpenDB(*connConfig)
 
 	// Create the test schema if it doesn't exist. The migration no longer
-	// creates the schema; the runner is responsible for creating it.
-	if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", schema)); err != nil {
+	// creates the schema; the runner is responsible for creating it. The
+	// schema has passed identifier validation and is quoted via
+	// pgx.Identifier to prevent injection.
+	quotedSchema := pgx.Identifier{schema}.Sanitize()
+	if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quotedSchema)); err != nil {
 		t.Fatalf("create test schema: %v", err)
 	}
 
-	goose.SetTableName(fmt.Sprintf("%s.goose_db_version", schema))
+	goose.SetTableName(pgx.Identifier{schema, "goose_db_version"}.Sanitize())
 	if err := goose.SetDialect("postgres"); err != nil {
 		t.Fatalf("set dialect: %v", err)
 	}
@@ -80,16 +88,13 @@ func setupTestDB(t *testing.T) *UserRepository {
 		t.Fatalf("apply migrations: %v", err)
 	}
 
-	// Clean up: drop all tables in the test schema and close the DB.
+	// Clean up: drop all tables in the test schema and close the DB. The
+	// connection's search_path is bound to the validated test schema, so
+	// unqualified DROP TABLE resolves there and no schema name needs to be
+	// interpolated.
 	t.Cleanup(func() {
-		_, _ = db.Exec(fmt.Sprintf(
-			`DROP TABLE IF EXISTS %s.user_personas, %s.identity_links, %s.users CASCADE`,
-			schema, schema, schema,
-		))
-		_, _ = db.Exec(fmt.Sprintf(
-			`DROP TABLE IF EXISTS %s.goose_db_version`,
-			schema,
-		))
+		_, _ = db.Exec(`DROP TABLE IF EXISTS user_personas, identity_links, users CASCADE`)
+		_, _ = db.Exec(`DROP TABLE IF EXISTS goose_db_version`)
 		_ = db.Close()
 	})
 

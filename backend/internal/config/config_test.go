@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -146,6 +147,51 @@ func TestLogLevelValue(t *testing.T) {
 	// slog.LevelWarn is a negative value; compare via string to avoid coupling.
 	if level.String() != "WARN" {
 		t.Errorf("LogLevelValue = %q, want WARN", level.String())
+	}
+}
+
+func TestValidSchemaIdentifier(t *testing.T) {
+	valid := []string{
+		"united_pass",
+		"united_pass_test",
+		"a",
+		"_private",
+		"schema_with_123_digits",
+	}
+	for _, s := range valid {
+		if !ValidSchemaIdentifier(s) {
+			t.Errorf("ValidSchemaIdentifier(%q) = false, want true", s)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"UPPER",
+		"with-dash",
+		"with space",
+		"1starts_with_digit",
+		"a; DROP TABLE users",
+		"x." + strings.Repeat("a", 63), // over 63 chars
+		"schema\"quote",
+	}
+	for _, s := range invalid {
+		if ValidSchemaIdentifier(s) {
+			t.Errorf("ValidSchemaIdentifier(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestValidateRejectsInvalidDatabaseSchema(t *testing.T) {
+	cfg := validDevelopmentConfig()
+	cfg.Database = DatabaseConfig{
+		URL:            "postgres://user:pass@host:5432/db?sslmode=disable",
+		Schema:         "bad-schema; DROP TABLE users",
+		MaxConns:       5,
+		MinConns:       1,
+		ConnectTimeout: 10 * time.Second,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate should reject invalid database schema identifier")
 	}
 }
 
