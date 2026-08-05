@@ -197,6 +197,37 @@ func TestValidateRejectsInvalidDatabaseSchema(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidEncryptionKey(t *testing.T) {
+	cases := []struct {
+		name  string
+		key   string
+		keyID string
+	}{
+		{name: "not base64", key: "!!!not-base64!!!", keyID: "v1"},
+		{name: "wrong length", key: "c2hvcnQ=", keyID: "v1"}, // 4 bytes
+		{name: "key id with colon", key: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", keyID: "bad:id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validDevelopmentConfig()
+			cfg.Session.EncryptionKey = tc.key
+			cfg.Session.EncryptionKeyID = tc.keyID
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("Validate should reject invalid session encryption key")
+			}
+		})
+	}
+}
+
+func TestValidateAcceptsValidEncryptionKey(t *testing.T) {
+	cfg := validDevelopmentConfig()
+	cfg.Session.EncryptionKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" // 32 bytes
+	cfg.Session.EncryptionKeyID = "development-v1"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate should accept a valid session encryption key: %v", err)
+	}
+}
+
 func validDevelopmentConfig() Config {
 	return Config{
 		Environment:         EnvironmentDevelopment,

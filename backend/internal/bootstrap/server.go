@@ -80,7 +80,13 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		}
 	}
 
-	// Session service.
+	// Session service. The encryption key is validated up front: an invalid
+	// key must prevent startup (fail closed), not degrade to plaintext.
+	encryptor, err := newSessionEncryptor(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("session encryption key: %w", err)
+	}
+
 	var sessionSvc *session.Service
 	var userChecker httpapi.UserStatusChecker
 	var userReader httpapi.UserReader
@@ -94,7 +100,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		sessionSvc = session.NewService(sessionStore, session.SystemClock{},
 			cfg.Session.TTL, cfg.Session.RememberTTL,
 			cfg.Session.IdleTTL, cfg.Session.TouchInterval,
-			newSessionEncryptor(cfg, logger))
+			encryptor)
 
 		mfaStore = redis.NewMFAStore(redisClient)
 		rateChecker = redis.NewRateLimiter(redisClient)
@@ -112,7 +118,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	// Authenticator selection enforces the production safety boundary: the
 	// development fake must never serve production traffic, and a production
 	// deployment must not start with an unimplemented provider adapter.
-	authenticator, err := buildAuthenticator(cfg, logger)
+	authenticator, err = buildAuthenticator(cfg, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -198,24 +204,20 @@ func buildAuthenticator(cfg config.Config, logger *slog.Logger) (auth.Authentica
 }
 
 // newSessionEncryptor builds the AES-GCM encryptor for provider session
-// references from configuration. It returns nil when no key is configured
-// (tests, or development without provider references); production validation
-// requires UP_SESSION_ENCRYPTION_KEY, and a session with a provider reference
-// is refused at creation time when the encryptor is nil.
-func newSessionEncryptor(cfg config.Config, logger *slog.Logger) session.Encryptor {
+// references from configuration. It returns a nil encryptor (no error) only
+// when no key is configured — the caller guarantees no provider references
+// will be stored, or refuses them at session creation. An invalid key
+// (malformed base64, wrong length) is a bootstrap error: the service must not
+// start with a key that silently cannot encrypt.
+func newSessionEncryptor(cfg config.Config) (session.Encryptor, error) {
 	if cfg.Session.EncryptionKey == "" {
-		if cfg.IsProduction() {
-			logger.Error("production requires UP_SESSION_ENCRYPTION_KEY; provider session references will be refused")
-		}
-		return nil
+		return nil, nil
 	}
 	enc, err := session.NewAESGCMEncryptor(cfg.Session.EncryptionKey, cfg.Session.EncryptionKeyID)
 	if err != nil {
-		logger.Error("session encryption key invalid; provider session references will be refused",
-			"error", err)
-		return nil
+		return nil, err
 	}
-	return enc
+	return enc, nil
 }
 
 // Run starts the HTTP server. It blocks until the server stops accepting

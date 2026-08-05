@@ -4,6 +4,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -282,6 +283,19 @@ func (c Config) Validate() error {
 	// Session validation.
 	if c.Session.TTL <= 0 {
 		errs = append(errs, errors.New("session TTL must be positive"))
+	}
+	if c.Session.EncryptionKey != "" {
+		key, err := base64.StdEncoding.DecodeString(c.Session.EncryptionKey)
+		if err != nil {
+			errs = append(errs, errors.New("session encryption key must be base64-encoded"))
+		} else if len(key) != 32 {
+			errs = append(errs, fmt.Errorf("session encryption key must decode to 32 bytes, got %d", len(key)))
+		}
+		// The ciphertext format is "{keyID}:{payload}"; a ':' in the key ID
+		// would break parsing and could collide with other key IDs.
+		if strings.Contains(c.Session.EncryptionKeyID, ":") {
+			errs = append(errs, errors.New("session encryption key id must not contain ':'"))
+		}
 	}
 	if c.Session.RememberTTL <= 0 {
 		errs = append(errs, errors.New("session remember TTL must be positive"))

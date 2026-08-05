@@ -278,3 +278,31 @@ func TestNewServerAllowsFakeInDevelopment(t *testing.T) {
 		t.Fatal("expected a server in development with fake provider")
 	}
 }
+
+// TestNewServerRejectsInvalidEncryptionKey verifies that a malformed session
+// encryption key prevents startup (fail closed) instead of degrading to
+// plaintext.
+func TestNewServerRejectsInvalidEncryptionKey(t *testing.T) {
+	cfg := testConfig()
+	cfg.Auth.Provider = "fake"
+	cfg.Session.EncryptionKey = "!!!not-base64!!!"
+	cfg.Session.EncryptionKeyID = "v1"
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if _, err := NewServer(cfg, logger); err == nil {
+		t.Fatal("expected error for invalid session encryption key")
+	}
+}
+
+// TestNewServerAcceptsValidEncryptionKeyInDevelopment verifies a well-formed
+// key is accepted and wired into the session service.
+func TestNewServerAcceptsValidEncryptionKeyInDevelopment(t *testing.T) {
+	cfg := testConfig()
+	cfg.Auth.Provider = "fake"
+	cfg.Session.EncryptionKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+	cfg.Session.EncryptionKeyID = "development-v1"
+	srv := newTestServer(t, cfg)
+	if srv == nil {
+		t.Fatal("expected a server with a valid encryption key")
+	}
+}
