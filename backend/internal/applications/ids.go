@@ -26,11 +26,15 @@ type ClientSecretID string
 // ProviderOperationID identifies a recorded provider provisioning operation.
 type ProviderOperationID string
 
+// SecurityEventID identifies a durable audit event ("evt_…").
+type SecurityEventID string
+
 const (
 	applicationIDPrefix       = "app_"
 	oauthClientIDPrefix       = "clt_"
 	clientSecretIDPrefix      = "sec_"
 	providerOperationIDPrefix = "op_"
+	securityEventIDPrefix     = "evt_"
 	idRandomByteLength        = 16 // 128 bits of entropy, matches P1 user IDs
 )
 
@@ -52,6 +56,11 @@ func NewClientSecretID() ClientSecretID {
 // NewProviderOperationID generates a fresh provider operation ID.
 func NewProviderOperationID() ProviderOperationID {
 	return ProviderOperationID(providerOperationIDPrefix + randomHex(idRandomByteLength))
+}
+
+// NewSecurityEventID generates a fresh audit event ID.
+func NewSecurityEventID() SecurityEventID {
+	return SecurityEventID(securityEventIDPrefix + randomHex(idRandomByteLength))
 }
 
 // HasApplicationIDPrefix reports whether s looks like a United Pass

@@ -23,6 +23,9 @@ CREATE TABLE oauth_applications (
     owner_user_id   TEXT        NOT NULL REFERENCES users(id),
     status          TEXT        NOT NULL DEFAULT 'active'
                     CHECK (status IN ('active', 'disabled')),
+    provisioning_status TEXT    NOT NULL DEFAULT 'provisioning'
+                    CHECK (provisioning_status IN
+                           ('provisioning', 'provisioned', 'provisioning_failed')),
     version         INTEGER     NOT NULL DEFAULT 1,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -34,7 +37,7 @@ CREATE UNIQUE INDEX uq_oauth_applications_name_live
 CREATE INDEX idx_oauth_applications_owner ON oauth_applications(owner_user_id);
 CREATE INDEX idx_oauth_applications_list
     ON oauth_applications (updated_at DESC, application_id DESC)
-    WHERE deleted_at IS NULL AND status IS NOT NULL;
+    WHERE deleted_at IS NULL AND provisioning_status = 'provisioned';
 
 -- oauth_clients: OAuth clients nested under an application.
 -- provisioning_status is the internal cross-store consistency state; the

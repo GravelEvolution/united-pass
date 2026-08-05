@@ -61,6 +61,14 @@ func setupTestDB(t *testing.T) *UserRepository {
 // the given size. MaxConns=1 is used to prove the identity linker never holds
 // a transaction connection while querying the pool (no self-deadlock).
 func setupTestDBWithMaxConns(t *testing.T, maxConns int32) *UserRepository {
+	pool := setupTestPool(t, maxConns)
+	return NewUserRepository(pool.PgxPool())
+}
+
+// setupTestPool runs migrations against the test schema and returns a test
+// pool. It registers a cleanup that drops all tables in the test schema —
+// never the development or production schema.
+func setupTestPool(t *testing.T, maxConns int32) *Pool {
 	t.Helper()
 	url, schema := mustLoadTestDBConfig(t)
 
@@ -126,7 +134,7 @@ func setupTestDBWithMaxConns(t *testing.T, maxConns int32) *UserRepository {
 	}
 	t.Cleanup(func() { pool.Close() })
 
-	return NewUserRepository(pool.PgxPool())
+	return pool
 }
 
 // findMigrationsDir locates the migrations directory relative to the test file.

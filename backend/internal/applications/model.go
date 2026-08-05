@@ -33,19 +33,28 @@ const (
 
 // Application is the OAuth application aggregate root. OwnerID is the
 // authoritative ownership reference; OwnerName is derived display text that
-// is never used for authorization decisions (ADR-0004 G1).
+// is never used for authorization decisions (ADR-0004 G1). Provisioning
+// tracks cross-store consistency and is never exposed in API responses.
 type Application struct {
-	ID          ApplicationID
-	Name        string
-	Description string
-	LogoURL     string
-	Audience    ApplicationAudience
-	OwnerID     identity.UserID
-	OwnerName   string
-	Status      Status
-	Version     int
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID           ApplicationID
+	Name         string
+	Description  string
+	LogoURL      string
+	Audience     ApplicationAudience
+	OwnerID      identity.UserID
+	OwnerName    string
+	Status       Status
+	Provisioning ProvisioningStatus
+	Version      int
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// ApplicationSummary is the list-view projection: the application plus the
+// number of provisioned, live clients it owns.
+type ApplicationSummary struct {
+	Application
+	ClientCount int
 }
 
 // OAuthClient is an OAuth client belonging to an application. Provider
@@ -66,10 +75,13 @@ type OAuthClient struct {
 	Provider              string
 	ProviderProjectID     string
 	ProviderApplicationID string
+	ProviderClientID      string
 	Provisioning          ProvisioningStatus
-	Version               int
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
+	// SecretRecords is secret metadata only; never secret values.
+	SecretRecords []ClientSecretRecord
+	Version       int
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // RedirectURI is a registered redirect URI, stored exactly as submitted.
