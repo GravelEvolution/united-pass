@@ -22,8 +22,10 @@ import (
 // subsequent user read (GetByID, which also loads personas) each use the pool
 // connection directly, so no nested pool query can ever hold two connections.
 // Only first-login creation opens a transaction, and all of its writes share
-// the transaction's connection. A pool with MaxConns=1 therefore cannot
-// deadlock on itself.
+// the transaction's connection. When a concurrent first login wins the unique
+// constraint race, the losing transaction is rolled back explicitly before
+// the winner is re-read through the pool, so a pool with MaxConns=1 (or an
+// exhausted pool) can never deadlock on itself.
 //
 // Concurrency is safe: if two requests race on the same provider subject, the
 // unique constraint on (provider, provider_tenant_id, provider_subject) makes
@@ -80,8 +82,16 @@ func (r *UserRepository) GetOrCreateUserByProviderSubject(
 	}
 	if err := createIdentityLinkTx(ctx, tx, newLink); err != nil {
 		if isUniqueViolation(err) {
-			// A concurrent first login committed first. The deferred rollback
-			// discards our partial user row; return the winner's user.
+			// A concurrent first login committed first. Release our losing
+			// transaction BEFORE reading the winner through the pool: the
+			// transaction still holds a connection, and querying the pool
+			// while it is held can deadlock when MaxConns=1 or the pool is
+			// exhausted. A subsequent deferred Rollback on the closed
+			// transaction is a harmless pgx.ErrTxClosed.
+			if rollbackErr := tx.Rollback(ctx); rollbackErr != nil &&
+				!errors.Is(rollbackErr, pgx.ErrTxClosed) {
+				return identity.User{}, fmt.Errorf("postgres: rollback losing identity link transaction: %w", rollbackErr)
+			}
 			winnerLink, getErr := r.GetIdentityLink(ctx, provider, providerTenantID, info.Subject)
 			if getErr != nil {
 				return identity.User{}, getErr

@@ -54,6 +54,13 @@ func mustLoadTestDBConfig(t *testing.T) (string, string) {
 // UserRepository. It also registers a cleanup that drops all tables in the
 // test schema — never the development or production schema.
 func setupTestDB(t *testing.T) *UserRepository {
+	return setupTestDBWithMaxConns(t, 5)
+}
+
+// setupTestDBWithMaxConns builds a test repository with a connection pool of
+// the given size. MaxConns=1 is used to prove the identity linker never holds
+// a transaction connection while querying the pool (no self-deadlock).
+func setupTestDBWithMaxConns(t *testing.T, maxConns int32) *UserRepository {
 	t.Helper()
 	url, schema := mustLoadTestDBConfig(t)
 
@@ -103,7 +110,7 @@ func setupTestDB(t *testing.T) *UserRepository {
 		Database: config.DatabaseConfig{
 			URL:            url,
 			Schema:         schema,
-			MaxConns:       5,
+			MaxConns:       maxConns,
 			MinConns:       1,
 			ConnectTimeout: 10 * time.Second,
 		},
@@ -436,6 +443,63 @@ func TestIntegration_ConcurrentFirstLoginSingleWinner(t *testing.T) {
 
 	// Exactly one identity link and exactly one user row must exist.
 	loaded, err := repo.GetIdentityLink(ctx, "zitadel", "tenant_concurrent", "zitadel-subject-concurrent")
+	if err != nil {
+		t.Fatalf("get identity link: %v", err)
+	}
+	if loaded.UserID != first {
+		t.Errorf("link user = %q, want %q", loaded.UserID, first)
+	}
+}
+
+// TestIntegration_ConcurrentFirstLoginSingleConnection verifies that
+// concurrent first logins for the same provider subject complete without
+// deadlock on a connection pool of size 1. The losing transaction must
+// release its only connection before re-reading the winner through the pool;
+// otherwise the pool acquisition waits on itself until the context deadline.
+func TestIntegration_ConcurrentFirstLoginSingleConnection(t *testing.T) {
+	repo := setupTestDBWithMaxConns(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	const workers = 6
+	results := make(chan identity.UserID, workers)
+	errs := make(chan error, workers)
+
+	for i := 0; i < workers; i++ {
+		go func() {
+			u, err := repo.GetOrCreateUserByProviderSubject(ctx, "zitadel", "tenant_single_conn", identity.ProviderUserInfo{
+				Subject: "zitadel-subject-single-conn",
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- u.ID
+		}()
+	}
+
+	var got []identity.UserID
+	for i := 0; i < workers; i++ {
+		select {
+		case id := <-results:
+			got = append(got, id)
+		case err := <-errs:
+			t.Fatalf("concurrent linking error: %v", err)
+		case <-ctx.Done():
+			t.Fatalf("pool self-deadlock detected: %v", ctx.Err())
+		}
+	}
+
+	// Every caller must resolve to the same user.
+	first := got[0]
+	for _, id := range got[1:] {
+		if id != first {
+			t.Errorf("different users resolved for the same provider subject: %v", got)
+		}
+	}
+
+	// Exactly one identity link must exist.
+	loaded, err := repo.GetIdentityLink(ctx, "zitadel", "tenant_single_conn", "zitadel-subject-single-conn")
 	if err != nil {
 		t.Fatalf("get identity link: %v", err)
 	}
