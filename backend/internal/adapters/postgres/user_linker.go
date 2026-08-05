@@ -18,46 +18,40 @@ import (
 // a provider subject to the stable United Pass user bound via an identity
 // link, creating the user, the link, and the consumer persona on first login.
 //
-// All writes for a first login happen inside a single transaction: if any step
-// fails, everything is rolled back, so no orphan user rows can be left behind.
+// The existing-link path runs without a transaction: the link lookup and the
+// subsequent user read (GetByID, which also loads personas) each use the pool
+// connection directly, so no nested pool query can ever hold two connections.
+// Only first-login creation opens a transaction, and all of its writes share
+// the transaction's connection. A pool with MaxConns=1 therefore cannot
+// deadlock on itself.
+//
 // Concurrency is safe: if two requests race on the same provider subject, the
 // unique constraint on (provider, provider_tenant_id, provider_subject) makes
-// exactly one transaction commit the link; the loser rolls back and re-reads
-// the winner's user.
+// exactly one transaction commit the link; the loser rolls back (discarding
+// its partial user row) and re-reads the winner's user.
 func (r *UserRepository) GetOrCreateUserByProviderSubject(
 	ctx context.Context,
 	provider string,
 	providerTenantID string,
 	info identity.ProviderUserInfo,
 ) (identity.User, error) {
+	// Fast path: an existing identity link needs no transaction.
+	link, err := r.GetIdentityLink(ctx, provider, providerTenantID, info.Subject)
+	if err == nil {
+		return r.GetByID(ctx, link.UserID)
+	}
+	if !errors.Is(err, identity.ErrUserNotFound) {
+		return identity.User{}, err
+	}
+
+	// First login: create user, link and consumer persona atomically. If any
+	// step fails, everything is rolled back — no orphan user rows.
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return identity.User{}, fmt.Errorf("postgres: begin identity link transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
 
-	// 1. Look for an existing link inside the transaction.
-	link, err := getIdentityLinkTx(ctx, tx, provider, providerTenantID, info.Subject)
-	if err == nil {
-		user, getErr := getByIDTx(ctx, tx, link.UserID)
-		if getErr != nil {
-			return identity.User{}, getErr
-		}
-		personas, getErr := r.GetPersonas(ctx, link.UserID)
-		if getErr != nil {
-			return identity.User{}, getErr
-		}
-		user.Personas = personas
-		if err := tx.Commit(ctx); err != nil {
-			return identity.User{}, fmt.Errorf("postgres: commit identity link transaction: %w", err)
-		}
-		return user, nil
-	}
-	if !errors.Is(err, identity.ErrUserNotFound) {
-		return identity.User{}, err
-	}
-
-	// 2. First login: create user, link and consumer persona atomically.
 	now := time.Now().UTC()
 	userID := identity.UserID(generateUserID())
 	user := identity.User{
@@ -86,9 +80,8 @@ func (r *UserRepository) GetOrCreateUserByProviderSubject(
 	}
 	if err := createIdentityLinkTx(ctx, tx, newLink); err != nil {
 		if isUniqueViolation(err) {
-			// A concurrent first login committed first. Roll back our partial
-			// user row and return the winner's user.
-			_ = tx.Rollback(ctx)
+			// A concurrent first login committed first. The deferred rollback
+			// discards our partial user row; return the winner's user.
 			winnerLink, getErr := r.GetIdentityLink(ctx, provider, providerTenantID, info.Subject)
 			if getErr != nil {
 				return identity.User{}, getErr
@@ -108,34 +101,6 @@ func (r *UserRepository) GetOrCreateUserByProviderSubject(
 		return identity.User{}, fmt.Errorf("postgres: commit identity link transaction: %w", err)
 	}
 	user.Personas = []identity.Persona{identity.PersonaConsumer}
-	return user, nil
-}
-
-// getIdentityLinkTx loads an identity link within an existing transaction.
-func getIdentityLinkTx(ctx context.Context, tx pgx.Tx, provider, providerTenantID, providerSubject string) (identity.IdentityLink, error) {
-	row := tx.QueryRow(ctx,
-		`SELECT `+identityLinkColumns+`
-           FROM identity_links
-          WHERE provider = $1
-            AND provider_tenant_id = $2
-            AND provider_subject = $3`,
-		provider, providerTenantID, providerSubject)
-	link, err := scanIdentityLink(row)
-	if err != nil {
-		return identity.IdentityLink{}, mapUserError(err, "get identity link in transaction")
-	}
-	return link, nil
-}
-
-// getByIDTx loads a user by ID within an existing transaction without
-// personas.
-func getByIDTx(ctx context.Context, tx pgx.Tx, userID identity.UserID) (identity.User, error) {
-	row := tx.QueryRow(ctx,
-		`SELECT `+userColumns+` FROM users WHERE id = $1`, string(userID))
-	user, err := scanUser(row)
-	if err != nil {
-		return identity.User{}, mapUserError(err, "get user by id in transaction")
-	}
 	return user, nil
 }
 

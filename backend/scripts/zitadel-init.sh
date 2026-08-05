@@ -172,11 +172,16 @@ fi
 
 if [[ ! -f "${SA_KEY_FILE}" ]]; then
   log "creating service account key"
-  # AddKey: POST /v2/users/{id}/keys -> {keyId, keyContent}. keyContent IS
-  # the key.json (type/keyId/key/userId) expected by the SDK and
-  # loadServiceAccountKey — save it verbatim.
+  # AddKey: POST /v2/users/{id}/keys -> {keyId, keyContent}. keyContent is a
+  # []byte field, which ProtoJSON serializes as a Base64 string. It encodes
+  # the key.json (type/keyId/key/expirationDate/userId) expected by the SDK
+  # and loadServiceAccountKey, so decode it before saving.
   KEY_RESP="$(api POST "/v2/users/${SA_ID}/keys" '{}')"
-  echo "${KEY_RESP}" | jq -r '.keyContent' > "${SA_KEY_FILE}"
+  echo "${KEY_RESP}" | jq -r '.keyContent | @base64d' > "${SA_KEY_FILE}"
+  chmod 600 "${SA_KEY_FILE}"
+  # Validate the decoded key matches the SDK KeyFile shape.
+  jq -e '.keyId != null and .key != null and .userId != null' "${SA_KEY_FILE}" >/dev/null \
+    || die "generated service account key has an invalid format"
   log "saved service account key to ${SA_KEY_FILE}"
 else
   log "service account key already exists at ${SA_KEY_FILE}"
