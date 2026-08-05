@@ -98,9 +98,14 @@ func setupTestDBWithMaxConns(t *testing.T, maxConns int32) *UserRepository {
 	// Clean up: drop all tables in the test schema and close the DB. The
 	// connection's search_path is bound to the validated test schema, so
 	// unqualified DROP TABLE resolves there and no schema name needs to be
-	// interpolated.
+	// interpolated. Every migration's tables must appear here so a rerun
+	// starts from a clean schema.
 	t.Cleanup(func() {
-		_, _ = db.Exec(`DROP TABLE IF EXISTS user_personas, identity_links, users CASCADE`)
+		_, _ = db.Exec(`DROP TABLE IF EXISTS
+			security_events, provider_reconciliation_jobs, oauth_provider_operations,
+			oauth_client_secret_records, oauth_client_scopes, oauth_client_redirect_uris,
+			oauth_clients, oauth_applications,
+			user_personas, identity_links, users CASCADE`)
 		_, _ = db.Exec(`DROP TABLE IF EXISTS goose_db_version`)
 		_ = db.Close()
 	})
