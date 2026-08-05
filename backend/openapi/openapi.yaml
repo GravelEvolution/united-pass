@@ -1,0 +1,139 @@
+openapi: 3.1.0
+
+info:
+  title: United Pass Backend API
+  description: |
+    United Pass is a unified identity, account, organization, OAuth application,
+    authorization, Provider synchronization and audit platform.
+
+    This OpenAPI specification is the machine-readable contract. The human-readable
+    detail lives in `frontend/docs/api-contracts.md`. Both must stay synchronized.
+
+    Phase 0 scope: operational endpoints only. Business endpoints (session, user,
+    OAuth, consent, etc.) are added incrementally in later phases.
+  version: 0.1.0
+  contact:
+    name: United Pass backend team
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: /api/v1
+    description: Same-origin reverse proxy (production)
+
+tags:
+  - name: Operational
+    description: Health and readiness endpoints
+
+paths:
+  /healthz:
+    get:
+      tags: [Operational]
+      summary: Process liveness
+      description: |
+        Reports that the process is alive and able to respond. This endpoint must
+        not depend on downstream services so it remains useful during outages.
+      operationId: getHealthz
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+              example:
+                status: ok
+
+  /readyz:
+    get:
+      tags: [Operational]
+      summary: Process readiness
+      description: |
+        Reports whether the process is ready to serve traffic. All registered
+        readiness checks must pass. Failures return 503 without leaking
+        dependency names or error text.
+      operationId: getReadyz
+      responses:
+        "200":
+          description: Process is ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+              example:
+                status: ready
+        "503":
+          description: At least one readiness check failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+              example:
+                status: not ready
+
+components:
+  headers:
+    X-Request-ID:
+      description: |
+        The request ID used for log, error and audit correlation. The server
+        accepts a valid upstream ID (alphanumeric, dash, underscore, colon;
+        8-128 chars) or generates a cryptographically random `req_`-prefixed ID.
+      schema:
+        type: string
+        pattern: "^[a-zA-Z0-9_:-]{8,128}$"
+        example: req_0123456789abcdef0123456789abcdef
+
+  schemas:
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, ready, "not ready"]
+          description: Liveness or readiness status
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorBody"
+
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable, machine-readable error code
+          examples:
+            internal: internal.unexpected
+            validation: validation.failed
+            reauth: session.reauthentication_required
+        message:
+          type: string
+          description: Safe, user-displayable message
+          example: "服务暂时无法处理该请求。"
+        requestId:
+          type: string
+          description: Request ID for troubleshooting and audit correlation
+          example: req_0123456789abcdef
+        fieldErrors:
+          type: array
+          description: Field-level validation errors (array format)
+          items:
+            $ref: "#/components/schemas/FieldError"
+
+    FieldError:
+      type: object
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          description: The field that failed validation
+          example: redirectUris[0]
+        message:
+          type: string
+          description: Safe, user-displayable field error message
+          example: "该重定向地址未登记。"
