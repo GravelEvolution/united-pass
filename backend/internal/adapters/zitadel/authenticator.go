@@ -110,7 +110,7 @@ func (a *Authenticator) BeginPasswordAuthentication(
 	ctx context.Context,
 	input auth.PasswordAuthenticationInput,
 ) (auth.AuthenticationResult, error) {
-	create, err := a.sessions.CreateSession(ctx, &sessionv2.CreateSessionRequest{
+	req := &sessionv2.CreateSessionRequest{
 		Checks: &sessionv2.Checks{
 			User: &sessionv2.CheckUser{
 				Search: &sessionv2.CheckUser_LoginName{LoginName: input.Identifier},
@@ -118,12 +118,25 @@ func (a *Authenticator) BeginPasswordAuthentication(
 			Password: &sessionv2.CheckPassword{Password: input.Password},
 		},
 		Challenges: a.requestChallenges(),
-	})
+	}
+	create, err := a.sessions.CreateSession(ctx, req)
 	if err != nil {
-		if status := mapAuthError(err); status != auth.StatusInvalidCredentials {
-			return auth.AuthenticationResult{Status: status}, nil
+		// Passkey challenges are best-effort: when ZITADEL cannot issue one
+		// (no passkeys registered, RP not configured, etc.) it returns an
+		// internal error. Retry without challenges so TOTP-only users can
+		// still authenticate instead of failing the whole login.
+		if a.domain != "" && isPasskeyChallengeFailure(err) {
+			noChallenge := &sessionv2.CreateSessionRequest{
+				Checks: req.Checks,
+			}
+			create, err = a.sessions.CreateSession(ctx, noChallenge)
 		}
-		return auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}, nil
+		if err != nil {
+			if status := mapAuthError(err); status != auth.StatusInvalidCredentials {
+				return auth.AuthenticationResult{Status: status}, nil
+			}
+			return auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}, nil
+		}
 	}
 
 	// Passkey challenge requested and granted by ZITADEL. The WebAuthn

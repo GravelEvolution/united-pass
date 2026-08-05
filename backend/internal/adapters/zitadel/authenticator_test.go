@@ -269,6 +269,80 @@ func TestBeginPasswordAuthenticationPasskeyChallenge(t *testing.T) {
 	}
 }
 
+// TestBeginPasswordAuthenticationPasskeyChallengeFallback verifies that a
+// WebAuthN challenge issuance failure (ZITADEL internal error, e.g. no
+// passkeys registered or RP not configured) does not block password login:
+// the adapter retries without challenges and the user can continue with TOTP.
+func TestBeginPasswordAuthenticationPasskeyChallengeFallback(t *testing.T) {
+	var calls int
+	var retriedWithoutChallenge bool
+	s := &fakeSessionService{
+		createFn: func(in *sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
+			calls++
+			if in.Challenges != nil {
+				// First call requests a WebAuthN challenge and ZITADEL fails.
+				return nil, status.Error(codes.Internal, "WebAuthN begin login failed (WEBAU-4G8sw)")
+			}
+			retriedWithoutChallenge = true
+			return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
+		},
+		getFn: func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error) {
+			return sessionWithUser("user-1"), nil
+		},
+	}
+	u := &fakeUserService{
+		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+			return &userv2.ListAuthenticationMethodTypesResponse{
+				AuthMethodTypes: []userv2.AuthenticationMethodType{
+					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_TOTP,
+				},
+			}, nil
+		},
+	}
+	a := newTestAuth(t, s, u, &fakeLinker{})
+	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+		Identifier: "u@example.com",
+		Password:   "secret",
+	})
+	if err != nil {
+		t.Fatalf("BeginPasswordAuthentication: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("CreateSession calls = %d, want 2 (challenge + fallback)", calls)
+	}
+	if !retriedWithoutChallenge {
+		t.Error("expected a retry without WebAuthN challenges")
+	}
+	if res.Status != auth.StatusMFARequired {
+		t.Fatalf("status = %q, want %q (TOTP fallback)", res.Status, auth.StatusMFARequired)
+	}
+	if len(res.AvailableMethods) != 1 || res.AvailableMethods[0] != auth.MFAMethodTOTP {
+		t.Errorf("available methods = %v, want [totp]", res.AvailableMethods)
+	}
+}
+
+// TestBeginPasswordAuthenticationNoFallbackOnOtherErrors verifies the retry
+// only happens for WebAuthN challenge failures, not for arbitrary internal
+// errors (which must not mask provider problems).
+func TestBeginPasswordAuthenticationNoFallbackOnOtherErrors(t *testing.T) {
+	s := &fakeSessionService{
+		createFn: func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
+			return nil, status.Error(codes.Internal, "some other internal failure")
+		},
+	}
+	a := newTestAuth(t, s, &fakeUserService{}, &fakeLinker{})
+	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+		Identifier: "u@example.com",
+		Password:   "secret",
+	})
+	if err != nil {
+		t.Fatalf("BeginPasswordAuthentication: %v", err)
+	}
+	if res.Status != auth.StatusProviderUnavailable {
+		t.Fatalf("status = %q, want %q", res.Status, auth.StatusProviderUnavailable)
+	}
+}
+
 func TestCompleteMFAPasskeySuccess(t *testing.T) {
 	var received *sessionv2.CheckWebAuthN
 	s := &fakeSessionService{

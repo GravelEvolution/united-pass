@@ -29,9 +29,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/postgres"
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
@@ -75,11 +80,70 @@ func newIntegrationLinker(t *testing.T) (identity.UserLinker, *postgres.Pool, bo
 	cfg.Database.MinConns = 1
 	cfg.Database.ConnectTimeout = 10 * time.Second
 
+	// Re-apply migrations: the PostgreSQL integration suite drops the test
+	// schema tables in its cleanup, so the tables may be missing when this
+	// suite runs afterwards. Migrations are idempotent (goose tracks
+	// versions), so this is safe to run every time.
+	ensureSchemaMigrated(t, dbURL, cfg.Database.Schema)
+
 	pool, err := postgres.NewPool(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("connect test database: %v", err)
 	}
 	return postgres.NewUserRepository(pool.PgxPool()), pool, true
+}
+
+// ensureSchemaMigrated creates the test schema (if absent) and applies all
+// migrations to it. See postgres integration tests for the same pattern.
+func ensureSchemaMigrated(t *testing.T, url, schema string) {
+	t.Helper()
+	if !config.ValidSchemaIdentifier(schema) {
+		t.Fatalf("test schema %q is not a valid PostgreSQL identifier", schema)
+	}
+	connConfig, err := pgx.ParseConfig(url)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	if connConfig.RuntimeParams == nil {
+		connConfig.RuntimeParams = make(map[string]string)
+	}
+	connConfig.RuntimeParams["search_path"] = schema
+
+	db := stdlib.OpenDB(*connConfig)
+	defer db.Close()
+
+	quotedSchema := pgx.Identifier{schema}.Sanitize()
+	if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quotedSchema)); err != nil {
+		t.Fatalf("create test schema: %v", err)
+	}
+
+	goose.SetTableName(pgx.Identifier{schema, "goose_db_version"}.Sanitize())
+	if err := goose.SetDialect("postgres"); err != nil {
+		t.Fatalf("set dialect: %v", err)
+	}
+	migrationsDir := findMigrationsDir(t)
+	if err := goose.UpContext(context.Background(), db, migrationsDir); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+}
+
+// findMigrationsDir locates the repository migrations directory by walking up
+// from the test working directory.
+func findMigrationsDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		candidate := filepath.Join(dir, "migrations")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+		dir = filepath.Dir(dir)
+	}
+	t.Fatal("migrations directory not found")
+	return ""
 }
 
 // recordingLinker records the provider subject and profile info it resolved

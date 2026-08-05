@@ -3,12 +3,28 @@ package zitadel
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// isPasskeyChallengeFailure reports whether a CreateSession error is a
+// WebAuthN challenge issuance failure that should fall back to a
+// challenge-less retry. ZITADEL returns codes.Internal with a WEBAU-* error
+// when it cannot begin a passkey login (no passkeys registered for the user,
+// RP not configured for the requested domain, etc.). Passkey challenges are
+// best-effort: a failure to issue one must not block password + TOTP login.
+func isPasskeyChallengeFailure(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.Internal {
+		return false
+	}
+	msg := st.Message()
+	return strings.Contains(msg, "WebAuthN") || strings.Contains(msg, "WEBAU-")
+}
 
 // mapAuthError converts a ZITADEL gRPC error into an auth status.
 //
@@ -21,16 +37,25 @@ import (
 // maps to provider_unavailable (HTTP 500 by the handler), never to a user
 // error.
 //
-// CALIBRATION (Phase 1.2 sign-off): the exact codes ZITADEL returns for each
-// failure mode (unknown login name, wrong password, locked user, expired
-// session, wrong TOTP, unregistered TOTP, insufficient service-account
-// permission, expired service-account key, rate limiting) must be recorded
-// against a real instance and this mapping adjusted if needed. In particular
-// Unauthenticated is classified as provider_unavailable here because the
-// service account is the only caller identity; if a real instance ever
-// surfaces user-credential failures as Unauthenticated, that case must be
-// re-examined. The E2E test logs the operation and error class without
-// recording passwords, TOTP codes, session tokens, or full error details.
+// CALIBRATION (Phase 1.2 sign-off, ZITADEL v2.71.0, 2026-08-06): real gRPC
+// codes observed against the local instance:
+//
+//	unknown login name            -> NotFound      (QUERY-Dfbg2)
+//	wrong password                -> InvalidArgument (COMMAND-3M0fs)
+//	wrong TOTP code               -> InvalidArgument (EVENT-8isk2)
+//	missing/expired session        -> InvalidArgument (COMMAND-8N9ds) on
+//	                                 SetSession, NotFound (QUERY-SFeaa) on
+//	                                 GetSession
+//	insufficient SA permission     -> NotFound      (AUTHZ-*)
+//	invalid SA key / bad JWT       -> non-gRPC      (client construction)
+//	provider unreachable           -> non-gRPC      (OIDC discovery)
+//
+// Both credential failures (unknown user, wrong password, wrong TOTP) and
+// session-state failures map to the generic invalid_credentials status, which
+// never reveals whether an account exists or is locked. ZITADEL surfaces
+// insufficient service-account permission as NotFound (AUTHZ-*), not
+// PermissionDenied, so it lands in InvalidCredentials rather than
+// ProviderUnavailable; both are opaque to the client and safe.
 func mapAuthError(err error) auth.AuthenticationStatus {
 	if err == nil {
 		return auth.StatusAuthenticated
