@@ -1,11 +1,3 @@
-# Backend Quality Checks workflow.
-#
-# NOTE: GitHub Actions only recognizes workflow files located at the repository
-# root under .github/workflows/. This file is committed under backend/ to stay
-# within the backend workspace. To activate it, copy or symlink it to
-# <repo-root>/.github/workflows/backend.yml (alongside the existing
-# frontend.yml). The working-directory below assumes the file runs from the
-# repository root.
 name: Backend Quality Checks
 
 on:
