@@ -1,0 +1,496 @@
+package httpapi
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/GravelEvolution/united-pass/backend/internal/auth"
+	"github.com/GravelEvolution/united-pass/backend/internal/config"
+	"github.com/GravelEvolution/united-pass/backend/internal/session"
+)
+
+// MFAChallengeStore abstracts MFA challenge persistence for the auth handlers.
+// The Redis adapter satisfies this interface; tests can use an in-memory fake.
+type MFAChallengeStore interface {
+	Create(ctx context.Context, mfaTokenHash string, data auth.MFAChallengeData, ttl time.Duration) error
+	Get(ctx context.Context, mfaTokenHash string) (auth.MFAChallengeData, error)
+	Delete(ctx context.Context, mfaTokenHash string) error
+	IncrementAttempts(ctx context.Context, mfaTokenHash string, maxAttempts int) (int, error)
+}
+
+// RateChecker abstracts rate limiting. The Redis rate limiter satisfies this
+// interface; tests can use a fake that always allows.
+type RateChecker interface {
+	// CheckLogin returns whether the login attempt is allowed and how long to
+	// wait before retrying. When Redis is unavailable, allowed=false (fail
+	// closed).
+	CheckLogin(ctx context.Context, ip string, identifierHash string, limit int, window time.Duration) (allowed bool, retryAfter time.Duration, err error)
+	// CheckMFA returns whether the MFA attempt is allowed.
+	CheckMFA(ctx context.Context, ip string, mfaTokenHash string, limit int, window time.Duration) (allowed bool, retryAfter time.Duration, err error)
+}
+
+// AuthHandlers serves the authentication endpoints: login, MFA, and logout.
+type AuthHandlers struct {
+	authenticator  auth.Authenticator
+	sessionSvc     *session.Service
+	mfaStore       MFAChallengeStore
+	rateChecker    RateChecker
+	userChecker    UserStatusChecker
+	cookieAttrs    SessionCookieAttributes
+	mfaTTL         time.Duration
+	mfaMaxAttempts int
+	loginLimit     int
+	loginWindow    time.Duration
+	mfaLimit       int
+	mfaWindow      time.Duration
+	sessionTTL     time.Duration
+	rememberTTL    time.Duration
+	logger         *slog.Logger
+}
+
+// NewAuthHandlers builds AuthHandlers from the given dependencies and configuration.
+func NewAuthHandlers(
+	authenticator auth.Authenticator,
+	sessionSvc *session.Service,
+	mfaStore MFAChallengeStore,
+	rateChecker RateChecker,
+	userChecker UserStatusChecker,
+	cfg config.Config,
+	logger *slog.Logger,
+) *AuthHandlers {
+	return &AuthHandlers{
+		authenticator:  authenticator,
+		sessionSvc:     sessionSvc,
+		mfaStore:       mfaStore,
+		rateChecker:    rateChecker,
+		userChecker:    userChecker,
+		cookieAttrs:    CookieAttributesFromConfig(cfg.Session),
+		mfaTTL:         cfg.MFA.ChallengeTTL,
+		mfaMaxAttempts: cfg.MFA.MaxAttempts,
+		loginLimit:     cfg.RateLimit.LoginLimit,
+		loginWindow:    cfg.RateLimit.LoginWindow,
+		mfaLimit:       cfg.RateLimit.MFALimit,
+		mfaWindow:      cfg.RateLimit.MFAWindow,
+		sessionTTL:     cfg.Session.TTL,
+		rememberTTL:    cfg.Session.RememberTTL,
+		logger:         logger,
+	}
+}
+
+// loginRequest is the JSON body for POST /api/v1/auth/sessions.
+type loginRequest struct {
+	Identifier      string `json:"identifier"`
+	Password        string `json:"password"`
+	Remember        bool   `json:"remember"`
+	ResumeRequestID string `json:"resumeRequestId"`
+}
+
+// mfaRequiredResponse is the JSON body for the 202 MFA-required response.
+type mfaRequiredResponse struct {
+	Status           string    `json:"status"`
+	MFAToken         string    `json:"mfaToken"`
+	AvailableMethods []string  `json:"availableMethods"`
+	ExpiresAt        time.Time `json:"expiresAt"`
+}
+
+// mfaChallengeRequest is the JSON body for POST /api/v1/auth/sessions/mfa.
+type mfaChallengeRequest struct {
+	MFAToken string `json:"mfaToken"`
+	Method   string `json:"method"`
+	Code     string `json:"code"`
+}
+
+// Login handles POST /api/v1/auth/sessions.
+//
+// Flow:
+//  1. Parse and validate the JSON request body.
+//  2. Check the login rate limit (IP + identifier hash).
+//  3. Call the Authenticator to begin password authentication.
+//  4. If authenticated, create a session and set cookies. Return 204.
+//  5. If MFA required, store an MFA challenge in Redis. Return 202 with mfaToken.
+//  6. On any failure, return a generic error that does not reveal whether the
+//     account exists.
+func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
+	var req loginRequest
+	if err := decodeLoginRequest(w, r, &req); err != nil {
+		return
+	}
+
+	ip := clientIP(r)
+	identifierHash := hashIdentifier(req.Identifier)
+
+	// Rate limit check. Fail closed: if Redis is unavailable, deny the attempt.
+	allowed, retryAfter, err := h.rateChecker.CheckLogin(r.Context(), ip, identifierHash, h.loginLimit, h.loginWindow)
+	if err != nil {
+		h.logger.Error("login rate limit check failed",
+			"requestId", requestID(r),
+			"ip", ip,
+			"error", err,
+		)
+		WriteRateLimited(w, r, int(h.loginWindow.Seconds()))
+		return
+	}
+	if !allowed {
+		WriteRateLimited(w, r, int(retryAfter.Seconds()))
+		return
+	}
+
+	// Begin authentication via the provider adapter.
+	result, err := h.authenticator.BeginPasswordAuthentication(r.Context(), auth.PasswordAuthenticationInput{
+		Identifier:      req.Identifier,
+		Password:        req.Password,
+		ResumeRequestID: req.ResumeRequestID,
+	})
+	if err != nil {
+		h.logger.Error("authentication provider error",
+			"requestId", requestID(r),
+			"error", err,
+		)
+		WriteInternalError(w, r)
+		return
+	}
+
+	switch result.Status {
+	case auth.StatusAuthenticated:
+		h.handleAuthenticated(w, r, result, req.Remember)
+
+	case auth.StatusMFARequired:
+		h.handleMFARequired(w, r, result, req.Remember)
+
+	case auth.StatusInvalidCredentials, auth.StatusLocked:
+		// Generic error: do not reveal whether the account exists or is locked.
+		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "账户名或密码错误。", nil)
+
+	case auth.StatusProviderUnavailable:
+		h.logger.Error("authentication provider unavailable",
+			"requestId", requestID(r),
+		)
+		WriteInternalError(w, r)
+
+	default:
+		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "账户名或密码错误。", nil)
+	}
+}
+
+// handleAuthenticated creates a session and sets cookies for a fully
+// authenticated user.
+func (h *AuthHandlers) handleAuthenticated(w http.ResponseWriter, r *http.Request, result auth.AuthenticationResult, remember bool) {
+	// Verify the user is still permitted to authenticate.
+	if h.userChecker != nil {
+		if err := h.userChecker.CanUseSession(r.Context(), result.UserID); err != nil {
+			writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "账户名或密码错误。", nil)
+			return
+		}
+	}
+
+	sessionResult, err := h.sessionSvc.CreateSession(r.Context(), session.CreateSessionInput{
+		UserID:                   result.UserID,
+		Provider:                 result.Provider,
+		ProviderSessionReference: result.ProviderSessionReference,
+		AuthenticationMethods:    result.AuthenticationMethods,
+		Remember:                 remember,
+		UserAgent:                r.UserAgent(),
+	})
+	if err != nil {
+		h.logger.Error("session creation failed",
+			"requestId", requestID(r),
+			"error", err,
+		)
+		WriteInternalError(w, r)
+		return
+	}
+
+	ttl := h.sessionTTL
+	if remember {
+		ttl = h.rememberTTL
+	}
+	maxAge := sessionCookieMaxAge(ttl)
+
+	SetSessionCookie(w, sessionResult.SessionToken, maxAge, h.cookieAttrs)
+	SetCSRFCookie(w, sessionResult.CSRFToken, maxAge, h.cookieAttrs)
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleMFARequired stores an MFA challenge and returns the mfaToken to the
+// client.
+func (h *AuthHandlers) handleMFARequired(w http.ResponseWriter, r *http.Request, result auth.AuthenticationResult, remember bool) {
+	// The Authenticator provides the MFA token. We store the challenge data
+	// in Redis keyed by the token hash for TTL and attempt tracking.
+	mfaTokenHash := session.HashToken(result.MFAToken)
+	challenge := auth.MFAChallengeData{
+		UserID:                result.UserID,
+		Provider:              result.Provider,
+		AuthenticationMethods: result.AuthenticationMethods,
+		AvailableMethods:      result.AvailableMethods,
+		Attempts:              0,
+		CreatedAt:             time.Now().UTC(),
+	}
+
+	if err := h.mfaStore.Create(r.Context(), mfaTokenHash, challenge, h.mfaTTL); err != nil {
+		h.logger.Error("mfa challenge store failed",
+			"requestId", requestID(r),
+			"error", err,
+		)
+		WriteInternalError(w, r)
+		return
+	}
+
+	methods := make([]string, len(result.AvailableMethods))
+	for i, m := range result.AvailableMethods {
+		methods[i] = string(m)
+	}
+
+	resp := mfaRequiredResponse{
+		Status:           "mfa_required",
+		MFAToken:         result.MFAToken,
+		AvailableMethods: methods,
+		ExpiresAt:        time.Now().UTC().Add(h.mfaTTL),
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// CompleteMFA handles POST /api/v1/auth/sessions/mfa.
+//
+// Flow:
+//  1. Parse and validate the JSON request body.
+//  2. Check the MFA rate limit (IP + MFA token hash).
+//  3. Look up the MFA challenge by token hash.
+//  4. Call the Authenticator to complete MFA.
+//  5. If authenticated, consume the challenge (single-use), create a session,
+//     and return 204.
+//  6. If invalid credentials, increment attempts. Return generic error.
+//  7. If max attempts exceeded, consume the challenge and return 429 or 403.
+func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
+	var req mfaChallengeRequest
+	if err := decodeJSONBody(w, r, &req, "MFA challenge"); err != nil {
+		return
+	}
+
+	if req.MFAToken == "" || req.Method == "" {
+		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "MFA 令牌和验证方式不能为空。", nil)
+		return
+	}
+
+	method := auth.MFAMethod(req.Method)
+	if !isValidMFAMethod(method) {
+		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "不支持的验证方式。", nil)
+		return
+	}
+
+	ip := clientIP(r)
+	mfaTokenHash := session.HashToken(req.MFAToken)
+
+	// Rate limit check.
+	allowed, retryAfter, err := h.rateChecker.CheckMFA(r.Context(), ip, mfaTokenHash, h.mfaLimit, h.mfaWindow)
+	if err != nil {
+		h.logger.Error("mfa rate limit check failed",
+			"requestId", requestID(r),
+			"error", err,
+		)
+		WriteRateLimited(w, r, int(h.mfaWindow.Seconds()))
+		return
+	}
+	if !allowed {
+		WriteRateLimited(w, r, int(retryAfter.Seconds()))
+		return
+	}
+
+	// Look up the challenge.
+	_, err = h.mfaStore.Get(r.Context(), mfaTokenHash)
+	if err != nil {
+		if errors.Is(err, auth.ErrMFAChallengeNotFound) {
+			writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "验证挑战已过期或不存在，请重新登录。", nil)
+			return
+		}
+		h.logger.Error("mfa challenge lookup failed",
+			"requestId", requestID(r),
+			"error", err,
+		)
+		WriteInternalError(w, r)
+		return
+	}
+
+	// Attempt MFA verification via the provider adapter.
+	result, err := h.authenticator.CompleteMFA(r.Context(), auth.MFAChallengeInput{
+		MFAToken: req.MFAToken,
+		Method:   method,
+		Code:     req.Code,
+	})
+	if err != nil {
+		h.logger.Error("mfa completion provider error",
+			"requestId", requestID(r),
+			"error", err,
+		)
+		WriteInternalError(w, r)
+		return
+	}
+
+	switch result.Status {
+	case auth.StatusAuthenticated:
+		// Consume the challenge (single-use).
+		_ = h.mfaStore.Delete(r.Context(), mfaTokenHash)
+
+		// Create session.
+		h.handleAuthenticated(w, r, result, false)
+
+	case auth.StatusInvalidCredentials:
+		// Increment attempts.
+		attempts, incErr := h.mfaStore.IncrementAttempts(r.Context(), mfaTokenHash, h.mfaMaxAttempts)
+		if incErr != nil {
+			if errors.Is(incErr, auth.ErrMFAMaxAttemptsExceeded) {
+				_ = h.mfaStore.Delete(r.Context(), mfaTokenHash)
+				writeError(w, r, http.StatusTooManyRequests, CodeRateLimited, "验证尝试次数过多，请稍后重新登录。", nil)
+				return
+			}
+			h.logger.Error("mfa attempt increment failed",
+				"requestId", requestID(r),
+				"error", incErr,
+			)
+		}
+		remaining := h.mfaMaxAttempts - attempts
+		if remaining < 0 {
+			remaining = 0
+		}
+		msg := fmt.Sprintf("验证码错误。剩余尝试次数 %d 次。", remaining)
+		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, msg, nil)
+
+	case auth.StatusExpired:
+		_ = h.mfaStore.Delete(r.Context(), mfaTokenHash)
+		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "验证挑战已过期，请重新登录。", nil)
+
+	default:
+		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "验证失败，请重试。", nil)
+	}
+}
+
+// Logout handles DELETE /api/v1/auth/session.
+//
+// This endpoint requires a valid session and CSRF token. It:
+//  1. Deletes the local Redis session.
+//  2. Best-effort revokes the provider session.
+//  3. Clears both cookies.
+//  4. Returns 204 No Content.
+//
+// The endpoint is idempotent: if the session is already gone, it still returns
+// 204 and clears the cookies. Provider unavailability does not prevent local
+// session invalidation.
+func (h *AuthHandlers) Logout(w http.ResponseWriter, r *http.Request) {
+	token := ReadSessionCookie(r)
+	record, _ := SessionRecordFromContext(r.Context())
+
+	// Delete the local session.
+	if token != "" {
+		_ = h.sessionSvc.DeleteSession(r.Context(), token)
+	}
+
+	// Best-effort provider session revocation. Failure is logged but does not
+	// prevent local logout.
+	if record.ProviderSessionReference != "" {
+		if err := h.authenticator.RevokeProviderSession(r.Context(), record.ProviderSessionReference); err != nil {
+			h.logger.Warn("provider session revocation failed",
+				"requestId", requestID(r),
+				"error", err,
+			)
+		}
+	}
+
+	ClearSessionCookie(w, h.cookieAttrs)
+	ClearCSRFCookie(w, h.cookieAttrs)
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// decodeLoginRequest parses the login JSON body with strict validation.
+func decodeLoginRequest(w http.ResponseWriter, r *http.Request, req *loginRequest) error {
+	if err := decodeJSONBody(w, r, req, "login"); err != nil {
+		return err
+	}
+	if req.Identifier == "" || req.Password == "" {
+		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "账户名和密码不能为空。", nil)
+		return errors.New("missing fields")
+	}
+	return nil
+}
+
+// decodeJSONBody is the shared JSON decoder for auth endpoints. It rejects
+// unknown fields, oversized bodies, malformed JSON, and multiple JSON objects.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, target any, op string) error {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	if err := dec.Decode(target); err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			WriteRequestBodyTooLarge(w, r)
+			return err
+		}
+		if err.Error() == "EOF" || strings.Contains(err.Error(), "cannot unmarshal") {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "请求体格式不正确。", nil)
+			return err
+		}
+		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "请求体格式不正确。", nil)
+		return err
+	}
+
+	// Reject trailing data (multiple JSON objects).
+	if dec.More() {
+		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "请求体包含多余的数据。", nil)
+		return errors.New("trailing data")
+	}
+
+	return nil
+}
+
+// isValidMFAMethod reports whether the method string is a recognized MFA method.
+func isValidMFAMethod(m auth.MFAMethod) bool {
+	switch m {
+	case auth.MFAMethodTOTP, auth.MFAMethodPasskey, auth.MFAMethodRecovery:
+		return true
+	default:
+		return false
+	}
+}
+
+// hashIdentifier returns the hex-encoded SHA-256 hash of the login identifier.
+// The hash is used as the rate-limit key component so the raw identifier (which
+// may be an email or username) never appears in Redis keys.
+func hashIdentifier(identifier string) string {
+	h := sha256.Sum256([]byte(identifier))
+	return hex.EncodeToString(h[:])
+}
+
+// clientIP extracts the client IP address from the request. It prefers the
+// X-Forwarded-For header (first value) when present, falling back to
+// RemoteAddr. This is sufficient for rate limiting; precise client IP
+// determination is the reverse proxy's responsibility.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if idx := strings.Index(xff, ","); idx > 0 {
+			return strings.TrimSpace(xff[:idx])
+		}
+		return strings.TrimSpace(xff)
+	}
+	// Strip the port from RemoteAddr.
+	addr := r.RemoteAddr
+	if idx := strings.LastIndex(addr, ":"); idx > 0 {
+		return addr[:idx]
+	}
+	return addr
+}
+
+// requestID extracts the request ID from the context for logging.
+func requestID(r *http.Request) string {
+	return r.Header.Get(RequestIDHeader)
+}

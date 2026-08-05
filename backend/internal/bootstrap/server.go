@@ -7,24 +7,35 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi"
+	"github.com/GravelEvolution/united-pass/backend/internal/adapters/postgres"
+	"github.com/GravelEvolution/united-pass/backend/internal/adapters/redis"
+	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
+	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
+	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
 // Server bundles the configured *http.Server with its router so the entry point
 // can start it and shut it down.
 type Server struct {
-	HTTP   *http.Server
-	Router http.Handler
-	logger *slog.Logger
-	config config.Config
+	HTTP        *http.Server
+	Router      http.Handler
+	logger      *slog.Logger
+	config      config.Config
+	pool        *postgres.Pool
+	redisClient *redis.Client
 }
 
 // NewServer constructs the router, applies middleware, mounts routes and
-// returns a Server wrapping a configured *http.Server.
+// returns a Server wrapping a configured *http.Server. It creates
+// infrastructure (PostgreSQL pool, Redis client) based on configuration and
+// wires all Phase 1 handlers.
 func NewServer(cfg config.Config, logger *slog.Logger) *Server {
 	router := chi.NewRouter()
 
@@ -34,15 +45,110 @@ func NewServer(cfg config.Config, logger *slog.Logger) *Server {
 	router.Use(httpapi.AccessLog(logger))
 	router.Use(httpapi.Recovery(logger, cfg))
 
-	health := httpapi.NewHealthHandlers()
+	// Infrastructure — created based on configuration. When database or Redis
+	// URLs are absent (e.g. local dev without remote services), the server
+	// starts but readiness checks will fail for those dependencies.
+	var pool *postgres.Pool
+	var redisClient *redis.Client
+	var readinessCheckers []httpapi.ReadinessChecker
+
+	if cfg.HasDatabase() {
+		var err error
+		pool, err = postgres.NewPool(context.Background(), cfg)
+		if err != nil {
+			logger.Error("failed to create postgres pool", "error", err)
+		} else {
+			readinessCheckers = append(readinessCheckers,
+				NewPostgresReadinessChecker(pool, 3*time.Second))
+		}
+	}
+
+	if cfg.HasRedis() {
+		var err error
+		redisClient, err = redis.NewClient(cfg.Redis)
+		if err != nil {
+			logger.Error("failed to create redis client", "error", err)
+		} else {
+			readinessCheckers = append(readinessCheckers,
+				httpapi.NewRedisChecker(redisClient, 3*time.Second))
+		}
+	}
+
+	// Session service.
+	var sessionSvc *session.Service
+	var userChecker httpapi.UserStatusChecker
+	var userReader httpapi.UserReader
+	var permResolver permissions.Resolver
+	var authenticator auth.Authenticator
+	var mfaStore httpapi.MFAChallengeStore
+	var rateChecker httpapi.RateChecker
+
+	if redisClient != nil {
+		sessionStore := redis.NewSessionStore(redisClient)
+		sessionSvc = session.NewService(sessionStore, session.SystemClock{},
+			cfg.Session.TTL, cfg.Session.RememberTTL,
+			cfg.Session.IdleTTL, cfg.Session.TouchInterval)
+
+		mfaStore = redis.NewMFAStore(redisClient)
+		rateChecker = redis.NewRateLimiter(redisClient)
+	}
+
+	if pool != nil {
+		userRepo := postgres.NewUserRepository(pool.PgxPool())
+		userReader = userRepo
+		userChecker = &userStatusChecker{repo: userRepo}
+	}
+
+	// Permission resolver: fail-closed by default, with optional dev override.
+	permResolver = permissions.NewResolver(cfg)
+
+	// Authenticator: use fake for development when no provider is configured.
+	// In production, missing provider configuration causes startup failure
+	// (enforced by config.Validate).
+	if cfg.HasAuthProvider() {
+		// Real provider adapter would be created here in Phase 6.
+		logger.Warn("authentication provider configured but no adapter implemented; using fake",
+			"provider", cfg.Auth.Provider)
+		authenticator = createDevAuthenticator()
+	} else {
+		logger.Info("no authentication provider configured; using fake authenticator for development")
+		authenticator = createDevAuthenticator()
+	}
+
+	health := httpapi.NewHealthHandlers(readinessCheckers...)
 	router.Get("/healthz", health.Healthz)
 	router.Get("/readyz", health.Readyz)
 
-	// API v1 mount point. Phase 0 registers no business routes; later phases
-	// attach domain handlers here.
+	// API v1 routes.
 	router.Route("/api/v1", func(r chi.Router) {
-		r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-			httpapi.WriteNotFound(w, r)
+		// Auth endpoints (no session required for login/MFA; logout requires
+		// session + CSRF).
+		authHandlers := httpapi.NewAuthHandlers(
+			authenticator, sessionSvc, mfaStore, rateChecker,
+			userChecker, cfg, logger)
+
+		r.Post("/auth/sessions", authHandlers.Login)
+		r.Post("/auth/sessions/mfa", authHandlers.CompleteMFA)
+
+		// Logout requires session and CSRF.
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireCSRF())
+			}
+			r.Delete("/auth/session", authHandlers.Logout)
+		})
+
+		// Account endpoints (require session).
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+			}
+			if userReader != nil && permResolver != nil {
+				accountHandlers := httpapi.NewAccountHandlers(userReader, permResolver)
+				r.Get("/me", accountHandlers.GetCurrentUser)
+				r.Get("/me/permissions", accountHandlers.GetPermissions)
+			}
 		})
 	})
 
@@ -56,10 +162,12 @@ func NewServer(cfg config.Config, logger *slog.Logger) *Server {
 	}
 
 	return &Server{
-		HTTP:   srv,
-		Router: router,
-		logger: logger,
-		config: cfg,
+		HTTP:        srv,
+		Router:      router,
+		logger:      logger,
+		config:      cfg,
+		pool:        pool,
+		redisClient: redisClient,
 	}
 }
 
@@ -78,8 +186,8 @@ func (s *Server) Run() error {
 }
 
 // Shutdown gracefully stops the server, waiting up to the configured
-// ShutdownTimeout for in-flight requests to complete. It logs failures rather
-// than crashing the process.
+// ShutdownTimeout for in-flight requests to complete. It also closes the
+// PostgreSQL pool and Redis client.
 func (s *Server) Shutdown(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(ctx, s.config.ShutdownTimeout)
 	defer cancel()
@@ -87,11 +195,86 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info("http server shutting down", "timeout", s.config.ShutdownTimeout.String())
 	if err := s.HTTP.Shutdown(shutdownCtx); err != nil {
 		s.logger.Error("graceful shutdown failed", "error", err)
-		return err
 	}
+
+	if s.redisClient != nil {
+		if err := s.redisClient.Close(); err != nil {
+			s.logger.Error("redis close failed", "error", err)
+		}
+	}
+
+	if s.pool != nil {
+		s.pool.Close()
+	}
+
 	s.logger.Info("http server stopped")
 	return nil
 }
 
 // Config returns the loaded configuration.
 func (s *Server) Config() config.Config { return s.config }
+
+// userStatusChecker adapts postgres.UserRepository to the UserStatusChecker
+// interface. It checks whether a user exists and is still active.
+type userStatusChecker struct {
+	repo userGetter
+}
+
+type userGetter interface {
+	GetByID(ctx context.Context, userID identity.UserID) (identity.User, error)
+}
+
+func (c *userStatusChecker) CanUseSession(ctx context.Context, userID identity.UserID) error {
+	user, err := c.repo.GetByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if !user.Status.CanAuthenticate() {
+		return identity.ErrUserNotFound
+	}
+	return nil
+}
+
+// postgresReadinessChecker adapts postgres.Pool to the ReadinessChecker
+// interface. postgres.Pool.Ping takes a timeout parameter, so we wrap it.
+type postgresReadinessChecker struct {
+	pool    *postgres.Pool
+	timeout time.Duration
+}
+
+func NewPostgresReadinessChecker(pool *postgres.Pool, timeout time.Duration) *postgresReadinessChecker {
+	return &postgresReadinessChecker{pool: pool, timeout: timeout}
+}
+
+func (c *postgresReadinessChecker) Name() string { return "postgresql" }
+
+func (c *postgresReadinessChecker) Check(ctx context.Context) error {
+	return c.pool.Ping(ctx, c.timeout)
+}
+
+// createDevAuthenticator creates a FakeAuthenticator with a test user for local
+// development. This is NOT for production use.
+func createDevAuthenticator() *auth.FakeAuthenticator {
+	f := auth.NewFakeAuthenticator()
+	f.AddUser(auth.FakeUser{
+		UserID:      identity.UserID("user_01JZDEVTEST001"),
+		Identifier:  "zhixing.lin",
+		Password:    "TestPassword123!",
+		UserStatus:  identity.UserStatusActive,
+		Provider:    "united-pass-fake",
+		SessionRef:  "fake-session-ref-001",
+		RequiresMFA: false,
+	})
+	f.AddUser(auth.FakeUser{
+		UserID:      identity.UserID("user_01JZDEVTEST002"),
+		Identifier:  "mfa.user",
+		Password:    "TestPassword123!",
+		UserStatus:  identity.UserStatusActive,
+		Provider:    "united-pass-fake",
+		SessionRef:  "fake-session-ref-002",
+		RequiresMFA: true,
+		MFAMethods:  []auth.MFAMethod{auth.MFAMethodTOTP, auth.MFAMethodRecovery},
+		MFACode:     "123456",
+	})
+	return f
+}
