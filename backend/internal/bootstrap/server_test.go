@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 )
 
@@ -339,5 +341,93 @@ func TestNewServerAcceptsValidEncryptionKeyInDevelopment(t *testing.T) {
 	srv := newTestServer(t, cfg)
 	if srv == nil {
 		t.Fatal("expected a server with a valid encryption key")
+	}
+}
+
+// TestFakeProviderWithDatabaseServesCurrentUser verifies that when a database
+// is configured but the authenticator is the development fake, a successful
+// login is followed by a 200 from /api/v1/me instead of 401. This is the
+// regression test for the wiring bug found during acceptance testing: the
+// database-backed userChecker and userReader rejected fake users whose IDs
+// do not exist in PostgreSQL.
+//
+// It requires a real PostgreSQL and Redis instance; the test is skipped when
+// UP_TEST_DATABASE_URL or UP_TEST_REDIS_URL is not set. Run with:
+//
+//	UP_TEST_DATABASE_URL=postgres://... UP_TEST_REDIS_URL=redis://... \
+//	go test ./internal/bootstrap/ -run TestFakeProviderWithDatabaseServesCurrentUser
+func TestFakeProviderWithDatabaseServesCurrentUser(t *testing.T) {
+	dbURL := os.Getenv("UP_TEST_DATABASE_URL")
+	redisURL := os.Getenv("UP_TEST_REDIS_URL")
+	if dbURL == "" || redisURL == "" {
+		t.Skip("UP_TEST_DATABASE_URL and UP_TEST_REDIS_URL required for this test")
+	}
+
+	cfg := testConfig()
+	cfg.Auth.Provider = "fake"
+	cfg.Session.EncryptionKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+	cfg.Session.EncryptionKeyID = "test-v1"
+	// testConfig() leaves zero-value durations; supply the same defaults as
+	// config.Load() so sessions do not expire instantly and login is not
+	// rate-limited at limit=0 (count 1 > limit 0).
+	cfg.Session.TTL = 12 * time.Hour
+	cfg.Session.RememberTTL = 720 * time.Hour
+	cfg.Session.IdleTTL = 2 * time.Hour
+	cfg.Session.TouchInterval = 5 * time.Minute
+	cfg.MFA.ChallengeTTL = 5 * time.Minute
+	cfg.MFA.MaxAttempts = 5
+	cfg.RateLimit.LoginLimit = 10
+	cfg.RateLimit.LoginWindow = 15 * time.Minute
+	cfg.RateLimit.MFALimit = 10
+	cfg.RateLimit.MFAWindow = 15 * time.Minute
+	cfg.Database.URL = dbURL
+	cfg.Database.Schema = "united_pass_test"
+	cfg.Database.MaxConns = 5
+	cfg.Database.MinConns = 1
+	cfg.Database.ConnectTimeout = 10 * time.Second
+	cfg.Redis.URL = redisURL
+	cfg.Redis.KeyPrefix = "up:test:bootstrap:"
+	cfg.Redis.PoolSize = 5
+	cfg.Redis.ConnectTimeout = 10 * time.Second
+
+	srv := newTestServer(t, cfg)
+	t.Cleanup(func() {
+		if err := srv.Shutdown(context.Background()); err != nil {
+			t.Logf("shutdown: %v", err)
+		}
+	})
+
+	// 1. Login with the no-MFA dev user.
+	loginBody := strings.NewReader(`{"identifier":"zhixing.lin","password":"TestPassword123!"}`)
+	loginRec := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sessions", loginBody)
+	loginReq.Header.Set("Content-Type", "application/json")
+	srv.Router.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusNoContent {
+		t.Fatalf("login status = %d, want 204; body=%s", loginRec.Code, loginRec.Body.String())
+	}
+
+	var sessionCookie *http.Cookie
+	for _, c := range loginRec.Result().Cookies() {
+		if c.Name == httpapi.SessionCookieName {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("up_session cookie not set after login")
+	}
+
+	// 2. /api/v1/me must return 200 (fake user reader), not 401 (database
+	// lookup failure for the hardcoded fake user ID).
+	meRec := httptest.NewRecorder()
+	meReq := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	meReq.AddCookie(sessionCookie)
+	srv.Router.ServeHTTP(meRec, meReq)
+	if meRec.Code != http.StatusOK {
+		t.Fatalf("/api/v1/me status = %d, want 200; body=%s", meRec.Code, meRec.Body.String())
+	}
+	if !strings.Contains(meRec.Body.String(), `"userId":"user_01JZDEVTEST001"`) {
+		t.Errorf("/api/v1/me body missing expected userId: %s", meRec.Body.String())
 	}
 }

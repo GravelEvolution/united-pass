@@ -128,6 +128,20 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 
+	// When using the fake development authenticator, skip database-backed
+	// user existence checks: fake users have hardcoded IDs that do not exist
+	// in PostgreSQL. Replace the userReader with an in-memory fake that
+	// returns the dev users so /me works.
+	//
+	// The FakeAuthenticator type is only ever constructed in non-production
+	// environments (buildAuthenticator rejects it in production), and the
+	// explicit IsProduction guard below makes that boundary defensive
+	// against future changes.
+	if _, isFake := authenticator.(*auth.FakeAuthenticator); isFake && !cfg.IsProduction() {
+		userChecker = nil
+		userReader = &fakeUserReader{}
+	}
+
 	// Provider readiness: the ZITADEL adapter reports API connectivity.
 	if checker, ok := authenticator.(httpapi.ReadinessChecker); ok {
 		readinessCheckers = append(readinessCheckers, checker)
@@ -377,4 +391,44 @@ func createDevAuthenticator() *auth.FakeAuthenticator {
 		MFACode:     "123456",
 	})
 	return f
+}
+
+// fakeUserReader is an in-memory UserReader used only with the fake
+// authenticator for local development. It returns hardcoded user records for
+// the two dev users so that GET /api/v1/me works without populating
+// PostgreSQL.
+type fakeUserReader struct{}
+
+func (fakeUserReader) GetByID(_ context.Context, userID identity.UserID) (identity.User, error) {
+	now := time.Now().UTC()
+	switch userID {
+	case "user_01JZDEVTEST001":
+		return identity.User{
+			ID:            "user_01JZDEVTEST001",
+			Status:        identity.UserStatusActive,
+			DisplayName:   "Zhixing Lin",
+			Nickname:      "Zhixing",
+			Email:         "zhixing.lin@example.com",
+			EmailVerified: true,
+			Personas:      []identity.Persona{identity.PersonaConsumer},
+			Version:       1,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}, nil
+	case "user_01JZDEVTEST002":
+		return identity.User{
+			ID:            "user_01JZDEVTEST002",
+			Status:        identity.UserStatusActive,
+			DisplayName:   "MFA User",
+			Nickname:      "MFA",
+			Email:         "mfa.user@example.com",
+			EmailVerified: true,
+			Personas:      []identity.Persona{identity.PersonaConsumer},
+			Version:       1,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}, nil
+	default:
+		return identity.User{}, identity.ErrUserNotFound
+	}
 }
