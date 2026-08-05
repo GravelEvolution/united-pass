@@ -100,7 +100,15 @@ func NewAuthenticator(
 //   - provider unreachable         -> StatusProviderUnavailable
 //   - response carries challenges  -> StatusMFARequired (passkey)
 //   - user has TOTP registered     -> StatusMFARequired (totp)
+//   - user has passkey/U2F but no  -> StatusProviderUnavailable (fail closed;
+//     WebAuthN challenge issued      the password-only session is revoked)
+//   - SA permission fault          -> StatusProviderUnavailable
 //   - otherwise                    -> StatusAuthenticated
+//
+// Fail closed: a user whose second factor is a passkey or U2F security key is
+// NEVER downgraded to password-only login when ZITADEL cannot issue a
+// WebAuthN challenge (e.g. RP/origin misconfiguration, WEBAU-* error). The
+// just-created provider session is revoked and no local session is created.
 //
 // The returned ProviderSessionID is the ZITADEL session ID; it is stored
 // server-side in the MFA challenge and never exposed to the browser. The
@@ -155,21 +163,37 @@ func (a *Authenticator) BeginPasswordAuthentication(
 		}, nil
 	}
 
-	// No challenge: check whether the user registered TOTP.
+	// No challenge was issued: either ZITADEL has no passkey registered for
+	// the user or the passkey challenge could not be issued (fallback above).
+	// Decide the second factor from the full registered method set.
 	userID, err := a.sessionUserID(ctx, create.SessionId)
 	if err != nil {
+		if errors.Is(err, errProviderPermission) {
+			return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
+		}
 		return auth.AuthenticationResult{}, err
 	}
-	hasTOTP, err := a.userHasTOTP(ctx, userID)
+	methods, err := a.userAuthMethods(ctx, userID)
 	if err != nil {
+		if errors.Is(err, errProviderPermission) {
+			return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
+		}
 		return auth.AuthenticationResult{}, err
 	}
-	if hasTOTP {
+	if hasMethod(methods, userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_TOTP) {
 		return auth.AuthenticationResult{
 			Status:            auth.StatusMFARequired,
 			ProviderSessionID: create.SessionId,
 			AvailableMethods:  []auth.MFAMethod{auth.MFAMethodTOTP},
 		}, nil
+	}
+	if hasWebAuthnMethod(methods) {
+		// The user's second factor is a passkey (or U2F security key) and no
+		// WebAuthN challenge could be issued. Fail closed: revoke the
+		// password-verified provider session and never create a local session
+		// with only one factor.
+		_, _ = a.sessions.DeleteSession(ctx, &sessionv2.DeleteSessionRequest{SessionId: create.SessionId})
+		return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
 	}
 
 	return a.resolveAuthenticated(ctx, create.SessionId, userID,
@@ -219,6 +243,9 @@ func (a *Authenticator) CompleteMFA(
 
 	userID, err := a.sessionUserID(ctx, input.ProviderSessionID)
 	if err != nil {
+		if errors.Is(err, errProviderPermission) {
+			return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
+		}
 		return auth.AuthenticationResult{}, err
 	}
 	methods := []auth.AuthenticationMethod{auth.MethodPassword}
@@ -285,6 +312,9 @@ func (a *Authenticator) sessionUserID(ctx context.Context, sessionID string) (st
 		SessionId: sessionID,
 	})
 	if err != nil {
+		if isAuthZFailure(err) {
+			return "", errProviderPermission
+		}
 		return "", fmt.Errorf("zitadel: get session: %w", err)
 	}
 	if resp.Session == nil || resp.Session.Factors == nil || resp.Session.Factors.User == nil {
@@ -293,20 +323,40 @@ func (a *Authenticator) sessionUserID(ctx context.Context, sessionID string) (st
 	return resp.Session.Factors.User.Id, nil
 }
 
-// userHasTOTP reports whether the user registered a TOTP authenticator.
-func (a *Authenticator) userHasTOTP(ctx context.Context, userID string) (bool, error) {
+// userAuthMethods returns the full set of authentication methods registered
+// for a user. Service-account permission failures (NotFound + AUTHZ-*) are
+// surfaced as errProviderPermission so the operation boundary can classify
+// them as provider_unavailable instead of a user credential error.
+func (a *Authenticator) userAuthMethods(ctx context.Context, userID string) ([]userv2.AuthenticationMethodType, error) {
 	resp, err := a.users.ListAuthenticationMethodTypes(ctx, &userv2.ListAuthenticationMethodTypesRequest{
 		UserId: userID,
 	})
 	if err != nil {
-		return false, fmt.Errorf("zitadel: list authentication methods: %w", err)
+		if isAuthZFailure(err) {
+			return nil, errProviderPermission
+		}
+		return nil, fmt.Errorf("zitadel: list authentication methods: %w", err)
 	}
-	for _, m := range resp.AuthMethodTypes {
-		if m == userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_TOTP {
-			return true, nil
+	return resp.AuthMethodTypes, nil
+}
+
+// hasMethod reports whether the registered method set contains want.
+func hasMethod(methods []userv2.AuthenticationMethodType, want userv2.AuthenticationMethodType) bool {
+	for _, m := range methods {
+		if m == want {
+			return true
 		}
 	}
-	return false, nil
+	return false
+}
+
+// hasWebAuthnMethod reports whether the user registered a WebAuthN second
+// factor: a passkey (passwordless) or a U2F security key. When no WebAuthN
+// challenge can be issued, such users must fail closed instead of being
+// downgraded to password-only login.
+func hasWebAuthnMethod(methods []userv2.AuthenticationMethodType) bool {
+	return hasMethod(methods, userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSKEY) ||
+		hasMethod(methods, userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_U2F)
 }
 
 // providerProfile fetches the ZITADEL user profile (display name, email,

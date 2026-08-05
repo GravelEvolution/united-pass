@@ -343,6 +343,240 @@ func TestBeginPasswordAuthenticationNoFallbackOnOtherErrors(t *testing.T) {
 	}
 }
 
+// challengeFailureSessionService returns a fake whose CreateSession fails
+// with the real ZITADEL WebAuthN challenge error on the first call and
+// succeeds without challenges on the retry.
+func challengeFailureSessionService(deleted *string, getFn func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error)) *fakeSessionService {
+	return &fakeSessionService{
+		createFn: func(in *sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
+			if in.Challenges != nil {
+				return nil, status.Error(codes.Internal, "WebAuthN begin login failed (WEBAU-4G8sw)")
+			}
+			return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
+		},
+		getFn: func(in *sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error) {
+			if getFn != nil {
+				return getFn(in)
+			}
+			return sessionWithUser("user-1"), nil
+		},
+		delFn: func(in *sessionv2.DeleteSessionRequest) (*sessionv2.DeleteSessionResponse, error) {
+			if deleted != nil {
+				*deleted = in.SessionId
+			}
+			return &sessionv2.DeleteSessionResponse{}, nil
+		},
+	}
+}
+
+// TestBeginPasswordAuthenticationPasskeyChallengeFallbackFailClosed verifies
+// that a passkey-only user (no TOTP) is NEVER downgraded to password-only
+// login when the WebAuthN challenge cannot be issued: the adapter deletes the
+// just-created provider session, returns provider_unavailable and must not
+// create a local user/session.
+func TestBeginPasswordAuthenticationPasskeyChallengeFallbackFailClosed(t *testing.T) {
+	var deleted string
+	s := challengeFailureSessionService(&deleted, nil)
+	u := &fakeUserService{
+		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+			return &userv2.ListAuthenticationMethodTypesResponse{
+				AuthMethodTypes: []userv2.AuthenticationMethodType{
+					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSKEY,
+				},
+			}, nil
+		},
+		getFn: func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error) {
+			return humanProfileResponse("user-1"), nil
+		},
+	}
+	l := &fakeLinker{user: identity.User{ID: "user_local_1", Status: identity.UserStatusActive}}
+	a := newTestAuth(t, s, u, l)
+	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+		Identifier: "u@example.com",
+		Password:   "secret",
+	})
+	if err != nil {
+		t.Fatalf("BeginPasswordAuthentication: %v", err)
+	}
+	if res.Status != auth.StatusProviderUnavailable {
+		t.Fatalf("status = %q, want %q (fail closed)", res.Status, auth.StatusProviderUnavailable)
+	}
+	if deleted != "s1" {
+		t.Errorf("provider session deleted = %q, want s1 (fail closed must revoke the session)", deleted)
+	}
+	if l.calls != 0 {
+		t.Errorf("linker calls = %d, want 0 (no local user/session may be created)", l.calls)
+	}
+	if res.UserID != "" {
+		t.Errorf("user id = %q, want empty", res.UserID)
+	}
+}
+
+// TestBeginPasswordAuthenticationPasskeyChallengeFallbackU2F verifies U2F
+// security keys are treated like passkeys for the fail-closed decision.
+func TestBeginPasswordAuthenticationPasskeyChallengeFallbackU2F(t *testing.T) {
+	var deleted string
+	s := challengeFailureSessionService(&deleted, nil)
+	u := &fakeUserService{
+		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+			return &userv2.ListAuthenticationMethodTypesResponse{
+				AuthMethodTypes: []userv2.AuthenticationMethodType{
+					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_U2F,
+				},
+			}, nil
+		},
+		getFn: func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error) {
+			return humanProfileResponse("user-1"), nil
+		},
+	}
+	l := &fakeLinker{user: identity.User{ID: "user_local_1", Status: identity.UserStatusActive}}
+	a := newTestAuth(t, s, u, l)
+	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+		Identifier: "u@example.com",
+		Password:   "secret",
+	})
+	if err != nil {
+		t.Fatalf("BeginPasswordAuthentication: %v", err)
+	}
+	if res.Status != auth.StatusProviderUnavailable {
+		t.Fatalf("status = %q, want %q (fail closed)", res.Status, auth.StatusProviderUnavailable)
+	}
+	if deleted != "s1" {
+		t.Errorf("provider session deleted = %q, want s1", deleted)
+	}
+	if l.calls != 0 {
+		t.Errorf("linker calls = %d, want 0", l.calls)
+	}
+}
+
+// TestBeginPasswordAuthenticationPasskeyChallengeFallbackPasskeyAndTOTP
+// verifies a user with both passkey and TOTP can fall back to TOTP when the
+// passkey challenge cannot be issued.
+func TestBeginPasswordAuthenticationPasskeyChallengeFallbackPasskeyAndTOTP(t *testing.T) {
+	var deleted string
+	s := challengeFailureSessionService(&deleted, nil)
+	u := &fakeUserService{
+		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+			return &userv2.ListAuthenticationMethodTypesResponse{
+				AuthMethodTypes: []userv2.AuthenticationMethodType{
+					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSKEY,
+					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_TOTP,
+				},
+			}, nil
+		},
+	}
+	a := newTestAuth(t, s, u, &fakeLinker{})
+	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+		Identifier: "u@example.com",
+		Password:   "secret",
+	})
+	if err != nil {
+		t.Fatalf("BeginPasswordAuthentication: %v", err)
+	}
+	if res.Status != auth.StatusMFARequired {
+		t.Fatalf("status = %q, want %q (TOTP fallback)", res.Status, auth.StatusMFARequired)
+	}
+	if len(res.AvailableMethods) != 1 || res.AvailableMethods[0] != auth.MFAMethodTOTP {
+		t.Errorf("available methods = %v, want [totp]", res.AvailableMethods)
+	}
+	if deleted != "" {
+		t.Errorf("provider session deleted = %q, want none (TOTP fallback keeps the session)", deleted)
+	}
+}
+
+// TestBeginPasswordAuthenticationPasskeyChallengeFallbackNoMFA verifies a
+// user with no second factor at all (password only) can authenticate with
+// just the password after the challenge fallback.
+func TestBeginPasswordAuthenticationPasskeyChallengeFallbackNoMFA(t *testing.T) {
+	s := challengeFailureSessionService(nil, nil)
+	u := &fakeUserService{
+		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+			return &userv2.ListAuthenticationMethodTypesResponse{
+				AuthMethodTypes: []userv2.AuthenticationMethodType{
+					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSWORD,
+				},
+			}, nil
+		},
+		getFn: func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error) {
+			return humanProfileResponse("user-1"), nil
+		},
+	}
+	l := &fakeLinker{user: identity.User{ID: "user_local_1", Status: identity.UserStatusActive}}
+	a := newTestAuth(t, s, u, l)
+	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+		Identifier: "u@example.com",
+		Password:   "secret",
+	})
+	if err != nil {
+		t.Fatalf("BeginPasswordAuthentication: %v", err)
+	}
+	if res.Status != auth.StatusAuthenticated {
+		t.Fatalf("status = %q, want %q", res.Status, auth.StatusAuthenticated)
+	}
+	if l.calls != 1 {
+		t.Errorf("linker calls = %d, want 1", l.calls)
+	}
+	if res.UserID != "user_local_1" {
+		t.Errorf("user id = %q, want user_local_1", res.UserID)
+	}
+}
+
+// TestBeginPasswordAuthenticationAuthZFailure verifies a service-account
+// permission failure while reading the user's authentication methods
+// (NotFound + AUTHZ-*, e.g. "membership not found") is classified as
+// provider_unavailable, not as invalid_credentials: a server-side
+// configuration fault must never masquerade as a wrong password.
+func TestBeginPasswordAuthenticationAuthZFailure(t *testing.T) {
+	s := &fakeSessionService{
+		createFn: func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
+			return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
+		},
+		getFn: func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error) {
+			return sessionWithUser("user-1"), nil
+		},
+	}
+	u := &fakeUserService{
+		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+			return nil, status.Error(codes.NotFound, "membership not found (AUTHZ-cdgFk)")
+		},
+	}
+	a := newTestAuth(t, s, u, &fakeLinker{})
+	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+		Identifier: "u@example.com",
+		Password:   "secret",
+	})
+	if err != nil {
+		t.Fatalf("BeginPasswordAuthentication: %v", err)
+	}
+	if res.Status != auth.StatusProviderUnavailable {
+		t.Fatalf("status = %q, want %q (SA permission fault)", res.Status, auth.StatusProviderUnavailable)
+	}
+}
+
+// TestBeginPasswordAuthenticationSessionAuthZFailure verifies the same
+// AUTHZ-* classification at the GetSession boundary.
+func TestBeginPasswordAuthenticationSessionAuthZFailure(t *testing.T) {
+	s := &fakeSessionService{
+		createFn: func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
+			return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
+		},
+		getFn: func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error) {
+			return nil, status.Error(codes.NotFound, "membership not found (AUTHZ-cdgFk)")
+		},
+	}
+	a := newTestAuth(t, s, &fakeUserService{}, &fakeLinker{})
+	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+		Identifier: "u@example.com",
+		Password:   "secret",
+	})
+	if err != nil {
+		t.Fatalf("BeginPasswordAuthentication: %v", err)
+	}
+	if res.Status != auth.StatusProviderUnavailable {
+		t.Fatalf("status = %q, want %q (SA permission fault)", res.Status, auth.StatusProviderUnavailable)
+	}
+}
+
 func TestCompleteMFAPasskeySuccess(t *testing.T) {
 	var received *sessionv2.CheckWebAuthN
 	s := &fakeSessionService{

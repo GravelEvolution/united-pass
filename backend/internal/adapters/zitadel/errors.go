@@ -26,6 +26,25 @@ func isPasskeyChallengeFailure(err error) bool {
 	return strings.Contains(msg, "WebAuthN") || strings.Contains(msg, "WEBAU-")
 }
 
+// errProviderPermission marks a ZITADEL error caused by insufficient service
+// account permissions (NotFound + AUTHZ-*). It is classified at the specific
+// operation boundary (GetSession, ListAuthenticationMethodTypes) as
+// provider_unavailable: a server-side authorization/config fault must never
+// masquerade as a user credential error (invalid_credentials).
+var errProviderPermission = errors.New("zitadel: service account permission denied")
+
+// isAuthZFailure reports whether a ZITADEL gRPC error is a service-account
+// authorization failure: NotFound with an AUTHZ-* error id. Ordinary NotFound
+// (e.g. an unknown login name, a deleted session) is NOT an authorization
+// failure and keeps its normal classification.
+func isAuthZFailure(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.NotFound {
+		return false
+	}
+	return strings.Contains(st.Message(), "AUTHZ-")
+}
+
 // mapAuthError converts a ZITADEL gRPC error into an auth status.
 //
 // Credentials failures must be generic: ZITADEL surfaces "user not found",
