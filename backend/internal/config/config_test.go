@@ -128,6 +128,7 @@ func TestValidateProductionConstraints(t *testing.T) {
 	cfg.Session.EncryptionKeyID = "production-v1"
 	cfg.Auth.Provider = "zitadel"
 	cfg.Auth.BaseURL = "https://auth.example.com"
+	cfg.Auth.ServiceAccountKeyFile = "/secrets/zitadel/key.json"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate should accept valid production config: %v", err)
 	}

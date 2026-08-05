@@ -144,6 +144,16 @@ type AuthProviderConfig struct {
 	ProjectID    string
 	ClientID     string
 	ClientSecret string
+	// ServiceAccountKeyFile is the path to the ZITADEL service account
+	// key.json used for JWT profile authentication to the ZITADEL API. The
+	// key file is read at adapter construction; it must contain the keyId
+	// and the RSA private key.
+	ServiceAccountKeyFile string
+	// Domain is the WebAuthn relying-party domain used for passkey MFA
+	// challenges (e.g. "login.example.com"). It must be the exact domain or
+	// a top-level domain of the request origin. Empty disables passkey
+	// challenges (TOTP remains available).
+	Domain string
 }
 
 // PermissionConfig holds permission resolver parameters.
@@ -216,11 +226,13 @@ func Load() (Config, error) {
 		},
 
 		Auth: AuthProviderConfig{
-			Provider:     envOr("UP_AUTH_PROVIDER", ""),
-			BaseURL:      envOr("UP_AUTH_PROVIDER_BASE_URL", ""),
-			ProjectID:    envOr("UP_AUTH_PROVIDER_PROJECT_ID", ""),
-			ClientID:     envOr("UP_AUTH_PROVIDER_CLIENT_ID", ""),
-			ClientSecret: envOr("UP_AUTH_PROVIDER_CLIENT_SECRET", ""),
+			Provider:              envOr("UP_AUTH_PROVIDER", ""),
+			BaseURL:               envOr("UP_AUTH_PROVIDER_BASE_URL", ""),
+			ProjectID:             envOr("UP_AUTH_PROVIDER_PROJECT_ID", ""),
+			ClientID:              envOr("UP_AUTH_PROVIDER_CLIENT_ID", ""),
+			ClientSecret:          envOr("UP_AUTH_PROVIDER_CLIENT_SECRET", ""),
+			ServiceAccountKeyFile: envOr("UP_AUTH_PROVIDER_SERVICE_ACCOUNT_KEY_FILE", ""),
+			Domain:                envOr("UP_AUTH_PROVIDER_DOMAIN", ""),
 		},
 
 		Permission: PermissionConfig{
@@ -393,6 +405,9 @@ func (c Config) Validate() error {
 		}
 		if c.Auth.Provider == "" || c.Auth.BaseURL == "" {
 			errs = append(errs, errors.New("production requires authentication provider configuration"))
+		}
+		if c.Auth.Provider == "zitadel" && c.Auth.ServiceAccountKeyFile == "" {
+			errs = append(errs, errors.New("zitadel provider requires UP_AUTH_PROVIDER_SERVICE_ACCOUNT_KEY_FILE"))
 		}
 		// Production stores provider session references encrypted at rest
 		// (ADR-0002 section 13), so the encryption key is mandatory.

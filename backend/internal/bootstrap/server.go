@@ -16,6 +16,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/postgres"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/redis"
+	"github.com/GravelEvolution/united-pass/backend/internal/adapters/zitadel"
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
@@ -26,12 +27,13 @@ import (
 // Server bundles the configured *http.Server with its router so the entry point
 // can start it and shut it down.
 type Server struct {
-	HTTP        *http.Server
-	Router      http.Handler
-	logger      *slog.Logger
-	config      config.Config
-	pool        *postgres.Pool
-	redisClient *redis.Client
+	HTTP           *http.Server
+	Router         http.Handler
+	logger         *slog.Logger
+	config         config.Config
+	pool           *postgres.Pool
+	redisClient    *redis.Client
+	providerCloser interface{ Close() error }
 }
 
 // NewServer constructs the router, applies middleware, mounts routes and
@@ -90,8 +92,10 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var sessionSvc *session.Service
 	var userChecker httpapi.UserStatusChecker
 	var userReader httpapi.UserReader
+	var userLinker identity.UserLinker
 	var permResolver permissions.Resolver
 	var authenticator auth.Authenticator
+	var providerCloser interface{ Close() error }
 	var mfaStore httpapi.MFAChallengeStore
 	var rateChecker httpapi.RateChecker
 
@@ -110,17 +114,23 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		userRepo := postgres.NewUserRepository(pool.PgxPool())
 		userReader = userRepo
 		userChecker = &userStatusChecker{repo: userRepo}
+		userLinker = userRepo
 	}
 
 	// Permission resolver: fail-closed by default, with optional dev override.
 	permResolver = permissions.NewResolver(cfg)
 
-	// Authenticator selection enforces the production safety boundary: the
-	// development fake must never serve production traffic, and a production
-	// deployment must not start with an unimplemented provider adapter.
-	authenticator, err = buildAuthenticator(cfg, logger)
+	// Authenticator selection: the production safety boundary from Phase 1
+	// hardening is preserved, and the ZITADEL adapter (Phase 1.2) is now
+	// wired for the "zitadel" provider in all environments.
+	authenticator, providerCloser, err = buildAuthenticator(cfg, userLinker, logger)
 	if err != nil {
 		return nil, err
+	}
+
+	// Provider readiness: the ZITADEL adapter reports API connectivity.
+	if checker, ok := authenticator.(httpapi.ReadinessChecker); ok {
+		readinessCheckers = append(readinessCheckers, checker)
 	}
 
 	health := httpapi.NewHealthHandlers(readinessCheckers...)
@@ -170,43 +180,72 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	}
 
 	return &Server{
-		HTTP:        srv,
-		Router:      router,
-		logger:      logger,
-		config:      cfg,
-		pool:        pool,
-		redisClient: redisClient,
+		HTTP:           srv,
+		Router:         router,
+		logger:         logger,
+		config:         cfg,
+		pool:           pool,
+		redisClient:    redisClient,
+		providerCloser: providerCloser,
 	}, nil
 }
 
-// buildAuthenticator selects the authentication provider implementation. The
-// development fake is permitted only in non-production environments and only
-// when no provider is configured or the provider is explicitly "fake". Any
-// configured provider without an implemented adapter is a startup error in
-// all environments: the service must never present the fake as a real
-// identity provider, and a misspelled provider must not silently fall back
-// to it. See ADR-0003.
-func buildAuthenticator(cfg config.Config, logger *slog.Logger) (auth.Authenticator, error) {
-	if cfg.IsProduction() {
-		if !cfg.HasAuthProvider() {
-			return nil, errors.New("production requires a configured authentication provider")
+// buildAuthenticator selects the authentication provider implementation.
+//
+//   - "":          fake, non-production only
+//   - "fake":      fake, non-production only
+//   - "zitadel":   ZITADEL LoginV2 adapter (Phase 1.2), all environments
+//   - other:       startup error in all environments (ADR-0003)
+//
+// The fake must never serve production traffic, and a misspelled or unknown
+// provider must not silently fall back to it. The ZITADEL adapter requires a
+// database-backed user linker for first-login identity mapping. The returned
+// closer (nil for the fake) closes the provider's underlying connection.
+func buildAuthenticator(
+	cfg config.Config,
+	userLinker identity.UserLinker,
+	logger *slog.Logger,
+) (auth.Authenticator, interface{ Close() error }, error) {
+	switch cfg.Auth.Provider {
+	case "":
+		if cfg.IsProduction() {
+			return nil, nil, errors.New("production requires a configured authentication provider")
 		}
-		// No real provider adapter is implemented yet (Phase 1.2). Refuse to
-		// start rather than silently authenticate with the development fake.
-		return nil, fmt.Errorf("authentication provider %q has no implemented adapter", cfg.Auth.Provider)
-	}
-
-	// Non-production: the fake is allowed only when no provider is configured
-	// or the provider is explicitly "fake". Any other value is a startup
-	// error, so a misspelled or not-yet-implemented provider (e.g. "zitadel")
-	// cannot silently fall back to the fake and create the illusion of real
-	// authentication. See ADR-0003.
-	if cfg.Auth.Provider == "" || cfg.Auth.Provider == "fake" {
 		logger.Info("using fake authenticator for development")
-		return createDevAuthenticator(), nil
-	}
+		return createDevAuthenticator(), nil, nil
 
-	return nil, fmt.Errorf("authentication provider %q has no implemented adapter", cfg.Auth.Provider)
+	case "fake":
+		if cfg.IsProduction() {
+			return nil, nil, errors.New("production must not use the fake authenticator")
+		}
+		logger.Info("using fake authenticator for development")
+		return createDevAuthenticator(), nil, nil
+
+	case zitadel.ProviderName:
+		if !cfg.HasAuthProvider() {
+			return nil, nil, errors.New("zitadel provider requires UP_AUTH_PROVIDER_BASE_URL")
+		}
+		if userLinker == nil {
+			return nil, nil, errors.New("zitadel provider requires database configuration for identity mapping")
+		}
+		zc, err := zitadel.NewSDKClient(context.Background(), cfg.Auth)
+		if err != nil {
+			return nil, nil, err
+		}
+		authz := zitadel.NewAuthenticator(
+			zc.SessionServiceV2(),
+			zc.UserServiceV2(),
+			userLinker,
+			cfg.Auth.ProjectID,
+			cfg.Auth.Domain,
+			logger,
+		)
+		logger.Info("authentication provider initialized", "provider", zitadel.ProviderName)
+		return authz, zc, nil
+
+	default:
+		return nil, nil, fmt.Errorf("authentication provider %q has no implemented adapter", cfg.Auth.Provider)
+	}
 }
 
 // newSessionEncryptor builds the AES-GCM encryptor for provider session
@@ -255,6 +294,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.redisClient != nil {
 		if err := s.redisClient.Close(); err != nil {
 			s.logger.Error("redis close failed", "error", err)
+		}
+	}
+
+	if s.providerCloser != nil {
+		if err := s.providerCloser.Close(); err != nil {
+			s.logger.Error("authentication provider close failed", "error", err)
 		}
 	}
 

@@ -240,19 +240,31 @@ func waitFor(t *testing.T, condition func() bool, timeout time.Duration) {
 	t.Fatal("condition never became true within timeout")
 }
 
-// TestNewServerRejectsUnimplementedProviderInProduction verifies the
-// production safety boundary: a production deployment must not start with an
-// unimplemented authentication provider (the development fake would otherwise
-// serve as the identity provider).
-func TestNewServerRejectsUnimplementedProviderInProduction(t *testing.T) {
+// TestNewServerRejectsUnknownProviderInProduction verifies that an unknown
+// authentication provider fails startup in production.
+func TestNewServerRejectsUnknownProviderInProduction(t *testing.T) {
 	cfg := testConfig()
 	cfg.Environment = config.EnvironmentProduction
+	cfg.Auth.Provider = "not-a-real-provider"
+	cfg.Auth.BaseURL = "https://auth.example.com"
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if _, err := NewServer(cfg, logger); err == nil {
+		t.Fatal("expected error for unknown provider in production")
+	}
+}
+
+// TestNewServerRejectsZitadelWithoutDatabase verifies that the ZITADEL
+// adapter refuses to start without database configuration (identity mapping
+// requires the local user store).
+func TestNewServerRejectsZitadelWithoutDatabase(t *testing.T) {
+	cfg := testConfig()
 	cfg.Auth.Provider = "zitadel"
 	cfg.Auth.BaseURL = "https://auth.example.com"
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if _, err := NewServer(cfg, logger); err == nil {
-		t.Fatal("expected error for unimplemented provider in production")
+		t.Fatal("expected error for zitadel provider without database")
 	}
 }
 
@@ -289,11 +301,11 @@ func TestNewServerAllowsNoProviderInDevelopment(t *testing.T) {
 }
 
 // TestNewServerRejectsUnknownProviderInDevelopment verifies that an unknown
-// or not-yet-implemented provider (e.g. "zitadel") fails startup in
-// development too, so it cannot silently fall back to the fake. See ADR-0003.
+// or not-yet-implemented provider fails startup in development too, so it
+// cannot silently fall back to the fake. See ADR-0003.
 func TestNewServerRejectsUnknownProviderInDevelopment(t *testing.T) {
 	cfg := testConfig()
-	cfg.Auth.Provider = "zitadel"
+	cfg.Auth.Provider = "not-a-real-provider"
 	cfg.Auth.BaseURL = "https://auth.example.com"
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
