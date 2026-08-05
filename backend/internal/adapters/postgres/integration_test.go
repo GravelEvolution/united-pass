@@ -342,3 +342,104 @@ func TestIntegration_ContextCancellation(t *testing.T) {
 		t.Fatal("expected error from cancelled context, got nil")
 	}
 }
+
+// TestIntegration_FirstLoginCreatesUserWithProfile verifies that the
+// transactional identity linker creates the user, identity link and consumer
+// persona on first login, with the provider profile persisted.
+func TestIntegration_FirstLoginCreatesUserWithProfile(t *testing.T) {
+	repo := setupTestDB(t)
+	ctx := context.Background()
+
+	user, err := repo.GetOrCreateUserByProviderSubject(ctx, "zitadel", "tenant_e2e", identity.ProviderUserInfo{
+		Subject:       "zitadel-subject-001",
+		DisplayName:   "Zhixing Lin",
+		Email:         "zhixing@example.com",
+		EmailVerified: true,
+		Phone:         "+8613800000000",
+	})
+	if err != nil {
+		t.Fatalf("first login linking: %v", err)
+	}
+	if user.Status != identity.UserStatusActive {
+		t.Errorf("status = %q, want active", user.Status)
+	}
+	if user.Email != "zhixing@example.com" || !user.EmailVerified {
+		t.Errorf("email = %q verified=%v, want zhixing@example.com verified", user.Email, user.EmailVerified)
+	}
+	if user.DisplayName != "Zhixing Lin" {
+		t.Errorf("display name = %q, want Zhixing Lin", user.DisplayName)
+	}
+	if user.Phone != "+8613800000000" {
+		t.Errorf("phone = %q, want +8613800000000", user.Phone)
+	}
+	if len(user.Personas) != 1 || user.Personas[0] != identity.PersonaConsumer {
+		t.Errorf("personas = %v, want [consumer]", user.Personas)
+	}
+
+	// A second login with the same provider subject resolves to the same user.
+	again, err := repo.GetOrCreateUserByProviderSubject(ctx, "zitadel", "tenant_e2e", identity.ProviderUserInfo{
+		Subject: "zitadel-subject-001",
+	})
+	if err != nil {
+		t.Fatalf("second login linking: %v", err)
+	}
+	if again.ID != user.ID {
+		t.Errorf("second login user = %q, want %q (same user)", again.ID, user.ID)
+	}
+}
+
+// TestIntegration_ConcurrentFirstLoginSingleWinner verifies that concurrent
+// first logins for the same provider subject produce exactly one user and no
+// orphan rows: all callers resolve to the same local user.
+func TestIntegration_ConcurrentFirstLoginSingleWinner(t *testing.T) {
+	repo := setupTestDB(t)
+	ctx := context.Background()
+
+	const workers = 8
+	results := make(chan identity.UserID, workers)
+	errs := make(chan error, workers)
+
+	for i := 0; i < workers; i++ {
+		go func() {
+			u, err := repo.GetOrCreateUserByProviderSubject(ctx, "zitadel", "tenant_concurrent", identity.ProviderUserInfo{
+				Subject:     "zitadel-subject-concurrent",
+				DisplayName: "Concurrent User",
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- u.ID
+		}()
+	}
+
+	var got []identity.UserID
+	for i := 0; i < workers; i++ {
+		select {
+		case id := <-results:
+			got = append(got, id)
+		case err := <-errs:
+			t.Fatalf("concurrent linking error: %v", err)
+		}
+	}
+
+	// Every caller must resolve to the same user.
+	if len(got) != workers {
+		t.Fatalf("got %d results, want %d", len(got), workers)
+	}
+	first := got[0]
+	for _, id := range got[1:] {
+		if id != first {
+			t.Errorf("different users resolved for the same provider subject: %v", got)
+		}
+	}
+
+	// Exactly one identity link and exactly one user row must exist.
+	loaded, err := repo.GetIdentityLink(ctx, "zitadel", "tenant_concurrent", "zitadel-subject-concurrent")
+	if err != nil {
+		t.Fatalf("get identity link: %v", err)
+	}
+	if loaded.UserID != first {
+		t.Errorf("link user = %q, want %q", loaded.UserID, first)
+	}
+}
