@@ -31,11 +31,36 @@ const (
 	defaultShutdownTimeout     = 30 * time.Second
 	defaultMaxRequestBodyBytes = 1 << 20 // 1 MiB
 	defaultLogLevel            = "info"
+
+	defaultDatabaseSchema               = "united_pass"
+	defaultDatabaseMaxConns       int32 = 10
+	defaultDatabaseMinConns       int32 = 1
+	defaultDatabaseConnectTimeout       = 10 * time.Second
+
+	defaultRedisKeyPrefix          = "up:development:"
+	defaultRedisPoolSize       int = 10
+	defaultRedisConnectTimeout     = 10 * time.Second
+	defaultRedisReadTimeout        = 3 * time.Second
+	defaultRedisWriteTimeout       = 3 * time.Second
+
+	defaultSessionTTL           = 12 * time.Hour
+	defaultSessionRememberTTL   = 720 * time.Hour
+	defaultSessionIdleTTL       = 2 * time.Hour
+	defaultSessionTouchInterval = 5 * time.Minute
+	defaultSessionSameSite      = "lax"
+
+	defaultMFAChallengeTTL = 5 * time.Minute
+	defaultMFAMaxAttempts  = 5
+	defaultLoginRateLimit  = 10
+	defaultLoginRateWindow = 15 * time.Minute
+	defaultMFARateLimit    = 10
+	defaultMFARateWindow   = 15 * time.Minute
 )
 
 // Config holds all process-level configuration. Values are loaded once at
 // startup and treated as immutable for the lifetime of the process.
 type Config struct {
+	// Phase 0 — HTTP server
 	Environment         Environment
 	HTTPAddr            string
 	ReadHeaderTimeout   time.Duration
@@ -45,10 +70,97 @@ type Config struct {
 	ShutdownTimeout     time.Duration
 	MaxRequestBodyBytes int64
 	LogLevel            string
+
+	// Phase 1 — Storage
+	Database DatabaseConfig
+	Redis    RedisConfig
+
+	// Phase 1 — Session
+	Session SessionConfig
+
+	// Phase 1 — Authentication
+	MFA       MFAConfig
+	RateLimit RateLimitConfig
+	Auth      AuthProviderConfig
+
+	// Phase 1 — Permissions
+	Permission PermissionConfig
+
+	// Integration tests
+	Test TestConfig
+}
+
+// DatabaseConfig holds PostgreSQL connection parameters.
+type DatabaseConfig struct {
+	URL            string
+	Schema         string
+	MaxConns       int32
+	MinConns       int32
+	ConnectTimeout time.Duration
+}
+
+// RedisConfig holds Redis connection parameters.
+type RedisConfig struct {
+	URL            string
+	KeyPrefix      string
+	PoolSize       int
+	ConnectTimeout time.Duration
+	ReadTimeout    time.Duration
+	WriteTimeout   time.Duration
+}
+
+// SessionConfig holds browser session parameters.
+type SessionConfig struct {
+	TTL             time.Duration
+	RememberTTL     time.Duration
+	IdleTTL         time.Duration
+	TouchInterval   time.Duration
+	CookieSecure    bool
+	CookieSameSite  string
+	EncryptionKey   string // base64-encoded 32-byte AES-GCM key
+	EncryptionKeyID string
+}
+
+// MFAConfig holds MFA challenge parameters.
+type MFAConfig struct {
+	ChallengeTTL time.Duration
+	MaxAttempts  int
+}
+
+// RateLimitConfig holds rate limiting parameters.
+type RateLimitConfig struct {
+	LoginLimit  int
+	LoginWindow time.Duration
+	MFALimit    int
+	MFAWindow   time.Duration
+}
+
+// AuthProviderConfig holds authentication provider parameters.
+type AuthProviderConfig struct {
+	Provider     string
+	BaseURL      string
+	ProjectID    string
+	ClientID     string
+	ClientSecret string
+}
+
+// PermissionConfig holds permission resolver parameters.
+type PermissionConfig struct {
+	DevOverrideEnabled bool
+	DevOverrideUserID  string
+}
+
+// TestConfig holds integration test environment parameters.
+type TestConfig struct {
+	DatabaseURL    string
+	DatabaseSchema string
+	RedisURL       string
+	RedisKeyPrefix string
 }
 
 // Load reads configuration from environment variables, applying development
-// defaults for any value that is not explicitly set.
+// defaults for any value that is not explicitly set. Call LoadDotEnv first in
+// local development to populate variables from an ignored .env file.
 func Load() (Config, error) {
 	cfg := Config{
 		Environment:         Environment(envOr("UP_ENVIRONMENT", string(EnvironmentDevelopment))),
@@ -60,6 +172,66 @@ func Load() (Config, error) {
 		ShutdownTimeout:     durationOr("UP_SHUTDOWN_TIMEOUT", defaultShutdownTimeout),
 		MaxRequestBodyBytes: int64Or("UP_MAX_REQUEST_BODY_BYTES", defaultMaxRequestBodyBytes),
 		LogLevel:            envOr("UP_LOG_LEVEL", defaultLogLevel),
+
+		Database: DatabaseConfig{
+			URL:            envOr("UP_DATABASE_URL", ""),
+			Schema:         envOr("UP_DATABASE_SCHEMA", defaultDatabaseSchema),
+			MaxConns:       int32Or("UP_DATABASE_MAX_CONNS", defaultDatabaseMaxConns),
+			MinConns:       int32Or("UP_DATABASE_MIN_CONNS", defaultDatabaseMinConns),
+			ConnectTimeout: durationOr("UP_DATABASE_CONNECT_TIMEOUT", defaultDatabaseConnectTimeout),
+		},
+
+		Redis: RedisConfig{
+			URL:            envOr("UP_REDIS_URL", ""),
+			KeyPrefix:      envOr("UP_REDIS_KEY_PREFIX", defaultRedisKeyPrefix),
+			PoolSize:       intOr("UP_REDIS_POOL_SIZE", defaultRedisPoolSize),
+			ConnectTimeout: durationOr("UP_REDIS_CONNECT_TIMEOUT", defaultRedisConnectTimeout),
+			ReadTimeout:    durationOr("UP_REDIS_READ_TIMEOUT", defaultRedisReadTimeout),
+			WriteTimeout:   durationOr("UP_REDIS_WRITE_TIMEOUT", defaultRedisWriteTimeout),
+		},
+
+		Session: SessionConfig{
+			TTL:             durationOr("UP_SESSION_TTL", defaultSessionTTL),
+			RememberTTL:     durationOr("UP_SESSION_REMEMBER_TTL", defaultSessionRememberTTL),
+			IdleTTL:         durationOr("UP_SESSION_IDLE_TTL", defaultSessionIdleTTL),
+			TouchInterval:   durationOr("UP_SESSION_TOUCH_INTERVAL", defaultSessionTouchInterval),
+			CookieSecure:    boolOr("UP_SESSION_COOKIE_SECURE", true),
+			CookieSameSite:  envOr("UP_SESSION_COOKIE_SAME_SITE", defaultSessionSameSite),
+			EncryptionKey:   envOr("UP_SESSION_ENCRYPTION_KEY", ""),
+			EncryptionKeyID: envOr("UP_SESSION_ENCRYPTION_KEY_ID", ""),
+		},
+
+		MFA: MFAConfig{
+			ChallengeTTL: durationOr("UP_MFA_CHALLENGE_TTL", defaultMFAChallengeTTL),
+			MaxAttempts:  intOr("UP_MFA_MAX_ATTEMPTS", defaultMFAMaxAttempts),
+		},
+
+		RateLimit: RateLimitConfig{
+			LoginLimit:  intOr("UP_LOGIN_RATE_LIMIT", defaultLoginRateLimit),
+			LoginWindow: durationOr("UP_LOGIN_RATE_WINDOW", defaultLoginRateWindow),
+			MFALimit:    intOr("UP_MFA_RATE_LIMIT", defaultMFARateLimit),
+			MFAWindow:   durationOr("UP_MFA_RATE_WINDOW", defaultMFARateWindow),
+		},
+
+		Auth: AuthProviderConfig{
+			Provider:     envOr("UP_AUTH_PROVIDER", ""),
+			BaseURL:      envOr("UP_AUTH_PROVIDER_BASE_URL", ""),
+			ProjectID:    envOr("UP_AUTH_PROVIDER_PROJECT_ID", ""),
+			ClientID:     envOr("UP_AUTH_PROVIDER_CLIENT_ID", ""),
+			ClientSecret: envOr("UP_AUTH_PROVIDER_CLIENT_SECRET", ""),
+		},
+
+		Permission: PermissionConfig{
+			DevOverrideEnabled: boolOr("UP_PERMISSION_DEV_OVERRIDE", false),
+			DevOverrideUserID:  envOr("UP_PERMISSION_DEV_OVERRIDE_USER_ID", ""),
+		},
+
+		Test: TestConfig{
+			DatabaseURL:    envOr("UP_TEST_DATABASE_URL", ""),
+			DatabaseSchema: envOr("UP_TEST_DATABASE_SCHEMA", "united_pass_test"),
+			RedisURL:       envOr("UP_TEST_REDIS_URL", ""),
+			RedisKeyPrefix: envOr("UP_TEST_REDIS_KEY_PREFIX", "up:test:"),
+		},
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -106,12 +278,98 @@ func (c Config) Validate() error {
 		errs = append(errs, err)
 	}
 
+	// Session validation.
+	if c.Session.TTL <= 0 {
+		errs = append(errs, errors.New("session TTL must be positive"))
+	}
+	if c.Session.RememberTTL <= 0 {
+		errs = append(errs, errors.New("session remember TTL must be positive"))
+	}
+	if c.Session.IdleTTL <= 0 {
+		errs = append(errs, errors.New("session idle TTL must be positive"))
+	}
+	if c.Session.TouchInterval <= 0 {
+		errs = append(errs, errors.New("session touch interval must be positive"))
+	}
+	switch strings.ToLower(c.Session.CookieSameSite) {
+	case "lax", "strict", "none":
+	default:
+		errs = append(errs, fmt.Errorf("invalid session cookie SameSite %q: must be lax, strict or none", c.Session.CookieSameSite))
+	}
+
+	// MFA validation.
+	if c.MFA.ChallengeTTL <= 0 {
+		errs = append(errs, errors.New("MFA challenge TTL must be positive"))
+	}
+	if c.MFA.MaxAttempts <= 0 {
+		errs = append(errs, errors.New("MFA max attempts must be positive"))
+	}
+
+	// Rate limit validation.
+	if c.RateLimit.LoginLimit <= 0 {
+		errs = append(errs, errors.New("login rate limit must be positive"))
+	}
+	if c.RateLimit.LoginWindow <= 0 {
+		errs = append(errs, errors.New("login rate window must be positive"))
+	}
+	if c.RateLimit.MFALimit <= 0 {
+		errs = append(errs, errors.New("MFA rate limit must be positive"))
+	}
+	if c.RateLimit.MFAWindow <= 0 {
+		errs = append(errs, errors.New("MFA rate window must be positive"))
+	}
+
+	// Database validation (when configured).
+	if c.Database.URL != "" {
+		if c.Database.Schema == "" {
+			errs = append(errs, errors.New("database schema must not be empty when database URL is set"))
+		}
+		if c.Database.MaxConns <= 0 {
+			errs = append(errs, errors.New("database max connections must be positive"))
+		}
+		if c.Database.MinConns < 0 {
+			errs = append(errs, errors.New("database min connections must not be negative"))
+		}
+		if c.Database.ConnectTimeout <= 0 {
+			errs = append(errs, errors.New("database connect timeout must be positive"))
+		}
+	}
+
+	// Redis validation (when configured).
+	if c.Redis.URL != "" {
+		if c.Redis.KeyPrefix == "" {
+			errs = append(errs, errors.New("redis key prefix must not be empty when redis URL is set"))
+		}
+		if c.Redis.PoolSize <= 0 {
+			errs = append(errs, errors.New("redis pool size must be positive"))
+		}
+		if c.Redis.ConnectTimeout <= 0 {
+			errs = append(errs, errors.New("redis connect timeout must be positive"))
+		}
+	}
+
 	if c.IsProduction() {
 		if c.ShutdownTimeout > 60*time.Second {
 			errs = append(errs, errors.New("production shutdown timeout must not exceed 60s"))
 		}
 		if c.MaxRequestBodyBytes > 16*(1<<20) {
 			errs = append(errs, errors.New("production max request body bytes must not exceed 16 MiB"))
+		}
+		// Production requires TLS-capable database and Redis.
+		if c.Database.URL == "" {
+			errs = append(errs, errors.New("production requires UP_DATABASE_URL"))
+		}
+		if c.Redis.URL == "" {
+			errs = append(errs, errors.New("production requires UP_REDIS_URL"))
+		}
+		if !c.Session.CookieSecure {
+			errs = append(errs, errors.New("production requires UP_SESSION_COOKIE_SECURE=true"))
+		}
+		if c.Auth.Provider == "" || c.Auth.BaseURL == "" {
+			errs = append(errs, errors.New("production requires authentication provider configuration"))
+		}
+		if c.Permission.DevOverrideEnabled {
+			errs = append(errs, errors.New("production must not enable permission dev override"))
 		}
 	}
 
@@ -126,6 +384,21 @@ func (c Config) IsProduction() bool {
 // LogLevel returns the parsed slog.Level for the configured log level.
 func (c Config) LogLevelValue() (slog.Level, error) {
 	return parseLogLevel(c.LogLevel)
+}
+
+// HasDatabase reports whether a database URL is configured.
+func (c Config) HasDatabase() bool {
+	return c.Database.URL != ""
+}
+
+// HasRedis reports whether a Redis URL is configured.
+func (c Config) HasRedis() bool {
+	return c.Redis.URL != ""
+}
+
+// HasAuthProvider reports whether an authentication provider is configured.
+func (c Config) HasAuthProvider() bool {
+	return c.Auth.Provider != "" && c.Auth.BaseURL != ""
 }
 
 func parseLogLevel(raw string) (slog.Level, error) {
@@ -163,6 +436,36 @@ func durationOr(key string, fallback time.Duration) time.Duration {
 func int64Or(key string, fallback int64) int64 {
 	if value, ok := os.LookupEnv(key); ok && value != "" {
 		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func int32Or(key string, fallback int32) int32 {
+	if value, ok := os.LookupEnv(key); ok && value != "" {
+		parsed, err := strconv.ParseInt(value, 10, 32)
+		if err == nil {
+			return int32(parsed)
+		}
+	}
+	return fallback
+}
+
+func intOr(key string, fallback int) int {
+	if value, ok := os.LookupEnv(key); ok && value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func boolOr(key string, fallback bool) bool {
+	if value, ok := os.LookupEnv(key); ok && value != "" {
+		parsed, err := strconv.ParseBool(value)
 		if err == nil {
 			return parsed
 		}

@@ -106,8 +106,33 @@ func TestValidateProductionConstraints(t *testing.T) {
 	}
 
 	cfg.MaxRequestBodyBytes = 1 << 20
+	// Production requires database, Redis, auth provider, and secure cookies.
+	cfg.Database = DatabaseConfig{
+		URL:            "postgres://user:pass@host:5432/db?sslmode=require",
+		Schema:         "united_pass",
+		MaxConns:       10,
+		MinConns:       1,
+		ConnectTimeout: 10 * time.Second,
+	}
+	cfg.Redis = RedisConfig{
+		URL:            "rediss://:pass@host:6379/0",
+		KeyPrefix:      "up:production:",
+		PoolSize:       10,
+		ConnectTimeout: 10 * time.Second,
+		ReadTimeout:    3 * time.Second,
+		WriteTimeout:   3 * time.Second,
+	}
+	cfg.Session.CookieSecure = true
+	cfg.Auth.Provider = "zitadel"
+	cfg.Auth.BaseURL = "https://auth.example.com"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate should accept valid production config: %v", err)
+	}
+
+	// Production must reject permission dev override.
+	cfg.Permission.DevOverrideEnabled = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate should reject production permission dev override")
 	}
 }
 
@@ -135,6 +160,27 @@ func validDevelopmentConfig() Config {
 		ShutdownTimeout:     30 * time.Second,
 		MaxRequestBodyBytes: 1 << 20,
 		LogLevel:            "info",
+
+		Session: SessionConfig{
+			TTL:            12 * time.Hour,
+			RememberTTL:    720 * time.Hour,
+			IdleTTL:        2 * time.Hour,
+			TouchInterval:  5 * time.Minute,
+			CookieSecure:   false,
+			CookieSameSite: "lax",
+		},
+
+		MFA: MFAConfig{
+			ChallengeTTL: 5 * time.Minute,
+			MaxAttempts:  5,
+		},
+
+		RateLimit: RateLimitConfig{
+			LoginLimit:  10,
+			LoginWindow: 15 * time.Minute,
+			MFALimit:    10,
+			MFAWindow:   15 * time.Minute,
+		},
 	}
 }
 
