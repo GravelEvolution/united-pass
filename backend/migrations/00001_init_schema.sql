@@ -1,14 +1,14 @@
 -- +goose Up
 -- +goose StatementBegin
 
--- United Pass Phase 1 schema: users, identity_links, user_personas.
+-- United Pass Phase 1 schema: users, identity-links, user_personas.
 -- This migration creates the minimal tables needed for session and current
 -- user functionality. Employee profiles, departments, applications, OAuth
 -- clients, consent, policies and audit are added in later phases.
-
-CREATE SCHEMA IF NOT EXISTS united_pass;
-
-SET search_path TO united_pass;
+--
+-- The schema and search_path must be set by the migration runner (cmd/migrate
+-- or the integration test harness) before executing this migration. Tables
+-- are created unqualified so they land in whatever search_path is active.
 
 -- users: stable United Pass user identity.
 -- Does NOT store passwords, MFA secrets, or provider tokens.
@@ -60,7 +60,6 @@ CREATE INDEX idx_identity_links_user_id ON identity_links(user_id);
 -- +goose Down
 -- +goose StatementBegin
 
-SET search_path TO united_pass;
 DROP TABLE IF EXISTS user_personas;
 DROP TABLE IF EXISTS identity_links;
 DROP TABLE IF EXISTS users;

@@ -40,9 +40,10 @@ func mustLoadTestRedisConfig(t *testing.T) config.RedisConfig {
 		t.Skip("UP_TEST_REDIS_URL not set; skipping Redis integration tests")
 	}
 	return config.RedisConfig{
-		URL:       url,
-		KeyPrefix: prefix,
-		PoolSize:  5,
+		URL:           url,
+		KeyPrefix:     prefix,
+		PoolSize:      5,
+		AllowInsecure: os.Getenv("UP_DEBUG_ALLOW_INSECURE") == "true",
 	}
 }
 

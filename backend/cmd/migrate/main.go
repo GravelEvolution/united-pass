@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/GravelEvolution/united-pass/backend/internal/adapters/postgres"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -85,6 +86,13 @@ func main() {
 	}
 	defer db.Close()
 
+	// Create the configured schema if it doesn't exist. The migration files
+	// no longer create the schema; the runner is responsible for creating it.
+	if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", cfg.Database.Schema)); err != nil {
+		fmt.Fprintf(os.Stderr, "error creating schema: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Configure goose to use the configured schema for its version table.
 	goose.SetTableName(fmt.Sprintf("%s.goose_db_version", cfg.Database.Schema))
 
@@ -137,7 +145,16 @@ func main() {
 
 // openDB opens a *sql.DB using pgx's stdlib adapter so goose can use it.
 func openDB(cfg config.Config) (*sql.DB, error) {
-	connConfig, err := pgx.ParseConfig(cfg.Database.URL)
+	dbURL := cfg.Database.URL
+	if cfg.Database.AllowInsecure && !cfg.IsProduction() {
+		rewritten, err := postgres.RewriteURLForInsecureMode(dbURL)
+		if err != nil {
+			return nil, fmt.Errorf("rewrite URL for insecure mode: %w", err)
+		}
+		dbURL = rewritten
+	}
+
+	connConfig, err := pgx.ParseConfig(dbURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse database URL: %w", err)
 	}

@@ -39,6 +39,18 @@ func mustLoadTestDBConfig(t *testing.T) (string, string) {
 	if url == "" {
 		t.Skip("UP_TEST_DATABASE_URL not set; skipping PostgreSQL integration tests")
 	}
+
+	// In debug mode, rewrite the URL to disable TLS so the test can connect
+	// to a server that does not support TLS. This applies to both the
+	// migration connection (pgx.ParseConfig) and the pool (NewPool).
+	if os.Getenv("UP_DEBUG_ALLOW_INSECURE") == "true" {
+		rewritten, err := RewriteURLForInsecureMode(url)
+		if err != nil {
+			t.Fatalf("rewrite URL for insecure mode: %v", err)
+		}
+		url = rewritten
+	}
+
 	return url, schema
 }
 
@@ -60,6 +72,12 @@ func setupTestDB(t *testing.T) *UserRepository {
 	connConfig.RuntimeParams["search_path"] = schema
 
 	db := stdlib.OpenDB(*connConfig)
+
+	// Create the test schema if it doesn't exist. The migration no longer
+	// creates the schema; the runner is responsible for creating it.
+	if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", schema)); err != nil {
+		t.Fatalf("create test schema: %v", err)
+	}
 
 	goose.SetTableName(fmt.Sprintf("%s.goose_db_version", schema))
 	if err := goose.SetDialect("postgres"); err != nil {
