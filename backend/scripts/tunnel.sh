@@ -151,7 +151,12 @@ start() {
   local ssh_cmd
   if [[ "${USE_SSHPASS}" -eq 1 ]]; then
     # Password auth: BatchMode must be off, and the key path is not used.
-    ssh_cmd=(sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=accept-new)
+    # The password is handed to sshpass through the SSHPASS environment
+    # variable (sshpass -e), never as a process argument, so it is not
+    # visible in `ps` output, PID files, or shell history. sshpass strips
+    # the variable from the ssh child environment before exec.
+    export SSHPASS="${SSH_PASSWORD}"
+    ssh_cmd=(sshpass -e ssh -o StrictHostKeyChecking=accept-new)
   else
     ssh_cmd=(ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o BatchMode=yes)
   fi
@@ -169,6 +174,11 @@ start() {
     "${SSH_USER}@${SSH_HOST}" >"${LOG_FILE}" 2>&1 &
 
   echo $! > "${PID_FILE}"
+
+  # Drop the password from this shell's environment as soon as the tunnel
+  # process has inherited it. The running ssh/sshpass processes keep their
+  # own environment; the password never appears in their argument lists.
+  unset SSHPASS SSH_PASSWORD UP_SSH_PASSWORD
 
   wait_for_tunnel
 }

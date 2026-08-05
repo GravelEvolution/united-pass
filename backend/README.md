@@ -146,7 +146,7 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_SSH_PORT` | `22` | SSH port for the development tunnel. |
 | `UP_SSH_USER` | | SSH user for the development tunnel. |
 | `UP_SSH_KEY` | `~/.ssh/id_ed25519` | SSH private key for the development tunnel (preferred). |
-| `UP_SSH_PASSWORD` | | Optional SSH password for the development tunnel via `sshpass`. When set, `tunnel.sh` uses password authentication instead of a key (requires `brew install sshpass`). Never commit the real password. |
+| `UP_SSH_PASSWORD` | | Optional SSH password for the development tunnel via `sshpass`. When set, `tunnel.sh` uses password authentication instead of a key (requires `brew install sshpass`). The password is passed to `sshpass` through the `SSHPASS` environment variable (`sshpass -e`) only — never as a process argument — and is unset right after the tunnel starts. Never commit the real password. |
 | `UP_LOCAL_PG_PORT` | `15432` | Local tunnel port for PostgreSQL. |
 | `UP_LOCAL_REDIS_PORT` | `16379` | Local tunnel port for Redis. |
 
@@ -181,6 +181,10 @@ go vet ./...
 go test ./...
 go test -race ./...
 go build ./...
+
+# Static hygiene check for the SSH tunnel script (password fallback must
+# never place the password in process arguments, logs, or PID files)
+./scripts/tunnel-hygiene-check.sh
 
 # Integration tests (require UP_TEST_DATABASE_URL and UP_TEST_REDIS_URL,
 # which point at the local SSH tunnel ports; start the tunnel first)
@@ -297,7 +301,7 @@ real PostgreSQL schema migrated with `cmd/migrate`):
 ```bash
 UP_TEST_ZITADEL_BASE_URL=http://localhost:8080 \
 UP_TEST_ZITADEL_KEY_FILE=.zitadel/sa-key.json \
-UP_TEST_ZITADEL_USER=zhixing.lin@zitadel.localhost \
+UP_TEST_ZITADEL_USER=zhixing.lin@example.com \
 UP_TEST_ZITADEL_PASSWORD='TestPassword123!' \
 UP_TEST_ZITADEL_TOTP_SECRET=$(jq -r .totpSecret .zitadel/init-state.json) \
 UP_TEST_DATABASE_URL='postgres://...' \
