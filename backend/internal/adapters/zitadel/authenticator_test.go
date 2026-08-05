@@ -58,12 +58,24 @@ type fakeLinker struct {
 	err      error
 	lastInfo identity.ProviderUserInfo
 	calls    int
+	link     identity.IdentityLink
+	linkErr  error
 }
 
 func (f *fakeLinker) GetOrCreateUserByProviderSubject(_ context.Context, _, _ string, info identity.ProviderUserInfo) (identity.User, error) {
 	f.calls++
 	f.lastInfo = info
 	return f.user, f.err
+}
+
+func (f *fakeLinker) GetIdentityLinkByUserID(_ context.Context, _, _ string, _ identity.UserID) (identity.IdentityLink, error) {
+	if f.linkErr != nil {
+		return identity.IdentityLink{}, f.linkErr
+	}
+	if f.link == (identity.IdentityLink{}) {
+		return identity.IdentityLink{}, identity.ErrUserNotFound
+	}
+	return f.link, nil
 }
 
 func newTestAuth(t *testing.T, s *fakeSessionService, u *fakeUserService, l *fakeLinker) *Authenticator {
@@ -818,5 +830,94 @@ func TestMapAuthError(t *testing.T) {
 				t.Errorf("mapAuthError = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// --- Reauthentication password verification (ADR-0004 §7) ---
+
+func TestVerifyUserPassword_RequiresIdentityLink(t *testing.T) {
+	providerCalls := 0
+	s := &fakeSessionService{
+		createFn: func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
+			providerCalls++
+			return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
+		},
+	}
+	a := newTestAuth(t, s, &fakeUserService{}, &fakeLinker{})
+
+	res, err := a.VerifyUserPassword(context.Background(), identity.UserID("user_local_1"), "secret")
+	if err != nil {
+		t.Fatalf("VerifyUserPassword: %v", err)
+	}
+	if res.Status != auth.StatusInvalidCredentials {
+		t.Fatalf("status = %q, want %q", res.Status, auth.StatusInvalidCredentials)
+	}
+	// Without an identity link the provider must never be contacted.
+	if providerCalls != 0 {
+		t.Errorf("provider calls = %d, want 0", providerCalls)
+	}
+}
+
+func TestVerifyUserPassword_SuccessUsesLinkedSubject(t *testing.T) {
+	var gotUserID, gotPassword string
+	s := &fakeSessionService{
+		createFn: func(in *sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
+			if search, ok := in.Checks.User.Search.(*sessionv2.CheckUser_UserId); ok {
+				gotUserID = search.UserId
+			}
+			if in.Checks.Password != nil {
+				gotPassword = in.Checks.Password.Password
+			}
+			return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
+		},
+		getFn: func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error) {
+			return sessionWithUser("user-zitadel-1"), nil
+		},
+	}
+	u := &fakeUserService{
+		getFn: func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error) {
+			return humanProfileResponse("user-zitadel-1"), nil
+		},
+		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+			return &userv2.ListAuthenticationMethodTypesResponse{
+				AuthMethodTypes: []userv2.AuthenticationMethodType{
+					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSWORD,
+				},
+			}, nil
+		},
+	}
+	l := &fakeLinker{
+		user: identity.User{ID: "user_local_1", Status: identity.UserStatusActive},
+		link: identity.IdentityLink{
+			UserID:          identity.UserID("user_local_1"),
+			Provider:        ProviderName,
+			ProviderSubject: "user-zitadel-1",
+		},
+	}
+	a := newTestAuth(t, s, u, l)
+
+	res, err := a.VerifyUserPassword(context.Background(), identity.UserID("user_local_1"), "secret")
+	if err != nil {
+		t.Fatalf("VerifyUserPassword: %v", err)
+	}
+	if res.Status != auth.StatusAuthenticated {
+		t.Fatalf("status = %q, want %q", res.Status, auth.StatusAuthenticated)
+	}
+	// The provider user is resolved from the identity link — never from a
+	// caller-supplied identifier.
+	if gotUserID != "user-zitadel-1" {
+		t.Errorf("provider user id = %q, want user-zitadel-1", gotUserID)
+	}
+	if gotPassword != "secret" {
+		t.Errorf("password check = %q, want secret", gotPassword)
+	}
+}
+
+func TestVerifyUserPassword_LinkLookupErrorPropagates(t *testing.T) {
+	lookupErr := errors.New("db down")
+	a := newTestAuth(t, &fakeSessionService{}, &fakeUserService{}, &fakeLinker{linkErr: lookupErr})
+
+	if _, err := a.VerifyUserPassword(context.Background(), identity.UserID("user_local_1"), "secret"); !errors.Is(err, lookupErr) {
+		t.Fatalf("err = %v, want lookup error propagated", err)
 	}
 }

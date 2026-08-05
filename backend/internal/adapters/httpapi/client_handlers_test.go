@@ -1,11 +1,14 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
@@ -581,5 +584,177 @@ func TestDeleteClient_SuccessConsumesToken(t *testing.T) {
 	// The provider resource was removed.
 	if env.prov.ClientCount() != 0 {
 		t.Errorf("provider clients = %d, want 0", env.prov.ClientCount())
+	}
+}
+
+// --- Secret rotation ---
+
+type fakeRotationChecker struct {
+	allow bool
+	err   error
+	calls int
+}
+
+func (f *fakeRotationChecker) CheckRotation(_ context.Context, _, _ string, _ int, _ time.Duration) (bool, time.Duration, error) {
+	f.calls++
+	return f.allow, 30 * time.Second, f.err
+}
+
+// newRotationAppEnv mirrors newAppEnv but wires a rotation rate checker.
+func newRotationAppEnv(reauth ReauthVerifier, rates RotationRateChecker) *appEnv {
+	store := newFakeAppStore()
+	prov := applications.NewFakeProvisioner()
+	events := &captureEvents{}
+	svc := applications.NewService(store, prov, events, stubAuditReader{},
+		&stubUserLookup{exists: map[string]bool{"user_owner_1": true}}, "fake", "proj_test", 0)
+	resolver := &stubPermResolver{caps: permissions.AllCapabilities()}
+	return &appEnv{
+		store:    store,
+		prov:     prov,
+		events:   events,
+		resolver: resolver,
+		reauth:   reauth,
+		handlers: NewApplicationHandlers(svc, resolver, reauth, rates, 3, 15*time.Minute, slog.Default()),
+	}
+}
+
+func TestRotateClientSecret_SuccessOneTimeSecret(t *testing.T) {
+	verifier := &fakeReauthVerifier{validToken: "reauth-good"}
+	rates := &fakeRotationChecker{allow: true}
+	env := newRotationAppEnv(verifier, rates)
+	router := buildAppRouter(env, true)
+	appID, clientID := createAppAndClientViaAPI(t, env, router, validCreateBody)
+	path := "/admin/applications/" + appID + "/clients/" + clientID + "/secret-rotations"
+
+	rec := doClientRequestWithReauth(router, http.MethodPost, path, "", "reauth-good", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if got := rec.Header().Get("Pragma"); got != "no-cache" {
+		t.Errorf("Pragma = %q, want no-cache", got)
+	}
+	var body struct {
+		SecretID                string `json:"secretId"`
+		ClientSecret            string `json:"clientSecret"`
+		PreviousSecretExpiresAt string `json:"previousSecretExpiresAt"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.SecretID == "" || body.ClientSecret == "" || body.PreviousSecretExpiresAt == "" {
+		t.Errorf("body = %+v, want secretId + one-time clientSecret + expiry", body)
+	}
+	if rates.calls != 1 {
+		t.Errorf("rate limiter calls = %d, want 1", rates.calls)
+	}
+	if fc := env.prov.Client("fake-app-1"); fc == nil || fc.SecretVersion != 2 {
+		t.Error("provider secret must have been rotated exactly once")
+	}
+
+	// The consumed reauth token cannot authorize a second rotation.
+	rec = doClientRequestWithReauth(router, http.MethodPost, path, "", "reauth-good", true)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("reuse status = %d, want 403", rec.Code)
+	}
+	if body := decodeErrorBody(t, rec); body.Code != CodeReauthenticationReq {
+		t.Errorf("code = %q, want %q", body.Code, CodeReauthenticationReq)
+	}
+}
+
+func TestRotateClientSecret_RequiresToken(t *testing.T) {
+	env := newRotationAppEnv(&fakeReauthVerifier{validToken: "reauth-good"}, &fakeRotationChecker{allow: true})
+	router := buildAppRouter(env, true)
+	appID, clientID := createAppAndClientViaAPI(t, env, router, validCreateBody)
+	path := "/admin/applications/" + appID + "/clients/" + clientID + "/secret-rotations"
+
+	rec := doClientRequestWithReauth(router, http.MethodPost, path, "", "", true)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if body := decodeErrorBody(t, rec); body.Code != CodeReauthenticationReq {
+		t.Errorf("code = %q, want %q", body.Code, CodeReauthenticationReq)
+	}
+}
+
+func TestRotateClientSecret_RequiresCapability(t *testing.T) {
+	env := newRotationAppEnv(&fakeReauthVerifier{validToken: "reauth-good"}, &fakeRotationChecker{allow: true})
+	env.resolver.caps = permissions.Capabilities{ApplicationRead: true, ApplicationManage: true}
+	router := buildAppRouter(env, true)
+	appID, clientID := createAppAndClientViaAPI(t, env, router, validCreateBody)
+	path := "/admin/applications/" + appID + "/clients/" + clientID + "/secret-rotations"
+
+	rec := doClientRequestWithReauth(router, http.MethodPost, path, "", "reauth-good", true)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if !env.events.denied(applications.EventSecretRotationFailed) {
+		t.Error("expected denied rotation audit event")
+	}
+}
+
+func TestRotateClientSecret_RateLimited(t *testing.T) {
+	rates := &fakeRotationChecker{allow: false}
+	env := newRotationAppEnv(&fakeReauthVerifier{validToken: "reauth-good"}, rates)
+	router := buildAppRouter(env, true)
+	appID, clientID := createAppAndClientViaAPI(t, env, router, validCreateBody)
+	path := "/admin/applications/" + appID + "/clients/" + clientID + "/secret-rotations"
+
+	rec := doClientRequestWithReauth(router, http.MethodPost, path, "", "reauth-good", true)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	for _, call := range env.prov.Calls {
+		if call == "rotate" {
+			t.Fatal("rate-limited rotation must never reach the provider")
+		}
+	}
+}
+
+func TestRotateClientSecret_PublicClient422(t *testing.T) {
+	env := newRotationAppEnv(&fakeReauthVerifier{validToken: "reauth-good"}, &fakeRotationChecker{allow: true})
+	router := buildAppRouter(env, true)
+	appID := createAppViaAPI(t, env, router, validCreateBody)
+
+	rec := doAppRequest(router, http.MethodPost, "/admin/applications/"+appID+"/clients", validPublicClientBody, true)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("setup create: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ClientID string `json:"clientId"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	path := "/admin/applications/" + appID + "/clients/" + created.ClientID + "/secret-rotations"
+	rec = doClientRequestWithReauth(router, http.MethodPost, path, "", "reauth-good", true)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRotateClientSecret_MalformedIDs404(t *testing.T) {
+	env := newRotationAppEnv(&fakeReauthVerifier{validToken: "reauth-good"}, &fakeRotationChecker{allow: true})
+	router := buildAppRouter(env, true)
+
+	rec := doClientRequestWithReauth(router, http.MethodPost,
+		"/admin/applications/bogus/clients/clt_x/secret-rotations", "", "reauth-good", true)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestRotateClientSecret_NilRateCheckerFailsClosed(t *testing.T) {
+	env := newRotationAppEnv(&fakeReauthVerifier{validToken: "reauth-good"}, nil)
+	router := buildAppRouter(env, true)
+	appID, clientID := createAppAndClientViaAPI(t, env, router, validCreateBody)
+	path := "/admin/applications/" + appID + "/clients/" + clientID + "/secret-rotations"
+
+	rec := doClientRequestWithReauth(router, http.MethodPost, path, "", "reauth-good", true)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 (fail closed)", rec.Code)
 	}
 }

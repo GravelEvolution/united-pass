@@ -425,6 +425,26 @@ func (r *ApplicationRepository) MarkSecretRotated(ctx context.Context, secretID 
 	return nil
 }
 
+// BeginSecretRotation acquires the single-winner rotation gate by bumping
+// the client's optimistic-concurrency version before any provider call
+// (ADR-0004 §6). A concurrent rotation or any other concurrent client write
+// makes the version match fail and returns ErrConflict.
+func (r *ApplicationRepository) BeginSecretRotation(ctx context.Context, clientID applications.OAuthClientID, expectedVersion int) error {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE oauth_clients
+		    SET updated_at = NOW(), version = version + 1
+		  WHERE client_id = $1 AND version = $2
+		    AND deleted_at IS NULL AND provisioning_status = 'provisioned'`,
+		string(clientID), expectedVersion)
+	if err != nil {
+		return fmt.Errorf("postgres: begin secret rotation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return r.conflictOrNotFoundClient(ctx, clientID)
+	}
+	return nil
+}
+
 // GetOperationByIdempotencyKey loads a recorded provider operation so a
 // retry can reuse its outcome instead of calling the provider twice.
 func (r *ApplicationRepository) GetOperationByIdempotencyKey(ctx context.Context, key string) (applications.ProviderOperation, error) {

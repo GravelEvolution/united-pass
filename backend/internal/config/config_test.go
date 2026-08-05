@@ -307,6 +307,19 @@ func validDevelopmentConfig() Config {
 			MFALimit:    10,
 			MFAWindow:   15 * time.Minute,
 		},
+
+		Reauth: ReauthConfig{
+			ChallengeTTL: 5 * time.Minute,
+			GrantTTL:     5 * time.Minute,
+			MaxAttempts:  5,
+			RateLimit:    10,
+			RateWindow:   15 * time.Minute,
+		},
+
+		Rotation: RotationConfig{
+			RateLimit:  3,
+			RateWindow: 15 * time.Minute,
+		},
 	}
 }
 

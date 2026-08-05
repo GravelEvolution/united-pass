@@ -32,4 +32,15 @@ type UserLinker interface {
 		providerTenantID string,
 		info ProviderUserInfo,
 	) (User, error)
+
+	// GetIdentityLinkByUserID returns the identity link binding a United Pass
+	// user to a provider subject. Reauthentication resolves the provider-side
+	// user from the stable user ID — never from a caller-supplied identifier
+	// (ADR-0004 §7). Returns ErrUserNotFound when no link exists.
+	GetIdentityLinkByUserID(
+		ctx context.Context,
+		provider string,
+		providerTenantID string,
+		userID UserID,
+	) (IdentityLink, error)
 }

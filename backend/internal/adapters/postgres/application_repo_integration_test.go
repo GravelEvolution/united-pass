@@ -410,6 +410,45 @@ func TestIntegration_SecretRecordsAndRotation(t *testing.T) {
 	}
 }
 
+// TestIntegration_BeginSecretRotationSingleWinner verifies the optimistic
+// gate: exactly one rotation proceeds for a given client version, stale
+// versions are rejected with a conflict, and missing clients stay hidden
+// behind the same error surface.
+func TestIntegration_BeginSecretRotationSingleWinner(t *testing.T) {
+	repo, users := setupAppRepo(t)
+	ctx := context.Background()
+	ownerID := createTestOwner(t, users, "user_rotate_owner")
+	appID, clientID := provisionTestApp(t, repo, "Rotation Gate App", ownerID)
+
+	client, err := repo.GetClient(ctx, appID, clientID)
+	if err != nil {
+		t.Fatalf("get client: %v", err)
+	}
+
+	// The first rotation wins and bumps the version.
+	if err := repo.BeginSecretRotation(ctx, clientID, client.Version); err != nil {
+		t.Fatalf("begin rotation: %v", err)
+	}
+	updated, err := repo.GetClient(ctx, appID, clientID)
+	if err != nil {
+		t.Fatalf("get client after begin: %v", err)
+	}
+	if updated.Version != client.Version+1 {
+		t.Fatalf("version = %d, want %d", updated.Version, client.Version+1)
+	}
+
+	// A concurrent rotation holding the stale version loses the gate.
+	if err := repo.BeginSecretRotation(ctx, clientID, client.Version); !errors.Is(err, applications.ErrConflict) {
+		t.Fatalf("stale begin err = %v, want ErrConflict", err)
+	}
+
+	// Unknown clients yield the same conflict/not-found surface without
+	// revealing existence differences.
+	if err := repo.BeginSecretRotation(ctx, applications.OAuthClientID("clt_missing"), 1); !errors.Is(err, applications.ErrNotFound) {
+		t.Fatalf("missing client err = %v, want ErrNotFound", err)
+	}
+}
+
 // TestIntegration_OperationIdempotency verifies recorded operations are
 // retrievable by idempotency key for retry reuse.
 func TestIntegration_OperationIdempotency(t *testing.T) {

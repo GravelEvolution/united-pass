@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -20,25 +21,52 @@ import (
 // high-risk operations (ADR-0004 §6.7). A nil verifier fails closed: the
 // operation is denied until the reauthentication contract is implemented.
 type ReauthVerifier interface {
-	// VerifyAndConsume checks the token for the given action and resource.
-	// A consumed token can never be reused.
-	VerifyAndConsume(ctx context.Context, token, action string, appID applications.ApplicationID, clientID applications.OAuthClientID) error
+	// VerifyAndConsume checks the token for the given action, session and
+	// resource. A consumed token can never be reused.
+	VerifyAndConsume(ctx context.Context, token, action, sessionID string, appID applications.ApplicationID, clientID applications.OAuthClientID) error
+}
+
+// RotationRateChecker abstracts the secret rotation rate limiter (ADR-0004
+// §6). The Redis rate limiter satisfies this interface; a nil checker fails
+// closed.
+type RotationRateChecker interface {
+	CheckRotation(ctx context.Context, ip, clientIDHash string, limit int, window time.Duration) (allowed bool, retryAfter time.Duration, err error)
 }
 
 // ApplicationHandlers serves the OAuth application management plane
 // (ADR-0004 §7). All routes require a valid session and CSRF token; these
 // are enforced by middleware, not here.
 type ApplicationHandlers struct {
-	svc          *applications.Service
-	permResolver permissions.Resolver
-	reauth       ReauthVerifier
+	svc            *applications.Service
+	permResolver   permissions.Resolver
+	reauth         ReauthVerifier
+	rotationRates  RotationRateChecker
+	rotationLimit  int
+	rotationWindow time.Duration
+	logger         *slog.Logger
 }
 
 // NewApplicationHandlers builds the application management handlers. reauth
-// may be nil while the reauthentication contract is unimplemented; high-risk
-// operations then fail closed.
-func NewApplicationHandlers(svc *applications.Service, permResolver permissions.Resolver, reauth ReauthVerifier) *ApplicationHandlers {
-	return &ApplicationHandlers{svc: svc, permResolver: permResolver, reauth: reauth}
+// and rotationRates may be nil while their infrastructure is unavailable;
+// high-risk operations then fail closed.
+func NewApplicationHandlers(
+	svc *applications.Service,
+	permResolver permissions.Resolver,
+	reauth ReauthVerifier,
+	rotationRates RotationRateChecker,
+	rotationLimit int,
+	rotationWindow time.Duration,
+	logger *slog.Logger,
+) *ApplicationHandlers {
+	return &ApplicationHandlers{
+		svc:            svc,
+		permResolver:   permResolver,
+		reauth:         reauth,
+		rotationRates:  rotationRates,
+		rotationLimit:  rotationLimit,
+		rotationWindow: rotationWindow,
+		logger:         logger,
+	}
 }
 
 // checkCapability resolves the caller's capabilities fail-closed and returns
@@ -484,14 +512,17 @@ func (h *ApplicationHandlers) DeleteApplication(w http.ResponseWriter, r *http.R
 
 // verifyReauthentication enforces the reauthentication requirement for
 // high-risk operations. It fails closed: without a verifier implementation,
-// an absent token or any verification failure denies the operation.
+// an absent token or any verification failure denies the operation. Grants
+// are bound to the caller's session, so a stolen token cannot be redeemed
+// from another session.
 func (h *ApplicationHandlers) verifyReauthentication(w http.ResponseWriter, r *http.Request, actor identity.UserID, eventType, action string, appID applications.ApplicationID, clientID applications.OAuthClientID) bool {
 	token := r.Header.Get("X-Reauthentication-Token")
+	principal, hasPrincipal := PrincipalFromContext(r.Context())
 	var err error
-	if h.reauth == nil || token == "" {
+	if h.reauth == nil || token == "" || !hasPrincipal {
 		err = errors.New("reauthentication unavailable")
 	} else {
-		err = h.reauth.VerifyAndConsume(r.Context(), token, action, appID, clientID)
+		err = h.reauth.VerifyAndConsume(r.Context(), token, action, string(principal.SessionID), appID, clientID)
 	}
 	if err != nil {
 		h.svc.RecordEvent(r.Context(), eventType, actor, appID, clientID,

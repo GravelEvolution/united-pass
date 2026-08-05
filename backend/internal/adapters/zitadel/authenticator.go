@@ -118,12 +118,47 @@ func (a *Authenticator) BeginPasswordAuthentication(
 	ctx context.Context,
 	input auth.PasswordAuthenticationInput,
 ) (auth.AuthenticationResult, error) {
+	return a.beginSession(ctx, &sessionv2.CheckUser{
+		Search: &sessionv2.CheckUser_LoginName{LoginName: input.Identifier},
+	}, input.Password)
+}
+
+// VerifyUserPassword verifies the password of an already-authenticated United
+// Pass user for reauthentication (ADR-0004 §7). The provider-side user is
+// resolved from the identity link bound to the stable user ID — never from a
+// caller-supplied identifier — so a session can only reauthenticate itself.
+func (a *Authenticator) VerifyUserPassword(
+	ctx context.Context,
+	userID identity.UserID,
+	password string,
+) (auth.AuthenticationResult, error) {
+	link, err := a.linker.GetIdentityLinkByUserID(ctx, a.provider, a.tenantID, userID)
+	if err != nil {
+		if errors.Is(err, identity.ErrUserNotFound) {
+			// The session user has no provider link: reauthentication is
+			// impossible. Fail closed with a generic credential error so no
+			// account state is revealed.
+			return auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}, nil
+		}
+		return auth.AuthenticationResult{}, err
+	}
+	return a.beginSession(ctx, &sessionv2.CheckUser{
+		Search: &sessionv2.CheckUser_UserId{UserId: link.ProviderSubject},
+	}, password)
+}
+
+// beginSession creates a ZITADEL session with user + password checks and
+// determines whether a second factor is required. It is shared by login
+// (identifier search) and reauthentication (stable user ID search).
+func (a *Authenticator) beginSession(
+	ctx context.Context,
+	checkUser *sessionv2.CheckUser,
+	password string,
+) (auth.AuthenticationResult, error) {
 	req := &sessionv2.CreateSessionRequest{
 		Checks: &sessionv2.Checks{
-			User: &sessionv2.CheckUser{
-				Search: &sessionv2.CheckUser_LoginName{LoginName: input.Identifier},
-			},
-			Password: &sessionv2.CheckPassword{Password: input.Password},
+			User:     checkUser,
+			Password: &sessionv2.CheckPassword{Password: password},
 		},
 		Challenges: a.requestChallenges(),
 	}

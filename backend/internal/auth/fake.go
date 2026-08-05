@@ -141,3 +141,49 @@ func (f *FakeAuthenticator) RevokeProviderSession(
 ) error {
 	return nil
 }
+
+// VerifyUserPassword verifies the password of an already-known user for
+// reauthentication (ADR-0004 §7). The user is located by the stable United
+// Pass user ID — never by a caller-supplied identifier — so a reauthenticating
+// session can never be redirected against another account. Status semantics
+// match BeginPasswordAuthentication.
+func (f *FakeAuthenticator) VerifyUserPassword(
+	ctx context.Context,
+	userID identity.UserID,
+	password string,
+) (AuthenticationResult, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	for _, user := range f.users {
+		if user.UserID != userID {
+			continue
+		}
+		if user.Password != password {
+			return AuthenticationResult{Status: StatusInvalidCredentials}, nil
+		}
+		if !user.UserStatus.CanAuthenticate() {
+			return AuthenticationResult{Status: StatusLocked}, nil
+		}
+		if user.RequiresMFA {
+			return AuthenticationResult{
+				Status:            StatusMFARequired,
+				UserID:            user.UserID,
+				Provider:          user.Provider,
+				ProviderSessionID: user.SessionRef,
+				AvailableMethods:  user.MFAMethods,
+			}, nil
+		}
+		return AuthenticationResult{
+			Status:                   StatusAuthenticated,
+			UserID:                   user.UserID,
+			Provider:                 user.Provider,
+			ProviderSessionReference: user.SessionRef,
+			AuthenticationMethods:    []AuthenticationMethod{MethodPassword},
+		}, nil
+	}
+
+	// No fake user matches the session user: fail closed with a generic
+	// credential error so no account state is revealed.
+	return AuthenticationResult{Status: StatusInvalidCredentials}, nil
+}

@@ -16,6 +16,16 @@ const rateLimitLoginSegment = "rl:login:"
 // {prefix}rl:mfa:{ip}:{sha256(mfaToken)}.
 const rateLimitMFASegment = "rl:mfa:"
 
+// rateLimitReauthSegment is the key segment for reauthentication rate limits.
+// The full key is: {prefix}rl:reauth:{ip}:{sha256(key)}. The key component is
+// a hashed session-user or challenge-token identifier; raw identifiers never
+// appear in Redis keys.
+const rateLimitReauthSegment = "rl:reauth:"
+
+// rateLimitRotationSegment is the key segment for secret rotation rate
+// limits. The full key is: {prefix}rl:rotate:{ip}:{sha256(clientId)}.
+const rateLimitRotationSegment = "rl:rotate:"
+
 // rateLimitScript atomically increments a rate-limit counter and sets the TTL
 // on the first request in a window. It returns a two-element array:
 //
@@ -94,6 +104,35 @@ func (r *RateLimiter) CheckMFA(
 	window time.Duration,
 ) (allowed bool, retryAfter time.Duration, err error) {
 	key := r.client.buildKey(rateLimitMFASegment, ip, ":", mfaTokenHash)
+	return r.check(ctx, key, limit, window)
+}
+
+// CheckReauth checks the rate limit for a reauthentication attempt
+// (ADR-0004 §7). The keyHash must be the SHA-256 hash of the session-user or
+// challenge-token identifier; the raw value must never appear in the Redis
+// key. Returns the same semantics as CheckLogin.
+func (r *RateLimiter) CheckReauth(
+	ctx context.Context,
+	ip string,
+	keyHash string,
+	limit int,
+	window time.Duration,
+) (allowed bool, retryAfter time.Duration, err error) {
+	key := r.client.buildKey(rateLimitReauthSegment, ip, ":", keyHash)
+	return r.check(ctx, key, limit, window)
+}
+
+// CheckRotation checks the rate limit for an OAuth client secret rotation
+// (ADR-0004 §6). The clientIDHash must be the SHA-256 hash of the target
+// client ID. Returns the same semantics as CheckLogin.
+func (r *RateLimiter) CheckRotation(
+	ctx context.Context,
+	ip string,
+	clientIDHash string,
+	limit int,
+	window time.Duration,
+) (allowed bool, retryAfter time.Duration, err error) {
+	key := r.client.buildKey(rateLimitRotationSegment, ip, ":", clientIDHash)
 	return r.check(ctx, key, limit, window)
 }
 

@@ -58,6 +58,16 @@ const (
 	defaultLoginRateWindow = 15 * time.Minute
 	defaultMFARateLimit    = 10
 	defaultMFARateWindow   = 15 * time.Minute
+
+	defaultReauthChallengeTTL = 5 * time.Minute
+	defaultReauthGrantTTL     = 5 * time.Minute
+	defaultReauthMaxAttempts  = 5
+	defaultReauthRateLimit    = 10
+	defaultReauthRateWindow   = 15 * time.Minute
+
+	defaultRotationGracePeriod = time.Duration(0)
+	defaultRotationRateLimit   = 3
+	defaultRotationRateWindow  = 15 * time.Minute
 )
 
 // Config holds all process-level configuration. Values are loaded once at
@@ -88,6 +98,10 @@ type Config struct {
 
 	// Phase 1 — Permissions
 	Permission PermissionConfig
+
+	// Phase 2 — Reauthentication and secret rotation
+	Reauth   ReauthConfig
+	Rotation RotationConfig
 
 	// Integration tests
 	Test TestConfig
@@ -136,6 +150,27 @@ type RateLimitConfig struct {
 	LoginWindow time.Duration
 	MFALimit    int
 	MFAWindow   time.Duration
+}
+
+// ReauthConfig holds reauthentication challenge and grant parameters
+// (ADR-0004 §7). Challenges and grants are short-lived, single-use and
+// bound to user + session + action + target resource.
+type ReauthConfig struct {
+	ChallengeTTL time.Duration
+	GrantTTL     time.Duration
+	MaxAttempts  int
+	RateLimit    int
+	RateWindow   time.Duration
+}
+
+// RotationConfig holds OAuth client secret rotation parameters (ADR-0004 §6).
+// GracePeriod is the overlap window reported as previousSecretExpiresAt;
+// against ZITADEL v2.71 the effective grace period is zero because the
+// provider invalidates the previous secret immediately.
+type RotationConfig struct {
+	GracePeriod time.Duration
+	RateLimit   int
+	RateWindow  time.Duration
 }
 
 // AuthProviderConfig holds authentication provider parameters.
@@ -241,6 +276,20 @@ func Load() (Config, error) {
 			DevOverrideUserID:  envOr("UP_PERMISSION_DEV_OVERRIDE_USER_ID", ""),
 		},
 
+		Reauth: ReauthConfig{
+			ChallengeTTL: durationOr("UP_REAUTH_CHALLENGE_TTL", defaultReauthChallengeTTL),
+			GrantTTL:     durationOr("UP_REAUTH_GRANT_TTL", defaultReauthGrantTTL),
+			MaxAttempts:  intOr("UP_REAUTH_MAX_ATTEMPTS", defaultReauthMaxAttempts),
+			RateLimit:    intOr("UP_REAUTH_RATE_LIMIT", defaultReauthRateLimit),
+			RateWindow:   durationOr("UP_REAUTH_RATE_WINDOW", defaultReauthRateWindow),
+		},
+
+		Rotation: RotationConfig{
+			GracePeriod: durationOr("UP_SECRET_ROTATION_GRACE_PERIOD", defaultRotationGracePeriod),
+			RateLimit:   intOr("UP_SECRET_ROTATION_RATE_LIMIT", defaultRotationRateLimit),
+			RateWindow:  durationOr("UP_SECRET_ROTATION_RATE_WINDOW", defaultRotationRateWindow),
+		},
+
 		Test: TestConfig{
 			DatabaseURL:    envOr("UP_TEST_DATABASE_URL", ""),
 			DatabaseSchema: envOr("UP_TEST_DATABASE_SCHEMA", "united_pass_test"),
@@ -331,6 +380,34 @@ func (c Config) Validate() error {
 	}
 	if c.MFA.MaxAttempts <= 0 {
 		errs = append(errs, errors.New("MFA max attempts must be positive"))
+	}
+
+	// Reauthentication validation.
+	if c.Reauth.ChallengeTTL <= 0 {
+		errs = append(errs, errors.New("reauthentication challenge TTL must be positive"))
+	}
+	if c.Reauth.GrantTTL <= 0 {
+		errs = append(errs, errors.New("reauthentication grant TTL must be positive"))
+	}
+	if c.Reauth.MaxAttempts <= 0 {
+		errs = append(errs, errors.New("reauthentication max attempts must be positive"))
+	}
+	if c.Reauth.RateLimit <= 0 {
+		errs = append(errs, errors.New("reauthentication rate limit must be positive"))
+	}
+	if c.Reauth.RateWindow <= 0 {
+		errs = append(errs, errors.New("reauthentication rate window must be positive"))
+	}
+
+	// Secret rotation validation.
+	if c.Rotation.GracePeriod < 0 {
+		errs = append(errs, errors.New("secret rotation grace period must not be negative"))
+	}
+	if c.Rotation.RateLimit <= 0 {
+		errs = append(errs, errors.New("secret rotation rate limit must be positive"))
+	}
+	if c.Rotation.RateWindow <= 0 {
+		errs = append(errs, errors.New("secret rotation rate window must be positive"))
 	}
 
 	// Rate limit validation.

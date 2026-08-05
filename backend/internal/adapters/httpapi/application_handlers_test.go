@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -341,6 +342,21 @@ func (s *fakeAppStore) GetClientSecretRecords(_ context.Context, _ applications.
 	return nil, nil
 }
 
+func (s *fakeAppStore) BeginSecretRotation(_ context.Context, clientID applications.OAuthClientID, expectedVersion int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.clients[clientID]
+	if !ok || s.deleted[clientID] {
+		return applications.ErrNotFound
+	}
+	if c.Version != expectedVersion {
+		return applications.ErrConflict
+	}
+	c.Version++
+	s.clients[clientID] = c
+	return nil
+}
+
 func (s *fakeAppStore) GetOperationByIdempotencyKey(_ context.Context, _ string) (applications.ProviderOperation, error) {
 	return applications.ProviderOperation{}, applications.ErrNotFound
 }
@@ -407,7 +423,7 @@ type fakeReauthVerifier struct {
 	consumed   bool
 }
 
-func (f *fakeReauthVerifier) VerifyAndConsume(_ context.Context, token, _ string, _ applications.ApplicationID, _ applications.OAuthClientID) error {
+func (f *fakeReauthVerifier) VerifyAndConsume(_ context.Context, token, _, _ string, _ applications.ApplicationID, _ applications.OAuthClientID) error {
 	if f.consumed || token != f.validToken {
 		return errors.New("invalid reauthentication token")
 	}
@@ -431,7 +447,7 @@ func newAppEnv(reauth ReauthVerifier) *appEnv {
 	prov := applications.NewFakeProvisioner()
 	events := &captureEvents{}
 	svc := applications.NewService(store, prov, events, stubAuditReader{},
-		&stubUserLookup{exists: map[string]bool{"user_owner_1": true}}, "fake", "proj_test")
+		&stubUserLookup{exists: map[string]bool{"user_owner_1": true}}, "fake", "proj_test", 0)
 	resolver := &stubPermResolver{caps: permissions.AllCapabilities()}
 	return &appEnv{
 		store:    store,
@@ -439,7 +455,7 @@ func newAppEnv(reauth ReauthVerifier) *appEnv {
 		events:   events,
 		resolver: resolver,
 		reauth:   reauth,
-		handlers: NewApplicationHandlers(svc, resolver, reauth),
+		handlers: NewApplicationHandlers(svc, resolver, reauth, nil, 0, 0, slog.Default()),
 	}
 }
 
@@ -475,6 +491,7 @@ func buildAppRouter(env *appEnv, injectSession bool) http.Handler {
 	r.Post("/admin/applications/{applicationId}/clients/{clientId}/enable", env.handlers.EnableClient)
 	r.Post("/admin/applications/{applicationId}/clients/{clientId}/disable", env.handlers.DisableClient)
 	r.Delete("/admin/applications/{applicationId}/clients/{clientId}", env.handlers.DeleteClient)
+	r.Post("/admin/applications/{applicationId}/clients/{clientId}/secret-rotations", env.handlers.RotateClientSecret)
 	return r
 }
 

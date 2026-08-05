@@ -21,6 +21,12 @@ var ErrOwnerNotFound = errors.New("applications: owner not found")
 // never exposed (ADR-0004 §9).
 var ErrInvalidCursor = errors.New("applications: invalid cursor")
 
+// ErrSecretRotationNotAllowed is returned when secret rotation is requested
+// for a client that cannot rotate: public clients never have secrets and
+// non-active clients must not be mutated (ADR-0004 §6). HTTP adapters map it
+// to a 422 response.
+var ErrSecretRotationNotAllowed = errors.New("applications: secret rotation not allowed")
+
 // ListQuery is the validated application list request. All fields are
 // optional; Sort defaults to "-updatedAt" and Limit to 20 (1–100) in the
 // repository.

@@ -138,6 +138,25 @@ func (r *UserRepository) GetIdentityLink(ctx context.Context, provider, provider
 	return link, nil
 }
 
+// GetIdentityLinkByUserID loads the identity link binding a United Pass user
+// to a provider subject within a provider tenant. Returns
+// identity.ErrUserNotFound when no link matches.
+func (r *UserRepository) GetIdentityLinkByUserID(ctx context.Context, provider, providerTenantID string, userID identity.UserID) (identity.IdentityLink, error) {
+	row := r.pool.QueryRow(ctx,
+		`SELECT `+identityLinkColumns+`
+           FROM identity_links
+          WHERE provider = $1
+            AND provider_tenant_id = $2
+            AND user_id = $3`,
+		provider, providerTenantID, string(userID))
+
+	link, err := scanIdentityLink(row)
+	if err != nil {
+		return identity.IdentityLink{}, mapUserError(err, "get identity link by user id")
+	}
+	return link, nil
+}
+
 // CreateIdentityLink inserts a new external identity link binding a provider
 // subject to a stable United Pass user ID. The unique constraint on
 // (provider, provider_tenant_id, provider_subject) prevents the same external

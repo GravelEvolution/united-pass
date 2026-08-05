@@ -807,3 +807,160 @@ func TestIntegration_KeysDoNotContainRawTokens(t *testing.T) {
 		t.Errorf("expected key %q to exist", expectedKey)
 	}
 }
+
+// --- Reauth Store Tests (ADR-0004 §7) ---
+
+func reauthChallengeData(action string) auth.ReauthChallengeData {
+	return auth.ReauthChallengeData{
+		UserID:        identity.UserID("user_reauth_1"),
+		SessionID:     "sess_reauth_1",
+		Action:        action,
+		ApplicationID: "app_reauth_1",
+		ClientID:      "clt_reauth_1",
+	}
+}
+
+func TestIntegration_ReauthStoreChallengeLifecycle(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewReauthStore(client)
+	ctx := context.Background()
+	tokenHash := session.HashToken("reauth-challenge-token")
+
+	if err := store.CreateChallenge(ctx, tokenHash, reauthChallengeData("client.secret.rotate"), 5*time.Minute); err != nil {
+		t.Fatalf("create challenge: %v", err)
+	}
+
+	// The first claim wins and returns the stored binding.
+	data, err := store.ClaimChallenge(ctx, tokenHash, "claim-1")
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if data.Action != "client.secret.rotate" || data.SessionID != "sess_reauth_1" || data.ClientID != "clt_reauth_1" {
+		t.Errorf("claimed data = %+v, want stored binding", data)
+	}
+
+	// A concurrent claim is rejected while the lock is held.
+	if _, err := store.ClaimChallenge(ctx, tokenHash, "claim-2"); !errors.Is(err, auth.ErrReauthChallengeClaimed) {
+		t.Fatalf("second claim err = %v, want ErrReauthChallengeClaimed", err)
+	}
+
+	// Release only succeeds for the holder; the lock can then be reclaimed.
+	if err := store.ReleaseChallenge(ctx, tokenHash, "claim-other"); !errors.Is(err, auth.ErrReauthChallengeNotHeld) {
+		t.Fatalf("foreign release err = %v, want ErrReauthChallengeNotHeld", err)
+	}
+	if err := store.ReleaseChallenge(ctx, tokenHash, "claim-1"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if _, err := store.ClaimChallenge(ctx, tokenHash, "claim-3"); err != nil {
+		t.Fatalf("reclaim after release: %v", err)
+	}
+
+	// Consuming without holding the lock fails closed.
+	if err := store.ConsumeChallenge(ctx, tokenHash, "claim-1"); !errors.Is(err, auth.ErrReauthChallengeNotHeld) {
+		t.Fatalf("consume without lock err = %v, want ErrReauthChallengeNotHeld", err)
+	}
+	if err := store.ConsumeChallenge(ctx, tokenHash, "claim-3"); err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+
+	// The challenge is gone: claims report not found and the lock was cleaned.
+	if _, err := store.ClaimChallenge(ctx, tokenHash, "claim-4"); !errors.Is(err, auth.ErrReauthChallengeNotFound) {
+		t.Fatalf("claim after consume err = %v, want ErrReauthChallengeNotFound", err)
+	}
+}
+
+func TestIntegration_ReauthStoreChallengeAttemptBudget(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewReauthStore(client)
+	ctx := context.Background()
+	tokenHash := session.HashToken("reauth-attempts-token")
+
+	if err := store.CreateChallenge(ctx, tokenHash, reauthChallengeData("client.delete"), 5*time.Minute); err != nil {
+		t.Fatalf("create challenge: %v", err)
+	}
+
+	for i := 1; i <= 3; i++ {
+		count, err := store.IncrementChallengeAttempts(ctx, tokenHash, 3)
+		if err != nil {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+		if count != i {
+			t.Errorf("attempt count = %d, want %d", count, i)
+		}
+	}
+	// The budget is exhausted: the store rejects further attempts.
+	if _, err := store.IncrementChallengeAttempts(ctx, tokenHash, 3); !errors.Is(err, auth.ErrReauthMaxAttemptsExceeded) {
+		t.Fatalf("over-budget err = %v, want ErrReauthMaxAttemptsExceeded", err)
+	}
+
+	// Unknown challenges report not found instead of silently counting.
+	if _, err := store.IncrementChallengeAttempts(ctx, session.HashToken("missing"), 3); !errors.Is(err, auth.ErrReauthChallengeNotFound) {
+		t.Fatalf("missing challenge err = %v, want ErrReauthChallengeNotFound", err)
+	}
+}
+
+func TestIntegration_ReauthStoreGrantSingleUse(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewReauthStore(client)
+	ctx := context.Background()
+	tokenHash := session.HashToken("reauth-grant-token")
+	data := auth.ReauthGrantData{
+		UserID:        identity.UserID("user_reauth_1"),
+		SessionID:     "sess_reauth_1",
+		Action:        "client.secret.rotate",
+		ApplicationID: "app_reauth_1",
+		ClientID:      "clt_reauth_1",
+	}
+
+	if err := store.CreateGrant(ctx, tokenHash, data, 5*time.Minute); err != nil {
+		t.Fatalf("create grant: %v", err)
+	}
+
+	got, err := store.ConsumeGrant(ctx, tokenHash)
+	if err != nil {
+		t.Fatalf("consume grant: %v", err)
+	}
+	if got.UserID != data.UserID || got.SessionID != data.SessionID || got.Action != data.Action ||
+		got.ApplicationID != data.ApplicationID || got.ClientID != data.ClientID {
+		t.Errorf("grant data = %+v, want %+v", got, data)
+	}
+
+	// A consumed grant can never be reused.
+	if _, err := store.ConsumeGrant(ctx, tokenHash); !errors.Is(err, auth.ErrReauthGrantNotFound) {
+		t.Fatalf("reuse err = %v, want ErrReauthGrantNotFound", err)
+	}
+}
+
+func TestIntegration_ReauthStoreGrantConcurrentConsume(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewReauthStore(client)
+	ctx := context.Background()
+	tokenHash := session.HashToken("reauth-grant-race-token")
+	data := auth.ReauthGrantData{
+		UserID:        identity.UserID("user_reauth_1"),
+		SessionID:     "sess_reauth_1",
+		Action:        "application.delete",
+		ApplicationID: "app_reauth_1",
+	}
+	if err := store.CreateGrant(ctx, tokenHash, data, 5*time.Minute); err != nil {
+		t.Fatalf("create grant: %v", err)
+	}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	winners := make(chan struct{}, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := store.ConsumeGrant(ctx, tokenHash); err == nil {
+				winners <- struct{}{}
+			}
+		}()
+	}
+	wg.Wait()
+	close(winners)
+	if count := len(winners); count != 1 {
+		t.Fatalf("concurrent winners = %d, want exactly 1", count)
+	}
+}

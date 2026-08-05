@@ -38,6 +38,11 @@ type ApplicationStore interface {
 	CreateSecretRecord(ctx context.Context, rec ClientSecretRecord) error
 	MarkSecretRotated(ctx context.Context, secretID ClientSecretID, rotatedAt time.Time) error
 	GetClientSecretRecords(ctx context.Context, clientID OAuthClientID) ([]ClientSecretRecord, error)
+	// BeginSecretRotation acquires the single-winner rotation gate by bumping
+	// the client's optimistic-concurrency version before any provider call.
+	// A concurrent rotation (or any other concurrent client write) makes the
+	// version match fail and returns ErrConflict.
+	BeginSecretRotation(ctx context.Context, clientID OAuthClientID, expectedVersion int) error
 
 	GetOperationByIdempotencyKey(ctx context.Context, key string) (ProviderOperation, error)
 	CreateReconciliationJob(ctx context.Context, job ReconciliationJob) error
@@ -78,6 +83,15 @@ type ClientCreateResult struct {
 	ClientSecret string
 }
 
+// SecretRotationResult is the outcome of a successful secret rotation. The
+// new secret appears exactly once and is never persisted; the secret ID and
+// the previous-secret expiry are durable metadata (ADR-0004 §6).
+type SecretRotationResult struct {
+	SecretID                ClientSecretID
+	ClientSecret            string
+	PreviousSecretExpiresAt time.Time
+}
+
 // Detail is the application detail projection: the application, its fully
 // provisioned clients and the audit trail actually recorded for it.
 type Detail struct {
@@ -98,11 +112,16 @@ type Service struct {
 	users             UserLookup
 	providerName      string
 	providerProjectID string
-	now               func() time.Time
+	// rotationGracePeriod is the overlap window added to the rotation
+	// timestamp for previousSecretExpiresAt. Against ZITADEL v2.71 the
+	// effective grace period is zero (ADR-0004 §6).
+	rotationGracePeriod time.Duration
+	now                 func() time.Time
 }
 
 // NewService builds the application management service. providerName and
-// providerProjectID are recorded on provisioned clients as mapping columns.
+// providerProjectID are recorded on provisioned clients as mapping columns;
+// rotationGracePeriod shapes previousSecretExpiresAt on secret rotation.
 func NewService(
 	store ApplicationStore,
 	provisioner OAuthClientProvisioner,
@@ -110,15 +129,17 @@ func NewService(
 	audits AuditReader,
 	users UserLookup,
 	providerName, providerProjectID string,
+	rotationGracePeriod time.Duration,
 ) *Service {
 	return &Service{
-		store:             store,
-		provisioner:       provisioner,
-		events:            events,
-		audits:            audits,
-		users:             users,
-		providerName:      providerName,
-		providerProjectID: providerProjectID,
+		store:               store,
+		provisioner:         provisioner,
+		events:              events,
+		audits:              audits,
+		users:               users,
+		providerName:        providerName,
+		providerProjectID:   providerProjectID,
+		rotationGracePeriod: rotationGracePeriod,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -834,6 +855,119 @@ func (s *Service) deleteClient(
 	s.RecordEvent(ctx, EventOAuthClientDeleted, actor, appID, c.ID, requestID,
 		"client.delete", SecurityEventSuccess, "")
 	return nil
+}
+
+// RotateClientSecret regenerates a confidential client's secret at the
+// provider (ADR-0004 §6). The single-winner gate is acquired locally before
+// any provider call; a provider failure never revokes the previous secret.
+// If the provider succeeds but local metadata cannot be updated, a
+// reconciliation trail is left and the error is surfaced. The new secret is
+// returned exactly once and never persisted.
+func (s *Service) RotateClientSecret(
+	ctx context.Context,
+	actor identity.UserID,
+	appID ApplicationID,
+	clientID OAuthClientID,
+	requestID string,
+) (SecretRotationResult, error) {
+	c, err := s.store.GetClient(ctx, appID, clientID)
+	if err != nil {
+		return SecretRotationResult{}, err
+	}
+	if !c.CanRotateSecret() {
+		s.RecordEvent(ctx, EventSecretRotationFailed, actor, appID, clientID, requestID,
+			"client.secret.rotate", SecurityEventDenied, "invalid_state_transition")
+		return SecretRotationResult{}, ErrSecretRotationNotAllowed
+	}
+	if c.ProviderApplicationID == "" {
+		// Fail closed: a provisioned confidential client must always have a
+		// provider resource before its secret can be rotated.
+		s.RecordEvent(ctx, EventSecretRotationFailed, actor, appID, clientID, requestID,
+			"client.secret.rotate", SecurityEventDenied, "internal")
+		return SecretRotationResult{}, ErrSecretRotationNotAllowed
+	}
+
+	// Single-winner gate: bump the optimistic-concurrency version before any
+	// provider call. Concurrent rotations (or other client writes) lose here.
+	if err := s.store.BeginSecretRotation(ctx, clientID, c.Version); err != nil {
+		if errors.Is(err, ErrConflict) {
+			s.RecordEvent(ctx, EventSecretRotationFailed, actor, appID, clientID, requestID,
+				"client.secret.rotate", SecurityEventDenied, "state_conflict")
+		}
+		return SecretRotationResult{}, err
+	}
+
+	// Provider call outside any database transaction.
+	rotation, err := s.provisioner.RotateClientSecret(ctx, c.ProviderApplicationID)
+	if err != nil {
+		s.RecordEvent(ctx, EventSecretRotationFailed, actor, appID, clientID, requestID,
+			"client.secret.rotate", SecurityEventDenied, ErrorClassFor(err))
+		if errors.Is(err, ErrProviderConflict) {
+			return SecretRotationResult{}, ErrProviderConflict
+		}
+		return SecretRotationResult{}, ErrProviderUnavailable
+	}
+
+	now := s.now()
+	// Stamp the currently active secret record (records are returned newest
+	// first; the active one has no rotation timestamp yet).
+	records, err := s.store.GetClientSecretRecords(ctx, clientID)
+	if err != nil {
+		s.recordRotationReconciliation(ctx, actor, appID, c, requestID, "internal")
+		return SecretRotationResult{}, err
+	}
+	for _, rec := range records {
+		if rec.LastRotatedAt == nil {
+			if err := s.store.MarkSecretRotated(ctx, rec.ID, now); err != nil {
+				s.recordRotationReconciliation(ctx, actor, appID, c, requestID, "internal")
+				return SecretRotationResult{}, err
+			}
+			break
+		}
+	}
+
+	newRec := ClientSecretRecord{
+		ID:        NewClientSecretID(),
+		ClientID:  clientID,
+		Label:     "轮转 Secret",
+		CreatedAt: now,
+	}
+	if err := s.store.CreateSecretRecord(ctx, newRec); err != nil {
+		s.recordRotationReconciliation(ctx, actor, appID, c, requestID, "internal")
+		return SecretRotationResult{}, err
+	}
+
+	s.RecordEvent(ctx, EventSecretRotated, actor, appID, clientID, requestID,
+		"client.secret.rotate", SecurityEventSuccess, "")
+	return SecretRotationResult{
+		SecretID:     newRec.ID,
+		ClientSecret: rotation.NewSecret,
+		// ZITADEL v2.71 has no grace period; the expiry is the rotation
+		// timestamp plus the configured overlap window (default zero).
+		PreviousSecretExpiresAt: now.Add(s.rotationGracePeriod),
+	}, nil
+}
+
+// recordRotationReconciliation leaves a reconciliation trail after the
+// provider rotation succeeded but local secret metadata could not be
+// updated (ADR-0004 §6).
+func (s *Service) recordRotationReconciliation(
+	ctx context.Context,
+	actor identity.UserID,
+	appID ApplicationID,
+	c OAuthClient,
+	requestID, reason string,
+) {
+	_ = s.store.SetClientReconciliationRequired(ctx, c.ID)
+	_ = s.store.CreateReconciliationJob(ctx, ReconciliationJob{
+		ID:                    NewProviderOperationID(),
+		ApplicationID:         appID,
+		ClientID:              c.ID,
+		ProviderApplicationID: c.ProviderApplicationID,
+		Reason:                reason,
+	})
+	s.RecordEvent(ctx, EventProviderReconciliationNeed, actor, appID, c.ID, requestID,
+		"client.secret.rotate", SecurityEventSuccess, reason)
 }
 
 // RecordEvent persists one audit row. Audit recording is best-effort at the

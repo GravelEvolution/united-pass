@@ -168,6 +168,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	}
 
 	var appHandlers *httpapi.ApplicationHandlers
+	var reauthHandlers *httpapi.ReauthHandlers
 	if pool != nil && provisioner != nil && userReader != nil && sessionSvc != nil && cfg.Session.EncryptionKey != "" {
 		appRepo, err := postgres.NewApplicationRepository(pool.PgxPool(), cfg.Session.EncryptionKey)
 		if err != nil {
@@ -175,10 +176,28 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		}
 		eventStore := postgres.NewSecurityEventStore(pool.PgxPool())
 		appSvc := applications.NewService(appRepo, provisioner, eventStore, eventStore, userReader,
-			providerName, cfg.Auth.ProjectID)
-		// reauth is nil until the reauthentication contract lands in P2.7;
-		// high-risk operations fail closed in the meantime.
-		appHandlers = httpapi.NewApplicationHandlers(appSvc, permResolver, nil)
+			providerName, cfg.Auth.ProjectID, cfg.Rotation.GracePeriod)
+
+		// Reauthentication and rotation infrastructure follow Redis
+		// availability; both fail closed while it is absent (ADR-0004 §6/§7).
+		var reauthVerifier httpapi.ReauthVerifier
+		var rotationRates httpapi.RotationRateChecker
+		if redisClient != nil {
+			limiter := redis.NewRateLimiter(redisClient)
+			rotationRates = limiter
+			reauthStore := redis.NewReauthStore(redisClient)
+			reauthVerifier = httpapi.NewReauthGrants(reauthStore)
+			if reauthAuth, ok := authenticator.(httpapi.ReauthAuthenticator); ok {
+				reauthHandlers = httpapi.NewReauthHandlers(
+					reauthAuth, reauthStore, reauthStore, limiter, appSvc,
+					cfg.Reauth.ChallengeTTL, cfg.Reauth.GrantTTL,
+					cfg.Reauth.MaxAttempts, cfg.Reauth.RateLimit, cfg.Reauth.RateWindow,
+					logger)
+			}
+		}
+
+		appHandlers = httpapi.NewApplicationHandlers(appSvc, permResolver, reauthVerifier,
+			rotationRates, cfg.Rotation.RateLimit, cfg.Rotation.RateWindow, logger)
 	}
 
 	health := httpapi.NewHealthHandlers(readinessCheckers...)
@@ -203,6 +222,19 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				r.Use(httpapi.RequireCSRF())
 			}
 			r.Delete("/auth/session", authHandlers.Logout)
+		})
+
+		// Reauthentication for high-risk operations (session + CSRF required;
+		// challenges and grants are bound to the session, ADR-0004 §7).
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireCSRF())
+			}
+			if reauthHandlers != nil {
+				r.Post("/auth/reauthentication", reauthHandlers.Request)
+				r.Post("/auth/reauthentication/mfa", reauthHandlers.CompleteMFA)
+			}
 		})
 
 		// Account endpoints (require session).
@@ -238,6 +270,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				r.Post("/admin/applications/{applicationId}/clients/{clientId}/enable", appHandlers.EnableClient)
 				r.Post("/admin/applications/{applicationId}/clients/{clientId}/disable", appHandlers.DisableClient)
 				r.Delete("/admin/applications/{applicationId}/clients/{clientId}", appHandlers.DeleteClient)
+				r.Post("/admin/applications/{applicationId}/clients/{clientId}/secret-rotations", appHandlers.RotateClientSecret)
 			}
 		})
 	})

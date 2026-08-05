@@ -1,12 +1,15 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
+	"github.com/GravelEvolution/united-pass/backend/internal/platform/observability"
 )
 
 // Client handlers for the OAuth client management plane (ADR-0004 §7).
@@ -219,4 +222,103 @@ func (h *ApplicationHandlers) DeleteClient(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type secretRotationResponse struct {
+	SecretID string `json:"secretId"`
+	// ClientSecret appears exactly once and is never persisted; the response
+	// is no-store + no-cache (ADR-0004 §6).
+	ClientSecret            string    `json:"clientSecret"`
+	PreviousSecretExpiresAt time.Time `json:"previousSecretExpiresAt"`
+}
+
+// RotateClientSecret handles POST
+// /api/v1/admin/applications/{applicationId}/clients/{clientId}/secret-rotations.
+// It requires the applicationSecretRotate capability, passes the rotation
+// rate limit and consumes a single-use reauthentication grant bound to
+// exactly this action and client. The new secret is returned exactly once.
+func (h *ApplicationHandlers) RotateClientSecret(w http.ResponseWriter, r *http.Request) {
+	appID, clientID, ok := clientPathIDs(w, r)
+	if !ok {
+		return
+	}
+
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		WriteUnauthorized(w, r)
+		return
+	}
+	caps, err := h.permResolver.Resolve(r.Context(), principal.UserID)
+	if err != nil {
+		WriteInternalError(w, r)
+		return
+	}
+	if !caps.ApplicationSecretRotate {
+		h.svc.RecordEvent(r.Context(), applications.EventSecretRotationFailed, principal.UserID, appID, clientID,
+			request.ID(r.Context()), "client.secret.rotate", applications.SecurityEventDenied, "authorization")
+		WriteForbidden(w, r)
+		return
+	}
+
+	// Rotation rate limit keyed on IP + hashed client ID. Fail closed.
+	if h.rotationRates == nil {
+		WriteRateLimited(w, r, int(h.rotationWindow.Seconds()))
+		return
+	}
+	allowed, retryAfter, err := h.rotationRates.CheckRotation(r.Context(), clientIP(r),
+		hashIdentifier(string(clientID)), h.rotationLimit, h.rotationWindow)
+	if err != nil {
+		h.logger.Error("secret rotation rate limit check failed",
+			"requestId", request.ID(r.Context()),
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
+		)
+		WriteRateLimited(w, r, int(h.rotationWindow.Seconds()))
+		return
+	}
+	if !allowed {
+		WriteRateLimited(w, r, int(retryAfter.Seconds()))
+		return
+	}
+
+	if !h.verifyReauthentication(w, r, principal.UserID, applications.EventSecretRotationFailed,
+		"client.secret.rotate", appID, clientID) {
+		return
+	}
+
+	result, err := h.svc.RotateClientSecret(r.Context(), principal.UserID, appID, clientID, request.ID(r.Context()))
+	if err != nil {
+		h.writeRotationError(w, r, err)
+		return
+	}
+
+	w.Header().Set("Pragma", "no-cache")
+	writeJSONNoStore(w, r, http.StatusOK, secretRotationResponse{
+		SecretID:                string(result.SecretID),
+		ClientSecret:            result.ClientSecret,
+		PreviousSecretExpiresAt: result.PreviousSecretExpiresAt.UTC(),
+	})
+}
+
+// writeRotationError maps rotation use-case errors onto the frozen error
+// contract. Public or non-active clients yield 422; concurrent rotations
+// yield the standard 409.
+func (h *ApplicationHandlers) writeRotationError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, applications.ErrNotFound):
+		WriteNotFound(w, r)
+	case errors.Is(err, applications.ErrSecretRotationNotAllowed):
+		WriteValidation(w, r, "请求参数校验失败。", []FieldError{{
+			Field:   "clientId",
+			Message: "该客户端不支持轮转 Secret（公开客户端无 Secret，非活跃客户端不允许变更）。",
+		}})
+	case errors.Is(err, applications.ErrInvalidStateTransition), errors.Is(err, applications.ErrConflict):
+		writeError(w, r, http.StatusConflict, CodeConflict, "资源当前状态不允许该操作。", nil)
+	case errors.Is(err, applications.ErrProviderConflict):
+		writeError(w, r, http.StatusConflict, CodeConflict, "身份提供方报告冲突，请稍后重试。", nil)
+	case errors.Is(err, applications.ErrProviderUnavailable):
+		WriteProviderUnavailable(w, r)
+	default:
+		WriteInternalError(w, r)
+	}
 }

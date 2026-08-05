@@ -34,6 +34,9 @@ type fakeStore struct {
 	markDeletingErr  error
 	completeDelErr   error
 	reconcileMarkErr error
+	beginRotationErr error
+	markRotatedErr   error
+	secretRecordErr  error
 }
 
 func newFakeStore(seq *[]string) *fakeStore {
@@ -344,13 +347,37 @@ func (s *fakeStore) MarkClientDeleteFailed(_ context.Context, clientID OAuthClie
 func (s *fakeStore) CreateSecretRecord(_ context.Context, rec ClientSecretRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.secretRecordErr != nil {
+		return s.secretRecordErr
+	}
 	s.secrets = append(s.secrets, rec)
+	return nil
+}
+
+func (s *fakeStore) BeginSecretRotation(_ context.Context, clientID OAuthClientID, expectedVersion int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.beginRotationErr != nil {
+		return s.beginRotationErr
+	}
+	c, ok := s.clients[clientID]
+	if !ok || s.deleted[clientID] {
+		return ErrNotFound
+	}
+	if c.Version != expectedVersion {
+		return ErrConflict
+	}
+	c.Version++
+	s.clients[clientID] = c
 	return nil
 }
 
 func (s *fakeStore) MarkSecretRotated(_ context.Context, secretID ClientSecretID, rotatedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.markRotatedErr != nil {
+		return s.markRotatedErr
+	}
 	for i := range s.secrets {
 		if s.secrets[i].ID == secretID {
 			s.secrets[i].LastRotatedAt = &rotatedAt
@@ -475,7 +502,7 @@ func newTestService(t *testing.T) (*Service, *fakeStore, *FakeProvisioner, *fake
 	fakeProv := NewFakeProvisioner()
 	prov := &seqProvisioner{FakeProvisioner: fakeProv, seq: seq}
 	events := &fakeEvents{}
-	svc := NewService(store, prov, events, &fakeAudits{}, &fakeUsers{ids: map[identity.UserID]bool{"user_owner_1": true}}, "fake", "proj_test")
+	svc := NewService(store, prov, events, &fakeAudits{}, &fakeUsers{ids: map[identity.UserID]bool{"user_owner_1": true}}, "fake", "proj_test", 0)
 	return svc, store, fakeProv, events, seq
 }
 
@@ -1423,5 +1450,168 @@ func TestErrorClassFor(t *testing.T) {
 		if got := ErrorClassFor(tc.err); got != tc.want {
 			t.Errorf("ErrorClassFor(%v) = %q, want %q", tc.err, got, tc.want)
 		}
+	}
+}
+
+// --- Secret rotation ---
+
+func TestRotateClientSecret_Success(t *testing.T) {
+	svc, store, _, events, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	out, err := svc.RotateClientSecret(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2")
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if out.ClientSecret == "" || out.SecretID == "" {
+		t.Fatal("rotation must return the one-time secret and its ID")
+	}
+
+	secrets, _ := store.GetClientSecretRecords(ctx, res.ClientID)
+	if len(secrets) != 2 {
+		t.Fatalf("secret records = %d, want 2", len(secrets))
+	}
+	var rotatedOld, activeNew int
+	for _, rec := range secrets {
+		if rec.LastRotatedAt != nil {
+			rotatedOld++
+		} else {
+			activeNew++
+		}
+	}
+	if rotatedOld != 1 || activeNew != 1 {
+		t.Errorf("secret states wrong: %d rotated, %d active", rotatedOld, activeNew)
+	}
+
+	// The single-winner gate bumped the client version before the provider call.
+	if store.clients[res.ClientID].Version != 2 {
+		t.Errorf("client version = %d, want 2", store.clients[res.ClientID].Version)
+	}
+
+	found := false
+	for _, ev := range events.events {
+		if ev.EventType == EventSecretRotated && ev.Result == SecurityEventSuccess {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected oauth_client.secret_rotated success event")
+	}
+}
+
+func TestRotateClientSecret_PublicClientDenied(t *testing.T) {
+	svc, _, prov, events, _ := newTestService(t)
+	ctx := context.Background()
+	in := confidentialClientInput()
+	in.Profile = ClientProfileSPAMobile
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), in)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if _, err := svc.RotateClientSecret(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2"); !errors.Is(err, ErrSecretRotationNotAllowed) {
+		t.Fatalf("err = %v, want ErrSecretRotationNotAllowed", err)
+	}
+	for _, call := range prov.Calls {
+		if call == "rotate" {
+			t.Fatal("provider must never be called for a public client")
+		}
+	}
+	denied := false
+	for _, ev := range events.events {
+		if ev.EventType == EventSecretRotationFailed && ev.Result == SecurityEventDenied {
+			denied = true
+		}
+	}
+	if !denied {
+		t.Error("expected denied secret_rotation_failed event")
+	}
+}
+
+func TestRotateClientSecret_DisabledClientDenied(t *testing.T) {
+	svc, _, _, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := svc.SetClientStatus(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2", false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if _, err := svc.RotateClientSecret(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-3"); !errors.Is(err, ErrSecretRotationNotAllowed) {
+		t.Fatalf("err = %v, want ErrSecretRotationNotAllowed", err)
+	}
+}
+
+func TestRotateClientSecret_GateConflict(t *testing.T) {
+	svc, store, _, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Another rotation wins the single-winner gate between the read and the
+	// provider call.
+	store.beginRotationErr = ErrConflict
+
+	if _, err := svc.RotateClientSecret(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+}
+
+func TestRotateClientSecret_ProviderFailureKeepsOldSecret(t *testing.T) {
+	svc, store, prov, events, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	prov.RotateErr = ErrProviderUnavailable
+
+	if _, err := svc.RotateClientSecret(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2"); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	secrets, _ := store.GetClientSecretRecords(ctx, res.ClientID)
+	if len(secrets) != 1 || secrets[0].LastRotatedAt != nil {
+		t.Error("a failed rotation must never touch the existing secret")
+	}
+	failed := false
+	for _, ev := range events.events {
+		if ev.EventType == EventSecretRotationFailed && ev.Result == SecurityEventDenied && ev.FailureClass == "provider_unavailable" {
+			failed = true
+		}
+	}
+	if !failed {
+		t.Error("expected provider_unavailable rotation failure event")
+	}
+}
+
+func TestRotateClientSecret_LocalFailureAfterProviderReconciles(t *testing.T) {
+	svc, store, _, events, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	store.markRotatedErr = errors.New("db down")
+
+	if _, err := svc.RotateClientSecret(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2"); err == nil {
+		t.Fatal("rotation must surface the local failure")
+	}
+	if len(store.jobs) != 1 {
+		t.Fatalf("reconciliation jobs = %d, want 1", len(store.jobs))
+	}
+	reconciled := false
+	for _, ev := range events.events {
+		if ev.EventType == EventProviderReconciliationNeed {
+			reconciled = true
+		}
+	}
+	if !reconciled {
+		t.Error("expected reconciliation event")
 	}
 }
