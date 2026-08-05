@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -37,6 +38,7 @@ func NewMFAStore(client *Client) *MFAStore {
 // Create stores an MFA challenge under the given token hash with the specified
 // TTL. The mfaTokenHash must be the SHA-256 hex hash of the raw MFA token
 // (produced by session.HashToken); the raw token must never reach Redis.
+// New challenges are created in the MFAStateAvailable state.
 func (m *MFAStore) Create(
 	ctx context.Context,
 	mfaTokenHash string,
@@ -46,6 +48,8 @@ func (m *MFAStore) Create(
 	if mfaTokenHash == "" {
 		return errors.New("redis: mfa token hash must not be empty")
 	}
+
+	data.State = auth.MFAStateAvailable
 
 	payload, err := json.Marshal(data)
 	if err != nil {
@@ -157,11 +161,152 @@ return count
 	return result, nil
 }
 
+// mfaProcessingTTL is the short TTL applied when a challenge is claimed for
+// verification. A claim that never completes (e.g. the provider call hangs)
+// expires quickly so the user can start a fresh login instead of being blocked
+// on a permanently processing challenge.
+const mfaProcessingTTL = 60 * time.Second
+
+// Claim atomically reserves an MFA challenge for verification. Only one
+// concurrent request can claim a given challenge:
+//
+//   - If the challenge does not exist (expired or consumed), it returns
+//     auth.ErrMFAChallengeNotFound.
+//   - If another request already claimed it, it returns
+//     auth.ErrMFAChallengeClaimed.
+//   - Otherwise it transitions the challenge to MFAStateProcessing, shortens
+//     its TTL to mfaProcessingTTL, and returns the challenge data.
+//
+// Claim is a single Lua script, so there is no race window between the
+// existence check, the state transition, and the TTL update.
+func (m *MFAStore) Claim(ctx context.Context, mfaTokenHash string) (auth.MFAChallengeData, error) {
+	if mfaTokenHash == "" {
+		return auth.MFAChallengeData{}, errors.New("redis: mfa token hash must not be empty")
+	}
+
+	key := m.client.buildKey(mfaKeySegment, mfaTokenHash)
+
+	// Lua script: read the challenge, fail if absent or already claimed,
+	// otherwise mark it processing and shorten its TTL.
+	script := goredis.NewScript(`
+local key = KEYS[1]
+local processingTTL = tonumber(ARGV[1])
+
+local data = redis.call('GET', key)
+if not data then
+	return nil
+end
+
+local obj = cjson.decode(data)
+if obj.state == 'processing' then
+	return redis.error_reply('CLAIMED')
+end
+
+obj.state = 'processing'
+local encoded = cjson.encode(obj)
+redis.call('SET', key, encoded)
+redis.call('PEXPIRE', key, processingTTL)
+return encoded
+`)
+
+	result, err := script.Run(ctx, m.client.rdb, []string{key}, mfaProcessingTTL.Milliseconds()).Result()
+	if err != nil {
+		if errors.Is(err, goredis.Nil) {
+			return auth.MFAChallengeData{}, auth.ErrMFAChallengeNotFound
+		}
+		if isClaimedError(err) {
+			return auth.MFAChallengeData{}, auth.ErrMFAChallengeClaimed
+		}
+		return auth.MFAChallengeData{}, fmt.Errorf("redis: claim mfa challenge: %w", err)
+	}
+
+	var data auth.MFAChallengeData
+	if err := json.Unmarshal([]byte(result.(string)), &data); err != nil {
+		return auth.MFAChallengeData{}, fmt.Errorf("redis: decode claimed mfa challenge: %w", err)
+	}
+	return data, nil
+}
+
+// Release returns a claimed challenge to the available state so the user can
+// retry after a failed verification attempt. It returns
+// auth.ErrMFAChallengeNotFound when the challenge no longer exists. Release
+// is atomic: the state transition happens in a single Lua script.
+func (m *MFAStore) Release(ctx context.Context, mfaTokenHash string) error {
+	if mfaTokenHash == "" {
+		return errors.New("redis: mfa token hash must not be empty")
+	}
+
+	key := m.client.buildKey(mfaKeySegment, mfaTokenHash)
+
+	// Lua script: flip the state back to available without touching the
+	// attempt counter (which lives in a separate key).
+	script := goredis.NewScript(`
+local key = KEYS[1]
+
+local data = redis.call('GET', key)
+if not data then
+	return nil
+end
+
+local obj = cjson.decode(data)
+obj.state = 'available'
+local encoded = cjson.encode(obj)
+redis.call('SET', key, encoded)
+return encoded
+`)
+
+	_, err := script.Run(ctx, m.client.rdb, []string{key}).Result()
+	if err != nil {
+		if errors.Is(err, goredis.Nil) {
+			return auth.ErrMFAChallengeNotFound
+		}
+		return fmt.Errorf("redis: release mfa challenge: %w", err)
+	}
+	return nil
+}
+
 // Consume deletes the MFA challenge and its attempt counter, enforcing
-// single-use semantics. After a successful MFA verification, the challenge
-// must be consumed so the same token cannot be replayed. This is a security
-// requirement: a consumed challenge cannot be reused even if the token is
-// intercepted. See ADR-0002 section 7.
+// single-use semantics. After a successful MFA verification (or when the
+// challenge has expired), the challenge must be consumed so the same token
+// cannot be replayed. This is a security requirement: a consumed challenge
+// cannot be reused even if the token is intercepted. See ADR-0002 section 7.
+//
+// Consume is atomic: the existence check and the deletion run in a single
+// Lua script. It returns auth.ErrMFAChallengeNotFound when the challenge is
+// already gone (already consumed or expired).
 func (m *MFAStore) Consume(ctx context.Context, mfaTokenHash string) error {
-	return m.Delete(ctx, mfaTokenHash)
+	if mfaTokenHash == "" {
+		return errors.New("redis: mfa token hash must not be empty")
+	}
+
+	challengeKey := m.client.buildKey(mfaKeySegment, mfaTokenHash)
+	attemptsKey := m.client.buildKey(mfaAttemptsKeySegment, mfaTokenHash)
+
+	script := goredis.NewScript(`
+local challengeKey = KEYS[1]
+local attemptsKey  = KEYS[2]
+
+if redis.call('EXISTS', challengeKey) == 0 then
+	return 0
+end
+
+redis.call('DEL', challengeKey, attemptsKey)
+return 1
+`)
+
+	result, err := script.Run(ctx, m.client.rdb, []string{challengeKey, attemptsKey}).Int()
+	if err != nil {
+		return fmt.Errorf("redis: consume mfa challenge: %w", err)
+	}
+	if result == 0 {
+		return auth.ErrMFAChallengeNotFound
+	}
+	return nil
+}
+
+// isClaimedError reports whether a Redis error is the Lua error_reply marker
+// returned when a challenge is already processing. go-redis surfaces custom
+// error replies as errors whose message contains the reply text.
+func isClaimedError(err error) bool {
+	return strings.Contains(err.Error(), "CLAIMED")
 }

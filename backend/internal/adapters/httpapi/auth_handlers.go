@@ -14,15 +14,30 @@ import (
 
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
+	"github.com/GravelEvolution/united-pass/backend/internal/platform/observability"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
 // MFAChallengeStore abstracts MFA challenge persistence for the auth handlers.
 // The Redis adapter satisfies this interface; tests can use an in-memory fake.
+//
+// Challenges follow a strict lifecycle enforced by the store: a challenge is
+// created available, atomically claimed (processing) before verification, and
+// consumed on success or released on failure. Concurrent verification of the
+// same challenge is impossible because Claim is atomic.
 type MFAChallengeStore interface {
 	Create(ctx context.Context, mfaTokenHash string, data auth.MFAChallengeData, ttl time.Duration) error
 	Get(ctx context.Context, mfaTokenHash string) (auth.MFAChallengeData, error)
-	Delete(ctx context.Context, mfaTokenHash string) error
+	// Claim atomically reserves a challenge for verification. Only one
+	// concurrent request can claim a given challenge; the second gets
+	// auth.ErrMFAChallengeClaimed.
+	Claim(ctx context.Context, mfaTokenHash string) (auth.MFAChallengeData, error)
+	// Consume atomically deletes a claimed challenge (single-use). It returns
+	// auth.ErrMFAChallengeNotFound when the challenge is already gone.
+	Consume(ctx context.Context, mfaTokenHash string) error
+	// Release returns a claimed challenge to the available state so the user
+	// can retry after a failed verification.
+	Release(ctx context.Context, mfaTokenHash string) error
 	IncrementAttempts(ctx context.Context, mfaTokenHash string, maxAttempts int) (int, error)
 }
 
@@ -133,7 +148,8 @@ func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("login rate limit check failed",
 			"requestId", requestID(r),
 			"ip", ip,
-			"error", err,
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
 		)
 		WriteRateLimited(w, r, int(h.loginWindow.Seconds()))
 		return
@@ -152,7 +168,8 @@ func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.logger.Error("authentication provider error",
 			"requestId", requestID(r),
-			"error", err,
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
 		)
 		WriteInternalError(w, r)
 		return
@@ -202,7 +219,8 @@ func (h *AuthHandlers) handleAuthenticated(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		h.logger.Error("session creation failed",
 			"requestId", requestID(r),
-			"error", err,
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
 		)
 		WriteInternalError(w, r)
 		return
@@ -238,7 +256,8 @@ func (h *AuthHandlers) handleMFARequired(w http.ResponseWriter, r *http.Request,
 	if err := h.mfaStore.Create(r.Context(), mfaTokenHash, challenge, h.mfaTTL); err != nil {
 		h.logger.Error("mfa challenge store failed",
 			"requestId", requestID(r),
-			"error", err,
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
 		)
 		WriteInternalError(w, r)
 		return
@@ -266,12 +285,15 @@ func (h *AuthHandlers) handleMFARequired(w http.ResponseWriter, r *http.Request,
 // Flow:
 //  1. Parse and validate the JSON request body.
 //  2. Check the MFA rate limit (IP + MFA token hash).
-//  3. Look up the MFA challenge by token hash.
+//  3. Atomically claim the MFA challenge. Claim is single-winner: concurrent
+//     requests for the same challenge cannot both proceed to verification,
+//     which prevents two sessions being established from one challenge.
 //  4. Call the Authenticator to complete MFA.
 //  5. If authenticated, consume the challenge (single-use), create a session,
 //     and return 204.
-//  6. If invalid credentials, increment attempts. Return generic error.
-//  7. If max attempts exceeded, consume the challenge and return 429 or 403.
+//  6. If invalid credentials, increment attempts and release the challenge so
+//     the user can retry. If max attempts is exceeded, consume the challenge.
+//  7. If the challenge is expired, consume it and return a generic error.
 func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 	var req mfaChallengeRequest
 	if err := decodeJSONBody(w, r, &req, "MFA challenge"); err != nil {
@@ -297,7 +319,8 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.logger.Error("mfa rate limit check failed",
 			"requestId", requestID(r),
-			"error", err,
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
 		)
 		WriteRateLimited(w, r, int(h.mfaWindow.Seconds()))
 		return
@@ -307,19 +330,27 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Look up the challenge.
-	_, err = h.mfaStore.Get(r.Context(), mfaTokenHash)
+	// Atomically claim the challenge for verification. Only one request may
+	// claim a given challenge; concurrent requests are rejected here so a
+	// single MFA token can never establish two sessions.
+	_, err = h.mfaStore.Claim(r.Context(), mfaTokenHash)
 	if err != nil {
-		if errors.Is(err, auth.ErrMFAChallengeNotFound) {
+		switch {
+		case errors.Is(err, auth.ErrMFAChallengeNotFound):
 			writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "验证挑战已过期或不存在，请重新登录。", nil)
 			return
+		case errors.Is(err, auth.ErrMFAChallengeClaimed):
+			writeError(w, r, http.StatusTooManyRequests, CodeRateLimited, "验证正在进行中，请稍后重试。", nil)
+			return
+		default:
+			h.logger.Error("mfa challenge claim failed",
+				"requestId", requestID(r),
+				"errorClass", observability.ClassifyError(err),
+				"errorDetail", observability.RedactedError(err, 256),
+			)
+			WriteInternalError(w, r)
+			return
 		}
-		h.logger.Error("mfa challenge lookup failed",
-			"requestId", requestID(r),
-			"error", err,
-		)
-		WriteInternalError(w, r)
-		return
 	}
 
 	// Attempt MFA verification via the provider adapter.
@@ -329,9 +360,13 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 		Code:     req.Code,
 	})
 	if err != nil {
+		// Provider failure: release the claim so the user can retry. The
+		// challenge is not lost.
+		_ = h.mfaStore.Release(r.Context(), mfaTokenHash)
 		h.logger.Error("mfa completion provider error",
 			"requestId", requestID(r),
-			"error", err,
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
 		)
 		WriteInternalError(w, r)
 		return
@@ -339,26 +374,32 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 
 	switch result.Status {
 	case auth.StatusAuthenticated:
-		// Consume the challenge (single-use).
-		_ = h.mfaStore.Delete(r.Context(), mfaTokenHash)
+		// Consume the challenge (single-use). It was claimed by this request,
+		// so it must still exist; Consume makes replay impossible.
+		_ = h.mfaStore.Consume(r.Context(), mfaTokenHash)
 
 		// Create session.
 		h.handleAuthenticated(w, r, result, false)
 
 	case auth.StatusInvalidCredentials:
-		// Increment attempts.
+		// Increment the attempt counter. The challenge is still claimed by
+		// this request, so no other request can interfere with the count.
 		attempts, incErr := h.mfaStore.IncrementAttempts(r.Context(), mfaTokenHash, h.mfaMaxAttempts)
 		if incErr != nil {
 			if errors.Is(incErr, auth.ErrMFAMaxAttemptsExceeded) {
-				_ = h.mfaStore.Delete(r.Context(), mfaTokenHash)
+				_ = h.mfaStore.Consume(r.Context(), mfaTokenHash)
 				writeError(w, r, http.StatusTooManyRequests, CodeRateLimited, "验证尝试次数过多，请稍后重新登录。", nil)
 				return
 			}
 			h.logger.Error("mfa attempt increment failed",
 				"requestId", requestID(r),
-				"error", incErr,
+				"errorClass", observability.ClassifyError(incErr),
+				"errorDetail", observability.RedactedError(incErr, 256),
 			)
 		}
+		// Release the claim so the user can retry within the remaining
+		// attempt budget.
+		_ = h.mfaStore.Release(r.Context(), mfaTokenHash)
 		remaining := h.mfaMaxAttempts - attempts
 		if remaining < 0 {
 			remaining = 0
@@ -367,10 +408,11 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, msg, nil)
 
 	case auth.StatusExpired:
-		_ = h.mfaStore.Delete(r.Context(), mfaTokenHash)
+		_ = h.mfaStore.Consume(r.Context(), mfaTokenHash)
 		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "验证挑战已过期，请重新登录。", nil)
 
 	default:
+		_ = h.mfaStore.Release(r.Context(), mfaTokenHash)
 		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "验证失败，请重试。", nil)
 	}
 }
@@ -379,7 +421,8 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 //
 // This endpoint requires a valid session and CSRF token. It:
 //  1. Deletes the local Redis session.
-//  2. Best-effort revokes the provider session.
+//  2. Best-effort revokes the provider session (the stored provider session
+//     reference is decrypted from its AES-GCM ciphertext first).
 //  3. Clears both cookies.
 //  4. Returns 204 No Content.
 //
@@ -395,14 +438,25 @@ func (h *AuthHandlers) Logout(w http.ResponseWriter, r *http.Request) {
 		_ = h.sessionSvc.DeleteSession(r.Context(), token)
 	}
 
-	// Best-effort provider session revocation. Failure is logged but does not
-	// prevent local logout.
+	// Best-effort provider session revocation. The reference is stored
+	// encrypted (AES-GCM) per ADR-0002; decrypt it before handing it to the
+	// provider adapter. Failure is logged but does not prevent local logout.
 	if record.ProviderSessionReference != "" {
-		if err := h.authenticator.RevokeProviderSession(r.Context(), record.ProviderSessionReference); err != nil {
-			h.logger.Warn("provider session revocation failed",
+		ref, err := h.sessionSvc.DecryptProviderSessionReference(r.Context(), record.ProviderSessionReference)
+		if err != nil {
+			h.logger.Warn("provider session reference decrypt failed",
 				"requestId", requestID(r),
-				"error", err,
+				"errorClass", observability.ClassifyError(err),
+				"errorDetail", observability.RedactedError(err, 256),
 			)
+		} else if ref != "" {
+			if err := h.authenticator.RevokeProviderSession(r.Context(), ref); err != nil {
+				h.logger.Warn("provider session revocation failed",
+					"requestId", requestID(r),
+					"errorClass", observability.ClassifyError(err),
+					"errorDetail", observability.RedactedError(err, 256),
+				)
+			}
 		}
 	}
 

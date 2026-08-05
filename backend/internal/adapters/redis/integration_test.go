@@ -408,6 +408,141 @@ func TestIntegration_MFAStoreConcurrentReplay(t *testing.T) {
 	}
 }
 
+func TestIntegration_MFAStoreClaimIsAtomic(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewMFAStore(client)
+	ctx := context.Background()
+
+	tokenHash := session.HashToken("mfa-claim-atomic")
+	data := auth.MFAChallengeData{
+		UserID:    identity.UserID("user_mfa_claim_atomic"),
+		Provider:  "fake",
+		CreatedAt: time.Now().UTC(),
+	}
+
+	if err := store.Create(ctx, tokenHash, data, 5*time.Minute); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Launch many concurrent claims: exactly one must win, every other
+	// request must observe the challenge as already claimed or gone.
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	winners := 0
+	claimants := 10
+
+	for i := 0; i < claimants; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := store.Claim(ctx, tokenHash)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			winners++
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	if winners != 1 {
+		t.Fatalf("claims won = %d, want exactly 1", winners)
+	}
+
+	// The challenge must now be in processing state.
+	claimed, err := store.Get(ctx, tokenHash)
+	if err != nil {
+		t.Fatalf("get after claim: %v", err)
+	}
+	if claimed.State != auth.MFAStateProcessing {
+		t.Errorf("state after claim = %q, want %q", claimed.State, auth.MFAStateProcessing)
+	}
+}
+
+func TestIntegration_MFAStoreClaimReleaseAndReclaim(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewMFAStore(client)
+	ctx := context.Background()
+
+	tokenHash := session.HashToken("mfa-claim-release")
+	data := auth.MFAChallengeData{
+		UserID:    identity.UserID("user_mfa_claim_release"),
+		Provider:  "fake",
+		CreatedAt: time.Now().UTC(),
+	}
+
+	if err := store.Create(ctx, tokenHash, data, 5*time.Minute); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// First claim wins.
+	if _, err := store.Claim(ctx, tokenHash); err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+
+	// A second claim while processing must be rejected.
+	_, err := store.Claim(ctx, tokenHash)
+	if !errors.Is(err, auth.ErrMFAChallengeClaimed) {
+		t.Fatalf("second claim error = %v, want ErrMFAChallengeClaimed", err)
+	}
+
+	// Release returns the challenge to available.
+	if err := store.Release(ctx, tokenHash); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	// The challenge can now be claimed again.
+	reclaimed, err := store.Claim(ctx, tokenHash)
+	if err != nil {
+		t.Fatalf("reclaim after release: %v", err)
+	}
+	if reclaimed.State != auth.MFAStateProcessing {
+		t.Errorf("state after reclaim = %q, want %q", reclaimed.State, auth.MFAStateProcessing)
+	}
+
+	// Consume the claimed challenge.
+	if err := store.Consume(ctx, tokenHash); err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+
+	// Consuming again must report not found (already consumed).
+	err = store.Consume(ctx, tokenHash)
+	if !errors.Is(err, auth.ErrMFAChallengeNotFound) {
+		t.Fatalf("second consume error = %v, want ErrMFAChallengeNotFound", err)
+	}
+}
+
+func TestIntegration_MFAStoreReleaseAfterConsume(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewMFAStore(client)
+	ctx := context.Background()
+
+	tokenHash := session.HashToken("mfa-release-after-consume")
+	data := auth.MFAChallengeData{
+		UserID:    identity.UserID("user_mfa_release_after_consume"),
+		Provider:  "fake",
+		CreatedAt: time.Now().UTC(),
+	}
+
+	if err := store.Create(ctx, tokenHash, data, 5*time.Minute); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if _, err := store.Claim(ctx, tokenHash); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := store.Consume(ctx, tokenHash); err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+
+	// Releasing a consumed challenge must report not found.
+	err := store.Release(ctx, tokenHash)
+	if !errors.Is(err, auth.ErrMFAChallengeNotFound) {
+		t.Fatalf("release after consume error = %v, want ErrMFAChallengeNotFound", err)
+	}
+}
+
 // --- Rate Limiter Tests ---
 
 func TestIntegration_RateLimiterLogin(t *testing.T) {

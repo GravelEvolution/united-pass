@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -92,6 +93,7 @@ func newFakeMFAStore() *fakeMFAStore {
 func (m *fakeMFAStore) Create(_ context.Context, hash string, data auth.MFAChallengeData, _ time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	data.State = auth.MFAStateAvailable
 	m.challenges[hash] = data
 	return nil
 }
@@ -106,11 +108,41 @@ func (m *fakeMFAStore) Get(_ context.Context, hash string) (auth.MFAChallengeDat
 	return d, nil
 }
 
-func (m *fakeMFAStore) Delete(_ context.Context, hash string) error {
+func (m *fakeMFAStore) Claim(_ context.Context, hash string) (auth.MFAChallengeData, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	d, ok := m.challenges[hash]
+	if !ok {
+		return auth.MFAChallengeData{}, auth.ErrMFAChallengeNotFound
+	}
+	if d.State == auth.MFAStateProcessing {
+		return auth.MFAChallengeData{}, auth.ErrMFAChallengeClaimed
+	}
+	d.State = auth.MFAStateProcessing
+	m.challenges[hash] = d
+	return d, nil
+}
+
+func (m *fakeMFAStore) Consume(_ context.Context, hash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.challenges[hash]; !ok {
+		return auth.ErrMFAChallengeNotFound
+	}
 	delete(m.challenges, hash)
 	delete(m.attempts, hash)
+	return nil
+}
+
+func (m *fakeMFAStore) Release(_ context.Context, hash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.challenges[hash]
+	if !ok {
+		return auth.ErrMFAChallengeNotFound
+	}
+	d.State = auth.MFAStateAvailable
+	m.challenges[hash] = d
 	return nil
 }
 
@@ -237,7 +269,8 @@ func setupAuthHandlers(t *testing.T) (*AuthHandlers, *auth.FakeAuthenticator, *f
 	store := newFakeSessionStore()
 	sessionSvc := session.NewService(store, session.SystemClock{},
 		cfg.Session.TTL, cfg.Session.RememberTTL,
-		cfg.Session.IdleTTL, cfg.Session.TouchInterval)
+		cfg.Session.IdleTTL, cfg.Session.TouchInterval,
+		testEncryptor())
 
 	mfaStore := newFakeMFAStore()
 	rateChecker := fakeRateChecker{}
@@ -254,6 +287,17 @@ func setupAuthHandlers(t *testing.T) (*AuthHandlers, *auth.FakeAuthenticator, *f
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(&strings.Builder{}, &slog.HandlerOptions{Level: slog.LevelError}))
+}
+
+// testEncryptor returns an AES-GCM encryptor with a fixed 32-byte key for
+// tests. Provider session references must be encrypted at rest, so session
+// services in tests always receive an encryptor.
+func testEncryptor() session.Encryptor {
+	enc, err := session.NewAESGCMEncryptor("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", "test-v1")
+	if err != nil {
+		panic(err)
+	}
+	return enc
 }
 
 func doRequest(handler http.Handler, method, path string, body string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
@@ -434,7 +478,7 @@ func TestLoginMultipleJSONObjects(t *testing.T) {
 // --- MFA Tests ---
 
 func TestMFASuccess(t *testing.T) {
-	h, _, store, _, _ := setupAuthHandlers(t)
+	h, _, store, mfaStore, _ := setupAuthHandlers(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
 	mux.HandleFunc("POST /api/v1/auth/sessions/mfa", h.CompleteMFA)
@@ -474,10 +518,17 @@ func TestMFASuccess(t *testing.T) {
 	if record.UserID != identity.UserID("user_01TEST002") {
 		t.Errorf("session UserID: got %q, want user_01TEST002", record.UserID)
 	}
+
+	// The MFA challenge must be consumed after success: replaying the same
+	// MFA token must not be possible.
+	mfaTokenHash := session.HashToken(mfaResp.MFAToken)
+	if _, err := mfaStore.Get(context.Background(), mfaTokenHash); !errors.Is(err, auth.ErrMFAChallengeNotFound) {
+		t.Errorf("MFA challenge should be consumed after success, got err: %v", err)
+	}
 }
 
 func TestMFAWrongCode(t *testing.T) {
-	h, _, _, _, _ := setupAuthHandlers(t)
+	h, _, _, mfaStore, _ := setupAuthHandlers(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
 	mux.HandleFunc("POST /api/v1/auth/sessions/mfa", h.CompleteMFA)
@@ -493,6 +544,44 @@ func TestMFAWrongCode(t *testing.T) {
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d, want %d. Body: %s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+
+	// A failed verification releases the claim: the challenge must be back
+	// in the available state so the user can retry.
+	mfaTokenHash := session.HashToken(mfaResp.MFAToken)
+	challenge, err := mfaStore.Get(context.Background(), mfaTokenHash)
+	if err != nil {
+		t.Fatalf("challenge should still exist after wrong code: %v", err)
+	}
+	if challenge.State != auth.MFAStateAvailable {
+		t.Errorf("challenge state after wrong code = %q, want %q", challenge.State, auth.MFAStateAvailable)
+	}
+}
+
+func TestMFAChallengeAlreadyClaimed(t *testing.T) {
+	h, _, _, mfaStore, _ := setupAuthHandlers(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+	mux.HandleFunc("POST /api/v1/auth/sessions/mfa", h.CompleteMFA)
+
+	// Login to get MFA token.
+	rr := doRequest(mux, "POST", "/api/v1/auth/sessions", `{"identifier":"mfauser","password":"TestPassword123!"}`)
+	var mfaResp mfaRequiredResponse
+	json.Unmarshal(rr.Body.Bytes(), &mfaResp)
+
+	// Simulate a concurrent verification already claiming the challenge.
+	mfaTokenHash := session.HashToken(mfaResp.MFAToken)
+	if _, err := mfaStore.Claim(context.Background(), mfaTokenHash); err != nil {
+		t.Fatalf("pre-claim: %v", err)
+	}
+
+	// The HTTP request must be rejected (429) because the challenge is
+	// already processing.
+	mfaBody := fmt.Sprintf(`{"mfaToken":"%s","method":"totp","code":"123456"}`, mfaResp.MFAToken)
+	rr = doRequest(mux, "POST", "/api/v1/auth/sessions/mfa", mfaBody)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status: got %d, want %d. Body: %s", rr.Code, http.StatusTooManyRequests, rr.Body.String())
 	}
 }
 
@@ -524,7 +613,8 @@ func TestLogoutSuccess(t *testing.T) {
 	// Build a session first.
 	sessionSvc := session.NewService(store, session.SystemClock{},
 		cfg.Session.TTL, cfg.Session.RememberTTL,
-		cfg.Session.IdleTTL, cfg.Session.TouchInterval)
+		cfg.Session.IdleTTL, cfg.Session.TouchInterval,
+		testEncryptor())
 
 	result, err := sessionSvc.CreateSession(context.Background(), session.CreateSessionInput{
 		UserID:                identity.UserID("user_01TEST001"),
@@ -587,7 +677,8 @@ func TestLogoutWithoutCSRF(t *testing.T) {
 
 	sessionSvc := session.NewService(store, session.SystemClock{},
 		cfg.Session.TTL, cfg.Session.RememberTTL,
-		cfg.Session.IdleTTL, cfg.Session.TouchInterval)
+		cfg.Session.IdleTTL, cfg.Session.TouchInterval,
+		testEncryptor())
 
 	result, _ := sessionSvc.CreateSession(context.Background(), session.CreateSessionInput{
 		UserID: identity.UserID("user_01TEST001"),
@@ -622,7 +713,8 @@ func TestLogoutCSRFMismatch(t *testing.T) {
 
 	sessionSvc := session.NewService(store, session.SystemClock{},
 		cfg.Session.TTL, cfg.Session.RememberTTL,
-		cfg.Session.IdleTTL, cfg.Session.TouchInterval)
+		cfg.Session.IdleTTL, cfg.Session.TouchInterval,
+		testEncryptor())
 
 	result, _ := sessionSvc.CreateSession(context.Background(), session.CreateSessionInput{
 		UserID: identity.UserID("user_01TEST001"),

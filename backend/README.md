@@ -127,7 +127,7 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_SESSION_TOUCH_INTERVAL` | `5m` | Minimum interval between Redis session touches. |
 | `UP_SESSION_COOKIE_SECURE` | `false` | Set `true` in production. |
 | `UP_SESSION_COOKIE_SAME_SITE` | `lax` | Cookie SameSite attribute. |
-| `UP_SESSION_ENCRYPTION_KEY` | | Base64-encoded 32-byte key for encrypting provider session credentials. |
+| `UP_SESSION_ENCRYPTION_KEY` | | Base64-encoded 32-byte key for encrypting provider session credentials (AES-256-GCM). Required in production. |
 | `UP_SESSION_ENCRYPTION_KEY_ID` | | Key identifier for rotation. |
 | `UP_MFA_CHALLENGE_TTL` | `5m` | MFA challenge token TTL. |
 | `UP_MFA_MAX_ATTEMPTS` | `5` | Maximum MFA verification attempts. |
@@ -217,13 +217,15 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
 - **Session Cookie** (`up_session`): HttpOnly, SameSite=Lax, Secure in production
 - **CSRF protection** (`up_csrf` + `X-CSRF-Token`): session-bound, constant-time comparison
 - **Login**: `POST /api/v1/auth/sessions` with rate limiting and generic error responses
-- **MFA challenge**: `POST /api/v1/auth/sessions/mfa` with one-time tokens and attempt limits
+- **MFA challenge**: `POST /api/v1/auth/sessions/mfa` with one-time tokens, atomic single-winner claim (concurrent replays rejected), attempt limits, and short processing TTL
 - **Logout**: `DELETE /api/v1/auth/session` with session and CSRF validation
 - **Current user**: `GET /api/v1/me` with masked phone, personas, null employee profile
 - **Permissions**: `GET /api/v1/me/permissions` with fail-closed default resolver
 - **Session middleware**: `RequireSession`, `OptionalSession`, `RequireCSRF`
 - **Readiness checks**: PostgreSQL, Redis, and auth provider connectivity
 - **Authentication provider adapter**: interface + test fake (no production provider yet)
+- **Provider session reference encryption**: AES-256-GCM at rest (`UP_SESSION_ENCRYPTION_KEY`), decrypted only for logout revocation
+- **Redacted dependency logging**: stable error classes instead of raw provider/DB error text
 - **Permission resolver**: fail-closed default with optional development override
 - **Migration command**: `cmd/migrate/main.go` with explicit up/status/version/reset
 - **Development tooling**: `scripts/tunnel.sh` (SSH tunnel manager) and `scripts/dev.sh` (one-command startup)
@@ -233,6 +235,7 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
 
 ### Not yet implemented (later phases)
 
+- Real authentication provider integration (ZITADEL or another provider). The adapter interface, development fake, and production safety guardrails are in place; **Phase 1 is Implemented, provider integration blocked** until a provider adapter is built and tested (Phase 6).
 - User registration, password reset, email verification
 - Profile updates and avatar upload
 - TOTP, Passkey, Recovery Code management (MFA verification is Phase 1; factor management is Phase 4)

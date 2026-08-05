@@ -37,11 +37,13 @@ func (SystemClock) Now() time.Time { return time.Now() }
 
 // Service orchestrates session lifecycle: creation, validation, touching,
 // rotation, and deletion. It wraps a Store with token generation, expiry
-// checks, and CSRF binding. Handlers and middleware use the Service, not the
-// Store directly.
+// checks, CSRF binding, and at-rest encryption of provider session
+// references. Handlers and middleware use the Service, not the Store
+// directly.
 type Service struct {
 	store         Store
 	clock         Clock
+	encryptor     Encryptor
 	ttl           time.Duration
 	rememberTTL   time.Duration
 	idleTTL       time.Duration
@@ -49,13 +51,17 @@ type Service struct {
 }
 
 // NewService creates a session Service from the given store and configuration.
-func NewService(store Store, clock Clock, ttl, rememberTTL, idleTTL, touchInterval time.Duration) *Service {
+// encryptor is used to encrypt provider session references at rest (ADR-0002
+// section 13); it may be nil only when the caller guarantees no provider
+// session references will be stored (e.g. tests without provider references).
+func NewService(store Store, clock Clock, ttl, rememberTTL, idleTTL, touchInterval time.Duration, encryptor Encryptor) *Service {
 	if clock == nil {
 		clock = SystemClock{}
 	}
 	return &Service{
 		store:         store,
 		clock:         clock,
+		encryptor:     encryptor,
 		ttl:           ttl,
 		rememberTTL:   rememberTTL,
 		idleTTL:       idleTTL,
@@ -102,12 +108,22 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		ttl = s.rememberTTL
 	}
 
+	// Encrypt the provider session reference before it reaches Redis.
+	// Plaintext provider credentials must never be stored at rest (ADR-0002
+	// section 13). If a reference is present but no encryptor is configured,
+	// refuse to create the session rather than silently downgrading to
+	// plaintext.
+	providerRef, err := s.encryptProviderSessionReference(ctx, input.ProviderSessionReference)
+	if err != nil {
+		return CreateSessionResult{}, err
+	}
+
 	record := SessionRecord{
 		Version:                  1,
 		SessionID:                generateSessionID(),
 		UserID:                   input.UserID,
 		Provider:                 input.Provider,
-		ProviderSessionReference: input.ProviderSessionReference,
+		ProviderSessionReference: providerRef,
 		CreatedAt:                now,
 		LastSeenAt:               now,
 		ExpiresAt:                now.Add(ttl),
@@ -129,6 +145,40 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		TokenHash:    tokenHash,
 		Record:       record,
 	}, nil
+}
+
+// encryptProviderSessionReference encrypts a provider session reference for
+// at-rest storage. Empty references pass through unchanged; non-empty
+// references require a configured Encryptor.
+func (s *Service) encryptProviderSessionReference(ctx context.Context, plaintext string) (string, error) {
+	if plaintext == "" {
+		return "", nil
+	}
+	if s.encryptor == nil {
+		return "", fmt.Errorf("session: %w", ErrMissingEncryptionKey)
+	}
+	encrypted, err := s.encryptor.Encrypt(plaintext)
+	if err != nil {
+		return "", fmt.Errorf("session: encrypt provider reference: %w", err)
+	}
+	return encrypted, nil
+}
+
+// DecryptProviderSessionReference decrypts an at-rest provider session
+// reference (AES-GCM ciphertext). Logout uses it to revoke the provider
+// session; the plaintext reference never touches Redis or logs.
+func (s *Service) DecryptProviderSessionReference(ctx context.Context, encrypted string) (string, error) {
+	if encrypted == "" {
+		return "", nil
+	}
+	if s.encryptor == nil {
+		return "", fmt.Errorf("session: %w", ErrMissingEncryptionKey)
+	}
+	plaintext, err := s.encryptor.Decrypt(encrypted)
+	if err != nil {
+		return "", fmt.Errorf("session: decrypt provider reference: %w", err)
+	}
+	return plaintext, nil
 }
 
 // ValidateSession looks up a session by its raw token, checks absolute and

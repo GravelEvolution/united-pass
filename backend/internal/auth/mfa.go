@@ -9,6 +9,21 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 )
 
+// MFAState tracks the lifecycle of an MFA challenge. Challenges are issued in
+// the available state, atomically claimed (processing) before provider
+// verification, and consumed on success or expiry. Consumption is represented
+// by the absence of the challenge record; a consumed challenge can never be
+// replayed. See ADR-0002 section 7.
+type MFAState string
+
+const (
+	// MFAStateAvailable means the challenge may be claimed for verification.
+	MFAStateAvailable MFAState = "available"
+	// MFAStateProcessing means a verification attempt has claimed the
+	// challenge. Concurrent requests must not verify the same challenge.
+	MFAStateProcessing MFAState = "processing"
+)
+
 // MFAChallengeData is the MFA challenge record stored in Redis. The raw MFA
 // token is never stored — only its SHA-256 hash is used as the Redis key.
 // The challenge is short-lived (default 5 minutes) and single-use.
@@ -18,7 +33,9 @@ type MFAChallengeData struct {
 	// Provider is the authentication provider name.
 	Provider string `json:"provider"`
 	// ProviderSessionReference is the provider-side session reference used
-	// to resume the authentication flow after MFA completion.
+	// to resume the authentication flow after MFA completion. It is only
+	// populated after successful verification (the challenge is consumed
+	// at that point), so it is omitted here in practice.
 	ProviderSessionReference string `json:"providerSessionReference,omitempty"`
 	// AuthenticationMethods records how the user authenticated in the first
 	// step (typically just "password").
@@ -27,6 +44,9 @@ type MFAChallengeData struct {
 	AvailableMethods []MFAMethod `json:"availableMethods"`
 	// Attempts is the initial attempt count (always 0 at creation).
 	Attempts int `json:"attempts"`
+	// State is the challenge lifecycle state. New challenges start as
+	// available; verification claims them (processing) atomically.
+	State MFAState `json:"state,omitempty"`
 	// CreatedAt is when the challenge was issued.
 	CreatedAt time.Time `json:"createdAt"`
 }
@@ -35,6 +55,11 @@ type MFAChallengeData struct {
 // record. This may mean the challenge expired, was already consumed, or was
 // never created.
 var ErrMFAChallengeNotFound = errors.New("mfa challenge not found")
+
+// ErrMFAChallengeClaimed is returned when a claim is attempted on a challenge
+// that another request has already claimed for verification. The challenge
+// remains valid until the owner consumes or releases it.
+var ErrMFAChallengeClaimed = errors.New("mfa challenge already claimed")
 
 // ErrMFAMaxAttemptsExceeded is returned when the MFA challenge has been
 // attempted more than the configured maximum.

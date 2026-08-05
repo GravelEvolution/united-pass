@@ -124,6 +124,8 @@ func TestValidateProductionConstraints(t *testing.T) {
 		WriteTimeout:   3 * time.Second,
 	}
 	cfg.Session.CookieSecure = true
+	cfg.Session.EncryptionKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" // 32 bytes
+	cfg.Session.EncryptionKeyID = "production-v1"
 	cfg.Auth.Provider = "zitadel"
 	cfg.Auth.BaseURL = "https://auth.example.com"
 	if err := cfg.Validate(); err != nil {

@@ -380,6 +380,11 @@ func (c Config) Validate() error {
 		if c.Auth.Provider == "" || c.Auth.BaseURL == "" {
 			errs = append(errs, errors.New("production requires authentication provider configuration"))
 		}
+		// Production stores provider session references encrypted at rest
+		// (ADR-0002 section 13), so the encryption key is mandatory.
+		if c.Session.EncryptionKey == "" {
+			errs = append(errs, errors.New("production requires UP_SESSION_ENCRYPTION_KEY"))
+		}
 		if c.Permission.DevOverrideEnabled {
 			errs = append(errs, errors.New("production must not enable permission dev override"))
 		}

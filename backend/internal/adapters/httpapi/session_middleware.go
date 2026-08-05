@@ -8,6 +8,7 @@ import (
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/platform/observability"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
@@ -43,7 +44,8 @@ func RequireSession(svc *session.Service, checker UserStatusChecker, logger *slo
 				if !errors.Is(err, session.ErrSessionNotFound) && !errors.Is(err, session.ErrSessionExpired) {
 					logger.Error("session validation failed",
 						"requestId", request.ID(r.Context()),
-						"error", err,
+						"errorClass", observability.ClassifyError(err),
+						"errorDetail", observability.RedactedError(err, 256),
 					)
 				}
 				WriteUnauthorized(w, r)
