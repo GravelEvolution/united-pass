@@ -240,17 +240,20 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
 
 ### Not yet implemented (later phases)
 
-**Phase 1 status: implementation complete; operational sign-off pending.**
+**Phase 1 status: implementation complete; local real-instance acceptance passed.**
 The session, current user, MFA (atomic consumption, opaque server-generated
 MFA tokens that never carry provider credentials), provider-reference
 encryption, logging redaction, production safety guardrails, and the ZITADEL
-provider adapter (Phase 1.2) are implemented. Production deployments can now
-start with the ZITADEL adapter once the instance is provisioned and the E2E
-integration tests have been run against it (see
-[Local ZITADEL Instance](#local-zitadel-instance)).
+provider adapter (Phase 1.2) are implemented. The adapter has been accepted
+against a local real ZITADEL v2.71.0 instance (password + TOTP login,
+first-login identity mapping, logout revocation, HTTP smoke flow); details in
+[ADR-0003 Operational Sign-off](docs/adr-0003.md). Production deployments can
+start with the ZITADEL adapter once the HTTPS instance and secrets are
+provisioned (see [Local ZITADEL Instance](#local-zitadel-instance)).
 
-- E2E validation against a provisioned ZITADEL instance and production secrets rollout (Phase 1.2 operational sign-off)
-- gRPC error-code calibration against the real instance (see `internal/adapters/zitadel/errors.go`)
+- Passkey browser ceremony against the real instance (WebAuthn begin fails in the local dev instance; adapter unit tests cover the contract)
+- Production HTTPS instance + Secret Manager rollout (Phase 1.2 production operational sign-off)
+- gRPC error-code calibration follow-ups on the production instance (see `internal/adapters/zitadel/errors.go`; local codes are recorded in ADR-0003)
 - Passkey / recovery-code factor management (passkey verification + WebAuthn ceremony contract work; factor *management* UI is Phase 4)
 - User registration, password reset, email verification
 - Profile updates and avatar upload
