@@ -10,7 +10,10 @@ info:
     detail lives in `frontend/docs/api-contracts.md`. Both must stay synchronized.
 
     Phase 0 scope: operational endpoints only. Business endpoints (session, user,
-    OAuth, consent, etc.) are added incrementally in later phases.
+    OAuth, consent, etc.) are added incrementally in later phases. Business API
+    paths use the full `/api/v1/...` prefix explicitly rather than relying on a
+    global server base path, so that root-level operational endpoints and
+    versioned API endpoints can coexist accurately.
   version: 0.1.0
   contact:
     name: United Pass backend team
@@ -18,8 +21,8 @@ info:
 servers:
   - url: http://localhost:8080
     description: Local development
-  - url: /api/v1
-    description: Same-origin reverse proxy (production)
+  - url: /
+    description: Same-origin production
 
 tags:
   - name: Operational
@@ -37,6 +40,9 @@ paths:
       responses:
         "200":
           description: Process is alive
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
           content:
             application/json:
               schema:
@@ -56,6 +62,9 @@ paths:
       responses:
         "200":
           description: Process is ready
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
           content:
             application/json:
               schema:
@@ -64,6 +73,9 @@ paths:
                 status: ready
         "503":
           description: At least one readiness check failed
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
           content:
             application/json:
               schema:
