@@ -15,7 +15,9 @@ services:
   zitadel-db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: zitadel
+      # Superuser for ZITADEL's init step (ZITADEL_DATABASE_POSTGRES_ADMIN_*).
+      # ZITADEL then creates its own runtime user "zitadel".
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: zitadel
       POSTGRES_DB: zitadel
     volumes:
@@ -27,8 +29,12 @@ services:
       retries: 10
 
   zitadel:
-    image: ghcr.io/zitadel/zitadel:v2.76.1
-    command: start-from-init
+    # v2.71 is the last v2 release line: the init script and zitadel-go v3
+    # SDK target the v2 API, and the v2 default instance supports the
+    # resource-owner password grant used by zitadel-init.sh. v3 removed the
+    # password grant by default.
+    image: ghcr.io/zitadel/zitadel:v2.71.0
+    command: start-from-init --masterkeyFromEnv
     depends_on:
       zitadel-db:
         condition: service_healthy
@@ -48,13 +54,27 @@ services:
       ZITADEL_EXTERNALDOMAIN: localhost
       ZITADEL_EXTERNALPORT: "8080"
       ZITADEL_TLS: "false"
+      # Encryption key for ZITADEL's own secrets. Must be exactly 32 bytes.
+      # Development-only fixed value; production must inject it via secrets
+      # management.
+      ZITADEL_MASTERKEY: MasterkeyNeedsToBeChangedInProd!
       # First admin user created on first startup.
       ZITADEL_FIRSTUSER_USERNAME: admin@zitadel.localhost
       ZITADEL_FIRSTUSER_PASSWORD: AdminPassword1!
       ZITADEL_FIRSTUSER_ORG: UnitedPassDev
+      # Pre-provision an IAM_OWNER machine user with a JSON key written to a
+      # file. The key lets zitadel-init.sh authenticate with JWT profile
+      # (v2.71+ rejects the resource-owner password grant). The key file is
+      # created once during first setup and must be treated as a secret.
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: up-init-sa
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: United Pass init service account
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINEKEY_TYPE: "1"
+      ZITADEL_FIRSTINSTANCE_MACHINEKEYPATH: /zitadel-init/init-sa.json
       ZITADEL_LOG_LEVEL: info
     ports:
       - "8080:8080"
+    volumes:
+      - ./.zitadel:/zitadel-init
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/debug/ready"]
       interval: 10s
