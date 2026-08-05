@@ -246,12 +246,13 @@ MFA tokens that never carry provider credentials), provider-reference
 encryption, logging redaction, production safety guardrails, and the ZITADEL
 provider adapter (Phase 1.2) are implemented. The adapter has been accepted
 against a local real ZITADEL v2.71.0 instance (password + TOTP login,
-first-login identity mapping, logout revocation, HTTP smoke flow); details in
-[ADR-0003 Operational Sign-off](docs/adr-0003.md). Production deployments can
-start with the ZITADEL adapter once the HTTPS instance and secrets are
-provisioned (see [Local ZITADEL Instance](#local-zitadel-instance)).
+first-login identity mapping, logout revocation, HTTP smoke flow, passkey
+fail-closed security remediation); details in [ADR-0003 Operational
+Sign-off](docs/adr-0003.md). Production deployments can start with the
+ZITADEL adapter once the HTTPS instance and secrets are provisioned (see
+[Local ZITADEL Instance](#local-zitadel-instance)).
 
-- Passkey browser ceremony against the real instance (WebAuthn begin fails in the local dev instance; adapter unit tests cover the contract)
+- Passkey browser ceremony against the real instance (WebAuthn begin fails in the local dev instance; adapter unit tests cover the contract and the fail-closed path)
 - Production HTTPS instance + Secret Manager rollout (Phase 1.2 production operational sign-off)
 - gRPC error-code calibration follow-ups on the production instance (see `internal/adapters/zitadel/errors.go`; local codes are recorded in ADR-0003)
 - Passkey / recovery-code factor management (passkey verification + WebAuthn ceremony contract work; factor *management* UI is Phase 4)
