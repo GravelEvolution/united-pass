@@ -1,15 +1,19 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 )
@@ -159,6 +163,53 @@ func TestNewServerMountsHealthRoutes(t *testing.T) {
 	readyRec := newRequest(srv.Router, http.MethodGet, "/readyz")
 	if readyRec.Code != http.StatusOK {
 		t.Errorf("readyz status = %d, want %d", readyRec.Code, http.StatusOK)
+	}
+}
+
+// TestNewServerPanicRecordsAccessLog verifies that the real NewServer
+// middleware ordering (AccessLog outer, Recovery inner) ensures AccessLog
+// captures the 500 status when a handler panics. This guards against
+// regressions where Recovery sits outside AccessLog, in which case AccessLog
+// would never log the request because the panic unwinds past it.
+func TestNewServerPanicRecordsAccessLog(t *testing.T) {
+	cfg := testConfig()
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	srv := NewServer(cfg, logger)
+
+	// Mount a panic handler on the real router. The Router field is typed
+	// http.Handler but NewServer always returns a *chi.Mux.
+	router, ok := srv.Router.(*chi.Mux)
+	if !ok {
+		t.Fatal("expected Router to be *chi.Mux")
+	}
+	router.Get("/test-panic", func(w http.ResponseWriter, r *http.Request) {
+		panic("test panic from bootstrap test")
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/test-panic", nil)
+	srv.Router.ServeHTTP(rec, req)
+
+	// Recovery must produce a 500 error envelope.
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+
+	logOutput := logBuf.String()
+
+	// AccessLog (outer) must have recorded the request with status 500.
+	if !strings.Contains(logOutput, "http request") {
+		t.Errorf("access log entry missing: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "status=500") {
+		t.Errorf("access log should record status=500 after panic: %s", logOutput)
+	}
+
+	// Recovery (inner) must have logged the panic.
+	if !strings.Contains(logOutput, "panic recovered") {
+		t.Errorf("panic recovery log missing: %s", logOutput)
 	}
 }
 
