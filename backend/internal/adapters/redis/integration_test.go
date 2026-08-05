@@ -6,11 +6,14 @@
 // absent. They never run FLUSHALL or FLUSHDB, and only delete keys under the
 // configured test prefix.
 //
-// Run locally:
+// Run locally (through the SSH tunnel managed by scripts/tunnel.sh):
 //
-//	UP_TEST_REDIS_URL=rediss://:password@host:6379/1 \
+//	UP_TEST_REDIS_URL=redis://:password@127.0.0.1:16379/1 \
 //	UP_TEST_REDIS_KEY_PREFIX=up:test: \
 //	go test -tags integration ./internal/adapters/redis/...
+//
+// Never point these tests at a public network endpoint with plaintext. The
+// tunnel keeps plaintext traffic on the loopback interface only.
 package redis
 
 import (
@@ -40,10 +43,9 @@ func mustLoadTestRedisConfig(t *testing.T) config.RedisConfig {
 		t.Skip("UP_TEST_REDIS_URL not set; skipping Redis integration tests")
 	}
 	return config.RedisConfig{
-		URL:           url,
-		KeyPrefix:     prefix,
-		PoolSize:      5,
-		AllowInsecure: os.Getenv("UP_DEBUG_ALLOW_INSECURE") == "true",
+		URL:       url,
+		KeyPrefix: prefix,
+		PoolSize:  5,
 	}
 }
 

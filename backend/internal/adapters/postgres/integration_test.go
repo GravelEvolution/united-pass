@@ -5,11 +5,14 @@
 // UP_TEST_DATABASE_SCHEMA to be set; they skip when the variables are absent.
 // They never connect to the development schema.
 //
-// Run locally:
+// Run locally (through the SSH tunnel managed by scripts/tunnel.sh):
 //
-//	UP_TEST_DATABASE_URL=postgres://user:pass@host:5432/db?sslmode=require \
+//	UP_TEST_DATABASE_URL=postgres://user:pass@127.0.0.1:15432/db?sslmode=disable \
 //	UP_TEST_DATABASE_SCHEMA=united_pass_test \
 //	go test -tags integration ./internal/adapters/postgres/...
+//
+// Never point these tests at a public network endpoint with plaintext. The
+// tunnel keeps plaintext traffic on the loopback interface only.
 package postgres
 
 import (
@@ -39,18 +42,6 @@ func mustLoadTestDBConfig(t *testing.T) (string, string) {
 	if url == "" {
 		t.Skip("UP_TEST_DATABASE_URL not set; skipping PostgreSQL integration tests")
 	}
-
-	// In debug mode, rewrite the URL to disable TLS so the test can connect
-	// to a server that does not support TLS. This applies to both the
-	// migration connection (pgx.ParseConfig) and the pool (NewPool).
-	if os.Getenv("UP_DEBUG_ALLOW_INSECURE") == "true" {
-		rewritten, err := RewriteURLForInsecureMode(url)
-		if err != nil {
-			t.Fatalf("rewrite URL for insecure mode: %v", err)
-		}
-		url = rewritten
-	}
-
 	return url, schema
 }
 

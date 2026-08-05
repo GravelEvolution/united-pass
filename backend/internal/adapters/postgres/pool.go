@@ -6,7 +6,6 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,24 +26,10 @@ type Pool struct {
 // so every connection defaults to the correct schema without per-query
 // qualification.
 //
-// When cfg.Database.AllowInsecure is true (and the environment is not
-// production), the database URL is rewritten to set sslmode=disable so pgx
-// does not attempt a TLS handshake. This is only for development against a
-// remote server that does not support TLS.
-//
 // The pool does NOT run migrations. Callers must run migrations explicitly via
 // cmd/migrate before or after pool creation.
 func NewPool(ctx context.Context, cfg config.Config) (*Pool, error) {
-	dbURL := cfg.Database.URL
-	if cfg.Database.AllowInsecure && !cfg.IsProduction() {
-		rewritten, err := RewriteURLForInsecureMode(dbURL)
-		if err != nil {
-			return nil, fmt.Errorf("postgres: rewrite URL for insecure mode: %w", err)
-		}
-		dbURL = rewritten
-	}
-
-	poolConfig, err := pgxpool.ParseConfig(dbURL)
+	poolConfig, err := pgxpool.ParseConfig(cfg.Database.URL)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: parse database URL: %w", err)
 	}
@@ -67,23 +52,6 @@ func NewPool(ctx context.Context, cfg config.Config) (*Pool, error) {
 	}
 
 	return &Pool{pool: pool}, nil
-}
-
-// RewriteURLForInsecureMode rewrites a PostgreSQL connection URL to set
-// sslmode=disable, preventing pgx from attempting a TLS handshake. This is
-// exported so that integration tests (which create their own pgx connections
-// for migrations outside of NewPool) can apply the same rewriting.
-//
-// Callers must ensure this is only used in non-production environments.
-func RewriteURLForInsecureMode(rawURL string) (string, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "", fmt.Errorf("parse URL: %w", err)
-	}
-	q := u.Query()
-	q.Set("sslmode", "disable")
-	u.RawQuery = q.Encode()
-	return u.String(), nil
 }
 
 // Ping verifies database connectivity within the given timeout. It is suitable

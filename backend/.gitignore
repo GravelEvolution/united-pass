@@ -1,4 +1,16 @@
+# Environment files
 .env
 .env.local
 .env.*.local
 !.env.template
+
+# Go build artifacts
+/bin/
+/api
+*.exe
+*.out
+coverage.txt
+
+# SSH tunnel runtime state (scripts/tunnel.sh)
+.tunnel.pid
+.tunnel.log

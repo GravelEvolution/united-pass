@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/GravelEvolution/united-pass/backend/internal/adapters/postgres"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -145,16 +144,7 @@ func main() {
 
 // openDB opens a *sql.DB using pgx's stdlib adapter so goose can use it.
 func openDB(cfg config.Config) (*sql.DB, error) {
-	dbURL := cfg.Database.URL
-	if cfg.Database.AllowInsecure && !cfg.IsProduction() {
-		rewritten, err := postgres.RewriteURLForInsecureMode(dbURL)
-		if err != nil {
-			return nil, fmt.Errorf("rewrite URL for insecure mode: %w", err)
-		}
-		dbURL = rewritten
-	}
-
-	connConfig, err := pgx.ParseConfig(dbURL)
+	connConfig, err := pgx.ParseConfig(cfg.Database.URL)
 	if err != nil {
 		return nil, fmt.Errorf("parse database URL: %w", err)
 	}

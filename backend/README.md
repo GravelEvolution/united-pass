@@ -10,8 +10,51 @@ This directory contains the Go backend API service.
 - macOS / Linux
 - PostgreSQL 16+ (Phase 1 onwards)
 - Redis 7+ (Phase 1 onwards)
+- SSH access to the server hosting PostgreSQL and Redis (for the development tunnel)
 
-Remote test services are available but require TLS, VPN, or a secure tunnel. Never downgrade to plaintext connections for convenience.
+Remote test services are available, but the API must never connect to them over plaintext on the public network. Use the SSH tunnel described in [Secure Remote Access](#secure-remote-access-ssh-tunnel), TLS, or a VPN. Never downgrade to plaintext connections for convenience.
+
+## Secure Remote Access (SSH Tunnel)
+
+The remote PostgreSQL and Redis instances do not expose TLS. To comply with ADR-0002 (no plaintext over public network connections), development traffic is tunneled through SSH so the API connects to localhost only. Plaintext stays on the loopback interface; the public network is only reached through the encrypted SSH transport.
+
+### One-command startup
+
+```bash
+# Start the tunnel, apply pending migrations, and run the API server
+./scripts/dev.sh up --migrate
+
+# Tunnel + migrations only
+./scripts/dev.sh migrate
+
+# Stop the tunnel
+./scripts/dev.sh down
+
+# Show tunnel state
+./scripts/dev.sh status
+```
+
+`up` runs the API server in the foreground; stopping it (Ctrl+C) also stops the tunnel it started.
+
+### Tunnel management
+
+```bash
+./scripts/tunnel.sh start     # establish SSH tunnels for PostgreSQL and Redis
+./scripts/tunnel.sh stop      # tear the tunnels down
+./scripts/tunnel.sh restart
+./scripts/tunnel.sh status    # tunnel process and local port readiness
+```
+
+The tunnel maps:
+
+| Local endpoint | Remote endpoint |
+| --- | --- |
+| `127.0.0.1:15432` | PostgreSQL `127.0.0.1:5432` on the SSH host |
+| `127.0.0.1:16379` | Redis `127.0.0.1:6379` on the SSH host |
+
+Configure the SSH target in `.env` (see `UP_SSH_*` below). The database and Redis URLs in `.env` must point at the local tunnel ports, never at the public IP. The tunnel keeps both services reachable without exposing credentials on the public network.
+
+CI does not use the tunnel: the workflow runs PostgreSQL and Redis as service containers inside the isolated GitHub Actions runner and connects with `sslmode=disable` / `redis://localhost`.
 
 ## Running the Service
 
@@ -67,8 +110,8 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_SHUTDOWN_TIMEOUT` | `30s` | Graceful shutdown deadline. Production caps at 60s. |
 | `UP_MAX_REQUEST_BODY_BYTES` | `1048576` (1 MiB) | Maximum request body size. Production caps at 16 MiB. |
 | `UP_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
-| `UP_DATABASE_URL` | | PostgreSQL connection URL. Password must be URL-encoded. Use `sslmode=require` for remote servers. |
-| `UP_DATABASE_SCHEMA` | `united_pass` | PostgreSQL schema for United Pass tables. |
+| `UP_DATABASE_URL` | | PostgreSQL connection URL. Password must be URL-encoded. Use `sslmode=disable` only for localhost (e.g. through the SSH tunnel) or isolated CI. |
+| `UP_DATABASE_SCHEMA` | `united_pass` | PostgreSQL schema for United Pass tables. Must be a valid PostgreSQL identifier. |
 | `UP_DATABASE_MAX_CONNS` | `10` | Maximum pool connections. |
 | `UP_DATABASE_MIN_CONNS` | `1` | Minimum pool connections. |
 | `UP_DATABASE_CONNECT_TIMEOUT` | `10s` | Connection timeout. |
@@ -97,6 +140,12 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_AUTH_PROVIDER_PROJECT_ID` | | Authentication provider project ID. |
 | `UP_AUTH_PROVIDER_CLIENT_ID` | | Authentication provider client ID. |
 | `UP_AUTH_PROVIDER_CLIENT_SECRET` | | Authentication provider client secret. |
+| `UP_SSH_HOST` | | SSH host for the development tunnel (`scripts/tunnel.sh`). |
+| `UP_SSH_PORT` | `22` | SSH port for the development tunnel. |
+| `UP_SSH_USER` | | SSH user for the development tunnel. |
+| `UP_SSH_KEY` | `~/.ssh/id_ed25519` | SSH private key for the development tunnel. |
+| `UP_LOCAL_PG_PORT` | `15432` | Local tunnel port for PostgreSQL. |
+| `UP_LOCAL_REDIS_PORT` | `16379` | Local tunnel port for Redis. |
 
 ### Integration Test Variables
 
@@ -116,7 +165,7 @@ Integration tests skip when these variables are absent. They never fall back to 
 - PostgreSQL is the persistent source of truth for user identity.
 - Redis holds only ephemeral data: sessions, MFA challenges, and rate-limit counters.
 - Redis data loss only invalidates sessions — it does not delete users.
-- Remote services must use TLS, VPN, or a secure tunnel.
+- Never connect to public network services with plaintext. Development uses the SSH tunnel; production requires TLS.
 - CI does not connect to remote shared databases.
 
 ## Test Commands
@@ -130,8 +179,11 @@ go test ./...
 go test -race ./...
 go build ./...
 
-# Integration tests (require UP_TEST_DATABASE_URL and UP_TEST_REDIS_URL)
+# Integration tests (require UP_TEST_DATABASE_URL and UP_TEST_REDIS_URL,
+# which point at the local SSH tunnel ports; start the tunnel first)
+./scripts/tunnel.sh start
 go test -tags integration -race ./internal/adapters/postgres/... ./internal/adapters/redis/...
+./scripts/tunnel.sh stop
 ```
 
 Integration tests never run `FLUSHALL`, `FLUSHDB`, or `DROP DATABASE`. They only delete keys under the configured test prefix and only drop tables in the test schema.
@@ -174,6 +226,7 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
 - **Authentication provider adapter**: interface + test fake (no production provider yet)
 - **Permission resolver**: fail-closed default with optional development override
 - **Migration command**: `cmd/migrate/main.go` with explicit up/status/version/reset
+- **Development tooling**: `scripts/tunnel.sh` (SSH tunnel manager) and `scripts/dev.sh` (one-command startup)
 - ADR-0002 documenting session, PostgreSQL, Redis, and authentication provider architecture
 - OpenAPI specification updated with all Phase 1 endpoints
 - Unit tests, HTTP tests, and integration tests (PostgreSQL and Redis)

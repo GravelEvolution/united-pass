@@ -97,10 +97,6 @@ type DatabaseConfig struct {
 	MaxConns       int32
 	MinConns       int32
 	ConnectTimeout time.Duration
-	// AllowInsecure disables TLS for database connections. This is only
-	// permitted in non-production environments when the remote server does not
-	// support TLS. Production validation rejects this flag.
-	AllowInsecure bool
 }
 
 // RedisConfig holds Redis connection parameters.
@@ -111,10 +107,6 @@ type RedisConfig struct {
 	ConnectTimeout time.Duration
 	ReadTimeout    time.Duration
 	WriteTimeout   time.Duration
-	// AllowInsecure disables TLS for Redis connections. This is only permitted
-	// in non-production environments when the remote server does not support
-	// TLS. Production validation rejects this flag.
-	AllowInsecure bool
 }
 
 // SessionConfig holds browser session parameters.
@@ -170,11 +162,6 @@ type TestConfig struct {
 // defaults for any value that is not explicitly set. Call LoadDotEnv first in
 // local development to populate variables from an ignored .env file.
 func Load() (Config, error) {
-	// UP_DEBUG_ALLOW_INSECURE allows non-production environments to connect
-	// to PostgreSQL and Redis without TLS. This is useful when the remote
-	// server does not support TLS. Production validation rejects this flag.
-	allowInsecure := boolOr("UP_DEBUG_ALLOW_INSECURE", false)
-
 	cfg := Config{
 		Environment:         Environment(envOr("UP_ENVIRONMENT", string(EnvironmentDevelopment))),
 		HTTPAddr:            envOr("UP_HTTP_ADDR", defaultHTTPAddr),
@@ -192,7 +179,6 @@ func Load() (Config, error) {
 			MaxConns:       int32Or("UP_DATABASE_MAX_CONNS", defaultDatabaseMaxConns),
 			MinConns:       int32Or("UP_DATABASE_MIN_CONNS", defaultDatabaseMinConns),
 			ConnectTimeout: durationOr("UP_DATABASE_CONNECT_TIMEOUT", defaultDatabaseConnectTimeout),
-			AllowInsecure:  allowInsecure,
 		},
 
 		Redis: RedisConfig{
@@ -202,7 +188,6 @@ func Load() (Config, error) {
 			ConnectTimeout: durationOr("UP_REDIS_CONNECT_TIMEOUT", defaultRedisConnectTimeout),
 			ReadTimeout:    durationOr("UP_REDIS_READ_TIMEOUT", defaultRedisReadTimeout),
 			WriteTimeout:   durationOr("UP_REDIS_WRITE_TIMEOUT", defaultRedisWriteTimeout),
-			AllowInsecure:  allowInsecure,
 		},
 
 		Session: SessionConfig{
@@ -385,13 +370,6 @@ func (c Config) Validate() error {
 		}
 		if c.Permission.DevOverrideEnabled {
 			errs = append(errs, errors.New("production must not enable permission dev override"))
-		}
-		// Production must never allow insecure (non-TLS) connections.
-		if c.Database.AllowInsecure {
-			errs = append(errs, errors.New("production must not enable UP_DEBUG_ALLOW_INSECURE for database"))
-		}
-		if c.Redis.AllowInsecure {
-			errs = append(errs, errors.New("production must not enable UP_DEBUG_ALLOW_INSECURE for redis"))
 		}
 	}
 

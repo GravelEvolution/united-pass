@@ -31,22 +31,12 @@ type Client struct {
 // config. The key prefix is stored for use by stores to construct namespaced
 // keys.
 //
-// When cfg.AllowInsecure is true, TLS is disabled even if the URL uses the
-// rediss:// scheme. This is only for development against a remote server that
-// does not support TLS; production validation rejects this flag.
-//
 // The key prefix (e.g. "up:development:") namespaces keys per environment so
 // development, test, and production never collide. See ADR-0002 section 8.
 func NewClient(cfg config.RedisConfig) (*Client, error) {
 	opts, err := goredis.ParseURL(cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("redis: parse URL: %w", err)
-	}
-
-	// In debug mode, disable TLS so the client can connect to a server that
-	// does not support TLS even when the URL uses rediss://.
-	if cfg.AllowInsecure {
-		opts.TLSConfig = nil
 	}
 
 	if cfg.PoolSize > 0 {

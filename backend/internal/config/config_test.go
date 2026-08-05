@@ -134,20 +134,6 @@ func TestValidateProductionConstraints(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate should reject production permission dev override")
 	}
-
-	// Production must reject AllowInsecure for both database and Redis.
-	cfg.Permission.DevOverrideEnabled = false
-	cfg.Database.AllowInsecure = true
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("Validate should reject production database AllowInsecure")
-	}
-	cfg.Database.AllowInsecure = false
-
-	cfg.Redis.AllowInsecure = true
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("Validate should reject production redis AllowInsecure")
-	}
-	cfg.Redis.AllowInsecure = false
 }
 
 func TestLogLevelValue(t *testing.T) {
@@ -160,15 +146,6 @@ func TestLogLevelValue(t *testing.T) {
 	// slog.LevelWarn is a negative value; compare via string to avoid coupling.
 	if level.String() != "WARN" {
 		t.Errorf("LogLevelValue = %q, want WARN", level.String())
-	}
-}
-
-func TestValidateDevelopmentAcceptsAllowInsecure(t *testing.T) {
-	cfg := validDevelopmentConfig()
-	cfg.Database.AllowInsecure = true
-	cfg.Redis.AllowInsecure = true
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate should accept AllowInsecure in development: %v", err)
 	}
 }
 
