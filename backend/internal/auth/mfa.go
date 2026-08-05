@@ -32,6 +32,14 @@ type MFAChallengeData struct {
 	AuthenticationMethods []AuthenticationMethod `json:"authenticationMethods"`
 	// AvailableMethods lists the MFA methods the user may use.
 	AvailableMethods []MFAMethod `json:"availableMethods"`
+	// ProviderSessionID references the provider-side authentication session
+	// that must be completed with the second factor. It is populated only
+	// after the password step and consumed together with the challenge; the
+	// provider session token is never persisted.
+	ProviderSessionID string `json:"providerSessionId,omitempty"`
+	// PasskeyRequestOptions carries the WebAuthn PublicKeyCredentialRequestOptions
+	// (JSON) when passkey is among the available methods.
+	PasskeyRequestOptions string `json:"passkeyRequestOptions,omitempty"`
 	// Attempts is the initial attempt count (always 0 at creation).
 	Attempts int `json:"attempts"`
 	// CreatedAt is when the challenge was issued.

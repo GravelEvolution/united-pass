@@ -112,11 +112,15 @@ type loginRequest struct {
 }
 
 // mfaRequiredResponse is the JSON body for the 202 MFA-required response.
+// The mfaToken is an opaque, randomly generated United Pass token — it never
+// contains provider credentials. PasskeyRequestOptions is the WebAuthn
+// PublicKeyCredentialRequestOptions (JSON) when passkey is available.
 type mfaRequiredResponse struct {
-	Status           string    `json:"status"`
-	MFAToken         string    `json:"mfaToken"`
-	AvailableMethods []string  `json:"availableMethods"`
-	ExpiresAt        time.Time `json:"expiresAt"`
+	Status                string    `json:"status"`
+	MFAToken              string    `json:"mfaToken"`
+	AvailableMethods      []string  `json:"availableMethods"`
+	PasskeyRequestOptions string    `json:"passkeyRequestOptions,omitempty"`
+	ExpiresAt             time.Time `json:"expiresAt"`
 }
 
 // mfaChallengeRequest is the JSON body for POST /api/v1/auth/sessions/mfa.
@@ -242,16 +246,29 @@ func (h *AuthHandlers) handleAuthenticated(w http.ResponseWriter, r *http.Reques
 }
 
 // handleMFARequired stores an MFA challenge and returns the mfaToken to the
-// client.
+// client. The mfaToken is a fresh opaque token generated here with crypto/rand;
+// provider session credentials never leave the server. The provider session
+// ID (needed to complete the second factor) is stored in the challenge.
 func (h *AuthHandlers) handleMFARequired(w http.ResponseWriter, r *http.Request, result auth.AuthenticationResult, remember bool) {
-	// The Authenticator provides the MFA token. We store the challenge data
-	// in Redis keyed by the token hash for TTL and attempt tracking.
-	mfaTokenHash := session.HashToken(result.MFAToken)
+	mfaToken, err := session.GenerateMFAToken()
+	if err != nil {
+		h.logger.Error("mfa token generation failed",
+			"requestId", requestID(r),
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
+		)
+		WriteInternalError(w, r)
+		return
+	}
+
+	mfaTokenHash := session.HashToken(mfaToken)
 	challenge := auth.MFAChallengeData{
 		UserID:                result.UserID,
 		Provider:              result.Provider,
 		AuthenticationMethods: result.AuthenticationMethods,
 		AvailableMethods:      result.AvailableMethods,
+		ProviderSessionID:     result.ProviderSessionID,
+		PasskeyRequestOptions: result.PasskeyRequestOptions,
 		Attempts:              0,
 		CreatedAt:             time.Now().UTC(),
 	}
@@ -272,10 +289,11 @@ func (h *AuthHandlers) handleMFARequired(w http.ResponseWriter, r *http.Request,
 	}
 
 	resp := mfaRequiredResponse{
-		Status:           "mfa_required",
-		MFAToken:         result.MFAToken,
-		AvailableMethods: methods,
-		ExpiresAt:        time.Now().UTC().Add(h.mfaTTL),
+		Status:                "mfa_required",
+		MFAToken:              mfaToken,
+		AvailableMethods:      methods,
+		PasskeyRequestOptions: result.PasskeyRequestOptions,
+		ExpiresAt:             time.Now().UTC().Add(h.mfaTTL),
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -350,7 +368,7 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 		WriteInternalError(w, r)
 		return
 	}
-	_, err = h.mfaStore.Claim(r.Context(), mfaTokenHash, claimID)
+	challenge, err := h.mfaStore.Claim(r.Context(), mfaTokenHash, claimID)
 	if err != nil {
 		switch {
 		case errors.Is(err, auth.ErrMFAChallengeNotFound):
@@ -370,11 +388,13 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Attempt MFA verification via the provider adapter.
+	// Attempt MFA verification via the provider adapter. The provider session
+	// ID comes from the stored challenge; the browser-supplied mfaToken is
+	// only a lookup key and never reaches the provider.
 	result, err := h.authenticator.CompleteMFA(r.Context(), auth.MFAChallengeInput{
-		MFAToken: req.MFAToken,
-		Method:   method,
-		Code:     req.Code,
+		ProviderSessionID: challenge.ProviderSessionID,
+		Method:            method,
+		Code:              req.Code,
 	})
 	if err != nil {
 		// Provider failure: release the claim so the user can retry. The

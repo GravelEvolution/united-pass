@@ -5,8 +5,6 @@ package auth
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"sync"
 
@@ -57,7 +55,8 @@ func (f *FakeAuthenticator) AddUser(u FakeUser) {
 
 // BeginPasswordAuthentication checks the identifier and password against
 // configured fake users. If MFA is required, it returns an MFARequired result
-// with a deterministic MFA token derived from the user ID.
+// whose ProviderSessionID references the fake provider session; the HTTP layer
+// generates the opaque MFA token returned to the browser.
 func (f *FakeAuthenticator) BeginPasswordAuthentication(
 	ctx context.Context,
 	input PasswordAuthenticationInput,
@@ -75,13 +74,12 @@ func (f *FakeAuthenticator) BeginPasswordAuthentication(
 	}
 
 	if user.RequiresMFA {
-		mfaToken := generateFakeMFAToken(string(user.UserID))
 		return AuthenticationResult{
-			Status:           StatusMFARequired,
-			UserID:           user.UserID,
-			Provider:         user.Provider,
-			MFAToken:         mfaToken,
-			AvailableMethods: user.MFAMethods,
+			Status:            StatusMFARequired,
+			UserID:            user.UserID,
+			Provider:          user.Provider,
+			ProviderSessionID: user.SessionRef,
+			AvailableMethods:  user.MFAMethods,
 		}, nil
 	}
 
@@ -94,7 +92,9 @@ func (f *FakeAuthenticator) BeginPasswordAuthentication(
 	}, nil
 }
 
-// CompleteMFA verifies the MFA code against the configured fake user.
+// CompleteMFA verifies the MFA code against the configured fake user. The
+// user is located by the provider session ID supplied from the stored
+// challenge (never from the browser).
 func (f *FakeAuthenticator) CompleteMFA(
 	ctx context.Context,
 	input MFAChallengeInput,
@@ -102,13 +102,11 @@ func (f *FakeAuthenticator) CompleteMFA(
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
-	// Find the user by matching the MFA token.
 	for _, user := range f.users {
 		if !user.RequiresMFA {
 			continue
 		}
-		expectedToken := generateFakeMFAToken(string(user.UserID))
-		if expectedToken != input.MFAToken {
+		if user.SessionRef != input.ProviderSessionID {
 			continue
 		}
 
@@ -142,12 +140,4 @@ func (f *FakeAuthenticator) RevokeProviderSession(
 	sessionReference string,
 ) error {
 	return nil
-}
-
-// generateFakeMFAToken creates a deterministic MFA token from a user ID for
-// the fake authenticator. This is NOT how real MFA tokens are generated —
-// real tokens use crypto/rand.
-func generateFakeMFAToken(userID string) string {
-	h := sha256.Sum256([]byte("mfa:" + userID))
-	return hex.EncodeToString(h[:])
 }

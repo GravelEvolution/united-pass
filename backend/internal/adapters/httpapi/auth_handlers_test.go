@@ -437,9 +437,23 @@ func TestLoginMFARequired(t *testing.T) {
 
 	// Verify challenge was stored.
 	hash := session.HashToken(resp.MFAToken)
-	_, err := mfaStore.Get(context.Background(), hash)
+	challenge, err := mfaStore.Get(context.Background(), hash)
 	if err != nil {
 		t.Fatalf("MFA challenge not stored: %v", err)
+	}
+
+	// SECURITY: the browser-visible mfaToken must be a fresh opaque token and
+	// must never leak the provider session handle (the fake's SessionRef is
+	// "fake-session-ref-002"). The provider session ID is stored server-side
+	// only.
+	if strings.Contains(resp.MFAToken, challenge.ProviderSessionID) {
+		t.Error("mfaToken must not contain the provider session ID")
+	}
+	if challenge.ProviderSessionID == "" {
+		t.Error("challenge must store the provider session ID server-side")
+	}
+	if len(resp.MFAToken) < 32 {
+		t.Errorf("mfaToken too short (%d chars); want a random opaque token", len(resp.MFAToken))
 	}
 }
 
