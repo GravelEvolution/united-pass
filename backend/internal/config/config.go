@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -408,6 +409,28 @@ func (c Config) Validate() error {
 		}
 		if c.Auth.Provider == "zitadel" && c.Auth.ServiceAccountKeyFile == "" {
 			errs = append(errs, errors.New("zitadel provider requires UP_AUTH_PROVIDER_SERVICE_ACCOUNT_KEY_FILE"))
+		}
+		// Production ZITADEL must be reached over HTTPS. Rejecting plaintext
+		// and URL injection prevents a misconfigured deployment from
+		// downgrading the provider connection or leaking credentials.
+		if c.Auth.BaseURL != "" {
+			u, err := url.Parse(c.Auth.BaseURL)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("authentication provider base URL is invalid: %w", err))
+			} else {
+				if u.Scheme != "https" {
+					errs = append(errs, errors.New("production authentication provider base URL must use https"))
+				}
+				if u.Host == "" {
+					errs = append(errs, errors.New("authentication provider base URL must include a host"))
+				}
+				if u.User != nil {
+					errs = append(errs, errors.New("authentication provider base URL must not contain userinfo"))
+				}
+				if u.RawQuery != "" || u.Fragment != "" {
+					errs = append(errs, errors.New("authentication provider base URL must not contain query or fragment"))
+				}
+			}
 		}
 		// Production stores provider session references encrypted at rest
 		// (ADR-0002 section 13), so the encryption key is mandatory.

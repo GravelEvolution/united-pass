@@ -240,7 +240,8 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
 ### Not yet implemented (later phases)
 
 **Phase 1 status: implementation complete; operational sign-off pending.**
-The session, current user, MFA (atomic consumption), provider-reference
+The session, current user, MFA (atomic consumption, opaque server-generated
+MFA tokens that never carry provider credentials), provider-reference
 encryption, logging redaction, production safety guardrails, and the ZITADEL
 provider adapter (Phase 1.2) are implemented. Production deployments can now
 start with the ZITADEL adapter once the instance is provisioned and the E2E
@@ -248,7 +249,8 @@ integration tests have been run against it (see
 [Local ZITADEL Instance](#local-zitadel-instance)).
 
 - E2E validation against a provisioned ZITADEL instance and production secrets rollout (Phase 1.2 operational sign-off)
-- Passkey / recovery-code factor management (passkey verification works via WebAuthn; factor *management* UI is Phase 4)
+- gRPC error-code calibration against the real instance (see `internal/adapters/zitadel/errors.go`)
+- Passkey / recovery-code factor management (passkey verification + WebAuthn ceremony contract work; factor *management* UI is Phase 4)
 - User registration, password reset, email verification
 - Profile updates and avatar upload
 - TOTP, Passkey, Recovery Code management (MFA verification is Phase 1; factor management is Phase 4)
@@ -282,19 +284,25 @@ UP_AUTH_PROVIDER_DOMAIN=localhost \
 go run ./cmd/api
 ```
 
-Run the E2E tests against the instance:
+Run the E2E tests against the instance (TOTP code is computed automatically
+from the secret saved in `.zitadel/init-state.json`; set
+`UP_TEST_DATABASE_URL` to also validate first-login identity mapping against a
+real PostgreSQL schema migrated with `cmd/migrate`):
 
 ```bash
 UP_TEST_ZITADEL_BASE_URL=http://localhost:8080 \
 UP_TEST_ZITADEL_KEY_FILE=.zitadel/sa-key.json \
 UP_TEST_ZITADEL_USER=zhixing.lin@zitadel.localhost \
 UP_TEST_ZITADEL_PASSWORD='TestPassword123!' \
+UP_TEST_ZITADEL_TOTP_SECRET=$(jq -r .totpSecret .zitadel/init-state.json) \
+UP_TEST_DATABASE_URL='postgres://...' \
 go test -tags integration ./internal/adapters/zitadel/...
 ```
 
 Production ZITADEL requires an HTTPS endpoint and the service account key
 delivered via secrets management; the key file must never be committed
-(`.zitadel/` is gitignored).
+(`.zitadel/` is gitignored). Config validation rejects any non-HTTPS provider
+base URL in production.
 
 ## API Endpoints (Phase 1)
 

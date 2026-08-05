@@ -229,6 +229,52 @@ func TestValidateAcceptsValidEncryptionKey(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsInsecureProductionAuthURL verifies that production
+// rejects any ZITADEL base URL that is not a bare HTTPS URL.
+func TestValidateRejectsInsecureProductionAuthURL(t *testing.T) {
+	base := validDevelopmentConfig()
+	base.Environment = EnvironmentProduction
+	base.Database = DatabaseConfig{
+		URL:            "postgres://user:pass@host:5432/db?sslmode=require",
+		Schema:         "united_pass",
+		MaxConns:       10,
+		MinConns:       1,
+		ConnectTimeout: 10 * time.Second,
+	}
+	base.Redis = RedisConfig{
+		URL:            "rediss://:pass@host:6379/0",
+		KeyPrefix:      "up:production:",
+		PoolSize:       10,
+		ConnectTimeout: 10 * time.Second,
+		ReadTimeout:    3 * time.Second,
+		WriteTimeout:   3 * time.Second,
+	}
+	base.Session.CookieSecure = true
+	base.Session.EncryptionKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+	base.Session.EncryptionKeyID = "production-v1"
+	base.Auth.Provider = "zitadel"
+	base.Auth.ServiceAccountKeyFile = "/secrets/zitadel/key.json"
+
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{name: "http scheme", url: "http://auth.example.com"},
+		{name: "userinfo", url: "https://user:pass@auth.example.com"},
+		{name: "query", url: "https://auth.example.com?debug=1"},
+		{name: "fragment", url: "https://auth.example.com#frag"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			cfg.Auth.BaseURL = tc.url
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("Validate should reject %q in production", tc.url)
+			}
+		})
+	}
+}
+
 func validDevelopmentConfig() Config {
 	return Config{
 		Environment:         EnvironmentDevelopment,
