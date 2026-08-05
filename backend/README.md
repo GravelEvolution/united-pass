@@ -235,7 +235,16 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
 
 ### Not yet implemented (later phases)
 
-- Real authentication provider integration (ZITADEL or another provider). The adapter interface, development fake, and production safety guardrails are in place; **Phase 1 is Implemented, provider integration blocked** until a provider adapter is built and tested (Phase 6).
+**Phase 1 status: substantially complete.** The session, current user, MFA
+(atomic consumption), provider-reference encryption, logging redaction, and
+production safety guardrails are implemented. A real authentication provider
+adapter is **not** implemented — production deployments are intentionally
+blocked until then.
+
+- **Phase 1.2 — Production Authentication Provider**: implement the
+  `auth.Authenticator` adapter for a real provider (ZITADEL or another
+  candidate per ADR-0003). Until this lands, Phase 1 is "implemented, provider
+  integration blocked" and must not be closed.
 - User registration, password reset, email verification
 - Profile updates and avatar upload
 - TOTP, Passkey, Recovery Code management (MFA verification is Phase 1; factor management is Phase 4)
@@ -243,7 +252,7 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
 - OAuth Application and Client management
 - Consent orchestration
 - Employee profiles, departments, workforce
-- Feishu Provider synchronization
+- Feishu Provider synchronization (directory provider; distinct from the Phase 1.2 authentication provider)
 - Cerbos policies and audit
 - Audit export
 
@@ -293,3 +302,4 @@ The backend must never silently implement a different API contract from the fron
 
 - `docs/adr-0001.md` — Foundation architecture (HTTP server, middleware, config, logging)
 - `docs/adr-0002.md` — Session, PostgreSQL, Redis, and authentication provider architecture
+- `docs/adr-0003.md` — Authentication provider selection (Phase 1.2)

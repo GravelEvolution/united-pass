@@ -21,19 +21,48 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Load .env without overriding variables that are already exported.
-if [[ -f "${BACKEND_DIR}/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "${BACKEND_DIR}/.env"
-  set +a
-fi
+# Load ONLY the tunnel-relevant variables from .env. The file is never sourced
+# wholesale: values are parsed line by line, so arbitrary shell in .env cannot
+# execute, and variables already set in the environment are not overridden.
+load_tunnel_env() {
+  local env_file="${BACKEND_DIR}/.env"
+  [[ -f "${env_file}" ]] || return 0
+
+  local line key val
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    # Skip comments and empty lines.
+    case "${line}" in
+      ''|\#*) continue ;;
+    esac
+    key="${line%%=*}"
+    # Only the SSH/local/remote tunnel variables are read.
+    case "${key}" in
+      UP_SSH_*|UP_LOCAL_*|UP_REMOTE_*)
+        val="${line#*=}"
+        # Strip surrounding double quotes (values may be quoted in .env).
+        [[ "${val}" == \"*\" ]] && val="${val#\"}" && val="${val%\"}"
+        # Do not override variables already exported in the environment.
+        if ! env | grep -q "^${key}="; then
+          export "${key}=${val}"
+        fi
+        ;;
+    esac
+  done < "${env_file}"
+}
+
+load_tunnel_env
 
 # --- Configuration (override via environment or .env) ---
 SSH_HOST="${UP_SSH_HOST:-}"
 SSH_PORT="${UP_SSH_PORT:-22}"
 SSH_USER="${UP_SSH_USER:-}"
 SSH_KEY="${UP_SSH_KEY:-${HOME}/.ssh/id_ed25519}"
+
+# Expand a leading "~/" in the key path; the shell does not expand "~" inside
+# variable values.
+case "${SSH_KEY}" in
+  "~/"*) SSH_KEY="${HOME}/${SSH_KEY#\~/}" ;;
+esac
 
 LOCAL_PG_PORT="${UP_LOCAL_PG_PORT:-15432}"
 LOCAL_REDIS_PORT="${UP_LOCAL_REDIS_PORT:-16379}"
@@ -116,6 +145,8 @@ start() {
     -o ServerAliveCountMax=3 \
     -o ControlMaster=no \
     -o ConnectTimeout=10 \
+    -o BatchMode=yes \
+    -o IdentitiesOnly=yes \
     "${SSH_USER}@${SSH_HOST}" >"${LOG_FILE}" 2>&1 &
 
   echo $! > "${PID_FILE}"
