@@ -1,8 +1,7 @@
-// Command api is the entry point for the United Pass API service. Phase 0
-// scaffold: loads typed configuration, sets up structured logging, starts an
-// http.Server with configured timeouts and a minimal health endpoint, and
-// performs graceful shutdown on operating-system signals. The Chi router,
-// middleware and full HTTP adapter layer are introduced in the next commit.
+// Command api is the entry point for the United Pass API service. It loads
+// configuration, constructs structured logging, builds the HTTP server, starts
+// it, and performs graceful shutdown on operating-system signals. Business
+// logic lives in internal packages; main only wires them together.
 package main
 
 import (
@@ -14,6 +13,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/GravelEvolution/united-pass/backend/internal/bootstrap"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/platform/observability"
 )
@@ -27,6 +27,8 @@ func main() {
 func run() error {
 	cfg, err := config.Load()
 	if err != nil {
+		// Logging is not yet configured; write to stderr so startup failures
+		// are visible before the structured logger exists.
 		slog.New(slog.NewTextHandler(os.Stderr, nil)).Error("configuration invalid", "error", err)
 		return err
 	}
@@ -38,29 +40,17 @@ func run() error {
 	}
 	logger := observability.NewLogger(level, string(cfg.Environment), os.Stdout)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
+	server := bootstrap.NewServer(cfg, logger)
 
-	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           mux,
-		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
-		ReadTimeout:       cfg.ReadTimeout,
-		WriteTimeout:      cfg.WriteTimeout,
-		IdleTimeout:       cfg.IdleTimeout,
-	}
-
+	// Listen for termination signals. SIGINT (Ctrl-C) and SIGTERM (container
+	// orchestrator shutdown) both trigger graceful shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Start serving in a goroutine so the main goroutine can wait for signals.
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.Info("http server starting", "addr", cfg.HTTPAddr, "environment", string(cfg.Environment))
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := server.Run(); err != nil {
 			serveErr <- err
 		}
 	}()
@@ -71,15 +61,17 @@ func run() error {
 		return err
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
+		// Restore default signal behavior so a second signal forces an exit.
 		stop()
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Error("graceful shutdown failed", "error", err)
+	// Graceful shutdown: stop accepting new requests and wait for in-flight
+	// handlers within the configured timeout.
+	shutdownCtx := context.Background()
+	if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Error("shutdown completed with error", "error", err)
 		return err
 	}
-	logger.Info("http server stopped")
+
 	return nil
 }
