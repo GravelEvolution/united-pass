@@ -145,7 +145,8 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_SSH_HOST` | | SSH host for the development tunnel (`scripts/tunnel.sh`). |
 | `UP_SSH_PORT` | `22` | SSH port for the development tunnel. |
 | `UP_SSH_USER` | | SSH user for the development tunnel. |
-| `UP_SSH_KEY` | `~/.ssh/id_ed25519` | SSH private key for the development tunnel. |
+| `UP_SSH_KEY` | `~/.ssh/id_ed25519` | SSH private key for the development tunnel (preferred). |
+| `UP_SSH_PASSWORD` | | Optional SSH password for the development tunnel via `sshpass`. When set, `tunnel.sh` uses password authentication instead of a key (requires `brew install sshpass`). Never commit the real password. |
 | `UP_LOCAL_PG_PORT` | `15432` | Local tunnel port for PostgreSQL. |
 | `UP_LOCAL_REDIS_PORT` | `16379` | Local tunnel port for Redis. |
 
