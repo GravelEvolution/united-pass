@@ -1,0 +1,16 @@
+# Binaries
+/bin/
+/api
+*.exe
+
+# Test coverage
+*.out
+coverage.txt
+
+# Environment files
+.env
+.env.local
+
+# Editor / OS
+.DS_Store
+*.swp
