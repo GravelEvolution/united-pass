@@ -124,6 +124,8 @@ type PermissionCapabilities = {
 | --- | --- | --- | --- |
 | `/login` | `POST /api/v1/auth/sessions` | 使用凭据建立浏览器会话 | 限速；返回通用凭据错误；支持 MFA challenge，不记录密码 |
 | MFA 挑战 | `POST /api/v1/auth/sessions/mfa` | 提交 TOTP / Passkey / 恢复码 | challenge 限时；限速；过多尝试锁定 |
+| 高危操作重认证 | `POST /api/v1/auth/reauthentication` | 为删除应用/删除 Client/轮换 Secret 等高危操作重新验证密码 | 需要会话 + CSRF；返回授权（200）或 MFA 挑战（202）；限速；授权令牌一次性 |
+| 重认证 MFA 完成 | `POST /api/v1/auth/reauthentication/mfa` | 以 TOTP / Passkey 完成重认证挑战 | 与登录 MFA 相同的原子消费语义；成功后签发一次性授权令牌 |
 | `/forgot-password` | `POST /api/v1/password-reset-requests` | 请求向已验证联系方式发送重置说明 | 限速；始终返回通用结果，不能泄露账户是否存在 |
 | 密码重置落地页 | `POST /api/v1/password-resets` | 使用一次性令牌设置新密码 | 令牌限时、一次性、不可写入日志；成功后按策略撤销会话 |
 | 邮箱验证落地页 | `POST /api/v1/email-verifications` | 使用一次性令牌验证邮箱 | 令牌限时、一次性、限速 |
@@ -148,6 +150,19 @@ MFA 挑战请求：
   "code": "user-entered-code"
 }
 ```
+
+高危操作重认证请求（action 限定为 `application.delete`、`client.delete`、`client.secret.rotate`）：
+
+```json
+{
+  "action": "client.secret.rotate",
+  "applicationId": "app_x",
+  "clientId": "clt_x",
+  "password": "user-entered-password"
+}
+```
+
+重认证响应：密码验证通过但需要第二因子时返回 `202` `{"status":"mfa_required","reauthToken":"...","availableMethods":["totp"],"expiresAt":"..."}`；完成后的最终授权返回 `200` `{"status":"granted","reauthToken":"...","expiresAt":"..."}`。最终 `reauthToken` 一次性消费，随高危请求以 `X-Reauthentication-Token` 请求头提交；复用或未携带时后端返回错误码 `session.reauthentication_required`。授权与声明的 action 及目标资源绑定，不能跨操作重放。
 
 注册请求至少包含账户名、邮箱和密码：
 

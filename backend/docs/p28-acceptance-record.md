@@ -54,6 +54,7 @@
 2. **删除失败后客户端隐藏但可重试**：`delete_failed` 客户端对普通查询不可见，但删除状态机允许重试（`ListLiveClientsByApplication` 含 deleting/delete_failed 行），符合 ADR-0004 §6 设计。
 3. **Provider 失败一律 fail closed**：轮转在 provider 调用失败时不推进本地状态、不吊销旧 Secret，并留下审计记录，与验收预期一致。
 4. **TOTP 窗口**：同一 30s 窗口内的多次 reauth MFA 完成在 ZITADEL v2.71 上可通过；脚本仍以“等待新窗口”作为稳妥策略。
+5. **`client_credentials` 限制（ADR-0004 Follow-up 补验，如实记录不冒充）**：以 provisioner 相同的参数形态（WEB + BASIC + authorization_code grant）创建 confidential app 后，用其 clientId/clientSecret 请求 `grant_type=client_credentials`，token 端点返回 `400 invalid_client: client not found`。结论：ZITADEL v2.71 仅对 machine/service user 提供 client_credentials；`server_to_server` profile 可正常 provision/轮转/删除，但无法经项目 app 获取 client_credentials token。限制已在 ADR-0004 Follow-up 与本记录中披露。
 
 ## 4. 环境清理确认
 

@@ -135,6 +135,16 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_LOGIN_RATE_WINDOW` | `15m` | Login rate limit window. |
 | `UP_MFA_RATE_LIMIT` | `10` | Maximum MFA attempts per window. |
 | `UP_MFA_RATE_WINDOW` | `15m` | MFA rate limit window. |
+| `UP_REAUTH_CHALLENGE_TTL` | `5m` | Reauthentication challenge token TTL. |
+| `UP_REAUTH_GRANT_TTL` | `5m` | Reauthentication grant (single-use token) TTL. |
+| `UP_REAUTH_MAX_ATTEMPTS` | `5` | Maximum reauthentication MFA attempts per challenge. |
+| `UP_REAUTH_RATE_LIMIT` | `10` | Maximum reauthentication attempts per window. |
+| `UP_REAUTH_RATE_WINDOW` | `15m` | Reauthentication rate limit window. |
+| `UP_SECRET_ROTATION_GRACE_PERIOD` | `0s` | Overlap window during which the previous client secret stays valid after rotation (ZITADEL v2.71 has no native grace period). Must not be negative. |
+| `UP_SECRET_ROTATION_RATE_LIMIT` | `3` | Maximum secret rotations per window per client. |
+| `UP_SECRET_ROTATION_RATE_WINDOW` | `15m` | Secret rotation rate limit window. |
+| `UP_PERMISSION_DEV_OVERRIDE` | `false` | Development only: grant full capabilities to the user in `UP_PERMISSION_DEV_OVERRIDE_USER_ID`. Rejected in production. |
+| `UP_PERMISSION_DEV_OVERRIDE_USER_ID` | | Local user ID targeted by the development permission override. |
 | `UP_AUTH_PROVIDER` | | Authentication provider name: `fake` (development only) or `zitadel`. Unknown values fail startup in all environments. |
 | `UP_AUTH_PROVIDER_BASE_URL` | | Authentication provider base URL. HTTPS required in production; local dev may use `http://localhost:8080`. |
 | `UP_AUTH_PROVIDER_PROJECT_ID` | | Authentication provider project ID (tenant scope for identity links). |
@@ -195,9 +205,9 @@ go test -tags integration -race ./internal/adapters/postgres/... ./internal/adap
 
 Integration tests never run `FLUSHALL`, `FLUSHDB`, or `DROP DATABASE`. They only delete keys under the configured test prefix and only drop tables in the test schema.
 
-## Current Implementation Scope (Phase 1: Session and Current User)
+## Current Implementation Scope (Phase 1 + Phase 2)
 
-Phase 0 established the HTTP foundation. Phase 1 adds session management, authentication, and current user endpoints.
+Phase 0 established the HTTP foundation. Phase 1 adds session management, authentication, and current user endpoints. Phase 2 adds the OAuth Application and OAuth Client management plane (see [ADR-0004](docs/adr-0004.md)).
 
 ### Implemented in Phase 0
 
@@ -242,6 +252,20 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
 - OpenAPI specification updated with all Phase 1 endpoints
 - Unit tests, HTTP tests, and integration tests (PostgreSQL and Redis)
 
+### Implemented in Phase 2
+
+- **OAuth Application / Client domain** (`internal/applications`): application + client lifecycle state machines, confidential/public profiles, consent modes, scope catalog validation, soft delete
+- **PostgreSQL schema v2**: `oauth_applications`, `oauth_clients`, `oauth_client_secret_records`, `provider_operations`, `provider_reconciliation_jobs`, `security_events`
+- **ZITADEL provisioning adapter**: OIDC app create/update/disable/remove + secret rotation against the Management API, with a capability-equivalent fake provider for tests; all provider failures mapped to stable error classes (fail closed)
+- **Application API**: create with initial client, list (cursor pagination), get/update, enable/disable, delete
+- **Client API**: create/get/update/enable/disable/delete with profile-based validation (redirect URIs, token endpoint auth, scopes)
+- **Reauthentication** (`POST /api/v1/auth/reauthentication` + `/mfa`): password + TOTP step-up for high-risk actions; single-use grants bound to action and resource, submitted via `X-Reauthentication-Token`
+- **Secret rotation**: single-winner optimistic gate, one-time secret display (`Cache-Control: no-store`), rate limiting, rotation audit
+- **Compensation**: provider failures during delete/rotation leave `provider_reconciliation_required` flags, reconciliation jobs, and durable audit events; failed deletions are retryable
+- **Durable audit**: `security_events` rows for every management-plane action (log-based audit is not a substitute)
+- ADR-0004 documenting the Phase 2 management-plane architecture
+- Real-provider acceptance against ZITADEL v2.71 (provisioning, rotation, delete, compensation); see [P2.8 acceptance record](docs/p28-acceptance-record.md)
+
 ### Not yet implemented (later phases)
 
 **Phase 1 status: implementation complete; local real-instance acceptance passed.**
@@ -256,6 +280,16 @@ Sign-off](docs/adr-0003.md). Production deployments can start with the
 ZITADEL adapter once the HTTPS instance and secrets are provisioned (see
 [Local ZITADEL Instance](#local-zitadel-instance)).
 
+**Phase 2 status: implementation complete; real-provider acceptance passed.**
+The OAuth Application/Client management plane (provisioning, reauthentication,
+secret rotation, deletion, compensation, durable audit) is implemented and has
+been accepted against a real ZITADEL v2.71.0 instance; details in
+[ADR-0004](docs/adr-0004.md) and the
+[P2.8 acceptance record](docs/p28-acceptance-record.md). Note: the ZITADEL
+service account must hold `PROJECT_OWNER` membership on the provisioning
+project — organization-level `ORG_OWNER` alone is not sufficient for
+`RemoveApp` on v2.71.
+
 - Passkey browser ceremony against the real instance (WebAuthn begin fails in the local dev instance; adapter unit tests cover the contract and the fail-closed path)
 - Production HTTPS instance + Secret Manager rollout (Phase 1.2 production operational sign-off)
 - gRPC error-code calibration follow-ups on the production instance (see `internal/adapters/zitadel/errors.go`; local codes are recorded in ADR-0003)
@@ -264,7 +298,6 @@ ZITADEL adapter once the HTTPS instance and secrets are provisioned (see
 - Profile updates and avatar upload
 - TOTP, Passkey, Recovery Code management (MFA verification is Phase 1; factor management is Phase 4)
 - Session list and revocation of other sessions
-- OAuth Application and Client management
 - Consent orchestration
 - Employee profiles, departments, workforce
 - Feishu Provider synchronization (directory provider; distinct from the authentication provider)
@@ -325,6 +358,28 @@ base URL in production.
 | `/healthz` | GET | None | No | Process liveness |
 | `/readyz` | GET | None | No | Dependency readiness |
 
+## API Endpoints (Phase 2)
+
+All Phase 2 endpoints require a session; state-changing endpoints require CSRF.
+High-risk operations additionally require a fresh reauthentication grant
+(`X-Reauthentication-Token`).
+
+| Endpoint | Method | Reauth | Description |
+| --- | --- | --- | --- |
+| `/api/v1/auth/reauthentication` | POST | No | Start step-up verification for a high-risk action |
+| `/api/v1/auth/reauthentication/mfa` | POST | No | Complete a reauthentication challenge (TOTP/passkey) |
+| `/api/v1/admin/scopes` | GET | No | Authoritative OAuth scope catalog |
+| `/api/v1/admin/applications/with-initial-client` | POST | No | Create application with its initial client (one-time secret) |
+| `/api/v1/admin/applications` | GET | No | List applications (cursor pagination) |
+| `/api/v1/admin/applications/{applicationId}` | GET / PATCH / DELETE | DELETE | Get / update / delete application |
+| `/api/v1/admin/applications/{applicationId}/enable` | POST | No | Enable application |
+| `/api/v1/admin/applications/{applicationId}/disable` | POST | No | Disable application |
+| `/api/v1/admin/applications/{applicationId}/clients` | POST | No | Add client (one-time secret for confidential profiles) |
+| `/api/v1/admin/applications/{applicationId}/clients/{clientId}` | GET / PATCH / DELETE | DELETE | Get / update / delete client |
+| `/api/v1/admin/applications/{applicationId}/clients/{clientId}/enable` | POST | No | Enable client |
+| `/api/v1/admin/applications/{applicationId}/clients/{clientId}/disable` | POST | No | Disable client |
+| `/api/v1/admin/applications/{applicationId}/clients/{clientId}/secret-rotations` | POST | Yes | Rotate confidential client secret (one-time display) |
+
 ## Cookie and CSRF Conventions
 
 Per ADR-0006:
@@ -360,3 +415,5 @@ The backend must never silently implement a different API contract from the fron
 - `docs/adr-0001.md` — Foundation architecture (HTTP server, middleware, config, logging)
 - `docs/adr-0002.md` — Session, PostgreSQL, Redis, and authentication provider architecture
 - `docs/adr-0003.md` — Authentication provider selection (Phase 1.2)
+- `docs/adr-0004.md` — OAuth Application/Client management plane (Phase 2)
+- `docs/p28-acceptance-record.md` — Phase 2 real-provider acceptance record

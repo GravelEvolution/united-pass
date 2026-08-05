@@ -268,9 +268,10 @@ func addOIDCAppRequest(projectID string, spec applications.ClientProvisionSpec, 
 
 // grantTypesFor maps domain grant types onto the ZITADEL app.v1 enum. The
 // pinned enum has no client_credentials value; server_to_server clients are
-// registered with the authorization_code grant set and rely on ZITADEL v2
-// serving client_credentials at the token endpoint for confidential apps
-// (ADR-0004 §1, to be confirmed in P2.8 acceptance).
+// registered with the authorization_code grant set. P2.8 acceptance confirmed
+// that ZITADEL v2.71 serves client_credentials only for machine users, so
+// provisioned apps cannot mint tokens via client_credentials; the limitation
+// is recorded in ADR-0004 (Follow-up) and docs/p28-acceptance-record.md.
 func grantTypesFor(rules applications.ProfileRules) []appv1.OIDCGrantType {
 	grants := make([]appv1.OIDCGrantType, 0, len(rules.GrantTypes))
 	for _, gt := range rules.GrantTypes {
