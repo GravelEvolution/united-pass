@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 type fakeSessionService struct {
@@ -40,19 +41,27 @@ func (f *fakeSessionService) DeleteSession(_ context.Context, in *sessionv2.Dele
 }
 
 type fakeUserService struct {
+	getFn     func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error)
 	methodsFn func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error)
 }
 
+func (f *fakeUserService) GetUserByID(_ context.Context, in *userv2.GetUserByIDRequest, _ ...grpc.CallOption) (*userv2.GetUserByIDResponse, error) {
+	return f.getFn(in)
+}
 func (f *fakeUserService) ListAuthenticationMethodTypes(_ context.Context, in *userv2.ListAuthenticationMethodTypesRequest, _ ...grpc.CallOption) (*userv2.ListAuthenticationMethodTypesResponse, error) {
 	return f.methodsFn(in)
 }
 
 type fakeLinker struct {
-	user identity.User
-	err  error
+	user     identity.User
+	err      error
+	lastInfo identity.ProviderUserInfo
+	calls    int
 }
 
-func (f *fakeLinker) GetOrCreateUserByProviderSubject(_ context.Context, _, _ string, _ identity.ProviderUserInfo) (identity.User, error) {
+func (f *fakeLinker) GetOrCreateUserByProviderSubject(_ context.Context, _, _ string, info identity.ProviderUserInfo) (identity.User, error) {
+	f.calls++
+	f.lastInfo = info
 	return f.user, f.err
 }
 
@@ -71,6 +80,31 @@ func sessionWithUser(userID string) *sessionv2.GetSessionResponse {
 	}
 }
 
+func humanProfileResponse(userID string) *userv2.GetUserByIDResponse {
+	display := "Zhixing Lin"
+	return &userv2.GetUserByIDResponse{
+		User: &userv2.User{
+			UserId: userID,
+			Type: &userv2.User_Human{
+				Human: &userv2.HumanUser{
+					UserId: userID,
+					Profile: &userv2.HumanProfile{
+						DisplayName: &display,
+					},
+					Email: &userv2.HumanEmail{
+						Email:      "zhixing@example.com",
+						IsVerified: true,
+					},
+					Phone: &userv2.HumanPhone{
+						Phone:      "+8613800000000",
+						IsVerified: false,
+					},
+				},
+			},
+		},
+	}
+}
+
 func TestBeginPasswordAuthenticationSuccess(t *testing.T) {
 	s := &fakeSessionService{
 		createFn: func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
@@ -81,6 +115,9 @@ func TestBeginPasswordAuthenticationSuccess(t *testing.T) {
 		},
 	}
 	u := &fakeUserService{
+		getFn: func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error) {
+			return humanProfileResponse("user-zitadel-1"), nil
+		},
 		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
 			return &userv2.ListAuthenticationMethodTypesResponse{
 				AuthMethodTypes: []userv2.AuthenticationMethodType{
@@ -108,11 +145,30 @@ func TestBeginPasswordAuthenticationSuccess(t *testing.T) {
 	if res.Provider != ProviderName {
 		t.Errorf("provider = %q, want %q", res.Provider, ProviderName)
 	}
-	if res.ProviderSessionReference != "s1:tok1" {
-		t.Errorf("session reference = %q, want s1:tok1", res.ProviderSessionReference)
+	// Provider session reference must be the session ID only — the token is
+	// discarded and must never be persisted or returned.
+	if res.ProviderSessionReference != "s1" {
+		t.Errorf("session reference = %q, want s1 (session ID only)", res.ProviderSessionReference)
 	}
 	if len(res.AuthenticationMethods) != 1 || res.AuthenticationMethods[0] != auth.MethodPassword {
 		t.Errorf("methods = %v, want [password]", res.AuthenticationMethods)
+	}
+
+	// The profile must be synchronized into the identity linker.
+	if l.calls != 1 {
+		t.Fatalf("linker calls = %d, want 1", l.calls)
+	}
+	if l.lastInfo.Subject != "user-zitadel-1" {
+		t.Errorf("linked subject = %q, want user-zitadel-1", l.lastInfo.Subject)
+	}
+	if l.lastInfo.DisplayName != "Zhixing Lin" {
+		t.Errorf("linked display name = %q, want Zhixing Lin", l.lastInfo.DisplayName)
+	}
+	if l.lastInfo.Email != "zhixing@example.com" || !l.lastInfo.EmailVerified {
+		t.Errorf("linked email = %q verified=%v, want zhixing@example.com verified=true", l.lastInfo.Email, l.lastInfo.EmailVerified)
+	}
+	if l.lastInfo.Phone != "+8613800000000" {
+		t.Errorf("linked phone = %q, want +8613800000000", l.lastInfo.Phone)
 	}
 }
 
@@ -151,19 +207,33 @@ func TestBeginPasswordAuthenticationRequiresTOTP(t *testing.T) {
 	if len(res.AvailableMethods) != 1 || res.AvailableMethods[0] != auth.MFAMethodTOTP {
 		t.Errorf("available methods = %v, want [totp]", res.AvailableMethods)
 	}
-	if res.MFAToken != "s1:tok1" {
-		t.Errorf("mfa token = %q, want s1:tok1", res.MFAToken)
+	// The provider session ID is server-side only; it must NOT be returned as
+	// an MFA token. There is no MFAToken field on the result at all.
+	if res.ProviderSessionID != "s1" {
+		t.Errorf("provider session id = %q, want s1", res.ProviderSessionID)
+	}
+	// The linker must not have been called before MFA completes.
+	if l.calls != 0 {
+		t.Errorf("linker calls before MFA = %d, want 0", l.calls)
 	}
 }
 
 func TestBeginPasswordAuthenticationPasskeyChallenge(t *testing.T) {
+	options := &structpb.Struct{
+		Fields: map[string]*structpb.Value{
+			"challenge": structpb.NewStringValue("abc123"),
+			"rpId":      structpb.NewStringValue("login.example.com"),
+		},
+	}
 	s := &fakeSessionService{
 		createFn: func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
 			return &sessionv2.CreateSessionResponse{
 				SessionId:    "s1",
 				SessionToken: "tok1",
 				Challenges: &sessionv2.Challenges{
-					WebAuthN: &sessionv2.Challenges_WebAuthN{},
+					WebAuthN: &sessionv2.Challenges_WebAuthN{
+						PublicKeyCredentialRequestOptions: options,
+					},
 				},
 			}, nil
 		},
@@ -181,6 +251,13 @@ func TestBeginPasswordAuthenticationPasskeyChallenge(t *testing.T) {
 	}
 	if len(res.AvailableMethods) != 1 || res.AvailableMethods[0] != auth.MFAMethodPasskey {
 		t.Errorf("available methods = %v, want [passkey]", res.AvailableMethods)
+	}
+	// The WebAuthn request options must reach the HTTP layer for the browser.
+	if res.PasskeyRequestOptions == "" {
+		t.Fatal("passkey request options must be set for the browser ceremony")
+	}
+	if res.ProviderSessionID != "s1" {
+		t.Errorf("provider session id = %q, want s1", res.ProviderSessionID)
 	}
 }
 
@@ -223,10 +300,10 @@ func TestBeginPasswordAuthenticationProviderUnavailable(t *testing.T) {
 }
 
 func TestCompleteMFATOTPSuccess(t *testing.T) {
-	var receivedToken string
+	var receivedSessionID string
 	s := &fakeSessionService{
 		setFn: func(in *sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
-			receivedToken = in.SessionToken
+			receivedSessionID = in.SessionId
 			if in.Checks == nil || in.Checks.Totp == nil || in.Checks.Totp.Code != "123456" {
 				return nil, errors.New("expected totp check")
 			}
@@ -236,13 +313,18 @@ func TestCompleteMFATOTPSuccess(t *testing.T) {
 			return sessionWithUser("user-zitadel-1"), nil
 		},
 	}
+	u := &fakeUserService{
+		getFn: func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error) {
+			return humanProfileResponse("user-zitadel-1"), nil
+		},
+	}
 	l := &fakeLinker{user: identity.User{ID: "user_local_1", Status: identity.UserStatusActive}}
 
-	a := newTestAuth(t, s, &fakeUserService{}, l)
+	a := newTestAuth(t, s, u, l)
 	res, err := a.CompleteMFA(context.Background(), auth.MFAChallengeInput{
-		MFAToken: "s1:tok1",
-		Method:   auth.MFAMethodTOTP,
-		Code:     "123456",
+		ProviderSessionID: "s1",
+		Method:            auth.MFAMethodTOTP,
+		Code:              "123456",
 	})
 	if err != nil {
 		t.Fatalf("CompleteMFA: %v", err)
@@ -250,12 +332,12 @@ func TestCompleteMFATOTPSuccess(t *testing.T) {
 	if res.Status != auth.StatusAuthenticated {
 		t.Fatalf("status = %q, want %q", res.Status, auth.StatusAuthenticated)
 	}
-	if receivedToken != "tok1" {
-		t.Errorf("set session used token %q, want tok1", receivedToken)
+	if receivedSessionID != "s1" {
+		t.Errorf("set session used id %q, want s1", receivedSessionID)
 	}
-	// The new session token becomes the provider session reference.
-	if res.ProviderSessionReference != "s1:tok2" {
-		t.Errorf("session reference = %q, want s1:tok2", res.ProviderSessionReference)
+	// The session reference stores the session ID only.
+	if res.ProviderSessionReference != "s1" {
+		t.Errorf("session reference = %q, want s1", res.ProviderSessionReference)
 	}
 	wantMethods := []auth.AuthenticationMethod{auth.MethodPassword, auth.MethodTOTP}
 	if len(res.AuthenticationMethods) != 2 || res.AuthenticationMethods[0] != wantMethods[0] || res.AuthenticationMethods[1] != wantMethods[1] {
@@ -271,9 +353,9 @@ func TestCompleteMFAWrongTOTP(t *testing.T) {
 	}
 	a := newTestAuth(t, s, &fakeUserService{}, &fakeLinker{})
 	res, err := a.CompleteMFA(context.Background(), auth.MFAChallengeInput{
-		MFAToken: "s1:tok1",
-		Method:   auth.MFAMethodTOTP,
-		Code:     "000000",
+		ProviderSessionID: "s1",
+		Method:            auth.MFAMethodTOTP,
+		Code:              "000000",
 	})
 	if err != nil {
 		t.Fatalf("CompleteMFA: %v", err)
@@ -283,12 +365,12 @@ func TestCompleteMFAWrongTOTP(t *testing.T) {
 	}
 }
 
-func TestCompleteMFAInvalidTokenFormat(t *testing.T) {
+func TestCompleteMFAInvalidProviderSession(t *testing.T) {
 	a := newTestAuth(t, &fakeSessionService{}, &fakeUserService{}, &fakeLinker{})
 	res, err := a.CompleteMFA(context.Background(), auth.MFAChallengeInput{
-		MFAToken: "not-a-valid-token",
-		Method:   auth.MFAMethodTOTP,
-		Code:     "123456",
+		ProviderSessionID: "",
+		Method:            auth.MFAMethodTOTP,
+		Code:              "123456",
 	})
 	if err != nil {
 		t.Fatalf("CompleteMFA: %v", err)
@@ -307,7 +389,7 @@ func TestRevokeProviderSession(t *testing.T) {
 		},
 	}
 	a := newTestAuth(t, s, &fakeUserService{}, &fakeLinker{})
-	if err := a.RevokeProviderSession(context.Background(), "s1:tok1"); err != nil {
+	if err := a.RevokeProviderSession(context.Background(), "s1"); err != nil {
 		t.Fatalf("RevokeProviderSession: %v", err)
 	}
 	if deletedID != "s1" {
@@ -353,24 +435,5 @@ func TestMapAuthError(t *testing.T) {
 				t.Errorf("mapAuthError = %q, want %q", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestSessionRefRoundTrip(t *testing.T) {
-	ref := encodeSessionRef("session-123", "token-abc")
-	sid, tok, err := decodeSessionRef(ref)
-	if err != nil {
-		t.Fatalf("decodeSessionRef: %v", err)
-	}
-	if sid != "session-123" || tok != "token-abc" {
-		t.Errorf("decoded = (%q, %q), want (session-123, token-abc)", sid, tok)
-	}
-}
-
-func TestDecodeSessionRefInvalid(t *testing.T) {
-	for _, ref := range []string{"", "no-separator", ":empty-parts", "a:"} {
-		if _, _, err := decodeSessionRef(ref); err == nil {
-			t.Errorf("decodeSessionRef(%q) should fail", ref)
-		}
 	}
 }

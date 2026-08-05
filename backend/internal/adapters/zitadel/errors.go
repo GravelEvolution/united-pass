@@ -20,6 +20,17 @@ import (
 // Any transport, authentication or quota failure is a server-side problem and
 // maps to provider_unavailable (HTTP 500 by the handler), never to a user
 // error.
+//
+// CALIBRATION (Phase 1.2 sign-off): the exact codes ZITADEL returns for each
+// failure mode (unknown login name, wrong password, locked user, expired
+// session, wrong TOTP, unregistered TOTP, insufficient service-account
+// permission, expired service-account key, rate limiting) must be recorded
+// against a real instance and this mapping adjusted if needed. In particular
+// Unauthenticated is classified as provider_unavailable here because the
+// service account is the only caller identity; if a real instance ever
+// surfaces user-credential failures as Unauthenticated, that case must be
+// re-examined. The E2E test logs the operation and error class without
+// recording passwords, TOTP codes, session tokens, or full error details.
 func mapAuthError(err error) auth.AuthenticationStatus {
 	if err == nil {
 		return auth.StatusAuthenticated

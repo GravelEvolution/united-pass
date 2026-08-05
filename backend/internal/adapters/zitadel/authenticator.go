@@ -11,10 +11,14 @@
 //	CompleteMFA: SetSession with a TOTP or WebAuthN check.
 //	RevokeProviderSession: DeleteSession.
 //
-// The adapter talks to ZITADEL as a service account (JWT profile
-// authentication) so no end-user token ever reaches the ZITADEL API on behalf
-// of our service; end-user sessions are only referenced by their opaque IDs
-// and tokens inside MFA tokens and provider session references.
+// SECURITY: provider session credentials never reach the browser or the
+// database. Only the ZITADEL session ID is kept server-side (in the MFA
+// challenge while the second factor is pending, and encrypted at rest in the
+// session record for logout revocation). The session token returned by
+// CreateSession is treated as a provider bearer credential and is discarded
+// immediately: SetSession no longer requires it (deprecated and ignored), and
+// DeleteSession works with the session ID alone for the calling service
+// account. See ADR-0002 section 13 and ADR-0003.
 package zitadel
 
 import (
@@ -23,7 +27,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
@@ -49,6 +52,7 @@ type sessionService interface {
 
 // userService is the subset of the ZITADEL user service the adapter uses.
 type userService interface {
+	GetUserByID(ctx context.Context, in *userv2.GetUserByIDRequest, opts ...grpc.CallOption) (*userv2.GetUserByIDResponse, error)
 	ListAuthenticationMethodTypes(ctx context.Context, in *userv2.ListAuthenticationMethodTypesRequest, opts ...grpc.CallOption) (*userv2.ListAuthenticationMethodTypesResponse, error)
 }
 
@@ -98,8 +102,10 @@ func NewAuthenticator(
 //   - user has TOTP registered     -> StatusMFARequired (totp)
 //   - otherwise                    -> StatusAuthenticated
 //
-// The returned MFAToken and ProviderSessionReference both encode
-// "{sessionID}:{sessionToken}" — an opaque handle to the ZITADEL session.
+// The returned ProviderSessionID is the ZITADEL session ID; it is stored
+// server-side in the MFA challenge and never exposed to the browser. The
+// session token from CreateSession is discarded immediately (SetSession no
+// longer requires it).
 func (a *Authenticator) BeginPasswordAuthentication(
 	ctx context.Context,
 	input auth.PasswordAuthenticationInput,
@@ -120,14 +126,19 @@ func (a *Authenticator) BeginPasswordAuthentication(
 		return auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}, nil
 	}
 
-	mfaToken := encodeSessionRef(create.SessionId, create.SessionToken)
-
-	// Passkey challenge requested and granted by ZITADEL.
+	// Passkey challenge requested and granted by ZITADEL. The WebAuthn
+	// PublicKeyCredentialRequestOptions must reach the browser so it can run
+	// navigator.credentials.get.
 	if create.Challenges != nil && create.Challenges.WebAuthN != nil {
+		options, err := json.Marshal(create.Challenges.WebAuthN.PublicKeyCredentialRequestOptions)
+		if err != nil {
+			return auth.AuthenticationResult{}, fmt.Errorf("zitadel: encode passkey request options: %w", err)
+		}
 		return auth.AuthenticationResult{
-			Status:           auth.StatusMFARequired,
-			MFAToken:         mfaToken,
-			AvailableMethods: []auth.MFAMethod{auth.MFAMethodPasskey},
+			Status:                auth.StatusMFARequired,
+			ProviderSessionID:     create.SessionId,
+			AvailableMethods:      []auth.MFAMethod{auth.MFAMethodPasskey},
+			PasskeyRequestOptions: string(options),
 		}, nil
 	}
 
@@ -142,30 +153,28 @@ func (a *Authenticator) BeginPasswordAuthentication(
 	}
 	if hasTOTP {
 		return auth.AuthenticationResult{
-			Status:           auth.StatusMFARequired,
-			MFAToken:         mfaToken,
-			AvailableMethods: []auth.MFAMethod{auth.MFAMethodTOTP},
+			Status:            auth.StatusMFARequired,
+			ProviderSessionID: create.SessionId,
+			AvailableMethods:  []auth.MFAMethod{auth.MFAMethodTOTP},
 		}, nil
 	}
 
-	return a.resolveAuthenticated(ctx, create.SessionId, create.SessionToken, userID,
+	return a.resolveAuthenticated(ctx, create.SessionId, userID,
 		[]auth.AuthenticationMethod{auth.MethodPassword})
 }
 
 // CompleteMFA completes a second-factor check against the ZITADEL session
-// referenced by the MFA token.
+// referenced by the provider session ID (read from the stored challenge).
 func (a *Authenticator) CompleteMFA(
 	ctx context.Context,
 	input auth.MFAChallengeInput,
 ) (auth.AuthenticationResult, error) {
-	sessionID, sessionToken, err := decodeSessionRef(input.MFAToken)
-	if err != nil {
+	if input.ProviderSessionID == "" {
 		return auth.AuthenticationResult{Status: auth.StatusExpired}, nil
 	}
 
 	req := &sessionv2.SetSessionRequest{
-		SessionId:    sessionID,
-		SessionToken: sessionToken,
+		SessionId: input.ProviderSessionID,
 	}
 	switch input.Method {
 	case auth.MFAMethodTOTP:
@@ -187,7 +196,7 @@ func (a *Authenticator) CompleteMFA(
 		return auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}, nil
 	}
 
-	set, err := a.sessions.SetSession(ctx, req)
+	_, err := a.sessions.SetSession(ctx, req)
 	if err != nil {
 		if status := mapAuthError(err); status != auth.StatusInvalidCredentials {
 			return auth.AuthenticationResult{Status: status}, nil
@@ -195,7 +204,7 @@ func (a *Authenticator) CompleteMFA(
 		return auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}, nil
 	}
 
-	userID, err := a.sessionUserID(ctx, sessionID)
+	userID, err := a.sessionUserID(ctx, input.ProviderSessionID)
 	if err != nil {
 		return auth.AuthenticationResult{}, err
 	}
@@ -206,22 +215,21 @@ func (a *Authenticator) CompleteMFA(
 	case auth.MFAMethodPasskey:
 		methods = append(methods, auth.MethodPasskey)
 	}
-	return a.resolveAuthenticated(ctx, sessionID, set.SessionToken, userID, methods)
+	return a.resolveAuthenticated(ctx, input.ProviderSessionID, userID, methods)
 }
 
 // RevokeProviderSession terminates the ZITADEL session referenced by the
-// provider session reference. It is best-effort: the local session is already
-// deleted by the caller.
+// provider session reference, which stores the session ID only. It is
+// best-effort: the local session is already deleted by the caller.
 func (a *Authenticator) RevokeProviderSession(
 	ctx context.Context,
 	sessionReference string,
 ) error {
-	sessionID, _, err := decodeSessionRef(sessionReference)
-	if err != nil {
-		return fmt.Errorf("zitadel: invalid session reference: %w", err)
+	if sessionReference == "" {
+		return errors.New("zitadel: empty session reference")
 	}
-	_, err = a.sessions.DeleteSession(ctx, &sessionv2.DeleteSessionRequest{
-		SessionId: sessionID,
+	_, err := a.sessions.DeleteSession(ctx, &sessionv2.DeleteSessionRequest{
+		SessionId: sessionReference,
 	})
 	if err != nil {
 		return fmt.Errorf("zitadel: revoke session: %w", err)
@@ -288,16 +296,50 @@ func (a *Authenticator) userHasTOTP(ctx context.Context, userID string) (bool, e
 	return false, nil
 }
 
+// providerProfile fetches the ZITADEL user profile (display name, email,
+// phone) for first-login identity mapping.
+func (a *Authenticator) providerProfile(ctx context.Context, userID string) (identity.ProviderUserInfo, error) {
+	info := identity.ProviderUserInfo{Subject: userID}
+	resp, err := a.users.GetUserByID(ctx, &userv2.GetUserByIDRequest{UserId: userID})
+	if err != nil {
+		return info, fmt.Errorf("zitadel: get user profile: %w", err)
+	}
+	human := resp.User.GetHuman()
+	if human == nil {
+		return info, nil // machine user: no profile to sync
+	}
+	if p := human.Profile; p != nil {
+		if p.DisplayName != nil {
+			info.DisplayName = *p.DisplayName
+		} else {
+			info.DisplayName = p.GivenName + " " + p.FamilyName
+		}
+	}
+	if e := human.Email; e != nil {
+		info.Email = e.Email
+		info.EmailVerified = e.IsVerified
+	}
+	if ph := human.Phone; ph != nil {
+		info.Phone = ph.Phone
+	}
+	return info, nil
+}
+
 // resolveAuthenticated maps the ZITADEL session to the local United Pass
-// user (creating it on first login) and returns an authenticated result.
+// user (creating it on first login with the provider profile) and returns an
+// authenticated result. The provider session reference stores only the
+// ZITADEL session ID — the session token is never persisted.
 func (a *Authenticator) resolveAuthenticated(
 	ctx context.Context,
-	sessionID, sessionToken, providerUserID string,
+	sessionID, providerUserID string,
 	methods []auth.AuthenticationMethod,
 ) (auth.AuthenticationResult, error) {
-	user, err := a.linker.GetOrCreateUserByProviderSubject(ctx, a.provider, a.tenantID, identity.ProviderUserInfo{
-		Subject: providerUserID,
-	})
+	profile, err := a.providerProfile(ctx, providerUserID)
+	if err != nil {
+		return auth.AuthenticationResult{}, err
+	}
+
+	user, err := a.linker.GetOrCreateUserByProviderSubject(ctx, a.provider, a.tenantID, profile)
 	if err != nil {
 		return auth.AuthenticationResult{}, fmt.Errorf("zitadel: resolve local user: %w", err)
 	}
@@ -309,27 +351,9 @@ func (a *Authenticator) resolveAuthenticated(
 		Status:                   auth.StatusAuthenticated,
 		UserID:                   user.ID,
 		Provider:                 a.provider,
-		ProviderSessionReference: encodeSessionRef(sessionID, sessionToken),
+		ProviderSessionReference: sessionID,
 		AuthenticationMethods:    methods,
 	}, nil
-}
-
-// encodeSessionRef packs a ZITADEL session ID and token into a single opaque
-// string. The token is a random opaque value from ZITADEL and is stored
-// encrypted at rest by the session service.
-func encodeSessionRef(sessionID, sessionToken string) string {
-	return sessionID + ":" + sessionToken
-}
-
-// decodeSessionRef splits an encoded session reference into its parts. It
-// returns an error when the format is invalid, which callers map to expired
-// credentials (the session handle is unusable).
-func decodeSessionRef(ref string) (sessionID, sessionToken string, err error) {
-	sessionID, sessionToken, ok := strings.Cut(ref, ":")
-	if !ok || sessionID == "" || sessionToken == "" {
-		return "", "", errors.New("invalid session reference")
-	}
-	return sessionID, sessionToken, nil
 }
 
 // structFromJSON converts a JSON-encoded WebAuthn assertion into the protobuf

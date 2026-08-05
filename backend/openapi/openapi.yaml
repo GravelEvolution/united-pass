@@ -749,8 +749,9 @@ components:
       type: object
       description: |
         Returned when the account requires multi-factor authentication before a
-        session can be established. The `mfaToken` is opaque, short-lived and
-        must be submitted to `POST /api/v1/auth/sessions/mfa`.
+        session can be established. The `mfaToken` is an opaque, randomly
+        generated United Pass token — it never contains provider credentials —
+        and must be submitted to `POST /api/v1/auth/sessions/mfa`.
       required: [status, mfaToken, availableMethods, expiresAt]
       additionalProperties: false
       properties:
@@ -761,7 +762,9 @@ components:
         mfaToken:
           type: string
           minLength: 1
-          description: Opaque, short-lived token used to complete the MFA challenge.
+          description: |
+            Opaque, short-lived token used to complete the MFA challenge. It is
+            generated server-side and never embeds provider session credentials.
           example: opaque_mfa_token
         availableMethods:
           type: array
@@ -770,6 +773,14 @@ components:
             type: string
             enum: [totp, passkey, recovery_code]
           example: [totp, passkey, recovery_code]
+        passkeyRequestOptions:
+          type: string
+          description: |
+            WebAuthn PublicKeyCredentialRequestOptions (JSON) returned when
+            `passkey` is among the available methods. The browser must pass it
+            to `navigator.credentials.get()` and submit the resulting
+            assertion as `passkeyAssertion` to the MFA endpoint.
+          example: '{"publicKey":{"challenge":"abc","rpId":"login.example.com"}}'
         expiresAt:
           type: string
           format: date-time
