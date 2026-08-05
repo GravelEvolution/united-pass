@@ -337,8 +337,19 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 
 	// Atomically claim the challenge for verification. Only one request may
 	// hold the claim lock; concurrent requests are rejected here so a single
-	// MFA token can never establish two sessions.
-	claimID := generateClaimID()
+	// MFA token can never establish two sessions. The claim ID must be
+	// unpredictable; a random generation failure fails closed before any
+	// provider call or session creation.
+	claimID, err := generateClaimID()
+	if err != nil {
+		h.logger.Error("mfa claim id generation failed",
+			"requestId", requestID(r),
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
+		)
+		WriteInternalError(w, r)
+		return
+	}
 	_, err = h.mfaStore.Claim(r.Context(), mfaTokenHash, claimID)
 	if err != nil {
 		switch {
@@ -546,15 +557,15 @@ func hashIdentifier(identifier string) string {
 // generateClaimID returns a random hex string used as the MFA claim lock
 // owner identifier. It must be unpredictable so an attacker cannot present a
 // guessed claimID to release or consume a challenge they do not hold.
-func generateClaimID() string {
+//
+// On crypto/rand failure it returns an error; the caller must fail closed and
+// not proceed with a fixed or weak claim ID.
+func generateClaimID() (string, error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
-		// crypto/rand failure is catastrophic for security; a fallback to a
-		// timestamp-derived value would weaken the lock ownership guarantee,
-		// so surface a distinctive marker and let the claim fail naturally.
-		return "claim-rand-failed"
+		return "", fmt.Errorf("httpapi: generate mfa claim id: %w", err)
 	}
-	return hex.EncodeToString(buf)
+	return hex.EncodeToString(buf), nil
 }
 
 // clientIP extracts the client IP address from the request. It prefers the

@@ -201,6 +201,23 @@ func (c *fakeUserChecker) CanUseSession(_ context.Context, userID identity.UserI
 
 // --- Test Helpers ---
 
+func TestGenerateClaimID(t *testing.T) {
+	first, err := generateClaimID()
+	if err != nil {
+		t.Fatalf("generateClaimID: %v", err)
+	}
+	if len(first) != 32 { // 16 random bytes hex-encoded
+		t.Errorf("claimID length = %d, want 32", len(first))
+	}
+	second, err := generateClaimID()
+	if err != nil {
+		t.Fatalf("generateClaimID second: %v", err)
+	}
+	if first == second {
+		t.Error("two generated claim IDs are identical; expected uniqueness")
+	}
+}
+
 func testSessionConfig() config.Config {
 	return config.Config{
 		Environment:         config.EnvironmentDevelopment,
