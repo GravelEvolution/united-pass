@@ -76,24 +76,27 @@ func (s *fakeSessionStore) Rotate(_ context.Context, oldHash, newHash string, ne
 	return nil
 }
 
-// fakeMFAStore is an in-memory MFAChallengeStore for testing.
+// fakeMFAStore is an in-memory MFAChallengeStore for testing. It models the
+// claim lock as a map of tokenHash -> claimID, mirroring the Redis adapter's
+// separate claim key semantics.
 type fakeMFAStore struct {
 	mu         sync.Mutex
 	challenges map[string]auth.MFAChallengeData
 	attempts   map[string]int
+	claims     map[string]string // tokenHash -> claimID
 }
 
 func newFakeMFAStore() *fakeMFAStore {
 	return &fakeMFAStore{
 		challenges: make(map[string]auth.MFAChallengeData),
 		attempts:   make(map[string]int),
+		claims:     make(map[string]string),
 	}
 }
 
 func (m *fakeMFAStore) Create(_ context.Context, hash string, data auth.MFAChallengeData, _ time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	data.State = auth.MFAStateAvailable
 	m.challenges[hash] = data
 	return nil
 }
@@ -108,41 +111,41 @@ func (m *fakeMFAStore) Get(_ context.Context, hash string) (auth.MFAChallengeDat
 	return d, nil
 }
 
-func (m *fakeMFAStore) Claim(_ context.Context, hash string) (auth.MFAChallengeData, error) {
+func (m *fakeMFAStore) Claim(_ context.Context, hash, claimID string) (auth.MFAChallengeData, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	d, ok := m.challenges[hash]
-	if !ok {
+	if _, ok := m.challenges[hash]; !ok {
 		return auth.MFAChallengeData{}, auth.ErrMFAChallengeNotFound
 	}
-	if d.State == auth.MFAStateProcessing {
+	if owner, ok := m.claims[hash]; ok && owner != claimID {
 		return auth.MFAChallengeData{}, auth.ErrMFAChallengeClaimed
 	}
-	d.State = auth.MFAStateProcessing
-	m.challenges[hash] = d
-	return d, nil
+	m.claims[hash] = claimID
+	return m.challenges[hash], nil
 }
 
-func (m *fakeMFAStore) Consume(_ context.Context, hash string) error {
+func (m *fakeMFAStore) Consume(_ context.Context, hash, claimID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if owner, ok := m.claims[hash]; !ok || owner != claimID {
+		return auth.ErrMFAChallengeNotHeld
+	}
 	if _, ok := m.challenges[hash]; !ok {
 		return auth.ErrMFAChallengeNotFound
 	}
 	delete(m.challenges, hash)
 	delete(m.attempts, hash)
+	delete(m.claims, hash)
 	return nil
 }
 
-func (m *fakeMFAStore) Release(_ context.Context, hash string) error {
+func (m *fakeMFAStore) Release(_ context.Context, hash, claimID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	d, ok := m.challenges[hash]
-	if !ok {
-		return auth.ErrMFAChallengeNotFound
+	if owner, ok := m.claims[hash]; !ok || owner != claimID {
+		return auth.ErrMFAChallengeNotHeld
 	}
-	d.State = auth.MFAStateAvailable
-	m.challenges[hash] = d
+	delete(m.claims, hash)
 	return nil
 }
 
@@ -546,15 +549,11 @@ func TestMFAWrongCode(t *testing.T) {
 		t.Fatalf("status: got %d, want %d. Body: %s", rr.Code, http.StatusUnauthorized, rr.Body.String())
 	}
 
-	// A failed verification releases the claim: the challenge must be back
-	// in the available state so the user can retry.
+	// A failed verification releases the claim: the challenge must still
+	// exist so the user can retry.
 	mfaTokenHash := session.HashToken(mfaResp.MFAToken)
-	challenge, err := mfaStore.Get(context.Background(), mfaTokenHash)
-	if err != nil {
+	if _, err := mfaStore.Get(context.Background(), mfaTokenHash); err != nil {
 		t.Fatalf("challenge should still exist after wrong code: %v", err)
-	}
-	if challenge.State != auth.MFAStateAvailable {
-		t.Errorf("challenge state after wrong code = %q, want %q", challenge.State, auth.MFAStateAvailable)
 	}
 }
 
@@ -569,19 +568,58 @@ func TestMFAChallengeAlreadyClaimed(t *testing.T) {
 	var mfaResp mfaRequiredResponse
 	json.Unmarshal(rr.Body.Bytes(), &mfaResp)
 
-	// Simulate a concurrent verification already claiming the challenge.
+	// Simulate a concurrent verification already holding the claim lock.
 	mfaTokenHash := session.HashToken(mfaResp.MFAToken)
-	if _, err := mfaStore.Claim(context.Background(), mfaTokenHash); err != nil {
+	if _, err := mfaStore.Claim(context.Background(), mfaTokenHash, "concurrent-claim-id"); err != nil {
 		t.Fatalf("pre-claim: %v", err)
 	}
 
-	// The HTTP request must be rejected (429) because the challenge is
-	// already processing.
+	// The HTTP request must be rejected (429) because the claim is already
+	// held by another request.
 	mfaBody := fmt.Sprintf(`{"mfaToken":"%s","method":"totp","code":"123456"}`, mfaResp.MFAToken)
 	rr = doRequest(mux, "POST", "/api/v1/auth/sessions/mfa", mfaBody)
 
 	if rr.Code != http.StatusTooManyRequests {
 		t.Fatalf("status: got %d, want %d. Body: %s", rr.Code, http.StatusTooManyRequests, rr.Body.String())
+	}
+}
+
+// consumeFailingMFAStore wraps a fakeMFAStore and makes Consume always fail,
+// simulating a Redis error or an expired challenge during verification.
+type consumeFailingMFAStore struct {
+	*fakeMFAStore
+}
+
+func (m *consumeFailingMFAStore) Consume(_ context.Context, hash, claimID string) error {
+	return errors.New("redis: simulated consume failure")
+}
+
+// TestMFAConsumeFailCloses verifies that when consuming the challenge fails
+// after successful provider verification, no session is created (fail
+// closed).
+func TestMFAConsumeFailCloses(t *testing.T) {
+	h, _, _, mfaStore, _ := setupAuthHandlers(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+	mux.HandleFunc("POST /api/v1/auth/sessions/mfa", h.CompleteMFA)
+
+	// Login to get MFA token.
+	rr := doRequest(mux, "POST", "/api/v1/auth/sessions", `{"identifier":"mfauser","password":"TestPassword123!"}`)
+	var mfaResp mfaRequiredResponse
+	json.Unmarshal(rr.Body.Bytes(), &mfaResp)
+
+	// Swap the store so Consume fails even though verification succeeds.
+	h.mfaStore = &consumeFailingMFAStore{fakeMFAStore: mfaStore}
+
+	mfaBody := fmt.Sprintf(`{"mfaToken":"%s","method":"totp","code":"123456"}`, mfaResp.MFAToken)
+	rr = doRequest(mux, "POST", "/api/v1/auth/sessions/mfa", mfaBody)
+
+	// No session may be created: consumption failure must fail closed.
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d, want %d. Body: %s", rr.Code, http.StatusInternalServerError, rr.Body.String())
+	}
+	if _, csrf := extractCookies(rr); csrf != "" {
+		t.Error("no session should be created when consumption fails")
 	}
 }
 

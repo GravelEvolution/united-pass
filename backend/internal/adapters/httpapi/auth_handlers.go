@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,23 +22,25 @@ import (
 // MFAChallengeStore abstracts MFA challenge persistence for the auth handlers.
 // The Redis adapter satisfies this interface; tests can use an in-memory fake.
 //
-// Challenges follow a strict lifecycle enforced by the store: a challenge is
-// created available, atomically claimed (processing) before verification, and
-// consumed on success or released on failure. Concurrent verification of the
-// same challenge is impossible because Claim is atomic.
+// Challenges are single-use: the handler generates a random claimID and calls
+// Claim before verification. Claim is atomic (SET NX PX on a dedicated lock
+// key) so concurrent verification of the same challenge is impossible. The
+// challenge's own TTL is never modified; Consume must succeed (fail closed)
+// before a session may be created.
 type MFAChallengeStore interface {
 	Create(ctx context.Context, mfaTokenHash string, data auth.MFAChallengeData, ttl time.Duration) error
 	Get(ctx context.Context, mfaTokenHash string) (auth.MFAChallengeData, error)
-	// Claim atomically reserves a challenge for verification. Only one
-	// concurrent request can claim a given challenge; the second gets
-	// auth.ErrMFAChallengeClaimed.
-	Claim(ctx context.Context, mfaTokenHash string) (auth.MFAChallengeData, error)
+	// Claim atomically reserves a challenge for verification with a
+	// caller-generated claimID. Only one concurrent request can claim a given
+	// challenge; the second gets auth.ErrMFAChallengeClaimed.
+	Claim(ctx context.Context, mfaTokenHash, claimID string) (auth.MFAChallengeData, error)
 	// Consume atomically deletes a claimed challenge (single-use). It returns
-	// auth.ErrMFAChallengeNotFound when the challenge is already gone.
-	Consume(ctx context.Context, mfaTokenHash string) error
-	// Release returns a claimed challenge to the available state so the user
-	// can retry after a failed verification.
-	Release(ctx context.Context, mfaTokenHash string) error
+	// auth.ErrMFAChallengeNotHeld when the claimID no longer holds the lock,
+	// and auth.ErrMFAChallengeNotFound when the challenge is already gone.
+	Consume(ctx context.Context, mfaTokenHash, claimID string) error
+	// Release removes the claim lock (only if claimID still holds it) so the
+	// user can retry after a failed verification.
+	Release(ctx context.Context, mfaTokenHash, claimID string) error
 	IncrementAttempts(ctx context.Context, mfaTokenHash string, maxAttempts int) (int, error)
 }
 
@@ -285,14 +288,16 @@ func (h *AuthHandlers) handleMFARequired(w http.ResponseWriter, r *http.Request,
 // Flow:
 //  1. Parse and validate the JSON request body.
 //  2. Check the MFA rate limit (IP + MFA token hash).
-//  3. Atomically claim the MFA challenge. Claim is single-winner: concurrent
-//     requests for the same challenge cannot both proceed to verification,
-//     which prevents two sessions being established from one challenge.
+//  3. Atomically claim the MFA challenge with a fresh claimID. Claim is
+//     single-winner: concurrent requests for the same challenge cannot both
+//     proceed to verification, which prevents two sessions being established
+//     from one challenge. The claim lock lives in a separate key and does not
+//     extend the challenge's own TTL.
 //  4. Call the Authenticator to complete MFA.
-//  5. If authenticated, consume the challenge (single-use), create a session,
-//     and return 204.
-//  6. If invalid credentials, increment attempts and release the challenge so
-//     the user can retry. If max attempts is exceeded, consume the challenge.
+//  5. If authenticated, consume the challenge (single-use). Consumption is
+//     fail closed: if Consume fails, no session is created.
+//  6. If invalid credentials, increment attempts and release the claim so the
+//     user can retry. If max attempts is exceeded, consume the challenge.
 //  7. If the challenge is expired, consume it and return a generic error.
 func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 	var req mfaChallengeRequest
@@ -331,9 +336,10 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Atomically claim the challenge for verification. Only one request may
-	// claim a given challenge; concurrent requests are rejected here so a
-	// single MFA token can never establish two sessions.
-	_, err = h.mfaStore.Claim(r.Context(), mfaTokenHash)
+	// hold the claim lock; concurrent requests are rejected here so a single
+	// MFA token can never establish two sessions.
+	claimID := generateClaimID()
+	_, err = h.mfaStore.Claim(r.Context(), mfaTokenHash, claimID)
 	if err != nil {
 		switch {
 		case errors.Is(err, auth.ErrMFAChallengeNotFound):
@@ -362,7 +368,7 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Provider failure: release the claim so the user can retry. The
 		// challenge is not lost.
-		_ = h.mfaStore.Release(r.Context(), mfaTokenHash)
+		_ = h.mfaStore.Release(r.Context(), mfaTokenHash, claimID)
 		h.logger.Error("mfa completion provider error",
 			"requestId", requestID(r),
 			"errorClass", observability.ClassifyError(err),
@@ -374,32 +380,44 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 
 	switch result.Status {
 	case auth.StatusAuthenticated:
-		// Consume the challenge (single-use). It was claimed by this request,
-		// so it must still exist; Consume makes replay impossible.
-		_ = h.mfaStore.Consume(r.Context(), mfaTokenHash)
+		// Consume the challenge (single-use) BEFORE creating the session. This
+		// is fail closed: if the challenge expired during verification or
+		// consumption fails for any reason, no session is created and the
+		// token cannot be replayed.
+		if err := h.mfaStore.Consume(r.Context(), mfaTokenHash, claimID); err != nil {
+			h.logger.Error("mfa challenge consume failed",
+				"requestId", requestID(r),
+				"errorClass", observability.ClassifyError(err),
+				"errorDetail", observability.RedactedError(err, 256),
+			)
+			WriteInternalError(w, r)
+			return
+		}
 
 		// Create session.
 		h.handleAuthenticated(w, r, result, false)
 
 	case auth.StatusInvalidCredentials:
-		// Increment the attempt counter. The challenge is still claimed by
-		// this request, so no other request can interfere with the count.
+		// Increment the attempt counter. The claim lock is still held by this
+		// request, so no other request can interfere with the count.
 		attempts, incErr := h.mfaStore.IncrementAttempts(r.Context(), mfaTokenHash, h.mfaMaxAttempts)
 		if incErr != nil {
 			if errors.Is(incErr, auth.ErrMFAMaxAttemptsExceeded) {
-				_ = h.mfaStore.Consume(r.Context(), mfaTokenHash)
+				_ = h.mfaStore.Consume(r.Context(), mfaTokenHash, claimID)
 				writeError(w, r, http.StatusTooManyRequests, CodeRateLimited, "验证尝试次数过多，请稍后重新登录。", nil)
 				return
 			}
-			h.logger.Error("mfa attempt increment failed",
-				"requestId", requestID(r),
-				"errorClass", observability.ClassifyError(incErr),
-				"errorDetail", observability.RedactedError(incErr, 256),
-			)
+			if !errors.Is(incErr, auth.ErrMFAChallengeNotFound) {
+				h.logger.Error("mfa attempt increment failed",
+					"requestId", requestID(r),
+					"errorClass", observability.ClassifyError(incErr),
+					"errorDetail", observability.RedactedError(incErr, 256),
+				)
+			}
 		}
 		// Release the claim so the user can retry within the remaining
 		// attempt budget.
-		_ = h.mfaStore.Release(r.Context(), mfaTokenHash)
+		_ = h.mfaStore.Release(r.Context(), mfaTokenHash, claimID)
 		remaining := h.mfaMaxAttempts - attempts
 		if remaining < 0 {
 			remaining = 0
@@ -408,11 +426,11 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, msg, nil)
 
 	case auth.StatusExpired:
-		_ = h.mfaStore.Consume(r.Context(), mfaTokenHash)
+		_ = h.mfaStore.Consume(r.Context(), mfaTokenHash, claimID)
 		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "验证挑战已过期，请重新登录。", nil)
 
 	default:
-		_ = h.mfaStore.Release(r.Context(), mfaTokenHash)
+		_ = h.mfaStore.Release(r.Context(), mfaTokenHash, claimID)
 		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "验证失败，请重试。", nil)
 	}
 }
@@ -523,6 +541,20 @@ func isValidMFAMethod(m auth.MFAMethod) bool {
 func hashIdentifier(identifier string) string {
 	h := sha256.Sum256([]byte(identifier))
 	return hex.EncodeToString(h[:])
+}
+
+// generateClaimID returns a random hex string used as the MFA claim lock
+// owner identifier. It must be unpredictable so an attacker cannot present a
+// guessed claimID to release or consume a challenge they do not hold.
+func generateClaimID() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		// crypto/rand failure is catastrophic for security; a fallback to a
+		// timestamp-derived value would weaken the lock ownership guarantee,
+		// so surface a distinctive marker and let the claim fail naturally.
+		return "claim-rand-failed"
+	}
+	return hex.EncodeToString(buf)
 }
 
 // clientIP extracts the client IP address from the request. It prefers the

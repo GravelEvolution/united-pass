@@ -310,13 +310,22 @@ func TestIntegration_MFAStoreConsumeIsOneTime(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	// Consume the challenge.
-	if err := store.Consume(ctx, tokenHash); err != nil {
+	// Claim, then consume the challenge.
+	if _, err := store.Claim(ctx, tokenHash, "consume-claim"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := store.Consume(ctx, tokenHash, "consume-claim"); err != nil {
 		t.Fatalf("consume: %v", err)
 	}
 
-	// Second consume should not find the challenge.
-	_, err := store.Get(ctx, tokenHash)
+	// Second consume should report the claim not held.
+	err := store.Consume(ctx, tokenHash, "consume-claim")
+	if !errors.Is(err, auth.ErrMFAChallengeNotHeld) {
+		t.Fatalf("expected ErrMFAChallengeNotHeld on second consume, got %v", err)
+	}
+
+	// The challenge is gone.
+	_, err = store.Get(ctx, tokenHash)
 	if !errors.Is(err, auth.ErrMFAChallengeNotFound) {
 		t.Fatalf("expected ErrMFAChallengeNotFound after consume, got %v", err)
 	}
@@ -373,32 +382,34 @@ func TestIntegration_MFAStoreConcurrentReplay(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	// Launch multiple goroutines that try to consume the same challenge.
+	// Launch multiple goroutines, each with its own claimID. Exactly one can
+	// claim (and therefore consume) the challenge.
 	var wg sync.WaitGroup
-	successCount := int64(0)
 	var mu sync.Mutex
+	winners := 0
 	consumers := 10
 
 	for i := 0; i < consumers; i++ {
 		wg.Add(1)
-		go func() {
+		go func(seq int) {
 			defer wg.Done()
-			// Each goroutine tries to get and then consume the challenge.
-			_, err := store.Get(ctx, tokenHash)
-			if err != nil {
-				return // Challenge already consumed.
+			claimID := fmt.Sprintf("claim-%d", seq)
+			if _, err := store.Claim(ctx, tokenHash, claimID); err != nil {
+				return
 			}
-			// Small race window is acceptable for this test: we verify
-			// that after all goroutines finish, the challenge is gone.
-			if err := store.Consume(ctx, tokenHash); err != nil {
+			if err := store.Consume(ctx, tokenHash, claimID); err != nil {
 				return
 			}
 			mu.Lock()
-			successCount++
+			winners++
 			mu.Unlock()
-		}()
+		}(i)
 	}
 	wg.Wait()
+
+	if winners != 1 {
+		t.Fatalf("consumers succeeded = %d, want exactly 1", winners)
+	}
 
 	// The challenge must be consumed (gone) regardless of how many goroutines
 	// succeeded.
@@ -424,8 +435,8 @@ func TestIntegration_MFAStoreClaimIsAtomic(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	// Launch many concurrent claims: exactly one must win, every other
-	// request must observe the challenge as already claimed or gone.
+	// Launch many concurrent claims with distinct claimIDs: exactly one must
+	// win, every other request must observe the claim as already held.
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	winners := 0
@@ -433,30 +444,20 @@ func TestIntegration_MFAStoreClaimIsAtomic(t *testing.T) {
 
 	for i := 0; i < claimants; i++ {
 		wg.Add(1)
-		go func() {
+		go func(seq int) {
 			defer wg.Done()
-			_, err := store.Claim(ctx, tokenHash)
-			if err != nil {
+			if _, err := store.Claim(ctx, tokenHash, fmt.Sprintf("claim-%d", seq)); err != nil {
 				return
 			}
 			mu.Lock()
 			winners++
 			mu.Unlock()
-		}()
+		}(i)
 	}
 	wg.Wait()
 
 	if winners != 1 {
 		t.Fatalf("claims won = %d, want exactly 1", winners)
-	}
-
-	// The challenge must now be in processing state.
-	claimed, err := store.Get(ctx, tokenHash)
-	if err != nil {
-		t.Fatalf("get after claim: %v", err)
-	}
-	if claimed.State != auth.MFAStateProcessing {
-		t.Errorf("state after claim = %q, want %q", claimed.State, auth.MFAStateProcessing)
 	}
 }
 
@@ -476,40 +477,41 @@ func TestIntegration_MFAStoreClaimReleaseAndReclaim(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	// First claim wins.
-	if _, err := store.Claim(ctx, tokenHash); err != nil {
+	// First claim wins with claim-A.
+	if _, err := store.Claim(ctx, tokenHash, "claim-A"); err != nil {
 		t.Fatalf("first claim: %v", err)
 	}
 
-	// A second claim while processing must be rejected.
-	_, err := store.Claim(ctx, tokenHash)
+	// A second claim with a different claimID must be rejected.
+	_, err := store.Claim(ctx, tokenHash, "claim-B")
 	if !errors.Is(err, auth.ErrMFAChallengeClaimed) {
 		t.Fatalf("second claim error = %v, want ErrMFAChallengeClaimed", err)
 	}
 
-	// Release returns the challenge to available.
-	if err := store.Release(ctx, tokenHash); err != nil {
+	// A stale owner (claim-B) cannot release the lock held by claim-A.
+	if err := store.Release(ctx, tokenHash, "claim-B"); !errors.Is(err, auth.ErrMFAChallengeNotHeld) {
+		t.Fatalf("stale release error = %v, want ErrMFAChallengeNotHeld", err)
+	}
+
+	// The lock owner (claim-A) releases it.
+	if err := store.Release(ctx, tokenHash, "claim-A"); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 
-	// The challenge can now be claimed again.
-	reclaimed, err := store.Claim(ctx, tokenHash)
-	if err != nil {
+	// The challenge can now be claimed again by a new owner.
+	if _, err := store.Claim(ctx, tokenHash, "claim-C"); err != nil {
 		t.Fatalf("reclaim after release: %v", err)
 	}
-	if reclaimed.State != auth.MFAStateProcessing {
-		t.Errorf("state after reclaim = %q, want %q", reclaimed.State, auth.MFAStateProcessing)
-	}
 
-	// Consume the claimed challenge.
-	if err := store.Consume(ctx, tokenHash); err != nil {
+	// Consume the claimed challenge (owner claim-C only).
+	if err := store.Consume(ctx, tokenHash, "claim-C"); err != nil {
 		t.Fatalf("consume: %v", err)
 	}
 
-	// Consuming again must report not found (already consumed).
-	err = store.Consume(ctx, tokenHash)
-	if !errors.Is(err, auth.ErrMFAChallengeNotFound) {
-		t.Fatalf("second consume error = %v, want ErrMFAChallengeNotFound", err)
+	// Consuming again must report the claim not held (lock gone).
+	err = store.Consume(ctx, tokenHash, "claim-C")
+	if !errors.Is(err, auth.ErrMFAChallengeNotHeld) {
+		t.Fatalf("second consume error = %v, want ErrMFAChallengeNotHeld", err)
 	}
 }
 
@@ -529,17 +531,116 @@ func TestIntegration_MFAStoreReleaseAfterConsume(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	if _, err := store.Claim(ctx, tokenHash); err != nil {
+	if _, err := store.Claim(ctx, tokenHash, "claim-A"); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if err := store.Consume(ctx, tokenHash); err != nil {
+	if err := store.Consume(ctx, tokenHash, "claim-A"); err != nil {
 		t.Fatalf("consume: %v", err)
 	}
 
-	// Releasing a consumed challenge must report not found.
-	err := store.Release(ctx, tokenHash)
+	// Releasing after consume must report the claim not held.
+	err := store.Release(ctx, tokenHash, "claim-A")
+	if !errors.Is(err, auth.ErrMFAChallengeNotHeld) {
+		t.Fatalf("release after consume error = %v, want ErrMFAChallengeNotHeld", err)
+	}
+}
+
+// TestIntegration_MFAStoreClaimPreservesChallengeTTL is a regression test for
+// the TTL leak: claiming must never extend (or clear) the challenge's own
+// TTL, because the claim lock lives in a separate key.
+func TestIntegration_MFAStoreClaimPreservesChallengeTTL(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewMFAStore(client)
+	ctx := context.Background()
+
+	tokenHash := session.HashToken("mfa-ttl-preserve")
+	data := auth.MFAChallengeData{
+		UserID:    identity.UserID("user_mfa_ttl_preserve"),
+		Provider:  "fake",
+		CreatedAt: time.Now().UTC(),
+	}
+
+	// Short TTL so any TTL extension by Claim would be obvious.
+	challengeTTL := 30 * time.Second
+	if err := store.Create(ctx, tokenHash, data, challengeTTL); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if _, err := store.Claim(ctx, tokenHash, "claim-A"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	ttl := client.rdb.TTL(ctx, client.buildKey(mfaKeySegment, tokenHash)).Val()
+	if ttl <= 0 || ttl > challengeTTL {
+		t.Fatalf("challenge TTL after claim = %v, want in (0, %v]", ttl, challengeTTL)
+	}
+	if ttl < challengeTTL-5*time.Second {
+		t.Fatalf("challenge TTL after claim = %v, unexpectedly shorter than %v", ttl, challengeTTL)
+	}
+
+	// Release must not clear the challenge TTL either.
+	if err := store.Release(ctx, tokenHash, "claim-A"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	ttlAfter := client.rdb.TTL(ctx, client.buildKey(mfaKeySegment, tokenHash)).Val()
+	if ttlAfter <= 0 {
+		t.Fatalf("challenge TTL after release = %v, want still set (not cleared)", ttlAfter)
+	}
+}
+
+// TestIntegration_MFAStoreClaimMissingChallengeCleansLock verifies that
+// claiming an expired/consumed challenge removes the claim lock instead of
+// leaking it.
+func TestIntegration_MFAStoreClaimMissingChallengeCleansLock(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewMFAStore(client)
+	ctx := context.Background()
+
+	tokenHash := session.HashToken("mfa-claim-missing")
+	data := auth.MFAChallengeData{
+		UserID:    identity.UserID("user_mfa_claim_missing"),
+		Provider:  "fake",
+		CreatedAt: time.Now().UTC(),
+	}
+
+	// Create with a 1s TTL and wait for it to expire.
+	if err := store.Create(ctx, tokenHash, data, time.Second); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+
+	_, err := store.Claim(ctx, tokenHash, "claim-A")
 	if !errors.Is(err, auth.ErrMFAChallengeNotFound) {
-		t.Fatalf("release after consume error = %v, want ErrMFAChallengeNotFound", err)
+		t.Fatalf("claim on expired challenge error = %v, want ErrMFAChallengeNotFound", err)
+	}
+
+	// The claim lock must not linger.
+	claimKey := client.buildKey(mfaClaimKeySegment, tokenHash)
+	if n := client.rdb.Exists(ctx, claimKey).Val(); n != 0 {
+		t.Fatalf("claim lock leaked after failed claim on missing challenge (exists=%d)", n)
+	}
+}
+
+// TestIntegration_MFAStoreIncrementAttemptsNoStaleCounter verifies that
+// incrementing attempts on a missing challenge neither creates nor leaves a
+// stale counter.
+func TestIntegration_MFAStoreIncrementAttemptsNoStaleCounter(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewMFAStore(client)
+	ctx := context.Background()
+
+	tokenHash := session.HashToken("mfa-attempts-missing")
+	// No challenge created.
+
+	_, err := store.IncrementAttempts(ctx, tokenHash, 5)
+	if !errors.Is(err, auth.ErrMFAChallengeNotFound) {
+		t.Fatalf("increment on missing challenge error = %v, want ErrMFAChallengeNotFound", err)
+	}
+
+	attemptsKey := client.buildKey(mfaAttemptsKeySegment, tokenHash)
+	if n := client.rdb.Exists(ctx, attemptsKey).Val(); n != 0 {
+		t.Fatalf("attempt counter leaked for missing challenge (exists=%d)", n)
 	}
 }
 

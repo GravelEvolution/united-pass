@@ -9,24 +9,14 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 )
 
-// MFAState tracks the lifecycle of an MFA challenge. Challenges are issued in
-// the available state, atomically claimed (processing) before provider
-// verification, and consumed on success or expiry. Consumption is represented
-// by the absence of the challenge record; a consumed challenge can never be
-// replayed. See ADR-0002 section 7.
-type MFAState string
-
-const (
-	// MFAStateAvailable means the challenge may be claimed for verification.
-	MFAStateAvailable MFAState = "available"
-	// MFAStateProcessing means a verification attempt has claimed the
-	// challenge. Concurrent requests must not verify the same challenge.
-	MFAStateProcessing MFAState = "processing"
-)
-
 // MFAChallengeData is the MFA challenge record stored in Redis. The raw MFA
 // token is never stored — only its SHA-256 hash is used as the Redis key.
 // The challenge is short-lived (default 5 minutes) and single-use.
+//
+// Challenge TTL is authoritative and immutable: claim/release operations use a
+// separate short-lived lock key (mfa:claim:{hash}) and never modify the
+// challenge's own TTL. This guarantees an expiring challenge cannot be
+// extended by a verification attempt.
 type MFAChallengeData struct {
 	// UserID is the stable United Pass user ID of the authenticating user.
 	UserID identity.UserID `json:"userId"`
@@ -44,9 +34,6 @@ type MFAChallengeData struct {
 	AvailableMethods []MFAMethod `json:"availableMethods"`
 	// Attempts is the initial attempt count (always 0 at creation).
 	Attempts int `json:"attempts"`
-	// State is the challenge lifecycle state. New challenges start as
-	// available; verification claims them (processing) atomically.
-	State MFAState `json:"state,omitempty"`
 	// CreatedAt is when the challenge was issued.
 	CreatedAt time.Time `json:"createdAt"`
 }
@@ -57,9 +44,14 @@ type MFAChallengeData struct {
 var ErrMFAChallengeNotFound = errors.New("mfa challenge not found")
 
 // ErrMFAChallengeClaimed is returned when a claim is attempted on a challenge
-// that another request has already claimed for verification. The challenge
-// remains valid until the owner consumes or releases it.
+// whose lock key is already held by another verification request. The
+// challenge remains valid until the owner consumes or releases the lock.
 var ErrMFAChallengeClaimed = errors.New("mfa challenge already claimed")
+
+// ErrMFAChallengeNotHeld is returned when an operation (release or consume)
+// references a claim ID that does not hold the challenge's lock. This can
+// happen when the lock expired or was taken over after a timeout.
+var ErrMFAChallengeNotHeld = errors.New("mfa challenge claim not held")
 
 // ErrMFAMaxAttemptsExceeded is returned when the MFA challenge has been
 // attempted more than the configured maximum.

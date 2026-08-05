@@ -23,9 +23,23 @@ const mfaKeySegment = "mfa:"
 // atomically.
 const mfaAttemptsKeySegment = "mfa:attempts:"
 
+// mfaClaimKeySegment is the key segment for the MFA claim lock. The full key
+// is: {prefix}mfa:claim:{sha256(mfaToken)}. The lock holds a random claim ID
+// (SET NX PX) that grants exclusive verification rights to one request. The
+// challenge's own key and TTL are never modified by claim/release.
+const mfaClaimKeySegment = "mfa:claim:"
+
+// mfaClaimTTL bounds how long a claim lock may be held. If the verifying
+// request dies or the provider call hangs, the lock expires and the user can
+// start a fresh login. 60s is ample for a provider round-trip while short
+// enough to unblock retries quickly.
+const mfaClaimTTL = 60 * time.Second
+
 // MFAStore implements MFA challenge persistence using Redis. Challenges are
 // short-lived, single-use records keyed by the SHA-256 hash of the MFA token.
-// An attempt counter is maintained in a separate key for atomic INCR.
+// An attempt counter is maintained in a separate key for atomic INCR, and a
+// short-lived claim lock (separate key) provides single-winner verification
+// semantics without touching the challenge's own TTL.
 type MFAStore struct {
 	client *Client
 }
@@ -38,7 +52,6 @@ func NewMFAStore(client *Client) *MFAStore {
 // Create stores an MFA challenge under the given token hash with the specified
 // TTL. The mfaTokenHash must be the SHA-256 hex hash of the raw MFA token
 // (produced by session.HashToken); the raw token must never reach Redis.
-// New challenges are created in the MFAStateAvailable state.
 func (m *MFAStore) Create(
 	ctx context.Context,
 	mfaTokenHash string,
@@ -48,8 +61,6 @@ func (m *MFAStore) Create(
 	if mfaTokenHash == "" {
 		return errors.New("redis: mfa token hash must not be empty")
 	}
-
-	data.State = auth.MFAStateAvailable
 
 	payload, err := json.Marshal(data)
 	if err != nil {
@@ -107,16 +118,19 @@ func (m *MFAStore) Delete(ctx context.Context, mfaTokenHash string) error {
 }
 
 // IncrementAttempts atomically increments the attempt counter for an MFA
-// challenge and returns the new count. On the first increment (when the
-// counter key does not exist), the TTL is set to match the challenge key's
-// remaining TTL so the counter does not outlive the challenge.
+// challenge and returns the new count. The counter TTL is copied from the
+// challenge's remaining TTL so the counter can never outlive the challenge.
+//
+// If the challenge no longer exists (expired or consumed), the function
+// returns auth.ErrMFAChallengeNotFound without creating a counter, so a
+// stale counter can never linger after its challenge.
 //
 // If the count exceeds maxAttempts, the function returns
 // auth.ErrMFAMaxAttemptsExceeded along with the count. The caller should then
-// consume (delete) the challenge and redirect the user to re-authenticate.
+// consume the challenge and redirect the user to re-authenticate.
 //
-// Atomicity is ensured via a Lua script: INCR and conditional PEXPIRE execute
-// as a single Redis command with no race window.
+// Atomicity is ensured via a Lua script: the existence check, INCR and
+// conditional PEXPIRE execute as a single Redis command with no race window.
 func (m *MFAStore) IncrementAttempts(
 	ctx context.Context,
 	mfaTokenHash string,
@@ -130,20 +144,24 @@ func (m *MFAStore) IncrementAttempts(
 	attemptsKey := m.client.buildKey(mfaAttemptsKeySegment, mfaTokenHash)
 
 	// Lua script:
-	// 1. INCR the counter key (creates it with value 1 if absent).
-	// 2. If this is the first increment, copy the TTL from the challenge key
-	//    so the counter expires when the challenge does.
-	// 3. Return the count.
+	// 1. Fail (-1) if the challenge no longer exists, so a counter is never
+	//    created for a dead challenge.
+	// 2. INCR the counter key (creates it with value 1 if absent).
+	// 3. Copy the challenge's remaining TTL to the counter (PTTL is positive
+	//    because the challenge was just confirmed to exist).
+	// 4. Return the count.
 	script := goredis.NewScript(`
 local challengeKey = KEYS[1]
 local attemptsKey  = KEYS[2]
 
+if redis.call('EXISTS', challengeKey) == 0 then
+	return -1
+end
+
 local count = redis.call('INCR', attemptsKey)
-if count == 1 then
-	local ttl = redis.call('PTTL', challengeKey)
-	if ttl > 0 then
-		redis.call('PEXPIRE', attemptsKey, ttl)
-	end
+local ttl = redis.call('PTTL', challengeKey)
+if ttl > 0 then
+	redis.call('PEXPIRE', attemptsKey, ttl)
 end
 return count
 `)
@@ -155,67 +173,76 @@ return count
 		return 0, fmt.Errorf("redis: increment mfa attempts: %w", err)
 	}
 
+	if result < 0 {
+		return 0, auth.ErrMFAChallengeNotFound
+	}
 	if result > maxAttempts {
 		return result, auth.ErrMFAMaxAttemptsExceeded
 	}
 	return result, nil
 }
 
-// mfaProcessingTTL is the short TTL applied when a challenge is claimed for
-// verification. A claim that never completes (e.g. the provider call hangs)
-// expires quickly so the user can start a fresh login instead of being blocked
-// on a permanently processing challenge.
-const mfaProcessingTTL = 60 * time.Second
-
-// Claim atomically reserves an MFA challenge for verification. Only one
-// concurrent request can claim a given challenge:
+// Claim atomically reserves an MFA challenge for verification using a
+// dedicated claim lock key ({prefix}mfa:claim:{hash}) with SET NX PX:
 //
-//   - If the challenge does not exist (expired or consumed), it returns
-//     auth.ErrMFAChallengeNotFound.
-//   - If another request already claimed it, it returns
+//   - If the lock is already held by another request, it returns
 //     auth.ErrMFAChallengeClaimed.
-//   - Otherwise it transitions the challenge to MFAStateProcessing, shortens
-//     its TTL to mfaProcessingTTL, and returns the challenge data.
+//   - If the challenge does not exist (expired or consumed), the lock is
+//     removed again and auth.ErrMFAChallengeNotFound is returned.
+//   - Otherwise the caller becomes the sole owner of the challenge for up to
+//     mfaClaimTTL, and the challenge data is returned unchanged.
 //
-// Claim is a single Lua script, so there is no race window between the
-// existence check, the state transition, and the TTL update.
-func (m *MFAStore) Claim(ctx context.Context, mfaTokenHash string) (auth.MFAChallengeData, error) {
+// The challenge's own key and TTL are never modified: an expiring challenge
+// keeps its original TTL and cannot be extended by claiming. The claimID is
+// caller-generated (a random value); Release and Consume must present the
+// same claimID to act on this lock.
+//
+// The lock acquisition and challenge read run in a single Lua script, so
+// there is no race window.
+func (m *MFAStore) Claim(ctx context.Context, mfaTokenHash, claimID string) (auth.MFAChallengeData, error) {
 	if mfaTokenHash == "" {
 		return auth.MFAChallengeData{}, errors.New("redis: mfa token hash must not be empty")
 	}
+	if claimID == "" {
+		return auth.MFAChallengeData{}, errors.New("redis: mfa claim id must not be empty")
+	}
 
-	key := m.client.buildKey(mfaKeySegment, mfaTokenHash)
+	challengeKey := m.client.buildKey(mfaKeySegment, mfaTokenHash)
+	claimKey := m.client.buildKey(mfaClaimKeySegment, mfaTokenHash)
 
-	// Lua script: read the challenge, fail if absent or already claimed,
-	// otherwise mark it processing and shorten its TTL.
+	// Lua script:
+	// 1. SET NX PX on the claim lock. nil means the lock is already held.
+	// 2. Read the challenge. If absent, drop the lock and return nil.
+	// 3. Return the challenge data; its TTL is untouched.
 	script := goredis.NewScript(`
-local key = KEYS[1]
-local processingTTL = tonumber(ARGV[1])
+local challengeKey = KEYS[1]
+local claimKey = KEYS[2]
+local claimID = ARGV[1]
+local claimTTL = tonumber(ARGV[2])
 
-local data = redis.call('GET', key)
-if not data then
-	return nil
-end
-
-local obj = cjson.decode(data)
-if obj.state == 'processing' then
+local locked = redis.call('SET', claimKey, claimID, 'NX', 'PX', claimTTL)
+if not locked then
 	return redis.error_reply('CLAIMED')
 end
 
-obj.state = 'processing'
-local encoded = cjson.encode(obj)
-redis.call('SET', key, encoded)
-redis.call('PEXPIRE', key, processingTTL)
-return encoded
+local data = redis.call('GET', challengeKey)
+if not data then
+	redis.call('DEL', claimKey)
+	return nil
+end
+return data
 `)
 
-	result, err := script.Run(ctx, m.client.rdb, []string{key}, mfaProcessingTTL.Milliseconds()).Result()
+	result, err := script.Run(ctx, m.client.rdb,
+		[]string{challengeKey, claimKey},
+		claimID, mfaClaimTTL.Milliseconds(),
+	).Result()
 	if err != nil {
-		if errors.Is(err, goredis.Nil) {
-			return auth.MFAChallengeData{}, auth.ErrMFAChallengeNotFound
-		}
 		if isClaimedError(err) {
 			return auth.MFAChallengeData{}, auth.ErrMFAChallengeClaimed
+		}
+		if errors.Is(err, goredis.Nil) {
+			return auth.MFAChallengeData{}, auth.ErrMFAChallengeNotFound
 		}
 		return auth.MFAChallengeData{}, fmt.Errorf("redis: claim mfa challenge: %w", err)
 	}
@@ -227,86 +254,113 @@ return encoded
 	return data, nil
 }
 
-// Release returns a claimed challenge to the available state so the user can
-// retry after a failed verification attempt. It returns
-// auth.ErrMFAChallengeNotFound when the challenge no longer exists. Release
-// is atomic: the state transition happens in a single Lua script.
-func (m *MFAStore) Release(ctx context.Context, mfaTokenHash string) error {
+// Release removes the claim lock so the user can retry after a failed
+// verification attempt. The lock is only removed when the given claimID still
+// holds it; a stale owner (after lock expiry or takeover) cannot delete a
+// newer lock. It returns auth.ErrMFAChallengeNotHeld when the claim ID no
+// longer holds the lock, and nil when the lock was held and removed.
+func (m *MFAStore) Release(ctx context.Context, mfaTokenHash, claimID string) error {
 	if mfaTokenHash == "" {
 		return errors.New("redis: mfa token hash must not be empty")
 	}
+	if claimID == "" {
+		return errors.New("redis: mfa claim id must not be empty")
+	}
 
-	key := m.client.buildKey(mfaKeySegment, mfaTokenHash)
+	claimKey := m.client.buildKey(mfaClaimKeySegment, mfaTokenHash)
 
-	// Lua script: flip the state back to available without touching the
-	// attempt counter (which lives in a separate key).
+	// Lua script: delete the lock only if this claimID still owns it. The
+	// challenge key is left untouched (its TTL is authoritative).
 	script := goredis.NewScript(`
-local key = KEYS[1]
+local claimKey = KEYS[1]
+local claimID = ARGV[1]
 
-local data = redis.call('GET', key)
-if not data then
-	return nil
+local current = redis.call('GET', claimKey)
+if not current then
+	return 0
+end
+if current ~= claimID then
+	return 0
 end
 
-local obj = cjson.decode(data)
-obj.state = 'available'
-local encoded = cjson.encode(obj)
-redis.call('SET', key, encoded)
-return encoded
+redis.call('DEL', claimKey)
+return 1
 `)
 
-	_, err := script.Run(ctx, m.client.rdb, []string{key}).Result()
+	result, err := script.Run(ctx, m.client.rdb, []string{claimKey}, claimID).Int()
 	if err != nil {
-		if errors.Is(err, goredis.Nil) {
-			return auth.ErrMFAChallengeNotFound
-		}
 		return fmt.Errorf("redis: release mfa challenge: %w", err)
+	}
+	if result == 0 {
+		return auth.ErrMFAChallengeNotHeld
 	}
 	return nil
 }
 
-// Consume deletes the MFA challenge and its attempt counter, enforcing
-// single-use semantics. After a successful MFA verification (or when the
-// challenge has expired), the challenge must be consumed so the same token
-// cannot be replayed. This is a security requirement: a consumed challenge
-// cannot be reused even if the token is intercepted. See ADR-0002 section 7.
+// Consume atomically deletes the challenge, its attempt counter, and the
+// claim lock, enforcing single-use semantics. After a successful MFA
+// verification (or when the challenge has expired), the challenge must be
+// consumed so the same token cannot be replayed. This is a security
+// requirement: a consumed challenge cannot be reused even if the token is
+// intercepted. See ADR-0002 section 7.
 //
-// Consume is atomic: the existence check and the deletion run in a single
-// Lua script. It returns auth.ErrMFAChallengeNotFound when the challenge is
-// already gone (already consumed or expired).
-func (m *MFAStore) Consume(ctx context.Context, mfaTokenHash string) error {
+// The caller must hold the claim lock for this challenge (the claimID must
+// match). It returns auth.ErrMFAChallengeNotHeld when the lock is no longer
+// held (expired or taken over), and auth.ErrMFAChallengeNotFound when the
+// challenge is already gone. Either way nothing is created.
+func (m *MFAStore) Consume(ctx context.Context, mfaTokenHash, claimID string) error {
 	if mfaTokenHash == "" {
 		return errors.New("redis: mfa token hash must not be empty")
+	}
+	if claimID == "" {
+		return errors.New("redis: mfa claim id must not be empty")
 	}
 
 	challengeKey := m.client.buildKey(mfaKeySegment, mfaTokenHash)
 	attemptsKey := m.client.buildKey(mfaAttemptsKeySegment, mfaTokenHash)
+	claimKey := m.client.buildKey(mfaClaimKeySegment, mfaTokenHash)
 
+	// Lua script: consume atomically — only the lock owner can consume, and
+	// the challenge must still exist.
 	script := goredis.NewScript(`
 local challengeKey = KEYS[1]
 local attemptsKey  = KEYS[2]
+local claimKey     = KEYS[3]
+local claimID = ARGV[1]
 
-if redis.call('EXISTS', challengeKey) == 0 then
+if redis.call('GET', claimKey) ~= claimID then
 	return 0
 end
+if redis.call('EXISTS', challengeKey) == 0 then
+	redis.call('DEL', claimKey)
+	return -1
+end
 
-redis.call('DEL', challengeKey, attemptsKey)
+redis.call('DEL', challengeKey, attemptsKey, claimKey)
 return 1
 `)
 
-	result, err := script.Run(ctx, m.client.rdb, []string{challengeKey, attemptsKey}).Int()
+	result, err := script.Run(ctx, m.client.rdb,
+		[]string{challengeKey, attemptsKey, claimKey},
+		claimID,
+	).Int()
 	if err != nil {
 		return fmt.Errorf("redis: consume mfa challenge: %w", err)
 	}
-	if result == 0 {
+
+	switch result {
+	case 1:
+		return nil
+	case -1:
 		return auth.ErrMFAChallengeNotFound
+	default:
+		return auth.ErrMFAChallengeNotHeld
 	}
-	return nil
 }
 
 // isClaimedError reports whether a Redis error is the Lua error_reply marker
-// returned when a challenge is already processing. go-redis surfaces custom
-// error replies as errors whose message contains the reply text.
+// returned when a claim lock is already held. go-redis surfaces custom error
+// replies as errors whose message contains the reply text.
 func isClaimedError(err error) bool {
 	return strings.Contains(err.Error(), "CLAIMED")
 }
