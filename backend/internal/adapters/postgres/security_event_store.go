@@ -57,6 +57,42 @@ func (s *SecurityEventStore) exec(ctx context.Context, q eventExecer, ev applica
 	return nil
 }
 
+// ListByApplication returns the audit trail actually recorded for one
+// application, newest first. ActorName is the joined users.display_name
+// (empty when the actor row is gone); it is derived display text only.
+func (s *SecurityEventStore) ListByApplication(ctx context.Context, appID applications.ApplicationID) ([]applications.AuditEntry, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT e.event_id, e.event_type, COALESCE(u.display_name, ''),
+		        e.occurred_at, e.result
+		   FROM security_events e
+		   LEFT JOIN users u ON u.id = e.actor_user_id
+		  WHERE e.application_id = $1
+		  ORDER BY e.occurred_at DESC, e.event_id DESC`,
+		string(appID))
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list security events: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]applications.AuditEntry, 0)
+	for rows.Next() {
+		var (
+			entry           applications.AuditEntry
+			eventID, result string
+		)
+		if err := rows.Scan(&eventID, &entry.EventType, &entry.ActorName, &entry.OccurredAt, &result); err != nil {
+			return nil, fmt.Errorf("postgres: scan security event row: %w", err)
+		}
+		entry.EventID = applications.SecurityEventID(eventID)
+		entry.Result = applications.SecurityEventResult(result)
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate security event rows: %w", err)
+	}
+	return entries, nil
+}
+
 // eventPayload builds the JSONB payload. Only safe, stable fields are
 // included.
 func eventPayload(ev applications.SecurityEvent) ([]byte, error) {

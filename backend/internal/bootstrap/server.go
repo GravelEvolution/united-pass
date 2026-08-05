@@ -12,11 +12,13 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	zitadelsdk "github.com/zitadel/zitadel-go/v3/pkg/client"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/postgres"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/redis"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/zitadel"
+	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
@@ -123,7 +125,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	// Authenticator selection: the production safety boundary from Phase 1
 	// hardening is preserved, and the ZITADEL adapter (Phase 1.2) is now
 	// wired for the "zitadel" provider in all environments.
-	authenticator, providerCloser, err = buildAuthenticator(cfg, userLinker, logger)
+	authenticator, sdkClient, providerCloser, err := buildAuthenticator(cfg, userLinker, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -145,6 +147,38 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	// Provider readiness: the ZITADEL adapter reports API connectivity.
 	if checker, ok := authenticator.(httpapi.ReadinessChecker); ok {
 		readinessCheckers = append(readinessCheckers, checker)
+	}
+
+	// Application management plane (ADR-0004). The provisioner follows the
+	// authenticator selection: the ZITADEL Management API in real setups and
+	// the in-memory fake for development. Every dependency must be present or
+	// the routes stay unregistered (fail closed).
+	var provisioner applications.OAuthClientProvisioner
+	providerName := ""
+	if sdkClient != nil {
+		prov, err := zitadel.NewProvisioner(sdkClient.ManagementService(), cfg.Auth.ProjectID, logger)
+		if err != nil {
+			return nil, err
+		}
+		provisioner = prov
+		providerName = zitadel.ProviderName
+	} else if _, isFake := authenticator.(*auth.FakeAuthenticator); isFake && !cfg.IsProduction() {
+		provisioner = applications.NewFakeProvisioner()
+		providerName = "fake"
+	}
+
+	var appHandlers *httpapi.ApplicationHandlers
+	if pool != nil && provisioner != nil && userReader != nil && sessionSvc != nil && cfg.Session.EncryptionKey != "" {
+		appRepo, err := postgres.NewApplicationRepository(pool.PgxPool(), cfg.Session.EncryptionKey)
+		if err != nil {
+			return nil, fmt.Errorf("application repository: %w", err)
+		}
+		eventStore := postgres.NewSecurityEventStore(pool.PgxPool())
+		appSvc := applications.NewService(appRepo, provisioner, eventStore, eventStore, userReader,
+			providerName, cfg.Auth.ProjectID)
+		// reauth is nil until the reauthentication contract lands in P2.7;
+		// high-risk operations fail closed in the meantime.
+		appHandlers = httpapi.NewApplicationHandlers(appSvc, permResolver, nil)
 	}
 
 	health := httpapi.NewHealthHandlers(readinessCheckers...)
@@ -182,6 +216,24 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				r.Get("/me/permissions", accountHandlers.GetPermissions)
 			}
 		})
+
+		// Admin application management plane (session + CSRF required;
+		// capability checks happen inside the handlers).
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireCSRF())
+			}
+			if appHandlers != nil {
+				r.Post("/admin/applications/with-initial-client", appHandlers.CreateWithInitialClient)
+				r.Get("/admin/applications", appHandlers.ListApplications)
+				r.Get("/admin/applications/{applicationId}", appHandlers.GetApplication)
+				r.Patch("/admin/applications/{applicationId}", appHandlers.UpdateApplication)
+				r.Post("/admin/applications/{applicationId}/enable", appHandlers.EnableApplication)
+				r.Post("/admin/applications/{applicationId}/disable", appHandlers.DisableApplication)
+				r.Delete("/admin/applications/{applicationId}", appHandlers.DeleteApplication)
+			}
+		})
 	})
 
 	srv := &http.Server{
@@ -214,37 +266,39 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 // The fake must never serve production traffic, and a misspelled or unknown
 // provider must not silently fall back to it. The ZITADEL adapter requires a
 // database-backed user linker for first-login identity mapping. The returned
-// closer (nil for the fake) closes the provider's underlying connection.
+// closer (nil for the fake) closes the provider's underlying connection; the
+// returned SDK client (nil for the fake) is reused by the application
+// management provisioner.
 func buildAuthenticator(
 	cfg config.Config,
 	userLinker identity.UserLinker,
 	logger *slog.Logger,
-) (auth.Authenticator, interface{ Close() error }, error) {
+) (auth.Authenticator, *zitadelsdk.Client, interface{ Close() error }, error) {
 	switch cfg.Auth.Provider {
 	case "":
 		if cfg.IsProduction() {
-			return nil, nil, errors.New("production requires a configured authentication provider")
+			return nil, nil, nil, errors.New("production requires a configured authentication provider")
 		}
 		logger.Info("using fake authenticator for development")
-		return createDevAuthenticator(), nil, nil
+		return createDevAuthenticator(), nil, nil, nil
 
 	case "fake":
 		if cfg.IsProduction() {
-			return nil, nil, errors.New("production must not use the fake authenticator")
+			return nil, nil, nil, errors.New("production must not use the fake authenticator")
 		}
 		logger.Info("using fake authenticator for development")
-		return createDevAuthenticator(), nil, nil
+		return createDevAuthenticator(), nil, nil, nil
 
 	case zitadel.ProviderName:
 		if !cfg.HasAuthProvider() {
-			return nil, nil, errors.New("zitadel provider requires UP_AUTH_PROVIDER_BASE_URL")
+			return nil, nil, nil, errors.New("zitadel provider requires UP_AUTH_PROVIDER_BASE_URL")
 		}
 		if userLinker == nil {
-			return nil, nil, errors.New("zitadel provider requires database configuration for identity mapping")
+			return nil, nil, nil, errors.New("zitadel provider requires database configuration for identity mapping")
 		}
 		zc, err := zitadel.NewSDKClient(context.Background(), cfg.Auth)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		authz := zitadel.NewAuthenticator(
 			zc.SessionServiceV2(),
@@ -255,10 +309,10 @@ func buildAuthenticator(
 			logger,
 		)
 		logger.Info("authentication provider initialized", "provider", zitadel.ProviderName)
-		return authz, zc, nil
+		return authz, zc, zc, nil
 
 	default:
-		return nil, nil, fmt.Errorf("authentication provider %q has no implemented adapter", cfg.Auth.Provider)
+		return nil, nil, nil, fmt.Errorf("authentication provider %q has no implemented adapter", cfg.Auth.Provider)
 	}
 }
 

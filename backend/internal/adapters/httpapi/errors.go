@@ -43,6 +43,7 @@ const (
 	CodeRateLimited         = "rate_limited"
 	CodeReauthenticationReq = "session.reauthentication_required"
 	CodeRequestBodyTooLarge = "request.body_too_large"
+	CodeProviderUnavailable = "provider.unavailable"
 )
 
 // writeError writes a standard error envelope with the given status and code.
@@ -92,4 +93,11 @@ func WriteValidation(w http.ResponseWriter, r *http.Request, message string, fie
 // configured maximum size.
 func WriteRequestBodyTooLarge(w http.ResponseWriter, r *http.Request) {
 	writeError(w, r, http.StatusRequestEntityTooLarge, CodeRequestBodyTooLarge, "请求体超过允许的大小。", nil)
+}
+
+// WriteProviderUnavailable writes a 502 when the identity provider rejects
+// or fails a provisioning call. Only the stable error class is conveyed —
+// never raw provider detail.
+func WriteProviderUnavailable(w http.ResponseWriter, r *http.Request) {
+	writeError(w, r, http.StatusBadGateway, CodeProviderUnavailable, "身份提供方暂不可用，请稍后重试。", nil)
 }

@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 )
 
-// ErrInvalidCursor is returned for tampered, malformed or state-mismatched
-// cursors. Callers must map it to a 400 response; raw offsets are never
-// exposed (ADR-0004 §9).
-var ErrInvalidCursor = errors.New("postgres: invalid cursor")
+// ErrInvalidCursor is the domain sentinel for tampered, malformed or
+// state-mismatched cursors. Callers must map it to a 400 response; raw
+// offsets are never exposed (ADR-0004 §9).
+var ErrInvalidCursor = applications.ErrInvalidCursor
 
 // cursorSigningContext separates cursor HMAC keys from any other HMAC use of
 // the same base key material.

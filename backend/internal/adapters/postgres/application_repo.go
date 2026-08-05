@@ -13,27 +13,18 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 )
 
-// ErrDuplicateName is returned when a unique live-name constraint is hit.
-var ErrDuplicateName = errors.New("postgres: duplicate name")
+// ErrDuplicateName aliases the domain sentinel for unique live-name
+// constraint hits.
+var ErrDuplicateName = applications.ErrDuplicateName
 
-// ApplicationListQuery is the validated list request. All fields are
-// optional; Sort defaults to "-updatedAt" and Limit to 20 (1–100).
-type ApplicationListQuery struct {
-	Cursor   string
-	Limit    int
-	Query    string
-	Sort     string
-	Status   string
-	Audience string
-	OwnerID  string
-}
+// ApplicationListQuery aliases the domain list request type.
+type ApplicationListQuery = applications.ListQuery
 
-// ApplicationListResult is one page plus continuation state.
-type ApplicationListResult struct {
-	Items      []applications.ApplicationSummary
-	NextCursor string
-	HasMore    bool
-}
+// ApplicationListResult aliases the domain list result type.
+type ApplicationListResult = applications.ListResult
+
+// ApplicationUpdate aliases the domain update type.
+type ApplicationUpdate = applications.ApplicationUpdate
 
 // Supported sort keys for the application list. The ID tie-breaker is
 // always appended by the repository (ADR-0004 §9).
@@ -210,15 +201,6 @@ func (r *ApplicationRepository) GetApplication(ctx context.Context, appID applic
 		return applications.Application{}, fmt.Errorf("postgres: get application: %w", err)
 	}
 	return app, nil
-}
-
-// ApplicationUpdate carries the merged target values for a PATCH. All fields
-// are applied together; the caller validates them beforehand.
-type ApplicationUpdate struct {
-	Name        string
-	Description string
-	Audience    applications.ApplicationAudience
-	OwnerID     identity.UserID
 }
 
 // UpdateApplication applies a metadata update with optimistic concurrency.

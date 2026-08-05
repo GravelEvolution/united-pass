@@ -11,16 +11,8 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 )
 
-// ClientConfigUpdate carries the merged mutable client settings for a PATCH.
-// RedirectURIs and Scopes replace the stored sets wholesale; profile is
-// immutable and never part of an update.
-type ClientConfigUpdate struct {
-	Name         string
-	LogoutURI    string
-	ConsentMode  applications.ConsentMode
-	RedirectURIs []applications.RedirectURI
-	Scopes       []string
-}
+// ClientConfigUpdate aliases the domain client update type.
+type ClientConfigUpdate = applications.ClientConfigUpdate
 
 // CreateClientWithOperation inserts a new client (with redirect URIs and
 // scopes) and its pending provider operation in one transaction.
@@ -180,6 +172,43 @@ func (r *ApplicationRepository) ListClientsByApplication(ctx context.Context, ap
 	return clients, nil
 }
 
+// ListLiveClientsByApplication returns every client row that is not
+// soft-deleted, regardless of provisioning status. Application deletion
+// needs this to clean up delete_failed and ambiguously provisioned clients
+// that ListClientsByApplication hides.
+func (r *ApplicationRepository) ListLiveClientsByApplication(ctx context.Context, appID applications.ApplicationID) ([]applications.OAuthClient, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT client_id, application_id, name, profile, client_type,
+		        token_endpoint_auth_method, consent_mode, logout_uri, status,
+		        provider, provider_project_id, provider_application_id,
+		        provider_client_id, provisioning_status, version, created_at, updated_at
+		   FROM oauth_clients
+		  WHERE application_id = $1
+		    AND deleted_at IS NULL
+		  ORDER BY created_at ASC, client_id ASC`,
+		string(appID))
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list live clients: %w", err)
+	}
+	defer rows.Close()
+
+	clients := make([]applications.OAuthClient, 0)
+	for rows.Next() {
+		client, err := scanClient(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: scan client row: %w", err)
+		}
+		if err := r.hydrateClient(ctx, &client); err != nil {
+			return nil, err
+		}
+		clients = append(clients, client)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate live client rows: %w", err)
+	}
+	return clients, nil
+}
+
 // UpdateClientConfig applies a client metadata update with optimistic
 // concurrency. Redirect URIs and scopes are replaced wholesale.
 func (r *ApplicationRepository) UpdateClientConfig(ctx context.Context, clientID applications.OAuthClientID, upd ClientConfigUpdate, expectedVersion int) error {
@@ -255,8 +284,11 @@ func (r *ApplicationRepository) SetClientStatus(ctx context.Context, clientID ap
 	return nil
 }
 
-// MarkClientDeleting sets the client into the deleting state and records the
-// pending delete operation atomically.
+// MarkClientDeleting arms a client for deletion and records the pending
+// delete operation atomically. It accepts provisioned clients as well as
+// provisioning/provisioning_failed ones: after an ambiguous provider
+// timeout the provider resource may exist and must be cleaned up
+// idempotently during application deletion.
 func (r *ApplicationRepository) MarkClientDeleting(ctx context.Context, clientID applications.OAuthClientID, op applications.ProviderOperation) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -267,7 +299,8 @@ func (r *ApplicationRepository) MarkClientDeleting(ctx context.Context, clientID
 	tag, err := tx.Exec(ctx,
 		`UPDATE oauth_clients
 		    SET provisioning_status = 'deleting', updated_at = NOW()
-		  WHERE client_id = $1 AND deleted_at IS NULL AND provisioning_status = 'provisioned'`,
+		  WHERE client_id = $1 AND deleted_at IS NULL
+		    AND provisioning_status IN ('provisioned', 'provisioning', 'provisioning_failed')`,
 		string(clientID))
 	if err != nil {
 		return fmt.Errorf("postgres: mark client deleting: %w", err)
