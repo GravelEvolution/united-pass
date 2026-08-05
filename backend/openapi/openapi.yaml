@@ -9,12 +9,14 @@ info:
     This OpenAPI specification is the machine-readable contract. The human-readable
     detail lives in `frontend/docs/api-contracts.md`. Both must stay synchronized.
 
-    Phase 0 scope: operational endpoints only. Business endpoints (session, user,
-    OAuth, consent, etc.) are added incrementally in later phases. Business API
-    paths use the full `/api/v1/...` prefix explicitly rather than relying on a
-    global server base path, so that root-level operational endpoints and
-    versioned API endpoints can coexist accurately.
-  version: 0.1.0
+    Phase 0 scope: operational endpoints only.
+    Phase 1 scope: session establishment, MFA, logout, current user and
+    permission capabilities.
+
+    Business API paths use the full `/api/v1/...` prefix explicitly rather than
+    relying on a global server base path, so that root-level operational endpoints
+    and versioned API endpoints can coexist accurately.
+  version: 0.2.0
   contact:
     name: United Pass backend team
 
@@ -27,6 +29,13 @@ servers:
 tags:
   - name: Operational
     description: Health and readiness endpoints
+  - name: Session
+    description: |
+      Browser session establishment, MFA challenge completion and logout.
+      Sessions are carried by the `up_session` HttpOnly cookie; state-changing
+      operations require the `X-CSRF-Token` header matching the `up_csrf` cookie.
+  - name: Account
+    description: Current user profile and permission capabilities
 
 paths:
   /healthz:
@@ -83,7 +92,499 @@ paths:
               example:
                 status: not ready
 
+  /api/v1/auth/sessions:
+    post:
+      tags: [Session]
+      summary: Establish a browser session
+      description: |
+        Authenticates the caller with a unified identifier (account name or email)
+        and password, then establishes a browser session.
+
+        On success the server issues two cookies:
+          * `up_session` — HttpOnly, Secure, SameSite session cookie.
+          * `up_csrf`   — CSRF token cookie readable by browser JavaScript.
+
+        Both cookies are returned via `Set-Cookie`. The browser must not receive
+        raw authentication-provider Refresh Tokens or long-lived tokens.
+
+        When the account requires multi-factor authentication, the server responds
+        `202` with an opaque `mfaToken` and the list of available methods instead
+        of establishing the session. The MFA challenge is completed via
+        `POST /api/v1/auth/sessions/mfa`.
+
+        Authentication failures return generic errors that do not reveal whether
+        the account, email or phone number exists. Passwords are never logged.
+
+        Rate limited. Repeated failures return `429` with a `Retry-After` header.
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+            examples:
+              credentials:
+                value:
+                  identifier: zhixing.lin
+                  password: user-entered-password
+                  remember: true
+              resumeAuthorization:
+                value:
+                  identifier: zhixing.lin
+                  password: user-entered-password
+                  remember: false
+                  resumeRequestId: req_01ABCdefGHIjkl
+      responses:
+        "204":
+          description: |
+            Session established successfully. No response body. The
+            `up_session` and `up_csrf` cookies are set.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+            Set-Cookie:
+              $ref: "#/components/headers/Set-Session-Cookies"
+        "202":
+          description: |
+            Multi-factor authentication is required before the session can be
+            established. The caller must complete the challenge at
+            `POST /api/v1/auth/sessions/mfa`.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MFARequiredResponse"
+              example:
+                status: mfa_required
+                mfaToken: opaque_mfa_token
+                availableMethods: [totp, passkey, recovery_code]
+                expiresAt: "2026-08-05T12:05:30Z"
+        "400":
+          description: Malformed request body or missing required fields.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: validation.failed
+                  message: "请求参数有误，请检查后重试。"
+                  requestId: req_0123456789abcdef
+                  fieldErrors:
+                    - field: identifier
+                      message: "该字段不能为空。"
+        "401":
+          description: |
+            Invalid credentials. The response is generic and does not reveal
+            whether the identifier corresponds to an existing account.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: auth.invalid_credentials
+                  message: "账户名、邮箱或密码错误。"
+                  requestId: req_0123456789abcdef
+        "413":
+          description: Request body exceeds the configured maximum size.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: request.too_large
+                  message: "请求体过大。"
+                  requestId: req_0123456789abcdef
+        "429":
+          description: |
+            Too many login attempts. The caller must wait before retrying.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+            Retry-After:
+              $ref: "#/components/headers/Retry-After"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: auth.rate_limited
+                  message: "尝试次数过多，请稍后再试。"
+                  requestId: req_0123456789abcdef
+        "500":
+          description: Unexpected server failure.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: internal.unexpected
+                  message: "服务暂时无法处理该请求。"
+                  requestId: req_0123456789abcdef
+
+  /api/v1/auth/sessions/mfa:
+    post:
+      tags: [Session]
+      summary: Complete a multi-factor authentication challenge
+      description: |
+        Submits a verification code or assertion to complete an MFA challenge
+        started by `POST /api/v1/auth/sessions`.
+
+        The `mfaToken` is the opaque token returned in the `202` login response.
+        It is short-lived and single-use per attempt. Excessive failed attempts
+        result in temporary lockout (`429`).
+
+        On success the server issues the `up_session` and `up_csrf` cookies,
+        identical to a successful password-only login.
+
+        Rate limited.
+      operationId: completeSessionMfa
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MFAChallengeRequest"
+            example:
+              mfaToken: opaque_mfa_token
+              method: totp
+              code: "123456"
+      responses:
+        "204":
+          description: |
+            MFA challenge completed and session established successfully. No
+            response body. The `up_session` and `up_csrf` cookies are set.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+            Set-Cookie:
+              $ref: "#/components/headers/Set-Session-Cookies"
+        "400":
+          description: Malformed request body or missing required fields.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: validation.failed
+                  message: "请求参数有误，请检查后重试。"
+                  requestId: req_0123456789abcdef
+                  fieldErrors:
+                    - field: code
+                      message: "请输入 6 位数字验证码。"
+        "401":
+          description: |
+            The MFA token is invalid, expired, or the submitted code is wrong.
+            The response is generic and does not reveal which condition failed.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: auth.mfa_challenge_failed
+                  message: "验证失败，请检查后重试。"
+                  requestId: req_0123456789abcdef
+        "429":
+          description: |
+            Too many MFA attempts. The challenge is temporarily locked.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+            Retry-After:
+              $ref: "#/components/headers/Retry-After"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: auth.rate_limited
+                  message: "尝试次数过多，请稍后再试。"
+                  requestId: req_0123456789abcdef
+        "500":
+          description: Unexpected server failure.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: internal.unexpected
+                  message: "服务暂时无法处理该请求。"
+                  requestId: req_0123456789abcdef
+
+  /api/v1/auth/session:
+    delete:
+      tags: [Session]
+      summary: Revoke the current browser session (logout)
+      description: |
+        Revokes the server-side session bound to the `up_session` cookie and
+        instructs the browser to discard both the `up_session` and `up_csrf`
+        cookies by setting them with `Max-Age=0`.
+
+        Requires a valid session cookie and a matching `X-CSRF-Token` header.
+        The CSRF token must equal the value of the `up_csrf` cookie.
+      operationId: deleteSession
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      responses:
+        "204":
+          description: |
+            Session revoked successfully. No response body. The `up_session`
+            and `up_csrf` cookies are cleared.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+            Set-Cookie:
+              $ref: "#/components/headers/Clear-Session-Cookies"
+        "401":
+          description: No valid session cookie was supplied.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: auth.unauthenticated
+                  message: "请先登录后再继续。"
+                  requestId: req_0123456789abcdef
+        "403":
+          description: |
+            CSRF validation failed. The `X-CSRF-Token` header is missing or does
+            not match the `up_csrf` cookie.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: csrf.validation_failed
+                  message: "跨站请求验证失败，请刷新页面后重试。"
+                  requestId: req_0123456789abcdef
+        "500":
+          description: Unexpected server failure.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: internal.unexpected
+                  message: "服务暂时无法处理该请求。"
+                  requestId: req_0123456789abcdef
+
+  /api/v1/me:
+    get:
+      tags: [Account]
+      summary: Get the current user
+      description: |
+        Returns the profile of the authenticated user bound to the `up_session`
+        cookie.
+
+        The stable United Pass `userId` is the identity primary key. It is not
+        an email, phone number or external Provider identifier, and it does not
+        change when an external user becomes an employee.
+
+        `employeeProfile` is optional and present only when the user has an
+        active employee persona. When an external user is linked to an employee
+        profile, the same `userId` is preserved and the consumer persona
+        remains.
+
+        Responses must not be cached.
+      operationId: getCurrentUser
+      security:
+        - SessionCookie: []
+      responses:
+        "200":
+          description: Current user profile.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+            Cache-Control:
+              description: Prevents the browser and intermediaries from caching the response.
+              schema:
+                type: string
+                enum: [no-store]
+                default: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CurrentUser"
+              example:
+                userId: usr_01HQFGXKN8H2C4JVMW7K3R4D8Z
+                displayName: 林知行
+                nickname: 知行
+                avatarUrl: https://cdn.example.com/avatars/usr_01HQFGXKN8H2C4JVMW7K3R4D8Z.webp
+                email: zhixing.lin@example.com
+                phoneMasked: "+86 138****0123"
+                personas: [consumer, employee]
+                employeeProfile:
+                  employeeId: EMP-10032
+                  departmentName: 平台架构部
+                  title: 高级工程师
+        "401":
+          description: No valid session cookie was supplied.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: auth.unauthenticated
+                  message: "请先登录后再继续。"
+                  requestId: req_0123456789abcdef
+        "500":
+          description: Unexpected server failure.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: internal.unexpected
+                  message: "服务暂时无法处理该请求。"
+                  requestId: req_0123456789abcdef
+
+  /api/v1/me/permissions:
+    get:
+      tags: [Account]
+      summary: Get current user permission capabilities
+      description: |
+        Returns the permission capabilities computed for the authenticated user
+        from authoritative backend attributes (employee status, department,
+        ownership, etc.) and Cerbos policy decisions.
+
+        These capabilities are a user-experience summary only — they drive
+        frontend navigation visibility and control availability. Every
+        protected backend operation must independently authenticate, load
+        authoritative attributes, authorize via Cerbos, enforce the decision
+        and audit the operation. Frontend permission checks are not security
+        controls.
+
+        Responses must not be cached.
+      operationId: getCurrentPermissions
+      security:
+        - SessionCookie: []
+      responses:
+        "200":
+          description: Current user permission capabilities.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+            Cache-Control:
+              description: Prevents the browser and intermediaries from caching the response.
+              schema:
+                type: string
+                enum: [no-store]
+                default: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionCapabilities"
+              example:
+                userRead: true
+                userDisable: false
+                employeeManage: true
+                employeeOffboard: false
+                departmentManage: false
+                applicationRead: true
+                applicationManage: false
+                applicationSecretRotate: false
+                policyRead: true
+                policyManage: false
+                policyPublish: false
+                auditRead: true
+                auditExport: false
+                providerRead: true
+                providerManage: false
+        "401":
+          description: No valid session cookie was supplied.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: auth.unauthenticated
+                  message: "请先登录后再继续。"
+                  requestId: req_0123456789abcdef
+        "500":
+          description: Unexpected server failure.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: internal.unexpected
+                  message: "服务暂时无法处理该请求。"
+                  requestId: req_0123456789abcdef
+
 components:
+  securitySchemes:
+    SessionCookie:
+      type: apiKey
+      in: cookie
+      name: up_session
+      description: |
+        Browser session cookie (`up_session`) issued by United Pass. The cookie
+        is HttpOnly, Secure and carries an explicit SameSite policy. The browser
+        must not receive raw authentication-provider Refresh Tokens or
+        long-lived tokens.
+
   headers:
     X-Request-ID:
       description: |
@@ -94,6 +595,62 @@ components:
         type: string
         pattern: "^[a-zA-Z0-9_:-]{8,128}$"
         example: req_0123456789abcdef0123456789abcdef
+
+    Retry-After:
+      description: |
+        Seconds the client must wait before retrying a rate-limited request.
+        Returned with `429` responses.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+        example: 30
+
+    Set-Session-Cookies:
+      description: |
+        Sets the browser session and CSRF cookies on successful authentication.
+        Two cookies are issued:
+
+          * `up_session` — HttpOnly, Secure, SameSite session cookie. Never
+            contains a raw authentication-provider Refresh Token.
+          * `up_csrf`   — CSRF token cookie readable by browser JavaScript,
+            used to validate the `X-CSRF-Token` header on subsequent
+            state-changing requests.
+
+        Both cookies use restricted Path and explicit lifetime. Server-side
+        revocation is supported.
+      schema:
+        type: string
+        description: |
+          A `Set-Cookie` header value. Two `Set-Cookie` headers are emitted,
+          one for `up_session` and one for `up_csrf`.
+        example: up_session=...; Path=/; HttpOnly; Secure; SameSite=Lax
+
+    Clear-Session-Cookies:
+      description: |
+        Clears the browser session and CSRF cookies on logout. Both
+        `up_session` and `up_csrf` are set with `Max-Age=0` so the browser
+        discards them immediately.
+      schema:
+        type: string
+        description: |
+          A `Set-Cookie` header value with `Max-Age=0`. Two `Set-Cookie`
+          headers are emitted, one for `up_session` and one for `up_csrf`.
+        example: up_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax
+
+  parameters:
+    X-CSRF-Token:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: |
+        CSRF token that must match the value of the `up_csrf` cookie. Required
+        on all browser-originated state-changing requests using cookie
+        authentication. Safe HTTP methods must not mutate state.
+      schema:
+        type: string
+        minLength: 1
+        example: csrf_0123456789abcdef
 
   schemas:
     HealthStatus:
@@ -149,3 +706,256 @@ components:
           type: string
           description: Safe, user-displayable field error message
           example: "该重定向地址未登记。"
+
+    LoginRequest:
+      type: object
+      description: |
+        Credentials used to establish a browser session. `identifier` accepts
+        either an account name or an email address. Authentication failures
+        return generic errors that do not reveal which value was incorrect.
+      required: [identifier, password]
+      additionalProperties: false
+      properties:
+        identifier:
+          type: string
+          minLength: 1
+          description: Account name or email address used to identify the user.
+          example: zhixing.lin
+        password:
+          type: string
+          minLength: 1
+          format: password
+          description: User-entered password. Never logged or persisted in plaintext.
+          writeOnly: true
+        remember:
+          type: boolean
+          default: false
+          description: |
+            When true, the session cookie is issued with an extended lifetime
+            suitable for a "remember me" experience. When false or omitted, the
+            session uses the default browser-session lifetime.
+        resumeRequestId:
+          type: string
+          description: |
+            Opaque server-issued authorization transaction ID to resume after
+            successful login. When present and valid, login redirects to the
+            authorization resume flow instead of the default account or admin
+            destination. Only an opaque server-issued ID is accepted — never a
+            raw return URL.
+          pattern: "^[a-zA-Z0-9_:-]{8,128}$"
+          example: req_01ABCdefGHIjkl
+
+    MFARequiredResponse:
+      type: object
+      description: |
+        Returned when the account requires multi-factor authentication before a
+        session can be established. The `mfaToken` is opaque, short-lived and
+        must be submitted to `POST /api/v1/auth/sessions/mfa`.
+      required: [status, mfaToken, availableMethods, expiresAt]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [mfa_required]
+          description: Indicates that MFA is required to continue.
+        mfaToken:
+          type: string
+          minLength: 1
+          description: Opaque, short-lived token used to complete the MFA challenge.
+          example: opaque_mfa_token
+        availableMethods:
+          type: array
+          description: MFA methods the user may use to complete the challenge.
+          items:
+            type: string
+            enum: [totp, passkey, recovery_code]
+          example: [totp, passkey, recovery_code]
+        expiresAt:
+          type: string
+          format: date-time
+          description: |
+            ISO 8601 UTC timestamp after which the `mfaToken` is no longer
+            accepted.
+          example: "2026-08-05T12:05:30Z"
+
+    MFAChallengeRequest:
+      type: object
+      description: |
+        Submission of an MFA verification code or assertion to complete a
+        challenge started by `POST /api/v1/auth/sessions`.
+      required: [mfaToken, method, code]
+      additionalProperties: false
+      properties:
+        mfaToken:
+          type: string
+          minLength: 1
+          description: Opaque MFA token returned in the login `202` response.
+          example: opaque_mfa_token
+        method:
+          type: string
+          enum: [totp, passkey, recovery_code]
+          description: The MFA method being used to satisfy the challenge.
+          example: totp
+        code:
+          type: string
+          minLength: 1
+          description: |
+            User-entered verification value. For `totp` a 6-digit code; for
+            `recovery_code` a single-use recovery code; for `passkey` the
+            WebAuthn assertion payload. Never logged.
+          writeOnly: true
+          example: "123456"
+
+    UserPersona:
+      type: string
+      enum: [consumer, employee]
+      description: |
+        A persona attached to a stable United Pass user. An external user who
+        becomes an employee keeps the same `userId` and retains the consumer
+        persona.
+
+    EmployeeProfile:
+      type: object
+      description: |
+        Active employee profile linked to the stable user identity. Optional —
+        present only when the user has an active employee persona.
+      required: [employeeId, departmentName, title]
+      additionalProperties: false
+      properties:
+        employeeId:
+          type: string
+          description: Employee number unique within its scope.
+          example: EMP-10032
+        departmentName:
+          type: string
+          description: Display name of the employee's department.
+          example: 平台架构部
+        title:
+          type: string
+          description: Employee position or title.
+          example: 高级工程师
+
+    CurrentUser:
+      type: object
+      description: |
+        Profile of the authenticated user. The `userId` is the stable United
+        Pass identity primary key — not an email, phone number or external
+        Provider identifier. `employeeProfile` is present only when the user
+        has an active employee persona.
+      required: [userId, displayName, email, phoneMasked, personas]
+      additionalProperties: false
+      properties:
+        userId:
+          type: string
+          description: Stable United Pass user ID, used as the OIDC subject.
+          example: usr_01HQFGXKN8H2C4JVMW7K3R4D8Z
+        displayName:
+          type: string
+          description: User-facing display name.
+          example: 林知行
+        nickname:
+          type: string
+          nullable: true
+          description: Optional user-chosen nickname.
+          example: 知行
+        avatarUrl:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            Same-origin or controlled media domain URL of the user's avatar.
+            Stored after server-side validation, re-encoding and metadata
+            stripping. The frontend never submits an external image URL.
+          example: https://cdn.example.com/avatars/usr_01HQFGXKN8H2C4JVMW7K3R4D8Z.webp
+        email:
+          type: string
+          format: email
+          description: Verified or primary email address.
+          example: zhixing.lin@example.com
+        phoneMasked:
+          type: string
+          description: Masked phone number safe for user display.
+          example: "+86 138****0123"
+        personas:
+          type: array
+          description: Personas attached to the user identity.
+          items:
+            $ref: "#/components/schemas/UserPersona"
+          example: [consumer, employee]
+        employeeProfile:
+          allOf:
+            - $ref: "#/components/schemas/EmployeeProfile"
+          nullable: true
+          description: Active employee profile, present only for employees.
+
+    PermissionCapabilities:
+      type: object
+      description: |
+        User-experience permission summary computed from authoritative backend
+        attributes and Cerbos decisions. These capabilities drive frontend
+        navigation visibility and control availability only. Every protected
+        backend operation must independently authorize via Cerbos; frontend
+        checks are not security controls.
+      required:
+        - userRead
+        - userDisable
+        - employeeManage
+        - employeeOffboard
+        - departmentManage
+        - applicationRead
+        - applicationManage
+        - applicationSecretRotate
+        - policyRead
+        - policyManage
+        - policyPublish
+        - auditRead
+        - auditExport
+        - providerRead
+        - providerManage
+      additionalProperties: false
+      properties:
+        userRead:
+          type: boolean
+          description: May read managed user listings and user detail.
+        userDisable:
+          type: boolean
+          description: May disable or enable users and revoke their sessions.
+        employeeManage:
+          type: boolean
+          description: May create, link and update employee profiles.
+        employeeOffboard:
+          type: boolean
+          description: May start employee offboarding and revoke access.
+        departmentManage:
+          type: boolean
+          description: May create, update and delete departments.
+        applicationRead:
+          type: boolean
+          description: May read OAuth application and client metadata.
+        applicationManage:
+          type: boolean
+          description: May create, update and delete applications and clients.
+        applicationSecretRotate:
+          type: boolean
+          description: May rotate confidential client secrets.
+        policyRead:
+          type: boolean
+          description: May read authorization policies and versions.
+        policyManage:
+          type: boolean
+          description: May create and update policy drafts.
+        policyPublish:
+          type: boolean
+          description: May publish a policy version.
+        auditRead:
+          type: boolean
+          description: May query and filter audit events.
+        auditExport:
+          type: boolean
+          description: May create and download audit export jobs.
+        providerRead:
+          type: boolean
+          description: May read identity provider metadata.
+        providerManage:
+          type: boolean
+          description: May create, update, enable and disable identity providers.
