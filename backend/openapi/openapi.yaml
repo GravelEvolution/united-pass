@@ -12,11 +12,14 @@ info:
     Phase 0 scope: operational endpoints only.
     Phase 1 scope: session establishment, MFA, logout, current user and
     permission capabilities.
+    Phase 2 scope: OAuth application and client management plane (scope
+    catalog, application/client lifecycle, secret rotation, reauthentication).
+    See `../docs/adr-0004.md` for the architecture decisions.
 
     Business API paths use the full `/api/v1/...` prefix explicitly rather than
     relying on a global server base path, so that root-level operational endpoints
     and versioned API endpoints can coexist accurately.
-  version: 0.2.0
+  version: 0.3.0
   contact:
     name: United Pass backend team
 
@@ -36,6 +39,26 @@ tags:
       operations require the `X-CSRF-Token` header matching the `up_csrf` cookie.
   - name: Account
     description: Current user profile and permission capabilities
+  - name: Reauthentication
+    description: |
+      High-risk operation reauthentication. A completed grant is required
+      (single-use, action-bound, session-bound) before delete or secret
+      rotation operations execute.
+  - name: Scope Catalog
+    description: Backend-authoritative OAuth scope catalog
+  - name: Admin Applications
+    description: |
+      OAuth application management plane. All mutating operations require
+      session + CSRF + server-side authorization; deleting an application
+      additionally requires a reauthentication grant. Provider identifiers
+      never appear in responses.
+  - name: Admin OAuth Clients
+    description: |
+      OAuth client management nested under its owning application. Every
+      nested route asserts `client.applicationId == path.applicationId`
+      (404 on mismatch, anti-enumeration). Secret rotation requires the
+      `application.secret.rotate` permission plus a reauthentication grant;
+      the new secret is returned exactly once with `Cache-Control: no-store`.
 
 paths:
   /healthz:
@@ -573,6 +596,728 @@ paths:
                   message: "服务暂时无法处理该请求。"
                   requestId: req_0123456789abcdef
 
+  /api/v1/auth/reauthentication:
+    post:
+      tags: [Reauthentication]
+      summary: Reauthenticate the current session user for a high-risk action
+      description: |
+        Verifies the current session user's password for the declared action
+        (and optional target resource). Returns the grant immediately, or a
+        `202` challenge when a second factor must complete the verification.
+        Challenges are random opaque IDs bound to user + session + action,
+        with a short TTL and attempt limit. Redis loss only invalidates
+        challenges (fail closed).
+      operationId: requestReauthentication
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReauthenticationRequest"
+      responses:
+        "200":
+          description: Reauthentication succeeded; single-use grant issued.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReauthenticationGrantResponse"
+        "202":
+          description: Second factor required to complete reauthentication.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReauthenticationChallengeResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/auth/reauthentication/mfa:
+    post:
+      tags: [Reauthentication]
+      summary: Complete a reauthentication challenge with a second factor
+      description: |
+        Completes the challenge started by `POST /api/v1/auth/reauthentication`
+        using TOTP or passkey (same atomic claim/consume pattern as login
+        MFA). On success a single-use grant is issued.
+      operationId: completeReauthenticationMfa
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReauthenticationMfaRequest"
+      responses:
+        "200":
+          description: Challenge completed; single-use grant issued.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReauthenticationGrantResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/scopes:
+    get:
+      tags: [Scope Catalog]
+      summary: List the authoritative OAuth scope catalog
+      description: |
+        Returns the backend-authoritative scope catalog. Arbitrary unregistered
+        scopes are never accepted on client creation (422).
+      operationId: getAdminScopes
+      security:
+        - SessionCookie: []
+      responses:
+        "200":
+          description: Scope catalog
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ScopeCatalogItem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/applications/with-initial-client:
+    post:
+      tags: [Admin Applications]
+      summary: Create an application together with its initial OAuth client
+      description: |
+        The only creation path in Phase 2. The application and its initial
+        client are provisioned atomically from the API consumer's view:
+        local rows are committed first (`provisioning`), the provider call
+        runs outside any database transaction, then provider identifiers and
+        the one-time client secret are recorded. Provider failures return a
+        safe 5xx; local metadata for a failed provisioning is never exposed
+        as active. Standalone application creation without a client is not
+        supported.
+      operationId: createApplicationWithInitialClient
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplicationWithInitialClientRequest"
+      responses:
+        "201":
+          description: |
+            Application and initial client created. For confidential clients
+            the `clientSecret` appears exactly once in this response
+            (`Cache-Control: no-store`).
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+            Cache-Control:
+              description: Always `no-store` when a secret is included.
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationWithInitialClientResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/applications:
+    get:
+      tags: [Admin Applications]
+      summary: List OAuth applications (cursor pagination)
+      description: |
+        Cursor-paginated, server-side filtered listing. Cursors are opaque
+        HMAC-signed values bound to the current sort and filters; tampered
+        cursors return 400. Only applications in a fully provisioned state
+        are returned.
+      operationId: listAdminApplications
+      security:
+        - SessionCookie: []
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque pagination cursor from a previous response.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page size (1–100, default 20).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: query
+          in: query
+          required: false
+          description: Server-side name/description search.
+          schema:
+            type: string
+        - name: sort
+          in: query
+          required: false
+          description: |
+            Sort key, `-` prefix for descending. Default `-updatedAt`.
+            Stable ordering always appends the ID tie-breaker.
+          schema:
+            type: string
+            enum: [updatedAt, -updatedAt, createdAt, -createdAt, name, -name]
+            default: -updatedAt
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [active, disabled]
+        - name: audience
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [internal, external, hybrid]
+        - name: ownerId
+          in: query
+          required: false
+          description: Filter by owner user ID.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Application page
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/applications/{applicationId}:
+    get:
+      tags: [Admin Applications]
+      summary: Get application detail with clients, grants and audit entries
+      description: |
+        `grants` is a real array (always empty until Phase 3). `auditEntries`
+        contains only security events actually recorded for this application.
+        No fake data.
+      operationId: getAdminApplication
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ApplicationIdPath"
+      responses:
+        "200":
+          description: Application detail
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthApplicationDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      tags: [Admin Applications]
+      summary: Update application metadata
+      description: |
+        Updates name, description, audience and owner. Ownership is always
+        resolved from `ownerId` (validated user ID), never from a display
+        name. Unknown JSON fields are rejected.
+      operationId: updateAdminApplication
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ApplicationIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplicationUpdateRequest"
+      responses:
+        "200":
+          description: Updated application detail
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthApplicationDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [Admin Applications]
+      summary: Delete an application and all of its clients
+      description: |
+        High-risk operation: requires a single-use reauthentication grant
+        (`X-Reauthentication-Token`). Provider-side removal runs outside any
+        database transaction with compensation/reconciliation on partial
+        failure.
+      operationId: deleteAdminApplication
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ApplicationIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "204":
+          description: Application deleted
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/applications/{applicationId}/enable:
+    post:
+      tags: [Admin Applications]
+      summary: Enable a disabled application
+      operationId: enableAdminApplication
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ApplicationIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      responses:
+        "200":
+          description: Application enabled
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthApplicationDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/applications/{applicationId}/disable:
+    post:
+      tags: [Admin Applications]
+      summary: Disable an application
+      description: Disables the application and all of its clients at the provider.
+      operationId: disableAdminApplication
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ApplicationIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      responses:
+        "200":
+          description: Application disabled
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthApplicationDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/applications/{applicationId}/clients:
+    post:
+      tags: [Admin OAuth Clients]
+      summary: Add a new OAuth client to the application
+      description: |
+        The client profile determines grant types, token endpoint auth method,
+        redirect URI requirements and `openid` eligibility (see ADR-0004 §3).
+        Unsupported combinations return 422; submitted values are never
+        silently mutated. Confidential clients receive their secret exactly
+        once in the `201` response.
+      operationId: createAdminOAuthClient
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ApplicationIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OAuthClientCreateRequest"
+      responses:
+        "201":
+          description: Client created (secret included once for confidential clients)
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+            Cache-Control:
+              description: Always `no-store` when a secret is included.
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthClientCreationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/applications/{applicationId}/clients/{clientId}:
+    get:
+      tags: [Admin OAuth Clients]
+      summary: Get OAuth client detail
+      description: Secret values are never returned; only secret metadata is listed.
+      operationId: getAdminOAuthClient
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ApplicationIdPath"
+        - $ref: "#/components/parameters/ClientIdPath"
+      responses:
+        "200":
+          description: Client detail
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthClient"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      tags: [Admin OAuth Clients]
+      summary: Update client name, redirect URIs, logout URI, scopes or consent mode
+      description: |
+        Redirect and logout URIs are validated with exact-match semantics
+        (no normalization, no wildcards; https or loopback http only).
+        Profile is immutable after creation.
+      operationId: updateAdminOAuthClient
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ApplicationIdPath"
+        - $ref: "#/components/parameters/ClientIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OAuthClientUpdateRequest"
+      responses:
+        "200":
+          description: Updated client detail
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthClient"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [Admin OAuth Clients]
+      summary: Delete an OAuth client
+      description: High-risk operation; requires a reauthentication grant.
+      operationId: deleteAdminOAuthClient
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ApplicationIdPath"
+        - $ref: "#/components/parameters/ClientIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "204":
+          description: Client deleted
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/applications/{applicationId}/clients/{clientId}/enable:
+    post:
+      tags: [Admin OAuth Clients]
+      summary: Enable a disabled OAuth client
+      operationId: enableAdminOAuthClient
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ApplicationIdPath"
+        - $ref: "#/components/parameters/ClientIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      responses:
+        "200":
+          description: Client enabled
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthClient"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/applications/{applicationId}/clients/{clientId}/disable:
+    post:
+      tags: [Admin OAuth Clients]
+      summary: Disable an OAuth client
+      operationId: disableAdminOAuthClient
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ApplicationIdPath"
+        - $ref: "#/components/parameters/ClientIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      responses:
+        "200":
+          description: Client disabled
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthClient"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/applications/{applicationId}/clients/{clientId}/secret-rotations:
+    post:
+      tags: [Admin OAuth Clients]
+      summary: Rotate a confidential client secret
+      description: |
+        Requires `application.secret.rotate`, rate limiting, reauthentication
+        and audit. Concurrency is single-winner; a failed rotation never
+        revokes a still-valid old secret. The new secret is returned exactly
+        once; against ZITADEL v2.71 the previous secret is invalidated
+        immediately (no provider-side grace period — see ADR-0004 §6).
+        Public clients cannot rotate (422).
+      operationId: rotateAdminOAuthClientSecret
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ApplicationIdPath"
+        - $ref: "#/components/parameters/ClientIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "200":
+          description: Secret rotated; the new secret appears only here.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+            Cache-Control:
+              description: Always `no-store`.
+              schema:
+                type: string
+                example: no-store
+            Pragma:
+              description: Always `no-cache`.
+              schema:
+                type: string
+                example: no-cache
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecretRotationResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   securitySchemes:
     SessionCookie:
@@ -651,6 +1396,129 @@ components:
         type: string
         minLength: 1
         example: csrf_0123456789abcdef
+
+    ApplicationIdPath:
+      name: applicationId
+      in: path
+      required: true
+      description: United Pass application ID (`app_…`).
+      schema:
+        type: string
+        example: app_01HQFGXKN8H2C4JVMW7K3R4D8Z
+
+    ClientIdPath:
+      name: clientId
+      in: path
+      required: true
+      description: |
+        United Pass OAuth client ID (`clt_…`). The server asserts the client
+        belongs to the path application; mismatch answers 404.
+      schema:
+        type: string
+        example: clt_01HQFGXKN8H2C4JVMW7K3R4D8Z
+
+    X-Reauthentication-Token:
+      name: X-Reauthentication-Token
+      in: header
+      required: true
+      description: |
+        Single-use reauthentication grant issued by the reauthentication
+        endpoints. Bound to the exact action and target resource; consumed
+        atomically before the operation executes.
+      schema:
+        type: string
+        minLength: 1
+        example: reauth_grant_opaque_token
+
+  responses:
+    BadRequest:
+      description: Malformed request, unknown JSON field, or invalid cursor.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Missing or invalid session.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Session is valid but the operation is not authorized.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: |
+        Resource does not exist or is not accessible by the caller. Used
+        consistently for inaccessible resources (anti-enumeration).
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: State conflict (duplicate name, stale version, concurrent mutation).
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    FieldValidationFailed:
+      description: Domain validation failed; field-level errors are returned.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+        Retry-After:
+          $ref: "#/components/headers/Retry-After"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: Unexpected server failure. No internal detail is leaked.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ProviderUnavailable:
+      description: |
+        The identity provider rejected or failed the provisioning call. The
+        response carries a stable internal error class only — never raw
+        provider errors.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
 
   schemas:
     HealthStatus:
@@ -988,3 +1856,519 @@ components:
         providerManage:
           type: boolean
           description: May create, update, enable and disable identity providers.
+
+    ScopeCatalogItem:
+      type: object
+      description: One entry of the backend-authoritative OAuth scope catalog.
+      required: [scope, label, description, required]
+      additionalProperties: false
+      properties:
+        scope:
+          type: string
+          example: reporting:read
+        label:
+          type: string
+          example: 报表读取
+        description:
+          type: string
+          example: 允许读取报表数据
+        required:
+          type: boolean
+          description: Whether the scope is mandatory for the client profile.
+
+    ReauthenticationRequest:
+      type: object
+      description: |
+        Declares the high-risk action being prepared and verifies the current
+        session user's password. Target resource IDs must match the eventual
+        operation; the grant is bound to them.
+      required: [action, password]
+      additionalProperties: false
+      properties:
+        action:
+          type: string
+          enum: [application.delete, client.delete, client.secret.rotate]
+          description: The high-risk action the grant will authorize.
+        applicationId:
+          type: string
+          description: Target application (required for all current actions).
+        clientId:
+          type: string
+          description: Target client (required for client actions).
+        password:
+          type: string
+          minLength: 1
+          format: password
+          writeOnly: true
+          description: Current session user's password. Never logged.
+
+    ReauthenticationGrantResponse:
+      type: object
+      required: [status, reauthToken, expiresAt]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [granted]
+        reauthToken:
+          type: string
+          description: |
+            Single-use grant token submitted as `X-Reauthentication-Token`.
+            Consumed atomically by the target operation.
+        expiresAt:
+          type: string
+          format: date-time
+
+    ReauthenticationChallengeResponse:
+      type: object
+      description: Returned with 202 when a second factor must complete verification.
+      required: [status, reauthToken, availableMethods, expiresAt]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [mfa_required]
+        reauthToken:
+          type: string
+          description: Opaque challenge token for `POST /api/v1/auth/reauthentication/mfa`.
+        availableMethods:
+          type: array
+          items:
+            type: string
+            enum: [totp, passkey]
+        passkeyRequestOptions:
+          type: object
+          description: WebAuthn request options when `passkey` is available.
+        expiresAt:
+          type: string
+          format: date-time
+
+    ReauthenticationMfaRequest:
+      type: object
+      required: [reauthToken, method]
+      additionalProperties: false
+      properties:
+        reauthToken:
+          type: string
+          minLength: 1
+          description: Challenge token from the `202` response.
+        method:
+          type: string
+          enum: [totp, passkey]
+        code:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: TOTP code; required for `totp`. Never logged.
+        passkeyAssertion:
+          type: object
+          writeOnly: true
+          description: WebAuthn assertion; required for `passkey`. Never logged.
+
+    RedirectUriEntry:
+      type: object
+      required: [uri, isLoopback, addedAt]
+      additionalProperties: false
+      properties:
+        uri:
+          type: string
+          description: Registered URI, stored exactly as submitted (no normalization).
+        isLoopback:
+          type: boolean
+          description: True for the RFC 8252 loopback HTTP exception.
+        addedAt:
+          type: string
+          format: date-time
+
+    ClientSecretRecord:
+      type: object
+      description: Secret metadata only — never a secret value.
+      required: [secretId, label, createdAt]
+      additionalProperties: false
+      properties:
+        secretId:
+          type: string
+          example: sec_01HQFGXKN8H2C4JVMW7K3R4D8Z
+        label:
+          type: string
+          example: 初始 Secret
+        createdAt:
+          type: string
+          format: date-time
+        lastRotatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ApplicationGrantSummary:
+      type: object
+      description: User grant summary. Always an empty array until Phase 3.
+      required: [grantId, userLabel, scopes, grantedAt, status]
+      additionalProperties: false
+      properties:
+        grantId:
+          type: string
+        userLabel:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        grantedAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          type: string
+          enum: [active, revoked]
+
+    ApplicationAuditEntry:
+      type: object
+      description: Security event actually recorded for the application (no fake data).
+      required: [eventId, eventType, actorName, occurredAt, result]
+      additionalProperties: false
+      properties:
+        eventId:
+          type: string
+        eventType:
+          type: string
+          example: oauth_client.secret_rotated
+        actorName:
+          type: string
+        occurredAt:
+          type: string
+          format: date-time
+        result:
+          type: string
+          enum: [success, denied]
+
+    OAuthApplication:
+      type: object
+      description: Application list item.
+      required:
+        [applicationId, name, audience, ownerId, ownerName, status, clientCount, updatedAt]
+      additionalProperties: false
+      properties:
+        applicationId:
+          type: string
+          example: app_01HQFGXKN8H2C4JVMW7K3R4D8Z
+        name:
+          type: string
+        audience:
+          type: string
+          enum: [internal, external, hybrid]
+        ownerId:
+          type: string
+          description: Stable owner user ID (authoritative; G1 fix).
+        ownerName:
+          type: string
+          description: Derived display name of the owner; never authoritative.
+        status:
+          type: string
+          enum: [active, disabled]
+        clientCount:
+          type: integer
+          minimum: 0
+        updatedAt:
+          type: string
+          format: date-time
+
+    ApplicationListResponse:
+      type: object
+      required: [items, page]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/OAuthApplication"
+        page:
+          type: object
+          required: [nextCursor, hasMore]
+          additionalProperties: false
+          properties:
+            nextCursor:
+              type: string
+              nullable: true
+              description: Opaque HMAC-signed cursor; null when no more pages.
+            hasMore:
+              type: boolean
+
+    OAuthClient:
+      type: object
+      description: OAuth client detail. Secret values are never included.
+      required:
+        [clientId, applicationId, name, clientType, grantTypes,
+         tokenEndpointAuthMethod, redirectUris, allowedScopes, consentMode,
+         status, clientSecrets, createdAt, updatedAt]
+      additionalProperties: false
+      properties:
+        clientId:
+          type: string
+          example: clt_01HQFGXKN8H2C4JVMW7K3R4D8Z
+        applicationId:
+          type: string
+        name:
+          type: string
+        clientType:
+          type: string
+          enum: [public, confidential]
+        grantTypes:
+          type: array
+          items:
+            type: string
+            enum: [authorization_code, refresh_token, client_credentials]
+        tokenEndpointAuthMethod:
+          type: string
+          enum: [client_secret_basic, none]
+          description: |
+            Only values with verified provider support and a reviewed security
+            model are exposed in Phase 2 (`client_secret_post` and
+            `private_key_jwt` are rejected with 422).
+        redirectUris:
+          type: array
+          items:
+            $ref: "#/components/schemas/RedirectUriEntry"
+        logoutUri:
+          type: string
+          nullable: true
+        allowedScopes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScopeCatalogItem"
+        consentMode:
+          type: string
+          enum: [always, first_authorization]
+          description: |
+            For `server_to_server` clients only `always` is accepted and it is
+            recorded as not-applicable metadata.
+        status:
+          type: string
+          enum: [active, disabled]
+        clientSecrets:
+          type: array
+          description: Secret metadata; empty for public clients.
+          items:
+            $ref: "#/components/schemas/ClientSecretRecord"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    OAuthApplicationDetail:
+      type: object
+      required:
+        [applicationId, name, description, audience, ownerId, ownerName,
+         status, clients, grants, auditEntries, createdAt, updatedAt]
+      additionalProperties: false
+      properties:
+        applicationId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        logoUrl:
+          type: string
+          format: uri
+          nullable: true
+        audience:
+          type: string
+          enum: [internal, external, hybrid]
+        ownerId:
+          type: string
+        ownerName:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled]
+        clients:
+          type: array
+          items:
+            $ref: "#/components/schemas/OAuthClient"
+        grants:
+          type: array
+          description: Real grants only; always empty until Phase 3.
+          items:
+            $ref: "#/components/schemas/ApplicationGrantSummary"
+        auditEntries:
+          type: array
+          description: Only security events actually recorded.
+          items:
+            $ref: "#/components/schemas/ApplicationAuditEntry"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ApplicationCreateInput:
+      type: object
+      required: [name, audience, ownerId]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        description:
+          type: string
+          maxLength: 500
+          default: ""
+        audience:
+          type: string
+          enum: [internal, external, hybrid]
+        ownerId:
+          type: string
+          description: |
+            Stable United Pass user ID of the owner. Must exist; ownership is
+            never resolved from a display name (G1 fix).
+
+    OAuthClientCreateRequest:
+      type: object
+      required: [name, profile, redirectUris, allowedScopes, consentMode]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 64
+        profile:
+          type: string
+          enum: [web_server, spa_mobile, server_to_server]
+        redirectUris:
+          type: array
+          maxItems: 20
+          description: |
+            Exact strings; https or loopback http only; no fragments,
+            userinfo, wildcards or normalization. Required for interactive
+            profiles, forbidden for `server_to_server`.
+          items:
+            type: string
+            maxLength: 2048
+        logoutUri:
+          type: string
+          maxLength: 2048
+          default: ""
+          description: Same security checks as redirect URIs.
+        allowedScopes:
+          type: array
+          description: Registered scope IDs only; duplicates rejected.
+          items:
+            type: string
+        consentMode:
+          type: string
+          enum: [always, first_authorization]
+
+    ApplicationWithInitialClientRequest:
+      type: object
+      required: [application, initialClient]
+      additionalProperties: false
+      properties:
+        application:
+          $ref: "#/components/schemas/ApplicationCreateInput"
+        initialClient:
+          $ref: "#/components/schemas/OAuthClientCreateRequest"
+
+    ApplicationWithInitialClientResponse:
+      type: object
+      required: [applicationId, clientId]
+      additionalProperties: false
+      properties:
+        applicationId:
+          type: string
+        clientId:
+          type: string
+        clientSecret:
+          type: string
+          writeOnly: true
+          description: |
+            Present exactly once for confidential clients; absent for public
+            clients. Never persisted, never queryable afterwards.
+
+    OAuthClientCreationResponse:
+      type: object
+      required: [clientId]
+      additionalProperties: false
+      properties:
+        clientId:
+          type: string
+        clientSecret:
+          type: string
+          writeOnly: true
+          description: Present exactly once for confidential clients.
+
+    ApplicationUpdateRequest:
+      type: object
+      description: Partial update; at least one field required.
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        description:
+          type: string
+          maxLength: 500
+        audience:
+          type: string
+          enum: [internal, external, hybrid]
+        ownerId:
+          type: string
+          description: New owner user ID; must exist.
+
+    OAuthClientUpdateRequest:
+      type: object
+      description: |
+        Partial update; at least one field required. Profile is immutable.
+        When `redirectUris` is present it replaces the full set.
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 64
+        redirectUris:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            maxLength: 2048
+        logoutUri:
+          type: string
+          maxLength: 2048
+          nullable: true
+        allowedScopes:
+          type: array
+          items:
+            type: string
+        consentMode:
+          type: string
+          enum: [always, first_authorization]
+
+    SecretRotationResponse:
+      type: object
+      required: [secretId, clientSecret, previousSecretExpiresAt]
+      additionalProperties: false
+      properties:
+        secretId:
+          type: string
+          description: United Pass secret ID for the new secret.
+        clientSecret:
+          type: string
+          writeOnly: true
+          description: The new secret, shown exactly once. Never persisted.
+        previousSecretExpiresAt:
+          type: string
+          format: date-time
+          description: |
+            Expiry of the previous secret. Against ZITADEL v2.71 this equals
+            the rotation timestamp (zero grace period).
