@@ -76,120 +76,27 @@
 
 ## 3. 后端必须实现的 API 合同
 
-完整合同见 `docs/api-contracts.md`。以下是最小路径集合。
+完整且唯一的 API 路径清单见 `docs/api-contracts.md`（状态：Frozen v1 — Accepted for backend implementation）。本文不再重复定义全部路径，以避免两份文档漂移。
 
-### 3.1 认证与注册
+合同优先级：
 
-```text
-POST   /api/v1/auth/sessions              # 密码登录（支持 MFA challenge 响应）
-POST   /api/v1/auth/sessions/mfa           # MFA 挑战
-DELETE /api/v1/auth/session                # 退出登录
-POST   /api/v1/registrations               # 注册
-POST   /api/v1/password-reset-requests     # 请求密码重置
-POST   /api/v1/password-resets             # 执行密码重置
-POST   /api/v1/email-verifications        # 邮箱验证
-```
+1. **`backend/openapi/openapi.yaml`** — 机器可读的唯一合同（建立后以本为准）
+2. **`docs/api-contracts.md`** — 人类可读的详细合同（当前规范）
+3. **本文（`frontend-freeze-v1.md`）** — 前端交接摘要，不再独立定义 API 路径
 
-### 3.2 用户与账户
+以下为各模块的简要说明，详细路径、请求体、响应体和权限标识请查阅 `api-contracts.md`。
 
-```text
-GET    /api/v1/me                          # 当前用户（含权限能力）
-GET    /api/v1/me/permissions              # 权限能力
-GET    /api/v1/me/security-factors         # 安全因子列表
-GET    /api/v1/me/sessions                 # 活跃会话
-DELETE /api/v1/me/sessions/{sessionId}    # 撤销会话
-DELETE /api/v1/me/sessions/others         # 撤销其他会话
-GET    /api/v1/me/authorizations          # 已授权应用
-DELETE /api/v1/me/authorizations/{grantId} # 撤销授权
-PATCH  /api/v1/me/profile                 # 更新资料
-POST   /api/v1/me/avatar                  # 上传头像
-POST   /api/v1/me/email-change-requests   # 请求邮箱变更
-POST   /api/v1/me/email-changes           # 验证邮箱变更
-POST   /api/v1/me/phone-change-requests   # 请求手机变更
-POST   /api/v1/me/phone-changes           # 验证手机变更
-POST   /api/v1/me/password                # 修改密码
-POST   /api/v1/me/totp/enrollments        # 开始 TOTP 绑定
-POST   /api/v1/me/totp/enrollments/confirm # 确认 TOTP 绑定
-DELETE /api/v1/me/totp                    # 删除 TOTP
-POST   /api/v1/me/passkeys/enrollments    # 开始 Passkey 绑定
-POST   /api/v1/me/passkeys/enrollments/complete # 完成 Passkey 绑定
-DELETE /api/v1/me/passkeys/{credentialId} # 删除 Passkey
-POST   /api/v1/me/recovery-codes           # 生成恢复代码
-```
-
-### 3.3 OAuth Application / Client
-
-```text
-POST   /api/v1/admin/applications/with-initial-client
-GET    /api/v1/admin/applications
-GET    /api/v1/admin/applications/{applicationId}
-PATCH  /api/v1/admin/applications/{applicationId}
-DELETE /api/v1/admin/applications/{applicationId}
-
-POST   /api/v1/admin/applications/{applicationId}/clients
-GET    /api/v1/admin/applications/{applicationId}/clients/{clientId}
-PATCH  /api/v1/admin/applications/{applicationId}/clients/{clientId}
-DELETE /api/v1/admin/applications/{applicationId}/clients/{clientId}
-
-POST   /api/v1/admin/applications/{applicationId}/clients/{clientId}/enable
-POST   /api/v1/admin/applications/{applicationId}/clients/{clientId}/disable
-POST   /api/v1/admin/applications/{applicationId}/clients/{clientId}/secret-rotations
-```
-
-### 3.4 管理端
-
-```text
-GET    /api/v1/admin/users                 # 游标分页
-GET    /api/v1/admin/users/{userId}        # 用户详情
-POST   /api/v1/admin/users/{userId}/enable
-POST   /api/v1/admin/users/{userId}/disable
-POST   /api/v1/admin/users/{userId}/session-revocations
-
-GET    /api/v1/admin/employees
-GET    /api/v1/admin/employees/{userId}
-POST   /api/v1/admin/employees/link       # 为既有 userId 建立员工档案
-POST   /api/v1/admin/employees/{userId}/offboard
-
-GET    /api/v1/admin/departments
-GET    /api/v1/admin/departments/{departmentId}
-```
-
-### 3.5 Provider 与目录同步
-
-```text
-GET    /api/v1/admin/providers
-GET    /api/v1/admin/providers/{providerId}
-POST   /api/v1/admin/providers/{providerId}/directory-syncs
-GET    /api/v1/admin/providers/{providerId}/sync-history
-GET    /api/v1/admin/providers/{providerId}/sync-conflicts
-POST   /api/v1/admin/providers/{providerId}/sync-conflicts/{conflictId}/resolve
-POST   /api/v1/admin/providers/{providerId}/sync-conflicts/{conflictId}/ignore
-```
-
-### 3.6 ABAC 策略
-
-```text
-GET    /api/v1/admin/policies
-GET    /api/v1/admin/policies/{policyId}
-POST   /api/v1/admin/policies/drafts
-PUT    /api/v1/admin/policies/{policyId}/drafts
-POST   /api/v1/admin/policies/{policyId}/publish
-POST   /api/v1/admin/policies/simulate
-```
-
-### 3.7 审计
-
-```text
-GET    /api/v1/admin/audit-events          # 支持 eventType, result, actorName, requestId, from, to
-POST   /api/v1/admin/audit-events/export   # 异步导出任务
-```
-
-### 3.8 OAuth 授权同意
-
-```text
-GET    /api/v1/oauth/consent-resolution?requestId=...
-POST   /api/v1/oauth/consent-decisions
-```
+| 模块 | 说明 |
+| --- | --- |
+| 认证与注册 | 密码登录、MFA 挑战、注册、密码重置、邮箱验证、退出登录 |
+| 当前账户 | `GET/PATCH /api/v1/me`、头像上传、安全因子、会话管理、已授权应用 |
+| OAuth 授权同意 | `GET /api/v1/authorization/requests/{requestId}`、`POST .../decision` |
+| OAuth Application / Client | Application 与 Client 分离管理（ADR-0005） |
+| 用户与员工 | 员工档案挂在 `userId` 下，不强制使用 `/employees/{userId}` API 路径 |
+| 部门 | 树形/分页部门管理 |
+| Identity Provider | `GET /api/v1/admin/identity-providers`，飞书首个支持 |
+| ABAC 策略 | 草稿、发布、模拟、版本历史 |
+| 审计 | 事件筛选与异步导出 |
 
 ## 4. 关键类型合同
 

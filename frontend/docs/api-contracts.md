@@ -1,11 +1,11 @@
 # United Pass 前端 API 接入清单
 
-- 状态：Draft，等待前后端评审
+- 状态：Frozen v1 — Accepted for backend implementation
 - 日期：2026-08-05（v2，与 ADR-0004/0005 对齐）
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect
 
-本文记录当前页面替换 mock 所需的后端能力。它不是最终 OpenAPI 定义；字段名、状态码和权限标识需要以后端合同为准。正式接入优先使用 OpenAPI 生成的类型或客户端。
+本文是后端实现的详细人类可读合同。当 `backend/openapi/openapi.yaml` 建立后，OpenAPI 规范是机器可读的唯一合同，本文是其详细说明。两者必须保持同步，不得 knowingly 矛盾。在 OpenAPI 未覆盖到的细节上，以本文为准。
 
 ## 通用约定
 
