@@ -180,27 +180,33 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 }
 
 // buildAuthenticator selects the authentication provider implementation. The
-// development fake is permitted only in non-production environments. In
-// production, a configured provider without an implemented adapter is a
-// startup error: the service must never present the fake as a real identity
-// provider.
+// development fake is permitted only in non-production environments and only
+// when no provider is configured or the provider is explicitly "fake". Any
+// configured provider without an implemented adapter is a startup error in
+// all environments: the service must never present the fake as a real
+// identity provider, and a misspelled provider must not silently fall back
+// to it. See ADR-0003.
 func buildAuthenticator(cfg config.Config, logger *slog.Logger) (auth.Authenticator, error) {
 	if cfg.IsProduction() {
 		if !cfg.HasAuthProvider() {
 			return nil, errors.New("production requires a configured authentication provider")
 		}
-		// No real provider adapter is implemented yet (Phase 6). Refuse to
+		// No real provider adapter is implemented yet (Phase 1.2). Refuse to
 		// start rather than silently authenticate with the development fake.
 		return nil, fmt.Errorf("authentication provider %q has no implemented adapter", cfg.Auth.Provider)
 	}
 
-	if cfg.Auth.Provider != "" && cfg.Auth.Provider != "fake" {
-		logger.Warn("authentication provider adapter not implemented; using fake for development",
-			"provider", cfg.Auth.Provider)
-	} else {
+	// Non-production: the fake is allowed only when no provider is configured
+	// or the provider is explicitly "fake". Any other value is a startup
+	// error, so a misspelled or not-yet-implemented provider (e.g. "zitadel")
+	// cannot silently fall back to the fake and create the illusion of real
+	// authentication. See ADR-0003.
+	if cfg.Auth.Provider == "" || cfg.Auth.Provider == "fake" {
 		logger.Info("using fake authenticator for development")
+		return createDevAuthenticator(), nil
 	}
-	return createDevAuthenticator(), nil
+
+	return nil, fmt.Errorf("authentication provider %q has no implemented adapter", cfg.Auth.Provider)
 }
 
 // newSessionEncryptor builds the AES-GCM encryptor for provider session

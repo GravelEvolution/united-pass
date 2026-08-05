@@ -279,6 +279,29 @@ func TestNewServerAllowsFakeInDevelopment(t *testing.T) {
 	}
 }
 
+// TestNewServerAllowsNoProviderInDevelopment verifies that no provider
+// configuration at all still permits the fake in development.
+func TestNewServerAllowsNoProviderInDevelopment(t *testing.T) {
+	srv := newTestServer(t, testConfig())
+	if srv == nil {
+		t.Fatal("expected a server in development without a provider")
+	}
+}
+
+// TestNewServerRejectsUnknownProviderInDevelopment verifies that an unknown
+// or not-yet-implemented provider (e.g. "zitadel") fails startup in
+// development too, so it cannot silently fall back to the fake. See ADR-0003.
+func TestNewServerRejectsUnknownProviderInDevelopment(t *testing.T) {
+	cfg := testConfig()
+	cfg.Auth.Provider = "zitadel"
+	cfg.Auth.BaseURL = "https://auth.example.com"
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if _, err := NewServer(cfg, logger); err == nil {
+		t.Fatal("expected error for unknown provider in development")
+	}
+}
+
 // TestNewServerRejectsInvalidEncryptionKey verifies that a malformed session
 // encryption key prevents startup (fail closed) instead of degrading to
 // plaintext.
