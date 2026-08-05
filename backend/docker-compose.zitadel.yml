@@ -1,0 +1,65 @@
+# Local ZITADEL instance for development and integration tests.
+#
+# Usage:
+#   docker compose -f docker-compose.zitadel.yml up -d
+#   ./scripts/zitadel-init.sh
+#
+# The instance is exposed at http://localhost:8080 (plain HTTP, dev only).
+# The first-time admin (firstuser) is:
+#   login:    admin@zitadel.localhost
+#   password: AdminPassword1!
+#
+# Never use this composition for production; production ZITADEL requires TLS,
+# secrets management and a hardened database.
+services:
+  zitadel-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: zitadel
+      POSTGRES_PASSWORD: zitadel
+      POSTGRES_DB: zitadel
+    volumes:
+      - zitadel-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zitadel -d zitadel"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:v2.76.1
+    command: start-from-init
+    depends_on:
+      zitadel-db:
+        condition: service_healthy
+    environment:
+      # Database (ZITADEL manages its schema via the admin user).
+      ZITADEL_DATABASE_POSTGRES_HOST: zitadel-db
+      ZITADEL_DATABASE_POSTGRES_PORT: "5432"
+      ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: zitadel
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: postgres
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: zitadel
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+      # Public endpoint (plain HTTP, local dev only).
+      ZITADEL_EXTERNALSECURE: "false"
+      ZITADEL_EXTERNALDOMAIN: localhost
+      ZITADEL_EXTERNALPORT: "8080"
+      ZITADEL_TLS: "false"
+      # First admin user created on first startup.
+      ZITADEL_FIRSTUSER_USERNAME: admin@zitadel.localhost
+      ZITADEL_FIRSTUSER_PASSWORD: AdminPassword1!
+      ZITADEL_FIRSTUSER_ORG: UnitedPassDev
+      ZITADEL_LOG_LEVEL: info
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/debug/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  zitadel-db-data:

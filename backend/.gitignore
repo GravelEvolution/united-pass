@@ -14,3 +14,6 @@ coverage.txt
 # SSH tunnel runtime state (scripts/tunnel.sh)
 .tunnel.pid
 .tunnel.log
+
+# ZITADEL development instance state (scripts/zitadel-init.sh)
+.zitadel/

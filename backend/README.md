@@ -135,11 +135,13 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_LOGIN_RATE_WINDOW` | `15m` | Login rate limit window. |
 | `UP_MFA_RATE_LIMIT` | `10` | Maximum MFA attempts per window. |
 | `UP_MFA_RATE_WINDOW` | `15m` | MFA rate limit window. |
-| `UP_AUTH_PROVIDER` | | Authentication provider name. |
-| `UP_AUTH_PROVIDER_BASE_URL` | | Authentication provider base URL. |
-| `UP_AUTH_PROVIDER_PROJECT_ID` | | Authentication provider project ID. |
+| `UP_AUTH_PROVIDER` | | Authentication provider name: `fake` (development only) or `zitadel`. Unknown values fail startup in all environments. |
+| `UP_AUTH_PROVIDER_BASE_URL` | | Authentication provider base URL. HTTPS required in production; local dev may use `http://localhost:8080`. |
+| `UP_AUTH_PROVIDER_PROJECT_ID` | | Authentication provider project ID (tenant scope for identity links). |
 | `UP_AUTH_PROVIDER_CLIENT_ID` | | Authentication provider client ID. |
 | `UP_AUTH_PROVIDER_CLIENT_SECRET` | | Authentication provider client secret. |
+| `UP_AUTH_PROVIDER_SERVICE_ACCOUNT_KEY_FILE` | | Path to the ZITADEL service account key.json (JWT profile auth). Required for `zitadel`. |
+| `UP_AUTH_PROVIDER_DOMAIN` | | WebAuthn relying-party domain for passkey challenges. Empty disables passkey challenges. |
 | `UP_SSH_HOST` | | SSH host for the development tunnel (`scripts/tunnel.sh`). |
 | `UP_SSH_PORT` | `22` | SSH port for the development tunnel. |
 | `UP_SSH_USER` | | SSH user for the development tunnel. |
@@ -223,28 +225,30 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
 - **Permissions**: `GET /api/v1/me/permissions` with fail-closed default resolver
 - **Session middleware**: `RequireSession`, `OptionalSession`, `RequireCSRF`
 - **Readiness checks**: PostgreSQL, Redis, and auth provider connectivity
-- **Authentication provider adapter**: interface + test fake (no production provider yet)
+- **Authentication provider adapter**: `auth.Authenticator` interface + ZITADEL LoginV2 adapter (`internal/adapters/zitadel`, Phase 1.2) + development-only fake
+- **Identity mapping**: `identity.UserLinker` — first login creates the local user and binds the provider subject via `identity_links` (concurrency safe)
 - **Provider session reference encryption**: AES-256-GCM at rest (`UP_SESSION_ENCRYPTION_KEY`), decrypted only for logout revocation
 - **Redacted dependency logging**: stable error classes instead of raw provider/DB error text
 - **Permission resolver**: fail-closed default with optional development override
 - **Migration command**: `cmd/migrate/main.go` with explicit up/status/version/reset
-- **Development tooling**: `scripts/tunnel.sh` (SSH tunnel manager) and `scripts/dev.sh` (one-command startup)
+- **Development tooling**: `scripts/tunnel.sh` (SSH tunnel manager), `scripts/dev.sh` (one-command startup), `docker-compose.zitadel.yml` + `scripts/zitadel-init.sh` (local ZITADEL instance)
 - ADR-0002 documenting session, PostgreSQL, Redis, and authentication provider architecture
+- ADR-0003 documenting the ZITADEL provider selection and API mapping
 - OpenAPI specification updated with all Phase 1 endpoints
 - Unit tests, HTTP tests, and integration tests (PostgreSQL and Redis)
 
 ### Not yet implemented (later phases)
 
-**Phase 1 status: substantially complete.** The session, current user, MFA
-(atomic consumption), provider-reference encryption, logging redaction, and
-production safety guardrails are implemented. A real authentication provider
-adapter is **not** implemented — production deployments are intentionally
-blocked until then.
+**Phase 1 status: implementation complete; operational sign-off pending.**
+The session, current user, MFA (atomic consumption), provider-reference
+encryption, logging redaction, production safety guardrails, and the ZITADEL
+provider adapter (Phase 1.2) are implemented. Production deployments can now
+start with the ZITADEL adapter once the instance is provisioned and the E2E
+integration tests have been run against it (see
+[Local ZITADEL Instance](#local-zitadel-instance)).
 
-- **Phase 1.2 — Production Authentication Provider**: implement the
-  `auth.Authenticator` adapter for a real provider (ZITADEL or another
-  candidate per ADR-0003). Until this lands, Phase 1 is "implemented, provider
-  integration blocked" and must not be closed.
+- E2E validation against a provisioned ZITADEL instance and production secrets rollout (Phase 1.2 operational sign-off)
+- Passkey / recovery-code factor management (passkey verification works via WebAuthn; factor *management* UI is Phase 4)
 - User registration, password reset, email verification
 - Profile updates and avatar upload
 - TOTP, Passkey, Recovery Code management (MFA verification is Phase 1; factor management is Phase 4)
@@ -252,9 +256,45 @@ blocked until then.
 - OAuth Application and Client management
 - Consent orchestration
 - Employee profiles, departments, workforce
-- Feishu Provider synchronization (directory provider; distinct from the Phase 1.2 authentication provider)
+- Feishu Provider synchronization (directory provider; distinct from the authentication provider)
 - Cerbos policies and audit
 - Audit export
+
+## Local ZITADEL Instance
+
+Phase 1.2 authenticates against ZITADEL via the LoginV2 API. For local
+development and integration tests, a disposable instance runs in Docker:
+
+```bash
+docker compose -f docker-compose.zitadel.yml up -d
+./scripts/zitadel-init.sh
+```
+
+`zitadel-init.sh` creates a human test user (password + TOTP), a service
+account, and its API key (`key.json`), then prints the `UP_TEST_ZITADEL_*`
+variables. Configure the service to use it:
+
+```bash
+UP_AUTH_PROVIDER=zitadel \
+UP_AUTH_PROVIDER_BASE_URL=http://localhost:8080 \
+UP_AUTH_PROVIDER_SERVICE_ACCOUNT_KEY_FILE=/path/to/.zitadel/sa-key.json \
+UP_AUTH_PROVIDER_DOMAIN=localhost \
+go run ./cmd/api
+```
+
+Run the E2E tests against the instance:
+
+```bash
+UP_TEST_ZITADEL_BASE_URL=http://localhost:8080 \
+UP_TEST_ZITADEL_KEY_FILE=.zitadel/sa-key.json \
+UP_TEST_ZITADEL_USER=zhixing.lin@zitadel.localhost \
+UP_TEST_ZITADEL_PASSWORD='TestPassword123!' \
+go test -tags integration ./internal/adapters/zitadel/...
+```
+
+Production ZITADEL requires an HTTPS endpoint and the service account key
+delivered via secrets management; the key file must never be committed
+(`.zitadel/` is gitignored).
 
 ## API Endpoints (Phase 1)
 
