@@ -5,6 +5,8 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -36,7 +38,11 @@ type Server struct {
 // returns a Server wrapping a configured *http.Server. It creates
 // infrastructure (PostgreSQL pool, Redis client) based on configuration and
 // wires all Phase 1 handlers.
-func NewServer(cfg config.Config, logger *slog.Logger) *Server {
+//
+// NewServer returns an error when the configuration demands an authentication
+// provider adapter that is not implemented (always the case in production),
+// or when the configured session encryption key is unusable.
+func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	router := chi.NewRouter()
 
 	router.Use(httpapi.MaxBodyBytes(cfg.MaxRequestBodyBytes))
@@ -87,7 +93,8 @@ func NewServer(cfg config.Config, logger *slog.Logger) *Server {
 		sessionStore := redis.NewSessionStore(redisClient)
 		sessionSvc = session.NewService(sessionStore, session.SystemClock{},
 			cfg.Session.TTL, cfg.Session.RememberTTL,
-			cfg.Session.IdleTTL, cfg.Session.TouchInterval)
+			cfg.Session.IdleTTL, cfg.Session.TouchInterval,
+			newSessionEncryptor(cfg, logger))
 
 		mfaStore = redis.NewMFAStore(redisClient)
 		rateChecker = redis.NewRateLimiter(redisClient)
@@ -102,17 +109,12 @@ func NewServer(cfg config.Config, logger *slog.Logger) *Server {
 	// Permission resolver: fail-closed by default, with optional dev override.
 	permResolver = permissions.NewResolver(cfg)
 
-	// Authenticator: use fake for development when no provider is configured.
-	// In production, missing provider configuration causes startup failure
-	// (enforced by config.Validate).
-	if cfg.HasAuthProvider() {
-		// Real provider adapter would be created here in Phase 6.
-		logger.Warn("authentication provider configured but no adapter implemented; using fake",
-			"provider", cfg.Auth.Provider)
-		authenticator = createDevAuthenticator()
-	} else {
-		logger.Info("no authentication provider configured; using fake authenticator for development")
-		authenticator = createDevAuthenticator()
+	// Authenticator selection enforces the production safety boundary: the
+	// development fake must never serve production traffic, and a production
+	// deployment must not start with an unimplemented provider adapter.
+	authenticator, err := buildAuthenticator(cfg, logger)
+	if err != nil {
+		return nil, err
 	}
 
 	health := httpapi.NewHealthHandlers(readinessCheckers...)
@@ -168,7 +170,52 @@ func NewServer(cfg config.Config, logger *slog.Logger) *Server {
 		config:      cfg,
 		pool:        pool,
 		redisClient: redisClient,
+	}, nil
+}
+
+// buildAuthenticator selects the authentication provider implementation. The
+// development fake is permitted only in non-production environments. In
+// production, a configured provider without an implemented adapter is a
+// startup error: the service must never present the fake as a real identity
+// provider.
+func buildAuthenticator(cfg config.Config, logger *slog.Logger) (auth.Authenticator, error) {
+	if cfg.IsProduction() {
+		if !cfg.HasAuthProvider() {
+			return nil, errors.New("production requires a configured authentication provider")
+		}
+		// No real provider adapter is implemented yet (Phase 6). Refuse to
+		// start rather than silently authenticate with the development fake.
+		return nil, fmt.Errorf("authentication provider %q has no implemented adapter", cfg.Auth.Provider)
 	}
+
+	if cfg.Auth.Provider != "" && cfg.Auth.Provider != "fake" {
+		logger.Warn("authentication provider adapter not implemented; using fake for development",
+			"provider", cfg.Auth.Provider)
+	} else {
+		logger.Info("using fake authenticator for development")
+	}
+	return createDevAuthenticator(), nil
+}
+
+// newSessionEncryptor builds the AES-GCM encryptor for provider session
+// references from configuration. It returns nil when no key is configured
+// (tests, or development without provider references); production validation
+// requires UP_SESSION_ENCRYPTION_KEY, and a session with a provider reference
+// is refused at creation time when the encryptor is nil.
+func newSessionEncryptor(cfg config.Config, logger *slog.Logger) session.Encryptor {
+	if cfg.Session.EncryptionKey == "" {
+		if cfg.IsProduction() {
+			logger.Error("production requires UP_SESSION_ENCRYPTION_KEY; provider session references will be refused")
+		}
+		return nil
+	}
+	enc, err := session.NewAESGCMEncryptor(cfg.Session.EncryptionKey, cfg.Session.EncryptionKeyID)
+	if err != nil {
+		logger.Error("session encryption key invalid; provider session references will be refused",
+			"error", err)
+		return nil
+	}
+	return enc
 }
 
 // Run starts the HTTP server. It blocks until the server stops accepting

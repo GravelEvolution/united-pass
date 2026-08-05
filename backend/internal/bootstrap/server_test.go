@@ -21,7 +21,11 @@ import (
 func newTestServer(t *testing.T, cfg config.Config) *Server {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewServer(cfg, logger)
+	srv, err := NewServer(cfg, logger)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return srv
 }
 
 func testConfig() config.Config {
@@ -176,7 +180,10 @@ func TestNewServerPanicRecordsAccessLog(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	srv := NewServer(cfg, logger)
+	srv, err := NewServer(cfg, logger)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 
 	// Mount a panic handler on the real router. The Router field is typed
 	// http.Handler but NewServer always returns a *chi.Mux.
@@ -231,4 +238,43 @@ func waitFor(t *testing.T, condition func() bool, timeout time.Duration) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition never became true within timeout")
+}
+
+// TestNewServerRejectsUnimplementedProviderInProduction verifies the
+// production safety boundary: a production deployment must not start with an
+// unimplemented authentication provider (the development fake would otherwise
+// serve as the identity provider).
+func TestNewServerRejectsUnimplementedProviderInProduction(t *testing.T) {
+	cfg := testConfig()
+	cfg.Environment = config.EnvironmentProduction
+	cfg.Auth.Provider = "zitadel"
+	cfg.Auth.BaseURL = "https://auth.example.com"
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if _, err := NewServer(cfg, logger); err == nil {
+		t.Fatal("expected error for unimplemented provider in production")
+	}
+}
+
+// TestNewServerRejectsProductionWithoutProvider ensures production cannot
+// silently fall back to the development fake.
+func TestNewServerRejectsProductionWithoutProvider(t *testing.T) {
+	cfg := testConfig()
+	cfg.Environment = config.EnvironmentProduction
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if _, err := NewServer(cfg, logger); err == nil {
+		t.Fatal("expected error for production without provider")
+	}
+}
+
+// TestNewServerAllowsFakeInDevelopment verifies the fake authenticator is
+// accepted for local development.
+func TestNewServerAllowsFakeInDevelopment(t *testing.T) {
+	cfg := testConfig()
+	cfg.Auth.Provider = "fake"
+	srv := newTestServer(t, cfg)
+	if srv == nil {
+		t.Fatal("expected a server in development with fake provider")
+	}
 }

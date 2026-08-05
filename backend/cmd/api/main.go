@@ -40,7 +40,11 @@ func run() error {
 	}
 	logger := observability.NewLogger(level, string(cfg.Environment), os.Stdout)
 
-	server := bootstrap.NewServer(cfg, logger)
+	server, err := bootstrap.NewServer(cfg, logger)
+	if err != nil {
+		logger.Error("server bootstrap failed", "error", err)
+		return err
+	}
 
 	// Listen for termination signals. SIGINT (Ctrl-C) and SIGTERM (container
 	// orchestrator shutdown) both trigger graceful shutdown.
