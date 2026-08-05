@@ -2,6 +2,7 @@ package zitadel
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -252,12 +253,86 @@ func TestBeginPasswordAuthenticationPasskeyChallenge(t *testing.T) {
 	if len(res.AvailableMethods) != 1 || res.AvailableMethods[0] != auth.MFAMethodPasskey {
 		t.Errorf("available methods = %v, want [passkey]", res.AvailableMethods)
 	}
-	// The WebAuthn request options must reach the HTTP layer for the browser.
-	if res.PasskeyRequestOptions == "" {
+	// The WebAuthn request options must reach the HTTP layer as a JSON object.
+	if len(res.PasskeyRequestOptions) == 0 {
 		t.Fatal("passkey request options must be set for the browser ceremony")
+	}
+	var decoded structpb.Struct
+	if err := json.Unmarshal(res.PasskeyRequestOptions, &decoded); err != nil {
+		t.Fatalf("passkey request options must be valid JSON: %v", err)
+	}
+	if decoded.Fields["challenge"].GetStringValue() != "abc123" {
+		t.Errorf("passkey request options challenge = %q, want abc123", decoded.Fields["challenge"].GetStringValue())
 	}
 	if res.ProviderSessionID != "s1" {
 		t.Errorf("provider session id = %q, want s1", res.ProviderSessionID)
+	}
+}
+
+func TestCompleteMFAPasskeySuccess(t *testing.T) {
+	var received *sessionv2.CheckWebAuthN
+	s := &fakeSessionService{
+		setFn: func(in *sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+			if in.Checks == nil || in.Checks.WebAuthN == nil {
+				return nil, errors.New("expected webauthn check")
+			}
+			received = in.Checks.WebAuthN
+			return &sessionv2.SetSessionResponse{SessionToken: "tok2"}, nil
+		},
+		getFn: func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error) {
+			return sessionWithUser("user-zitadel-1"), nil
+		},
+	}
+	u := &fakeUserService{
+		getFn: func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error) {
+			return humanProfileResponse("user-zitadel-1"), nil
+		},
+	}
+	l := &fakeLinker{user: identity.User{ID: "user_local_1", Status: identity.UserStatusActive}}
+
+	a := newTestAuth(t, s, u, l)
+	res, err := a.CompleteMFA(context.Background(), auth.MFAChallengeInput{
+		ProviderSessionID: "s1",
+		Method:            auth.MFAMethodPasskey,
+		PasskeyAssertion:  json.RawMessage(`{"id":"assertion-1","response":{"authenticatorData":"abc"}}`),
+	})
+	if err != nil {
+		t.Fatalf("CompleteMFA: %v", err)
+	}
+	if res.Status != auth.StatusAuthenticated {
+		t.Fatalf("status = %q, want %q", res.Status, auth.StatusAuthenticated)
+	}
+	// The assertion must have been parsed into the WebAuthn check struct.
+	if received == nil || received.CredentialAssertionData == nil {
+		t.Fatal("webauthn check must carry the parsed assertion")
+	}
+	id, ok := received.CredentialAssertionData.Fields["id"]
+	if !ok || id.GetStringValue() != "assertion-1" {
+		t.Errorf("assertion id not forwarded, got %v", received.CredentialAssertionData.Fields)
+	}
+	wantMethods := []auth.AuthenticationMethod{auth.MethodPassword, auth.MethodPasskey}
+	if len(res.AuthenticationMethods) != 2 || res.AuthenticationMethods[0] != wantMethods[0] || res.AuthenticationMethods[1] != wantMethods[1] {
+		t.Errorf("methods = %v, want %v", res.AuthenticationMethods, wantMethods)
+	}
+}
+
+func TestCompleteMFABadPasskeyAssertion(t *testing.T) {
+	s := &fakeSessionService{
+		setFn: func(*sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+			return nil, errors.New("should not be called")
+		},
+	}
+	a := newTestAuth(t, s, &fakeUserService{}, &fakeLinker{})
+	res, err := a.CompleteMFA(context.Background(), auth.MFAChallengeInput{
+		ProviderSessionID: "s1",
+		Method:            auth.MFAMethodPasskey,
+		PasskeyAssertion:  json.RawMessage(`{not valid json`),
+	})
+	if err != nil {
+		t.Fatalf("CompleteMFA: %v", err)
+	}
+	if res.Status != auth.StatusInvalidCredentials {
+		t.Fatalf("status = %q, want %q", res.Status, auth.StatusInvalidCredentials)
 	}
 }
 

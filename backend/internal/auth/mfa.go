@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -38,8 +39,8 @@ type MFAChallengeData struct {
 	// provider session token is never persisted.
 	ProviderSessionID string `json:"providerSessionId,omitempty"`
 	// PasskeyRequestOptions carries the WebAuthn PublicKeyCredentialRequestOptions
-	// (JSON) when passkey is among the available methods.
-	PasskeyRequestOptions string `json:"passkeyRequestOptions,omitempty"`
+	// (JSON object) when passkey is among the available methods.
+	PasskeyRequestOptions json.RawMessage `json:"passkeyRequestOptions,omitempty"`
 	// Attempts is the initial attempt count (always 0 at creation).
 	Attempts int `json:"attempts"`
 	// CreatedAt is when the challenge was issued.

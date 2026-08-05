@@ -774,13 +774,17 @@ components:
             enum: [totp, passkey, recovery_code]
           example: [totp, passkey, recovery_code]
         passkeyRequestOptions:
-          type: string
+          type: object
           description: |
-            WebAuthn PublicKeyCredentialRequestOptions (JSON) returned when
-            `passkey` is among the available methods. The browser must pass it
-            to `navigator.credentials.get()` and submit the resulting
-            assertion as `passkeyAssertion` to the MFA endpoint.
-          example: '{"publicKey":{"challenge":"abc","rpId":"login.example.com"}}'
+            WebAuthn PublicKeyCredentialRequestOptions returned when `passkey`
+            is among the available methods. The browser must pass it to
+            `navigator.credentials.get()` and submit the resulting assertion
+            as `passkeyAssertion` to the MFA endpoint.
+          example:
+            publicKey:
+              challenge: "abc123"
+              rpId: login.example.com
+              timeout: 60000
         expiresAt:
           type: string
           format: date-time
@@ -793,8 +797,10 @@ components:
       type: object
       description: |
         Submission of an MFA verification code or assertion to complete a
-        challenge started by `POST /api/v1/auth/sessions`.
-      required: [mfaToken, method, code]
+        challenge started by `POST /api/v1/auth/sessions`. The payload depends
+        on `method`: `totp` requires `code`; `passkey` requires
+        `passkeyAssertion`; `recovery_code` is not supported in Phase 1.2.
+      required: [mfaToken, method]
       additionalProperties: false
       properties:
         mfaToken:
@@ -811,11 +817,23 @@ components:
           type: string
           minLength: 1
           description: |
-            User-entered verification value. For `totp` a 6-digit code; for
-            `recovery_code` a single-use recovery code; for `passkey` the
-            WebAuthn assertion payload. Never logged.
+            User-entered verification value. Required for `totp` (a 6-digit
+            code). Never logged.
           writeOnly: true
           example: "123456"
+        passkeyAssertion:
+          type: object
+          description: |
+            The WebAuthn assertion returned by `navigator.credentials.get()`,
+            submitted verbatim. Required for `passkey`. Never logged.
+          writeOnly: true
+          example:
+            id: assertion-id
+            rawId: "base64"
+            response:
+              authenticatorData: "base64"
+              signature: "base64"
+              clientDataJSON: "base64"
 
     UserPersona:
       type: string

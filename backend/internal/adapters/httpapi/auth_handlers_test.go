@@ -588,6 +588,110 @@ func TestMFAWrongCode(t *testing.T) {
 	}
 }
 
+func TestMFARequiresCodeForTOTP(t *testing.T) {
+	h, _, _, _, _ := setupAuthHandlers(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+	mux.HandleFunc("POST /api/v1/auth/sessions/mfa", h.CompleteMFA)
+
+	rr := doRequest(mux, "POST", "/api/v1/auth/sessions", `{"identifier":"mfauser","password":"TestPassword123!"}`)
+	var mfaResp mfaRequiredResponse
+	json.Unmarshal(rr.Body.Bytes(), &mfaResp)
+
+	// totp without code must be rejected before any provider call.
+	mfaBody := fmt.Sprintf(`{"mfaToken":"%s","method":"totp"}`, mfaResp.MFAToken)
+	rr = doRequest(mux, "POST", "/api/v1/auth/sessions/mfa", mfaBody)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want %d. Body: %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+}
+
+func TestMFARecoveryCodeUnsupported(t *testing.T) {
+	h, _, _, _, _ := setupAuthHandlers(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+	mux.HandleFunc("POST /api/v1/auth/sessions/mfa", h.CompleteMFA)
+
+	rr := doRequest(mux, "POST", "/api/v1/auth/sessions", `{"identifier":"mfauser","password":"TestPassword123!"}`)
+	var mfaResp mfaRequiredResponse
+	json.Unmarshal(rr.Body.Bytes(), &mfaResp)
+
+	// recovery_code is not implemented: a generic 401 without provider call.
+	mfaBody := fmt.Sprintf(`{"mfaToken":"%s","method":"recovery_code","code":"abc"}`, mfaResp.MFAToken)
+	rr = doRequest(mux, "POST", "/api/v1/auth/sessions/mfa", mfaBody)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status: got %d, want %d. Body: %s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+}
+
+// setupPasskeyHandlers builds a handler set whose MFA user also supports
+// passkey, to exercise the full WebAuthn HTTP contract.
+func setupPasskeyHandlers(t *testing.T) *AuthHandlers {
+	t.Helper()
+	cfg := testSessionConfig()
+	fakeAuth := auth.NewFakeAuthenticator()
+	fakeAuth.AddUser(auth.FakeUser{
+		UserID:      identity.UserID("user_pk_001"),
+		Identifier:  "pkuser",
+		Password:    "TestPassword123!",
+		UserStatus:  identity.UserStatusActive,
+		Provider:    "fake",
+		SessionRef:  "fake-ref-pk",
+		RequiresMFA: true,
+		MFAMethods:  []auth.MFAMethod{auth.MFAMethodTOTP, auth.MFAMethodPasskey},
+		MFACode:     "123456",
+	})
+
+	store := newFakeSessionStore()
+	sessionSvc := session.NewService(store, session.SystemClock{},
+		cfg.Session.TTL, cfg.Session.RememberTTL,
+		cfg.Session.IdleTTL, cfg.Session.TouchInterval,
+		testEncryptor())
+	mfaStore := newFakeMFAStore()
+
+	return NewAuthHandlers(fakeAuth, sessionSvc, mfaStore, fakeRateChecker{},
+		&fakeUserChecker{users: map[identity.UserID]identity.UserStatus{"user_pk_001": identity.UserStatusActive}},
+		cfg, nil)
+}
+
+func TestMFAPasskeyAssertionWiredThrough(t *testing.T) {
+	h := setupPasskeyHandlers(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+	mux.HandleFunc("POST /api/v1/auth/sessions/mfa", h.CompleteMFA)
+
+	// Step 1: login requires MFA (passkey among the methods).
+	rr := doRequest(mux, "POST", "/api/v1/auth/sessions", `{"identifier":"pkuser","password":"TestPassword123!"}`)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("login status: got %d, want %d", rr.Code, http.StatusAccepted)
+	}
+	var mfaResp mfaRequiredResponse
+	json.Unmarshal(rr.Body.Bytes(), &mfaResp)
+	if len(mfaResp.AvailableMethods) != 2 {
+		t.Fatalf("availableMethods = %v, want [totp passkey]", mfaResp.AvailableMethods)
+	}
+
+	// Step 2: passkey without an assertion is rejected as a bad request.
+	badBody := fmt.Sprintf(`{"mfaToken":"%s","method":"passkey"}`, mfaResp.MFAToken)
+	rr = doRequest(mux, "POST", "/api/v1/auth/sessions/mfa", badBody)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status without assertion: got %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+
+	// Step 3: passkey with an assertion completes authentication. The fake
+	// always succeeds once the assertion reaches the adapter.
+	assertion := `{"id":"assertion-1","response":{"authenticatorData":"abc"}}`
+	pkBody := fmt.Sprintf(`{"mfaToken":"%s","method":"passkey","passkeyAssertion":%s}`, mfaResp.MFAToken, assertion)
+	rr = doRequest(mux, "POST", "/api/v1/auth/sessions/mfa", pkBody)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status: got %d, want %d. Body: %s", rr.Code, http.StatusNoContent, rr.Body.String())
+	}
+	sessionToken, _ := extractCookies(rr)
+	if sessionToken == "" {
+		t.Error("up_session cookie not set after passkey MFA")
+	}
+}
+
 func TestMFAChallengeAlreadyClaimed(t *testing.T) {
 	h, _, _, mfaStore, _ := setupAuthHandlers(t)
 	mux := http.NewServeMux()

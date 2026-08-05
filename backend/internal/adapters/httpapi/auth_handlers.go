@@ -114,20 +114,23 @@ type loginRequest struct {
 // mfaRequiredResponse is the JSON body for the 202 MFA-required response.
 // The mfaToken is an opaque, randomly generated United Pass token — it never
 // contains provider credentials. PasskeyRequestOptions is the WebAuthn
-// PublicKeyCredentialRequestOptions (JSON) when passkey is available.
+// PublicKeyCredentialRequestOptions (JSON object) when passkey is available.
 type mfaRequiredResponse struct {
-	Status                string    `json:"status"`
-	MFAToken              string    `json:"mfaToken"`
-	AvailableMethods      []string  `json:"availableMethods"`
-	PasskeyRequestOptions string    `json:"passkeyRequestOptions,omitempty"`
-	ExpiresAt             time.Time `json:"expiresAt"`
+	Status                string          `json:"status"`
+	MFAToken              string          `json:"mfaToken"`
+	AvailableMethods      []string        `json:"availableMethods"`
+	PasskeyRequestOptions json.RawMessage `json:"passkeyRequestOptions,omitempty"`
+	ExpiresAt             time.Time       `json:"expiresAt"`
 }
 
 // mfaChallengeRequest is the JSON body for POST /api/v1/auth/sessions/mfa.
+// Code is required for totp; PasskeyAssertion (the raw WebAuthn assertion
+// JSON) is required for passkey. Recovery codes are not supported yet.
 type mfaChallengeRequest struct {
-	MFAToken string `json:"mfaToken"`
-	Method   string `json:"method"`
-	Code     string `json:"code"`
+	MFAToken         string          `json:"mfaToken"`
+	Method           string          `json:"method"`
+	Code             string          `json:"code,omitempty"`
+	PasskeyAssertion json.RawMessage `json:"passkeyAssertion,omitempty"`
 }
 
 // Login handles POST /api/v1/auth/sessions.
@@ -334,6 +337,25 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-method payload validation before any provider call.
+	switch method {
+	case auth.MFAMethodTOTP:
+		if req.Code == "" {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "totp 验证需要提供 code。", nil)
+			return
+		}
+	case auth.MFAMethodPasskey:
+		if len(req.PasskeyAssertion) == 0 {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "passkey 验证需要提供 passkeyAssertion。", nil)
+			return
+		}
+	case auth.MFAMethodRecovery:
+		// Recovery codes are not implemented in Phase 1.2; return a generic
+		// failure rather than a provider round-trip.
+		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "验证码无效或已过期。", nil)
+		return
+	}
+
 	ip := clientIP(r)
 	mfaTokenHash := session.HashToken(req.MFAToken)
 
@@ -395,6 +417,7 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 		ProviderSessionID: challenge.ProviderSessionID,
 		Method:            method,
 		Code:              req.Code,
+		PasskeyAssertion:  req.PasskeyAssertion,
 	})
 	if err != nil {
 		// Provider failure: release the claim so the user can retry. The

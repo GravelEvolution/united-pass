@@ -5,6 +5,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
@@ -65,10 +66,12 @@ type MFAChallengeInput struct {
 	// that must be completed with the second factor.
 	ProviderSessionID string
 	Method            MFAMethod
-	Code              string
-	// PasskeyAssertion is used for WebAuthn-based MFA. It is separate from
-	// Code to avoid cramming a WebAuthn assertion into a string field.
-	PasskeyAssertion string
+	// Code is the user-entered verification value for totp (and, in future
+	// phases, recovery codes). Required only when Method is TOTP.
+	Code string
+	// PasskeyAssertion is the raw WebAuthn assertion JSON submitted by the
+	// browser for Method Passkey. It is forwarded to the provider as-is.
+	PasskeyAssertion json.RawMessage
 }
 
 // AuthenticationResult is the outcome of an authentication attempt. When
@@ -93,9 +96,11 @@ type AuthenticationResult struct {
 	ProviderSessionReference string
 	AuthenticationMethods    []AuthenticationMethod
 	// PasskeyRequestOptions carries the WebAuthn PublicKeyCredentialRequestOptions
-	// (JSON) when StatusMFARequired and passkey is available. The browser uses
-	// it for navigator.credentials.get; nil/empty means no passkey challenge.
-	PasskeyRequestOptions string
+	// (JSON object) when StatusMFARequired and passkey is available. The
+	// browser uses it for navigator.credentials.get; nil means no passkey
+	// challenge. The HTTP layer returns it as a JSON object, never as a
+	// string, so clients do not need to parse an embedded JSON document.
+	PasskeyRequestOptions json.RawMessage
 	AvailableMethods      []MFAMethod
 }
 

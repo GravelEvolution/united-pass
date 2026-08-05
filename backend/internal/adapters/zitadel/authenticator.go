@@ -127,10 +127,10 @@ func (a *Authenticator) BeginPasswordAuthentication(
 	}
 
 	// Passkey challenge requested and granted by ZITADEL. The WebAuthn
-	// PublicKeyCredentialRequestOptions must reach the browser so it can run
-	// navigator.credentials.get.
+	// PublicKeyCredentialRequestOptions must reach the browser (as a JSON
+	// object) so it can run navigator.credentials.get.
 	if create.Challenges != nil && create.Challenges.WebAuthN != nil {
-		options, err := json.Marshal(create.Challenges.WebAuthN.PublicKeyCredentialRequestOptions)
+		options, err := create.Challenges.WebAuthN.PublicKeyCredentialRequestOptions.MarshalJSON()
 		if err != nil {
 			return auth.AuthenticationResult{}, fmt.Errorf("zitadel: encode passkey request options: %w", err)
 		}
@@ -138,7 +138,7 @@ func (a *Authenticator) BeginPasswordAuthentication(
 			Status:                auth.StatusMFARequired,
 			ProviderSessionID:     create.SessionId,
 			AvailableMethods:      []auth.MFAMethod{auth.MFAMethodPasskey},
-			PasskeyRequestOptions: string(options),
+			PasskeyRequestOptions: options,
 		}, nil
 	}
 
@@ -356,11 +356,11 @@ func (a *Authenticator) resolveAuthenticated(
 	}, nil
 }
 
-// structFromJSON converts a JSON-encoded WebAuthn assertion into the protobuf
+// structFromJSON converts a raw JSON WebAuthn assertion into the protobuf
 // Struct expected by CheckWebAuthN.
-func structFromJSON(raw string) (*structpb.Struct, error) {
+func structFromJSON(raw json.RawMessage) (*structpb.Struct, error) {
 	var m map[string]interface{}
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, fmt.Errorf("zitadel: parse webauthn assertion: %w", err)
 	}
 	s, err := structpb.NewStruct(m)
