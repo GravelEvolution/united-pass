@@ -43,6 +43,11 @@ TEST_DISPLAY_NAME="${ZITADEL_TEST_DISPLAY_NAME:-Zhixing Lin}"
 OUT_DIR="${BACKEND_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/.zitadel"
 SA_KEY_FILE="${OUT_DIR}/sa-key.json"
 STATE_FILE="${OUT_DIR}/init-state.json"
+# IAM_OWNER service account key pre-provisioned by docker-compose.zitadel.yml
+# (ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINEKEY_TYPE=1 +
+# ZITADEL_FIRSTINSTANCE_MACHINEKEYPATH). It is used with JWT profile because
+# ZITADEL v2.71+ rejects the resource-owner password grant by default.
+INIT_SA_KEY_FILE="${ZITADEL_INIT_SA_KEY_FILE:-${OUT_DIR}/init-sa.json}"
 
 log() { echo "[zitadel-init] $*"; }
 die() { echo "[zitadel-init] error: $*" >&2; exit 1; }
@@ -50,6 +55,7 @@ die() { echo "[zitadel-init] error: $*" >&2; exit 1; }
 command -v curl >/dev/null || die "curl is required"
 command -v jq >/dev/null || die "jq is required"
 command -v python3 >/dev/null || die "python3 is required (for TOTP code generation)"
+command -v openssl >/dev/null || die "openssl is required (for JWT profile signing)"
 
 mkdir -p "${OUT_DIR}"
 
@@ -66,13 +72,36 @@ for i in $(seq 1 60); do
 done
 log "ZITADEL is ready"
 
-# --- get an admin token (password grant, ZITADEL API audience) --------------
+# --- acquire an admin token via JWT profile (service account key) ------------
+# The init service account is IAM_OWNER on the default instance. ZITADEL
+# v2.71+ disables the resource-owner password grant by default, so we use the
+# urn:ietf:params:oauth:grant-type:jwt-bearer grant with the pre-provisioned
+# JSON key instead of admin username/password.
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
 admin_token() {
+  local key_id user_id now header payload signing_input sig assertion key_tmp
+  [[ -f "${INIT_SA_KEY_FILE}" ]] || die "init service account key missing: ${INIT_SA_KEY_FILE} (start docker-compose.zitadel.yml first)"
+  key_id="$(jq -r '.keyId' "${INIT_SA_KEY_FILE}")"
+  user_id="$(jq -r '.userId' "${INIT_SA_KEY_FILE}")"
+  jq -e '.key != null' "${INIT_SA_KEY_FILE}" >/dev/null || die "init service account key has no private key material"
+
+  now="$(date +%s)"
+  header="$(printf '{"alg":"RS256","kid":"%s"}' "${key_id}" | b64url)"
+  payload="$(printf '{"iss":"%s","sub":"%s","aud":"%s","iat":%s,"exp":%s}' \
+    "${user_id}" "${user_id}" "${BASE_URL}" "$((now-10))" "$((now+600))" | b64url)"
+  signing_input="${header}.${payload}"
+  key_tmp="$(mktemp)"
+  jq -r '.key' "${INIT_SA_KEY_FILE}" > "${key_tmp}"
+  chmod 600 "${key_tmp}"
+  sig="$(printf '%s' "${signing_input}" | openssl dgst -sha256 -sign "${key_tmp}" | b64url)"
+  rm -f "${key_tmp}"
+  assertion="${signing_input}.${sig}"
+
   curl -sf -X POST "${BASE_URL}/oauth/v2/token" \
     -H 'Content-Type: application/x-www-form-urlencoded' \
-    --data-urlencode "grant_type=password" \
-    --data-urlencode "username=${ADMIN_USER}" \
-    --data-urlencode "password=${ADMIN_PASSWORD}" \
+    --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" \
+    --data-urlencode "assertion=${assertion}" \
     --data-urlencode "scope=openid urn:zitadel:iam:org:project:id:zitadel:aud" \
     | jq -r '.access_token'
 }
@@ -95,18 +124,22 @@ api() { # method path json-body
 }
 
 # --- find or create the test human user --------------------------------------
-# ZITADEL user v2 searches are POST /v2/users with a query body.
+# ZITADEL user v2 lists users via POST /v2/users. The userNameQuery filter is
+# unreliable for instance-level tokens in v2.71, so list all users and match
+# by preferredLoginName (prefix match on the short name covers the org or
+# email domain suffix).
 find_user_by_name() {
   local name="$1"
   local resp
   resp="$(curl -sf -X POST "${BASE_URL}/v2/users" \
     -H "Authorization: Bearer ${TOKEN}" \
     -H 'Content-Type: application/json' \
-    -d "{\"queries\":[{\"userNameQuery\":{\"userName\":\"${name}\"}}]}" 2>/dev/null || true)"
-  [[ -n "${resp}" ]] && echo "${resp}" | jq -r '.result[0].userId // empty'
+    -d '{}' 2>/dev/null || true)"
+  [[ -n "${resp}" ]] && echo "${resp}" | jq -r --arg n "${name}" \
+    '.result[] | select((.preferredLoginName // "") | startswith($n)) | .userId // empty' | head -1
 }
 
-USER_ID="$(find_user_by_name "${TEST_USER_FULL}")"
+USER_ID="$(find_user_by_name "${TEST_USER}")"
 if [[ -z "${USER_ID}" ]]; then
   log "creating test user ${TEST_USER_FULL}"
   # AddHumanUser: POST /v2/users/human -> {userId}
@@ -133,6 +166,21 @@ print(f'{code:06d}')
 " "$1"
 }
 
+register_totp() {
+  local resp secret code
+  resp="$(curl -sf -X POST "${BASE_URL}/v2/users/${USER_ID}/totp" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d '{}')"
+  secret="$(echo "${resp}" | jq -r '.secret')"
+  code="$(totp_code "${secret}")"
+  curl -sf -X POST "${BASE_URL}/v2/users/${USER_ID}/totp/verify" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"code\":\"${code}\"}" >/dev/null
+  echo "${secret}"
+}
+
 TOTP_RESP="$(curl -sf -X POST "${BASE_URL}/v2/users/${USER_ID}/totp" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H 'Content-Type: application/json' \
@@ -142,6 +190,15 @@ if [[ -z "${TOTP_SECRET}" ]]; then
   log "TOTP already registered on ${TEST_USER_FULL}"
   # Recover the secret from a previous init-state so E2E stays unattended.
   TOTP_SECRET="$(jq -r '.totpSecret // empty' "${STATE_FILE}" 2>/dev/null || true)"
+  if [[ -z "${TOTP_SECRET}" ]]; then
+    # No recoverable secret (e.g. init-state from a failed earlier run):
+    # remove the stale TOTP and register a fresh one.
+    log "no recoverable TOTP secret; re-registering"
+    curl -sf -X DELETE "${BASE_URL}/v2/users/${USER_ID}/totp" \
+      -H "Authorization: Bearer ${TOKEN}" >/dev/null 2>&1 || true
+    TOTP_SECRET="$(register_totp)"
+    log "TOTP re-registered on ${TEST_USER_FULL}"
+  fi
 else
   CODE="$(totp_code "${TOTP_SECRET}")"
   curl -sf -X POST "${BASE_URL}/v2/users/${USER_ID}/totp/verify" \
@@ -152,32 +209,42 @@ else
 fi
 
 # --- find or create the service account and its key --------------------------
-SA_ID="$(find_user_by_name "up-backend-sa@zitadel.localhost")"
+SA_ID="$(find_user_by_name "up-backend-sa")"
 if [[ -z "${SA_ID}" ]]; then
   log "creating service account (machine user)"
-  # CreateUser with a machine type: POST /v2/users/new -> {id}
-  SA_ID="$(api POST /v2/users/new \
-    '{"userName":"up-backend-sa@zitadel.localhost","machine":{"name":"United Pass backend","description":"United Pass backend API service account"}}' \
-    | jq -r '.id')"
+  # Create a machine user. The v2 users API has no machine endpoint in
+  # v2.71 (POST /v2/users/new is gone), so use the management v1 API.
+  SA_ID="$(api POST /management/v1/users/machine \
+    '{"userName":"up-backend-sa@zitadel.localhost","name":"United Pass backend","description":"United Pass backend API service account"}' \
+    | jq -r '.userId')"
   log "created service account ${SA_ID}"
+fi
 
-  # Authorize the service account on the organization. The management member
-  # endpoint is deprecated in favor of the Administrator API; it still works
-  # for local development. ORG_OWNER grants session/user API access.
-  if ! api POST /management/v1/orgs/me/members \
-    "{\"userId\":\"${SA_ID}\",\"roles\":[\"ORG_OWNER\"]}" >/dev/null 2>&1; then
-    log "warning: could not add service account as org member (manual authorization may be needed)"
-  fi
+# Authorize the service account on the org that owns the test user
+# (ORG_OWNER grants session/user API access). The org member endpoint is
+# fixed at /orgs/me/members and requires the X-Zitadel-Orgid header to
+# target a specific org (IAM-level token context differs from the org).
+ORG_ID="$(curl -sf -X POST "${BASE_URL}/v2/users" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq -r --arg u "${USER_ID}" '.result[] | select(.userId == $u) | .details.resourceOwner')"
+if [[ -n "${ORG_ID}" ]] && ! curl -sf -X POST "${BASE_URL}/management/v1/orgs/me/members" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -H "X-Zitadel-Orgid: ${ORG_ID}" \
+  -d "{\"userId\":\"${SA_ID}\",\"roles\":[\"ORG_OWNER\"]}" >/dev/null 2>&1; then
+  log "warning: could not add service account as org member (manual authorization may be needed)"
 fi
 
 if [[ ! -f "${SA_KEY_FILE}" ]]; then
   log "creating service account key"
-  # AddKey: POST /v2/users/{id}/keys -> {keyId, keyContent}. keyContent is a
-  # []byte field, which ProtoJSON serializes as a Base64 string. It encodes
-  # the key.json (type/keyId/key/expirationDate/userId) expected by the SDK
-  # and loadServiceAccountKey, so decode it before saving.
-  KEY_RESP="$(api POST "/v2/users/${SA_ID}/keys" '{}')"
-  echo "${KEY_RESP}" | jq -r '.keyContent | @base64d' > "${SA_KEY_FILE}"
+  # AddKey: POST /management/v1/users/{id}/keys -> {keyId, keyDetails}.
+  # keyDetails is a []byte field, which ProtoJSON serializes as a Base64
+  # string. It encodes the key.json (type/keyId/key/expirationDate/userId)
+  # expected by the SDK and loadServiceAccountKey, so decode it before saving.
+  # (The v2 users API has no AddKey endpoint in v2.71.)
+  KEY_RESP="$(api POST "/management/v1/users/${SA_ID}/keys" '{"type":1}')"
+  echo "${KEY_RESP}" | jq -r '.keyDetails | @base64d' > "${SA_KEY_FILE}"
   chmod 600 "${SA_KEY_FILE}"
   # Validate the decoded key matches the SDK KeyFile shape.
   jq -e '.keyId != null and .key != null and .userId != null' "${SA_KEY_FILE}" >/dev/null \
