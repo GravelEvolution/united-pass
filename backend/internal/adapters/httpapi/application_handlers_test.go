@@ -30,12 +30,13 @@ type fakeAppStore struct {
 	clients map[applications.OAuthClientID]applications.OAuthClient
 	deleted map[applications.OAuthClientID]bool
 
-	createErr    error
-	completeErr  error
-	listErr      error
-	updateErr    error
-	setStatusErr error
-	deleteErr    error
+	createErr       error
+	completeErr     error
+	listErr         error
+	updateErr       error
+	updateClientErr error
+	setStatusErr    error
+	deleteErr       error
 }
 
 func newFakeAppStore() *fakeAppStore {
@@ -57,7 +58,7 @@ func (s *fakeAppStore) CreateApplicationWithInitialClient(_ context.Context, app
 	return nil
 }
 
-func (s *fakeAppStore) CompleteInitialProvisioning(_ context.Context, appID applications.ApplicationID, clientID applications.OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, _ applications.ProviderOperationID, _ *applications.ClientSecretRecord) error {
+func (s *fakeAppStore) CompleteInitialProvisioning(_ context.Context, appID applications.ApplicationID, clientID applications.OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, _ applications.ProviderOperationID, secret *applications.ClientSecretRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.completeErr != nil {
@@ -70,6 +71,9 @@ func (s *fakeAppStore) CompleteInitialProvisioning(_ context.Context, appID appl
 	c.Provisioning = applications.ProvisioningStatusProvisioned
 	c.ProviderApplicationID = providerApplicationID
 	c.ProviderClientID = providerClientID
+	if secret != nil {
+		c.SecretRecords = append(c.SecretRecords, *secret)
+	}
 	s.clients[clientID] = c
 	return nil
 }
@@ -204,17 +208,23 @@ func (s *fakeAppStore) GetClient(_ context.Context, appID applications.Applicati
 func (s *fakeAppStore) CreateClientWithOperation(_ context.Context, client applications.OAuthClient, _ applications.ProviderOperation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.createErr != nil {
+		return s.createErr
+	}
 	s.clients[client.ID] = client
 	return nil
 }
 
-func (s *fakeAppStore) CompleteClientProvisioning(_ context.Context, clientID applications.OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, _ applications.ProviderOperationID, _ *applications.ClientSecretRecord) error {
+func (s *fakeAppStore) CompleteClientProvisioning(_ context.Context, clientID applications.OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, _ applications.ProviderOperationID, secret *applications.ClientSecretRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.clients[clientID]
 	c.Provisioning = applications.ProvisioningStatusProvisioned
 	c.ProviderApplicationID = providerApplicationID
 	c.ProviderClientID = providerClientID
+	if secret != nil {
+		c.SecretRecords = append(c.SecretRecords, *secret)
+	}
 	s.clients[clientID] = c
 	return nil
 }
@@ -231,6 +241,9 @@ func (s *fakeAppStore) MarkClientProvisioningFailed(_ context.Context, clientID 
 func (s *fakeAppStore) UpdateClientConfig(_ context.Context, clientID applications.OAuthClientID, upd applications.ClientConfigUpdate, expectedVersion int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.updateClientErr != nil {
+		return s.updateClientErr
+	}
 	c, ok := s.clients[clientID]
 	if !ok {
 		return applications.ErrNotFound
@@ -239,6 +252,14 @@ func (s *fakeAppStore) UpdateClientConfig(_ context.Context, clientID applicatio
 		return applications.ErrConflict
 	}
 	c.Name = upd.Name
+	c.LogoutURI = upd.LogoutURI
+	c.ConsentMode = upd.ConsentMode
+	if upd.RedirectURIs != nil {
+		c.RedirectURIs = upd.RedirectURIs
+	}
+	if upd.Scopes != nil {
+		c.Scopes = upd.Scopes
+	}
 	c.Version++
 	s.clients[clientID] = c
 	return nil
@@ -448,6 +469,12 @@ func buildAppRouter(env *appEnv, injectSession bool) http.Handler {
 	r.Post("/admin/applications/{applicationId}/enable", env.handlers.EnableApplication)
 	r.Post("/admin/applications/{applicationId}/disable", env.handlers.DisableApplication)
 	r.Delete("/admin/applications/{applicationId}", env.handlers.DeleteApplication)
+	r.Post("/admin/applications/{applicationId}/clients", env.handlers.CreateClient)
+	r.Get("/admin/applications/{applicationId}/clients/{clientId}", env.handlers.GetClient)
+	r.Patch("/admin/applications/{applicationId}/clients/{clientId}", env.handlers.UpdateClient)
+	r.Post("/admin/applications/{applicationId}/clients/{clientId}/enable", env.handlers.EnableClient)
+	r.Post("/admin/applications/{applicationId}/clients/{clientId}/disable", env.handlers.DisableClient)
+	r.Delete("/admin/applications/{applicationId}/clients/{clientId}", env.handlers.DeleteClient)
 	return r
 }
 
@@ -542,6 +569,14 @@ func decodeErrorBody(t *testing.T, rec *httptest.ResponseRecorder) ErrorBody {
 // alone have no provider counterpart).
 func createAppViaAPI(t *testing.T, env *appEnv, router http.Handler, body string) string {
 	t.Helper()
+	appID, _ := createAppAndClientViaAPI(t, env, router, body)
+	return appID
+}
+
+// createAppAndClientViaAPI creates an application with its initial client
+// through the HTTP API and returns both IDs.
+func createAppAndClientViaAPI(t *testing.T, env *appEnv, router http.Handler, body string) (string, string) {
+	t.Helper()
 	rec := doAppRequest(router, http.MethodPost, "/admin/applications/with-initial-client", body, true)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("setup create: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
@@ -550,7 +585,7 @@ func createAppViaAPI(t *testing.T, env *appEnv, router http.Handler, body string
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("setup create decode: %v", err)
 	}
-	return resp.ApplicationID
+	return resp.ApplicationID, resp.ClientID
 }
 
 // --- Authentication / CSRF / Authorization ---

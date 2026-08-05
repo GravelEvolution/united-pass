@@ -415,7 +415,7 @@ func (h *ApplicationHandlers) UpdateApplication(w http.ResponseWriter, r *http.R
 	}
 
 	if _, err := h.svc.UpdateApplication(r.Context(), actor, appID, request.ID(r.Context()), patch); err != nil {
-		h.writeMutationError(w, r, err, nil)
+		h.writeMutationError(w, r, err, nil, "应用名称已存在。")
 		return
 	}
 
@@ -450,7 +450,7 @@ func (h *ApplicationHandlers) setApplicationStatus(w http.ResponseWriter, r *htt
 	}
 
 	if err := h.svc.SetStatus(r.Context(), actor, appID, request.ID(r.Context()), enable); err != nil {
-		h.writeMutationError(w, r, err, nil)
+		h.writeMutationError(w, r, err, nil, "应用名称已存在。")
 		return
 	}
 
@@ -471,12 +471,12 @@ func (h *ApplicationHandlers) DeleteApplication(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if !h.verifyReauthentication(w, r, actor, appID) {
+	if !h.verifyReauthentication(w, r, actor, applications.EventApplicationDeleted, "application.delete", appID, "") {
 		return
 	}
 
 	if err := h.svc.Delete(r.Context(), actor, appID, request.ID(r.Context())); err != nil {
-		h.writeMutationError(w, r, err, nil)
+		h.writeMutationError(w, r, err, nil, "应用名称已存在。")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -485,17 +485,17 @@ func (h *ApplicationHandlers) DeleteApplication(w http.ResponseWriter, r *http.R
 // verifyReauthentication enforces the reauthentication requirement for
 // high-risk operations. It fails closed: without a verifier implementation,
 // an absent token or any verification failure denies the operation.
-func (h *ApplicationHandlers) verifyReauthentication(w http.ResponseWriter, r *http.Request, actor identity.UserID, appID applications.ApplicationID) bool {
+func (h *ApplicationHandlers) verifyReauthentication(w http.ResponseWriter, r *http.Request, actor identity.UserID, eventType, action string, appID applications.ApplicationID, clientID applications.OAuthClientID) bool {
 	token := r.Header.Get("X-Reauthentication-Token")
 	var err error
 	if h.reauth == nil || token == "" {
 		err = errors.New("reauthentication unavailable")
 	} else {
-		err = h.reauth.VerifyAndConsume(r.Context(), token, "application.delete", appID, "")
+		err = h.reauth.VerifyAndConsume(r.Context(), token, action, appID, clientID)
 	}
 	if err != nil {
-		h.svc.RecordEvent(r.Context(), applications.EventApplicationDeleted, actor, appID, "",
-			request.ID(r.Context()), "application.delete", applications.SecurityEventDenied, "reauthentication")
+		h.svc.RecordEvent(r.Context(), eventType, actor, appID, clientID,
+			request.ID(r.Context()), action, applications.SecurityEventDenied, "reauthentication")
 		writeError(w, r, http.StatusForbidden, CodeReauthenticationReq, "该操作需要重新认证。", nil)
 		return false
 	}
@@ -521,8 +521,9 @@ func (h *ApplicationHandlers) manageFromPath(w http.ResponseWriter, r *http.Requ
 
 // writeMutationError maps use-case errors of mutating endpoints onto the
 // frozen error contract. extraFieldErrors allows callers to append
-// endpoint-specific field errors for validation failures.
-func (h *ApplicationHandlers) writeMutationError(w http.ResponseWriter, r *http.Request, err error, extraFieldErrors []FieldError) {
+// endpoint-specific field errors for validation failures; duplicateMessage
+// is the resource-specific unique-name conflict message.
+func (h *ApplicationHandlers) writeMutationError(w http.ResponseWriter, r *http.Request, err error, extraFieldErrors []FieldError, duplicateMessage string) {
 	switch {
 	case errors.Is(err, applications.ErrNotFound):
 		WriteNotFound(w, r)
@@ -532,7 +533,7 @@ func (h *ApplicationHandlers) writeMutationError(w http.ResponseWriter, r *http.
 	case isValidationErrors(err):
 		WriteValidation(w, r, "请求参数校验失败。", prefixFieldErrors(err, ""))
 	case errors.Is(err, applications.ErrDuplicateName):
-		writeError(w, r, http.StatusConflict, CodeConflict, "应用名称已存在。", nil)
+		writeError(w, r, http.StatusConflict, CodeConflict, duplicateMessage, nil)
 	case errors.Is(err, applications.ErrInvalidStateTransition), errors.Is(err, applications.ErrConflict):
 		writeError(w, r, http.StatusConflict, CodeConflict, "资源当前状态不允许该操作。", nil)
 	case errors.Is(err, applications.ErrProviderConflict):

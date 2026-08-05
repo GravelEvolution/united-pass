@@ -30,6 +30,7 @@ type fakeStore struct {
 	setAppStatusErr  error
 	deleteAppErr     error
 	listErr          error
+	updateClientErr  error
 	markDeletingErr  error
 	completeDelErr   error
 	reconcileMarkErr error
@@ -246,6 +247,10 @@ func (s *fakeStore) MarkClientProvisioningFailed(_ context.Context, clientID OAu
 func (s *fakeStore) UpdateClientConfig(_ context.Context, clientID OAuthClientID, upd ClientConfigUpdate, expectedVersion int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.updateClientErr != nil {
+		return s.updateClientErr
+	}
+	s.note("store:update-client")
 	c, ok := s.clients[clientID]
 	if !ok {
 		return ErrNotFound
@@ -266,6 +271,7 @@ func (s *fakeStore) UpdateClientConfig(_ context.Context, clientID OAuthClientID
 func (s *fakeStore) SetClientStatus(_ context.Context, clientID OAuthClientID, status Status, expectedVersion int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.note("store:set-client-status")
 	c, ok := s.clients[clientID]
 	if !ok {
 		return ErrNotFound
@@ -455,6 +461,11 @@ func (p *seqProvisioner) EnableClient(ctx context.Context, providerApplicationID
 func (p *seqProvisioner) DisableClient(ctx context.Context, providerApplicationID string) error {
 	*p.seq = append(*p.seq, "provider:disable")
 	return p.FakeProvisioner.DisableClient(ctx, providerApplicationID)
+}
+
+func (p *seqProvisioner) UpdateClient(ctx context.Context, providerApplicationID string, spec ClientUpdateSpec) error {
+	*p.seq = append(*p.seq, "provider:update")
+	return p.FakeProvisioner.UpdateClient(ctx, providerApplicationID, spec)
 }
 
 func newTestService(t *testing.T) (*Service, *fakeStore, *FakeProvisioner, *fakeEvents, *[]string) {
@@ -857,6 +868,541 @@ func TestDeleteConcurrentDeletionConflicts(t *testing.T) {
 		store.clients[id] = c
 	}
 	if err := svc.Delete(ctx, "user_actor", res.ApplicationID, "req-2"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+}
+
+// --- Create client (standalone) ---
+
+func TestCreateClient_ConfidentialSuccess(t *testing.T) {
+	svc, store, prov, events, _ := newTestService(t)
+	ctx := context.Background()
+
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	clientRes, err := svc.CreateClient(ctx, "user_actor", res.ApplicationID, "req-2", confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	if clientRes.ClientID == "" {
+		t.Fatal("expected generated client ID")
+	}
+	if clientRes.ClientSecret == "" {
+		t.Fatal("confidential client must return the one-time secret")
+	}
+
+	stored, err := store.GetClient(ctx, res.ApplicationID, clientRes.ClientID)
+	if err != nil {
+		t.Fatalf("get client: %v", err)
+	}
+	if stored.Provisioning != ProvisioningStatusProvisioned || stored.Status != StatusActive {
+		t.Errorf("client state = %s/%s, want provisioned/active", stored.Provisioning, stored.Status)
+	}
+	if prov.Client(stored.ProviderApplicationID) == nil {
+		t.Error("provider resource missing")
+	}
+	secrets, _ := store.GetClientSecretRecords(ctx, clientRes.ClientID)
+	if len(secrets) != 1 {
+		t.Fatalf("secret records = %d, want 1", len(secrets))
+	}
+	found := false
+	for _, ev := range events.events {
+		if ev.EventType == EventOAuthClientCreated && ev.ClientID == clientRes.ClientID && ev.Result == SecurityEventSuccess {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected oauth_client.created success event")
+	}
+}
+
+func TestCreateClient_PublicNoSecret(t *testing.T) {
+	svc, store, _, _, _ := newTestService(t)
+	ctx := context.Background()
+
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	in := confidentialClientInput()
+	in.Profile = ClientProfileSPAMobile
+	clientRes, err := svc.CreateClient(ctx, "user_actor", res.ApplicationID, "req-2", in)
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	if clientRes.ClientSecret != "" {
+		t.Fatal("public client must never return a secret")
+	}
+	secrets, _ := store.GetClientSecretRecords(ctx, clientRes.ClientID)
+	if len(secrets) != 0 {
+		t.Fatalf("secret records = %d, want 0", len(secrets))
+	}
+}
+
+func TestCreateClient_AppNotFound(t *testing.T) {
+	svc, _, _, _, _ := newTestService(t)
+	_, err := svc.CreateClient(context.Background(), "user_actor", ApplicationID("app_missing"), "req-1", confidentialClientInput())
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCreateClient_UnknownProfileRejected(t *testing.T) {
+	svc, _, _, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	in := confidentialClientInput()
+	in.Profile = ClientProfile("bogus")
+	_, err = svc.CreateClient(ctx, "user_actor", res.ApplicationID, "req-2", in)
+	if !errors.Is(err, ErrInvalidStateTransition) {
+		t.Fatalf("err = %v, want ErrInvalidStateTransition", err)
+	}
+}
+
+func TestCreateClient_ProviderFailureMarksFailed(t *testing.T) {
+	svc, store, prov, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	prov.ProvisionErr = ErrProviderUnavailable
+
+	_, err = svc.CreateClient(ctx, "user_actor", res.ApplicationID, "req-2", confidentialClientInput())
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	// The application stays untouched; only the new client row is failed.
+	failed := 0
+	for _, c := range store.clients {
+		if c.Provisioning == ProvisioningStatusProvisioningFailed {
+			failed++
+		}
+	}
+	if failed != 1 {
+		t.Errorf("failed clients = %d, want 1", failed)
+	}
+	if store.apps[res.ApplicationID].Provisioning != ProvisioningStatusProvisioned {
+		t.Error("application provisioning must stay provisioned")
+	}
+}
+
+func TestCreateClient_ProviderConflict(t *testing.T) {
+	svc, _, prov, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	prov.ProvisionErr = ErrProviderConflict
+	_, err = svc.CreateClient(ctx, "user_actor", res.ApplicationID, "req-2", confidentialClientInput())
+	if !errors.Is(err, ErrProviderConflict) {
+		t.Fatalf("err = %v, want ErrProviderConflict", err)
+	}
+}
+
+// --- Client detail ---
+
+func TestGetClientBindingAndLookup(t *testing.T) {
+	svc, _, _, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := svc.GetClient(ctx, res.ApplicationID, res.ClientID); err != nil {
+		t.Fatalf("get client: %v", err)
+	}
+	// A client looked up under the wrong application is not found
+	// (anti-enumeration).
+	if _, err := svc.GetClient(ctx, ApplicationID("app_other"), res.ClientID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+	if _, err := svc.GetClient(ctx, res.ApplicationID, OAuthClientID("clt_missing")); !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// --- Update client ---
+
+func TestUpdateClient_MergesAndSyncsProviderFirst(t *testing.T) {
+	svc, _, prov, events, seq := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	newName := "Renamed Client"
+	newURIs := []string{"https://new.example.com/callback"}
+	newScopes := []string{"openid", "email"}
+	updated, err := svc.UpdateClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2", ClientPatch{
+		Name:          &newName,
+		RedirectURIs:  &newURIs,
+		AllowedScopes: &newScopes,
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.Name != newName {
+		t.Errorf("name = %q, want %q", updated.Name, newName)
+	}
+	if len(updated.RedirectURIs) != 1 || updated.RedirectURIs[0].URI != "https://new.example.com/callback" {
+		t.Errorf("redirect uris = %+v", updated.RedirectURIs)
+	}
+	if len(updated.Scopes) != 2 {
+		t.Errorf("scopes = %v", updated.Scopes)
+	}
+	// Unsubmitted fields are preserved.
+	if updated.ConsentMode != ConsentModeAlways || updated.Profile != ClientProfileWebServer {
+		t.Errorf("unrelated fields changed: %+v", updated)
+	}
+
+	// Provider was synchronized with the new settings.
+	stored, err := svc.GetClient(ctx, res.ApplicationID, res.ClientID)
+	if err != nil {
+		t.Fatalf("get client: %v", err)
+	}
+	fake := prov.Client(stored.ProviderApplicationID)
+	if fake == nil || fake.DisplayName != newName {
+		t.Errorf("provider client not updated: %+v", fake)
+	}
+	// Provider call must precede the local write.
+	var providerIdx, storeIdx = -1, -1
+	for i, step := range *seq {
+		if step == "provider:update" && providerIdx == -1 {
+			providerIdx = i
+		}
+		if step == "store:update-client" && storeIdx == -1 {
+			storeIdx = i
+		}
+	}
+	if providerIdx == -1 || storeIdx == -1 || providerIdx > storeIdx {
+		t.Errorf("provider call must precede local update: %v", *seq)
+	}
+	found := false
+	for _, ev := range events.events {
+		if ev.EventType == EventOAuthClientUpdated && ev.Result == SecurityEventSuccess {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected oauth_client.updated success event")
+	}
+}
+
+func TestUpdateClient_ScopeOnlyPatchSkipsProvider(t *testing.T) {
+	svc, _, _, _, seq := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	*seq = (*seq)[:0]
+	newScopes := []string{"openid"}
+	if _, err := svc.UpdateClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2", ClientPatch{AllowedScopes: &newScopes}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	for _, step := range *seq {
+		if step == "provider:update" {
+			t.Error("local-only fields must not trigger a provider sync")
+		}
+	}
+}
+
+func TestUpdateClient_ValidationErrorNoProviderCall(t *testing.T) {
+	svc, store, _, _, seq := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	before := store.clients[res.ClientID]
+	*seq = (*seq)[:0]
+
+	badURIs := []string{"http://insecure.example.com/callback"}
+	_, err = svc.UpdateClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2", ClientPatch{RedirectURIs: &badURIs})
+	var verr *ValidationErrors
+	if !errors.As(err, &verr) {
+		t.Fatalf("err = %v, want ValidationErrors", err)
+	}
+	for _, step := range *seq {
+		if step == "provider:update" || step == "store:update-client" {
+			t.Errorf("validation failure must not touch provider or store: %v", *seq)
+		}
+	}
+	if store.clients[res.ClientID].Version != before.Version {
+		t.Error("local state changed despite validation failure")
+	}
+}
+
+func TestUpdateClient_ProviderFailureLeavesLocalUnchanged(t *testing.T) {
+	svc, store, prov, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	before := store.clients[res.ClientID]
+	prov.UpdateErr = ErrProviderUnavailable
+
+	newName := "New Name"
+	_, err = svc.UpdateClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2", ClientPatch{Name: &newName})
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	if store.clients[res.ClientID].Name != before.Name || store.clients[res.ClientID].Version != before.Version {
+		t.Error("local state must stay unchanged on provider failure")
+	}
+}
+
+func TestUpdateClient_LocalFailureAfterProviderReconciles(t *testing.T) {
+	svc, store, prov, events, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	store.updateClientErr = errors.New("db down")
+
+	newName := "New Name"
+	_, err = svc.UpdateClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2", ClientPatch{Name: &newName})
+	if err == nil {
+		t.Fatal("expected local write error")
+	}
+	if len(store.jobs) != 1 {
+		t.Errorf("reconciliation jobs = %d, want 1", len(store.jobs))
+	}
+	found := false
+	for _, ev := range events.events {
+		if ev.EventType == EventProviderReconciliationNeed {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected reconciliation audit event")
+	}
+	if prov.ClientCount() != 1 {
+		t.Error("provider resource must survive; drift is reconciled, not rolled back silently")
+	}
+}
+
+func TestUpdateClient_VersionConflict(t *testing.T) {
+	svc, store, _, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Simulate a concurrent writer between the read and the conditional write.
+	store.updateClientErr = ErrConflict
+
+	newName := "New Name"
+	_, err = svc.UpdateClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2", ClientPatch{Name: &newName})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+	if store.clients[res.ClientID].Name == newName {
+		t.Error("local state must not change on version conflict")
+	}
+}
+
+// --- Client enable / disable ---
+
+func TestSetClientStatus_DisableProviderFirst(t *testing.T) {
+	svc, store, prov, events, seq := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	updated, err := svc.SetClientStatus(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2", false)
+	if err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if updated.Status != StatusDisabled {
+		t.Errorf("status = %s, want disabled", updated.Status)
+	}
+	fake := prov.Client(store.clients[res.ClientID].ProviderApplicationID)
+	if fake == nil || !fake.Disabled {
+		t.Error("provider client must be disabled")
+	}
+	var providerIdx, storeIdx = -1, -1
+	for i, step := range *seq {
+		if step == "provider:disable" && providerIdx == -1 {
+			providerIdx = i
+		}
+		if step == "store:set-client-status" && storeIdx == -1 {
+			storeIdx = i
+		}
+	}
+	if providerIdx == -1 || storeIdx == -1 || providerIdx > storeIdx {
+		t.Errorf("provider call must precede local update: %v", *seq)
+	}
+	found := false
+	for _, ev := range events.events {
+		if ev.EventType == EventOAuthClientDisabled && ev.Result == SecurityEventSuccess {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected oauth_client.disabled success event")
+	}
+
+	// Re-enable returns to active.
+	if _, err := svc.SetClientStatus(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-3", true); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if store.clients[res.ClientID].Status != StatusActive {
+		t.Error("client not re-enabled")
+	}
+}
+
+func TestSetClientStatus_ProviderFailureLeavesLocalUnchanged(t *testing.T) {
+	svc, store, prov, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	prov.DisableErr = ErrProviderUnavailable
+
+	_, err = svc.SetClientStatus(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2", false)
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	if store.clients[res.ClientID].Status != StatusActive {
+		t.Error("local status must stay unchanged on provider failure")
+	}
+}
+
+func TestSetClientStatus_InvalidTransition(t *testing.T) {
+	svc, _, _, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Enabling an already-active client is rejected before any provider call.
+	_, err = svc.SetClientStatus(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2", true)
+	if !errors.Is(err, ErrInvalidStateTransition) {
+		t.Fatalf("err = %v, want ErrInvalidStateTransition", err)
+	}
+}
+
+// --- Delete client (standalone) ---
+
+func TestDeleteClient_RemovesProviderAndLocal(t *testing.T) {
+	svc, store, prov, events, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if prov.ClientCount() != 1 {
+		t.Fatalf("provider clients = %d, want 1", prov.ClientCount())
+	}
+
+	if err := svc.DeleteClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if !store.deleted[res.ClientID] {
+		t.Error("client not marked deleted")
+	}
+	if prov.ClientCount() != 0 {
+		t.Errorf("provider clients = %d, want 0", prov.ClientCount())
+	}
+	// The parent application survives.
+	if _, ok := store.apps[res.ApplicationID]; !ok {
+		t.Error("application must survive client deletion")
+	}
+	found := false
+	for _, ev := range events.events {
+		if ev.EventType == EventOAuthClientDeleted && ev.Result == SecurityEventSuccess {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected oauth_client.deleted success event")
+	}
+}
+
+func TestDeleteClient_ProviderFailureAbortsAndReconciles(t *testing.T) {
+	svc, store, prov, events, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	prov.DeleteErr = ErrProviderUnavailable
+
+	err = svc.DeleteClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2")
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	if store.deleted[res.ClientID] {
+		t.Error("client must survive a failed provider deletion")
+	}
+	if store.clients[res.ClientID].Provisioning != ProvisioningStatusDeleteFailed {
+		t.Errorf("provisioning = %s, want delete_failed", store.clients[res.ClientID].Provisioning)
+	}
+	if len(store.jobs) != 1 {
+		t.Errorf("reconciliation jobs = %d, want 1", len(store.jobs))
+	}
+	found := false
+	for _, ev := range events.events {
+		if ev.EventType == EventProviderReconciliationNeed {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected reconciliation audit event")
+	}
+
+	// Retry after failure goes through the delete-failed retry path.
+	if err := svc.DeleteClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-3"); err != nil {
+		t.Fatalf("retry delete: %v", err)
+	}
+	if !store.deleted[res.ClientID] {
+		t.Error("client not deleted after retry")
+	}
+}
+
+func TestDeleteClient_NotFoundAndBinding(t *testing.T) {
+	svc, _, _, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := svc.DeleteClient(ctx, "user_actor", res.ApplicationID, OAuthClientID("clt_missing"), "req-2"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+	// A client deleted under the wrong application is not found.
+	if err := svc.DeleteClient(ctx, "user_actor", ApplicationID("app_other"), res.ClientID, "req-2"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteClient_ConcurrentDeletionConflicts(t *testing.T) {
+	svc, store, _, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	c := store.clients[res.ClientID]
+	c.Provisioning = ProvisioningStatusDeleting
+	store.clients[res.ClientID] = c
+
+	if err := svc.DeleteClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("err = %v, want ErrConflict", err)
 	}
 }

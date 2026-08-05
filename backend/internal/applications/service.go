@@ -70,6 +70,14 @@ type CreateResult struct {
 	ClientSecret  string
 }
 
+// ClientCreateResult is the outcome of adding a client to an existing
+// application. ClientSecret is non-empty only for confidential clients; it
+// is shown exactly once and never persisted.
+type ClientCreateResult struct {
+	ClientID     OAuthClientID
+	ClientSecret string
+}
+
 // Detail is the application detail projection: the application, its fully
 // provisioned clients and the audit trail actually recorded for it.
 type Detail struct {
@@ -295,6 +303,303 @@ func (s *Service) List(ctx context.Context, q ListQuery) (ListResult, error) {
 	return s.store.ListApplications(ctx, q)
 }
 
+// CreateClient adds a new OAuth client to an existing, fully provisioned
+// application. It follows the same cross-store sequence as the initial
+// client: local row first (provisioning), provider call outside any
+// transaction, then completion or compensation. The raw secret is returned
+// exactly once and never persisted.
+func (s *Service) CreateClient(
+	ctx context.Context,
+	actor identity.UserID,
+	appID ApplicationID,
+	requestID string,
+	clientIn ClientInput,
+) (ClientCreateResult, error) {
+	// Applications that never finished provisioning are invisible
+	// (anti-enumeration); GetApplication yields ErrNotFound for them.
+	if _, err := s.store.GetApplication(ctx, appID); err != nil {
+		return ClientCreateResult{}, err
+	}
+
+	rules, ok := clientIn.Profile.Rules()
+	if !ok {
+		return ClientCreateResult{}, ErrInvalidStateTransition
+	}
+
+	now := s.now()
+	clientID := NewOAuthClientID()
+	opID := NewProviderOperationID()
+
+	uris := make([]RedirectURI, len(clientIn.RedirectURIs))
+	for i, u := range clientIn.RedirectURIs {
+		isLoopback, _ := ValidateRedirectURI(u)
+		uris[i] = RedirectURI{URI: u, IsLoopback: isLoopback, AddedAt: now}
+	}
+
+	client := OAuthClient{
+		ID:                clientID,
+		ApplicationID:     appID,
+		Name:              strings.TrimSpace(clientIn.Name),
+		Profile:           clientIn.Profile,
+		ClientType:        rules.ClientType,
+		TokenEndpointAuth: rules.TokenEndpointAuth,
+		ConsentMode:       clientIn.ConsentMode,
+		Status:            StatusActive,
+		RedirectURIs:      uris,
+		LogoutURI:         clientIn.LogoutURI,
+		Scopes:            clientIn.Scopes,
+		Provisioning:      ProvisioningStatusProvisioning,
+		Version:           1,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	op := ProviderOperation{
+		ID:             opID,
+		Type:           ProviderOperationProvision,
+		ApplicationID:  appID,
+		ClientID:       clientID,
+		IdempotencyKey: "provision:" + string(clientID),
+		Status:         ProviderOperationPending,
+	}
+
+	if err := s.store.CreateClientWithOperation(ctx, client, op); err != nil {
+		return ClientCreateResult{}, err
+	}
+
+	// Provider call outside any database transaction.
+	result, err := s.provisioner.ProvisionClient(ctx, op.IdempotencyKey, ClientProvisionSpec{
+		DisplayName:  client.Name,
+		Profile:      client.Profile,
+		RedirectURIs: clientIn.RedirectURIs,
+		LogoutURI:    clientIn.LogoutURI,
+		Scopes:       clientIn.Scopes,
+	})
+	if err != nil {
+		_ = s.store.MarkClientProvisioningFailed(ctx, clientID, opID, ErrorClassFor(err))
+		if errors.Is(err, ErrProviderConflict) {
+			return ClientCreateResult{}, ErrProviderConflict
+		}
+		return ClientCreateResult{}, ErrProviderUnavailable
+	}
+
+	var secret *ClientSecretRecord
+	if result.ClientSecret != "" {
+		secret = &ClientSecretRecord{
+			ID:        NewClientSecretID(),
+			ClientID:  clientID,
+			Label:     "初始 Secret",
+			CreatedAt: now,
+		}
+	}
+	if err := s.store.CompleteClientProvisioning(ctx, clientID,
+		s.providerName, s.providerProjectID,
+		result.ProviderApplicationID, result.ProviderClientID, opID, secret); err != nil {
+		s.compensateProvision(ctx, actor, appID, clientID, result.ProviderApplicationID, requestID)
+		return ClientCreateResult{}, err
+	}
+
+	s.RecordEvent(ctx, EventOAuthClientCreated, actor, appID, clientID, requestID,
+		"client.create", SecurityEventSuccess, "")
+
+	return ClientCreateResult{
+		ClientID:     clientID,
+		ClientSecret: result.ClientSecret,
+	}, nil
+}
+
+// GetClient loads one fully provisioned client bound to the application.
+// Missing, unbound or not yet provisioned clients yield ErrNotFound
+// (anti-enumeration).
+func (s *Service) GetClient(ctx context.Context, appID ApplicationID, clientID OAuthClientID) (OAuthClient, error) {
+	return s.store.GetClient(ctx, appID, clientID)
+}
+
+// UpdateClient applies a partial client configuration update. Submitted
+// fields are merged onto the stored client and validated against the
+// immutable profile (ADR-0004 §3). Provider-owned settings (name, redirect
+// URIs, logout URI) are synchronized to the provider first: on provider
+// failure the local state is left unchanged (fail closed). A local write
+// failure after provider success is handed to reconciliation.
+func (s *Service) UpdateClient(
+	ctx context.Context,
+	actor identity.UserID,
+	appID ApplicationID,
+	clientID OAuthClientID,
+	requestID string,
+	patch ClientPatch,
+) (OAuthClient, error) {
+	client, err := s.store.GetClient(ctx, appID, clientID)
+	if err != nil {
+		return OAuthClient{}, err
+	}
+
+	name := client.Name
+	logoutURI := client.LogoutURI
+	consentMode := client.ConsentMode
+	uriStrings := make([]string, len(client.RedirectURIs))
+	for i, u := range client.RedirectURIs {
+		uriStrings[i] = u.URI
+	}
+	scopes := append([]string(nil), client.Scopes...)
+
+	if patch.Name != nil {
+		name = strings.TrimSpace(*patch.Name)
+	}
+	if patch.RedirectURIs != nil {
+		uriStrings = *patch.RedirectURIs
+	}
+	if patch.LogoutURI != nil {
+		logoutURI = *patch.LogoutURI
+	}
+	if patch.AllowedScopes != nil {
+		scopes = *patch.AllowedScopes
+	}
+	if patch.ConsentMode != nil {
+		consentMode = *patch.ConsentMode
+	}
+
+	// The merged result is validated against the stored profile; submitted
+	// values are never silently mutated.
+	if err := ValidateClientInput(ClientInput{
+		Name:         name,
+		Profile:      client.Profile,
+		RedirectURIs: uriStrings,
+		LogoutURI:    logoutURI,
+		Scopes:       scopes,
+		ConsentMode:  consentMode,
+	}); err != nil {
+		return OAuthClient{}, err
+	}
+
+	providerSync := patch.Name != nil || patch.RedirectURIs != nil || patch.LogoutURI != nil
+	if providerSync && client.ProviderApplicationID != "" {
+		if err := s.provisioner.UpdateClient(ctx, client.ProviderApplicationID, ClientUpdateSpec{
+			DisplayName:  name,
+			RedirectURIs: uriStrings,
+			LogoutURI:    logoutURI,
+		}); err != nil {
+			return OAuthClient{}, err
+		}
+	}
+
+	upd := ClientConfigUpdate{
+		Name:        name,
+		LogoutURI:   logoutURI,
+		ConsentMode: consentMode,
+	}
+	if patch.RedirectURIs != nil {
+		now := s.now()
+		upd.RedirectURIs = make([]RedirectURI, len(uriStrings))
+		for i, u := range uriStrings {
+			isLoopback, _ := ValidateRedirectURI(u)
+			upd.RedirectURIs[i] = RedirectURI{URI: u, IsLoopback: isLoopback, AddedAt: now}
+		}
+	}
+	if patch.AllowedScopes != nil {
+		upd.Scopes = scopes
+	}
+
+	if err := s.store.UpdateClientConfig(ctx, clientID, upd, client.Version); err != nil {
+		if providerSync && client.ProviderApplicationID != "" {
+			// The provider already has the new settings; record the drift
+			// instead of leaking it silently.
+			_ = s.store.SetClientReconciliationRequired(ctx, clientID)
+			_ = s.store.CreateReconciliationJob(ctx, ReconciliationJob{
+				ID:                    NewProviderOperationID(),
+				ApplicationID:         appID,
+				ClientID:              clientID,
+				ProviderApplicationID: client.ProviderApplicationID,
+				Reason:                ErrorClassFor(err),
+			})
+			s.RecordEvent(ctx, EventProviderReconciliationNeed, actor, appID, clientID, requestID,
+				"client.update", SecurityEventSuccess, ErrorClassFor(err))
+		}
+		return OAuthClient{}, err
+	}
+
+	s.RecordEvent(ctx, EventOAuthClientUpdated, actor, appID, clientID, requestID,
+		"client.update", SecurityEventSuccess, "")
+
+	return s.store.GetClient(ctx, appID, clientID)
+}
+
+// SetClientStatus enables or disables one client. The provider-side state is
+// synchronized first; on provider failure the local status is left unchanged
+// (fail closed).
+func (s *Service) SetClientStatus(
+	ctx context.Context,
+	actor identity.UserID,
+	appID ApplicationID,
+	clientID OAuthClientID,
+	requestID string,
+	enable bool,
+) (OAuthClient, error) {
+	client, err := s.store.GetClient(ctx, appID, clientID)
+	if err != nil {
+		return OAuthClient{}, err
+	}
+
+	target := StatusDisabled
+	eventType := EventOAuthClientDisabled
+	operation := "client.disable"
+	if enable {
+		if err := client.Enable(); err != nil {
+			return OAuthClient{}, err
+		}
+		target = StatusActive
+		eventType = EventOAuthClientEnabled
+		operation = "client.enable"
+	} else {
+		if err := client.Disable(); err != nil {
+			return OAuthClient{}, err
+		}
+	}
+
+	if client.ProviderApplicationID != "" {
+		if enable {
+			err = s.provisioner.EnableClient(ctx, client.ProviderApplicationID)
+		} else {
+			err = s.provisioner.DisableClient(ctx, client.ProviderApplicationID)
+		}
+		if err != nil {
+			return OAuthClient{}, err
+		}
+	}
+
+	if err := s.store.SetClientStatus(ctx, clientID, target, client.Version); err != nil {
+		return OAuthClient{}, err
+	}
+
+	s.RecordEvent(ctx, eventType, actor, appID, clientID, requestID, operation,
+		SecurityEventSuccess, "")
+
+	return s.store.GetClient(ctx, appID, clientID)
+}
+
+// DeleteClient removes one client using the delete state machine: local row
+// marked deleting, provider removal (idempotent), then local deletion. A
+// provider failure aborts the deletion and leaves a reconciliation trail.
+func (s *Service) DeleteClient(
+	ctx context.Context,
+	actor identity.UserID,
+	appID ApplicationID,
+	clientID OAuthClientID,
+	requestID string,
+) error {
+	// The live lookup includes deleting/delete_failed rows so failed
+	// deletions can be retried; fully provisioned lookups hide them.
+	clients, err := s.store.ListLiveClientsByApplication(ctx, appID)
+	if err != nil {
+		return err
+	}
+	for _, c := range clients {
+		if c.ID == clientID {
+			return s.deleteClient(ctx, actor, appID, c, requestID)
+		}
+	}
+	return ErrNotFound
+}
+
 // Get loads the application detail projection. Missing or not yet
 // provisioned applications yield ErrNotFound (anti-enumeration).
 func (s *Service) Get(ctx context.Context, appID ApplicationID) (Detail, error) {
@@ -459,7 +764,7 @@ func (s *Service) Delete(
 		return err
 	}
 	for _, c := range clients {
-		if err := s.deleteClientForApplicationDeletion(ctx, actor, appID, c, requestID); err != nil {
+		if err := s.deleteClient(ctx, actor, appID, c, requestID); err != nil {
 			return err
 		}
 	}
@@ -471,11 +776,11 @@ func (s *Service) Delete(
 	return nil
 }
 
-// deleteClientForApplicationDeletion runs the delete state machine for one
-// client as part of an application deletion. Clients whose provisioning
-// never completed are deleted idempotently too: their provider resource may
-// exist after an ambiguous timeout.
-func (s *Service) deleteClientForApplicationDeletion(
+// deleteClient runs the delete state machine for one client. It is shared
+// by standalone client deletion and application deletion. Clients whose
+// provisioning never completed are deleted idempotently too: their provider
+// resource may exist after an ambiguous timeout.
+func (s *Service) deleteClient(
 	ctx context.Context,
 	actor identity.UserID,
 	appID ApplicationID,

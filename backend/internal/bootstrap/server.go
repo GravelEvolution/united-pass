@@ -232,6 +232,12 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				r.Post("/admin/applications/{applicationId}/enable", appHandlers.EnableApplication)
 				r.Post("/admin/applications/{applicationId}/disable", appHandlers.DisableApplication)
 				r.Delete("/admin/applications/{applicationId}", appHandlers.DeleteApplication)
+				r.Post("/admin/applications/{applicationId}/clients", appHandlers.CreateClient)
+				r.Get("/admin/applications/{applicationId}/clients/{clientId}", appHandlers.GetClient)
+				r.Patch("/admin/applications/{applicationId}/clients/{clientId}", appHandlers.UpdateClient)
+				r.Post("/admin/applications/{applicationId}/clients/{clientId}/enable", appHandlers.EnableClient)
+				r.Post("/admin/applications/{applicationId}/clients/{clientId}/disable", appHandlers.DisableClient)
+				r.Delete("/admin/applications/{applicationId}/clients/{clientId}", appHandlers.DeleteClient)
 			}
 		})
 	})

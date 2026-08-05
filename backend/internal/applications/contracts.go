@@ -60,6 +60,18 @@ type ApplicationPatch struct {
 	OwnerID     *identity.UserID
 }
 
+// ClientPatch is the partial-update input for an OAuth client. Nil pointers
+// mean "not submitted"; submitted values replace the stored ones. Profile is
+// immutable and never part of a patch. RedirectURIs and AllowedScopes
+// replace the stored sets wholesale when present.
+type ClientPatch struct {
+	Name          *string
+	RedirectURIs  *[]string
+	LogoutURI     *string
+	AllowedScopes *[]string
+	ConsentMode   *ConsentMode
+}
+
 // ClientConfigUpdate carries the merged mutable client settings for a PATCH.
 // RedirectURIs and Scopes replace the stored sets wholesale when non-nil;
 // profile is immutable and never part of an update.
