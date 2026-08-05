@@ -8,7 +8,10 @@ This directory contains the Go backend API service.
 
 - Go 1.26.5 (the version declared in `go.mod`)
 - macOS / Linux
-- No external services are required for Phase 0 (no database, Redis, or message broker)
+- PostgreSQL 16+ (Phase 1 onwards)
+- Redis 7+ (Phase 1 onwards)
+
+Remote test services are available but require TLS, VPN, or a secure tunnel. Never downgrade to plaintext connections for convenience.
 
 ## Running the Service
 
@@ -20,12 +23,34 @@ go run ./cmd/api
 UP_ENVIRONMENT=development UP_HTTP_ADDR=:9090 UP_LOG_LEVEL=debug go run ./cmd/api
 ```
 
+Local development may use an ignored `.env` file for configuration. Never commit `.env`.
+
 Operational endpoints:
 
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
 | `/healthz` | GET | Process is alive (never depends on downstream services) |
-| `/readyz` | GET | Process is ready to serve traffic |
+| `/readyz` | GET | Process is ready to serve traffic (checks PostgreSQL, Redis, and auth provider) |
+
+## Database Migrations
+
+Migrations are NOT executed automatically at API server startup. Use the explicit migration command:
+
+```bash
+# Apply all pending migrations
+go run ./cmd/migrate up
+
+# Show migration status
+go run ./cmd/migrate status
+
+# Show current migration version
+go run ./cmd/migrate version
+
+# Roll back all migrations (requires --confirm, destructive)
+go run ./cmd/migrate reset --confirm
+```
+
+Migrations live in `migrations/` and are managed by [goose](https://github.com/pressly/goose).
 
 ## Environment Variables
 
@@ -42,25 +67,80 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_SHUTDOWN_TIMEOUT` | `30s` | Graceful shutdown deadline. Production caps at 60s. |
 | `UP_MAX_REQUEST_BODY_BYTES` | `1048576` (1 MiB) | Maximum request body size. Production caps at 16 MiB. |
 | `UP_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
+| `UP_DATABASE_URL` | | PostgreSQL connection URL. Password must be URL-encoded. Use `sslmode=require` for remote servers. |
+| `UP_DATABASE_SCHEMA` | `united_pass` | PostgreSQL schema for United Pass tables. |
+| `UP_DATABASE_MAX_CONNS` | `10` | Maximum pool connections. |
+| `UP_DATABASE_MIN_CONNS` | `1` | Minimum pool connections. |
+| `UP_DATABASE_CONNECT_TIMEOUT` | `10s` | Connection timeout. |
+| `UP_REDIS_URL` | | Redis connection URL. Use `rediss://` for TLS. Password must be URL-encoded. |
+| `UP_REDIS_KEY_PREFIX` | `up:development:` | Key prefix for Redis namespace isolation. |
+| `UP_REDIS_POOL_SIZE` | `10` | Redis connection pool size. |
+| `UP_REDIS_CONNECT_TIMEOUT` | `10s` | Redis connect timeout. |
+| `UP_REDIS_READ_TIMEOUT` | `3s` | Redis read timeout. |
+| `UP_REDIS_WRITE_TIMEOUT` | `3s` | Redis write timeout. |
+| `UP_SESSION_TTL` | `12h` | Session absolute TTL. |
+| `UP_SESSION_REMEMBER_TTL` | `720h` | Session TTL when "remember me" is set. |
+| `UP_SESSION_IDLE_TTL` | `2h` | Session idle timeout. |
+| `UP_SESSION_TOUCH_INTERVAL` | `5m` | Minimum interval between Redis session touches. |
+| `UP_SESSION_COOKIE_SECURE` | `false` | Set `true` in production. |
+| `UP_SESSION_COOKIE_SAME_SITE` | `lax` | Cookie SameSite attribute. |
+| `UP_SESSION_ENCRYPTION_KEY` | | Base64-encoded 32-byte key for encrypting provider session credentials. |
+| `UP_SESSION_ENCRYPTION_KEY_ID` | | Key identifier for rotation. |
+| `UP_MFA_CHALLENGE_TTL` | `5m` | MFA challenge token TTL. |
+| `UP_MFA_MAX_ATTEMPTS` | `5` | Maximum MFA verification attempts. |
+| `UP_LOGIN_RATE_LIMIT` | `10` | Maximum login attempts per window. |
+| `UP_LOGIN_RATE_WINDOW` | `15m` | Login rate limit window. |
+| `UP_MFA_RATE_LIMIT` | `10` | Maximum MFA attempts per window. |
+| `UP_MFA_RATE_WINDOW` | `15m` | MFA rate limit window. |
+| `UP_AUTH_PROVIDER` | | Authentication provider name. |
+| `UP_AUTH_PROVIDER_BASE_URL` | | Authentication provider base URL. |
+| `UP_AUTH_PROVIDER_PROJECT_ID` | | Authentication provider project ID. |
+| `UP_AUTH_PROVIDER_CLIENT_ID` | | Authentication provider client ID. |
+| `UP_AUTH_PROVIDER_CLIENT_SECRET` | | Authentication provider client secret. |
 
-Local development may use an ignored `.env` file. Never commit secrets.
+### Integration Test Variables
+
+| Variable | Description |
+| --- | --- |
+| `UP_TEST_DATABASE_URL` | PostgreSQL URL for integration tests. |
+| `UP_TEST_DATABASE_SCHEMA` | PostgreSQL schema for integration tests (default: `united_pass_test`). |
+| `UP_TEST_REDIS_URL` | Redis URL for integration tests. |
+| `UP_TEST_REDIS_KEY_PREFIX` | Redis key prefix for integration tests (default: `up:test:`). |
+
+Integration tests skip when these variables are absent. They never fall back to the development database or Redis.
+
+### Security Notes
+
+- `.env` is for local development only and must never be committed.
+- `.env.template` is the committed template with placeholder values.
+- PostgreSQL is the persistent source of truth for user identity.
+- Redis holds only ephemeral data: sessions, MFA challenges, and rate-limit counters.
+- Redis data loss only invalidates sessions — it does not delete users.
+- Remote services must use TLS, VPN, or a secure tunnel.
+- CI does not connect to remote shared databases.
 
 ## Test Commands
 
 ```bash
+# Unit tests (no external dependencies required)
 go mod tidy
 go fmt ./...
 go vet ./...
 go test ./...
 go test -race ./...
 go build ./...
+
+# Integration tests (require UP_TEST_DATABASE_URL and UP_TEST_REDIS_URL)
+go test -tags integration -race ./internal/adapters/postgres/... ./internal/adapters/redis/...
 ```
 
-## Current Implementation Scope (Phase 0)
+Integration tests never run `FLUSHALL`, `FLUSHDB`, or `DROP DATABASE`. They only delete keys under the configured test prefix and only drop tables in the test schema.
 
-Phase 0 establishes the foundation only. No business logic, database, OAuth, Feishu, Cerbos or user/session endpoints are implemented yet.
+## Current Implementation Scope (Phase 1: Session and Current User)
 
-Implemented:
+Phase 0 established the HTTP foundation. Phase 1 adds session management, authentication, and current user endpoints.
+
+### Implemented in Phase 0
 
 - Go module `github.com/GravelEvolution/united-pass/backend`
 - Entry point at `cmd/api/main.go`
@@ -68,29 +148,70 @@ Implemented:
 - Structured logging with `log/slog` (`internal/platform/observability`)
 - `http.Server` with configurable timeouts
 - Chi router with standard `net/http` middleware interfaces
-- Request ID middleware (accepts valid upstream IDs or generates cryptographically random ones)
-- Panic recovery middleware (production-safe: redacts raw panic values, detects committed responses)
-- Structured access logging middleware (captures actual response status including default 200)
-- Security response headers
-- Request body size limit (handlers map `*http.MaxBytesError` to 413)
+- Request ID, panic recovery, access logging, security headers
+- Request body size limit
 - Unified API error envelope matching the frontend contract
-- `GET /healthz` and `GET /readyz` (extensible readiness checks, no dependencies in Phase 0)
+- `GET /healthz` and `GET /readyz`
 - Graceful shutdown via `SIGINT`/`SIGTERM`
 - ADR-0001 documenting the foundation architecture
-- GitHub Actions CI workflow at repository root `.github/workflows/backend.yml`
-- OpenAPI 3.1 specification for operational endpoints (`openapi/openapi.yaml`)
-- Tests covering health endpoints, request IDs, error envelope, panic recovery (including partial-write and production redaction), body limits, config validation and graceful shutdown
+- GitHub Actions CI workflow
+- OpenAPI 3.1 specification
 
-Not yet implemented (later phases):
+### Implemented in Phase 1
 
-- Authentication, sessions, CSRF, `GET /api/v1/me`
+- **PostgreSQL persistence**: users, identity_links, user_personas tables with goose migrations
+- **Redis ephemeral state**: session store, MFA challenge store, rate limiter
+- **Opaque server-side sessions**: 256-bit tokens, SHA-256 hashed in Redis, TTL with idle timeout
+- **Session Cookie** (`up_session`): HttpOnly, SameSite=Lax, Secure in production
+- **CSRF protection** (`up_csrf` + `X-CSRF-Token`): session-bound, constant-time comparison
+- **Login**: `POST /api/v1/auth/sessions` with rate limiting and generic error responses
+- **MFA challenge**: `POST /api/v1/auth/sessions/mfa` with one-time tokens and attempt limits
+- **Logout**: `DELETE /api/v1/auth/session` with session and CSRF validation
+- **Current user**: `GET /api/v1/me` with masked phone, personas, null employee profile
+- **Permissions**: `GET /api/v1/me/permissions` with fail-closed default resolver
+- **Session middleware**: `RequireSession`, `OptionalSession`, `RequireCSRF`
+- **Readiness checks**: PostgreSQL, Redis, and auth provider connectivity
+- **Authentication provider adapter**: interface + test fake (no production provider yet)
+- **Permission resolver**: fail-closed default with optional development override
+- **Migration command**: `cmd/migrate/main.go` with explicit up/status/version/reset
+- ADR-0002 documenting session, PostgreSQL, Redis, and authentication provider architecture
+- OpenAPI specification updated with all Phase 1 endpoints
+- Unit tests, HTTP tests, and integration tests (PostgreSQL and Redis)
+
+### Not yet implemented (later phases)
+
+- User registration, password reset, email verification
+- Profile updates and avatar upload
+- TOTP, Passkey, Recovery Code management (MFA verification is Phase 1; factor management is Phase 4)
+- Session list and revocation of other sessions
 - OAuth Application and Client management
 - Consent orchestration
-- Account security (password, TOTP, Passkeys, recovery codes)
-- Identity, workforce, departments
+- Employee profiles, departments, workforce
 - Feishu Provider synchronization
 - Cerbos policies and audit
-- PostgreSQL persistence and migrations
+- Audit export
+
+## API Endpoints (Phase 1)
+
+| Endpoint | Method | Auth | CSRF | Description |
+| --- | --- | --- | --- | --- |
+| `/api/v1/auth/sessions` | POST | None | No (origin check) | Login with identifier and password |
+| `/api/v1/auth/sessions/mfa` | POST | None | No | Complete MFA challenge |
+| `/api/v1/auth/session` | DELETE | Session | Yes | Logout and clear cookies |
+| `/api/v1/me` | GET | Session | No | Get current user profile |
+| `/api/v1/me/permissions` | GET | Session | No | Get permission capabilities |
+| `/healthz` | GET | None | No | Process liveness |
+| `/readyz` | GET | None | No | Dependency readiness |
+
+## Cookie and CSRF Conventions
+
+Per ADR-0006:
+
+- **Session cookie**: `up_session` (HttpOnly, SameSite=Lax, Secure in production)
+- **CSRF cookie**: `up_csrf` (readable by JavaScript, SameSite=Lax, Secure in production)
+- **CSRF header**: `X-CSRF-Token`
+
+CSRF tokens are bound to sessions: the token hash is stored in the Redis session record and validated with constant-time comparison on every state-changing request.
 
 ## Relationship with `../frontend/`
 
@@ -110,14 +231,9 @@ Key references:
 - `../frontend/docs/adr-0005.md` — Application and OAuth Client separation
 - `../frontend/docs/adr-0006.md` — deployment topology and cookie/CSRF names
 
-Cookie names (per ADR-0006):
-
-- Session cookie: `up_session` (HttpOnly)
-- CSRF cookie: `up_csrf` (readable by JS)
-- CSRF header: `X-CSRF-Token`
-
 The backend must never silently implement a different API contract from the frontend. Conflicts are reported before changes are made.
 
 ## Architecture
 
-See `docs/adr-0001.md` for the full foundation architecture decision record.
+- `docs/adr-0001.md` — Foundation architecture (HTTP server, middleware, config, logging)
+- `docs/adr-0002.md` — Session, PostgreSQL, Redis, and authentication provider architecture
