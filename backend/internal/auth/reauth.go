@@ -54,6 +54,27 @@ type ReauthChallengeData struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// ExpiredReauthChallenge identifies an abandoned or expired reauthentication
+// challenge whose temporary provider session must still be revoked. The full
+// challenge record may already be gone from Redis (TTL expiry or user
+// abandonment), so the cleanup index carries only the fields needed to revoke
+// the provider session and attribute a failure audit event.
+type ExpiredReauthChallenge struct {
+	// TokenHash is the SHA-256 hex hash of the challenge token.
+	TokenHash string `json:"tokenHash"`
+	// ProviderSessionID references the temporary provider session to revoke.
+	// It may be empty when the provider never reported one.
+	ProviderSessionID string `json:"providerSessionId,omitempty"`
+	// UserID is the session user the challenge was issued to.
+	UserID identity.UserID `json:"userId"`
+	// ApplicationID is the target application the challenge was bound to.
+	ApplicationID string `json:"applicationId"`
+	// ClientID is the target client the challenge was bound to (client actions).
+	ClientID string `json:"clientId,omitempty"`
+	// Action is the high-risk action the challenge declared.
+	Action string `json:"action"`
+}
+
 // ReauthGrantData is the single-use reauthentication grant stored in Redis.
 // The target operation consumes it atomically before executing; any binding
 // mismatch or reuse fails closed.

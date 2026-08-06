@@ -964,3 +964,111 @@ func TestIntegration_ReauthStoreGrantConcurrentConsume(t *testing.T) {
 		t.Fatalf("concurrent winners = %d, want exactly 1", count)
 	}
 }
+
+func TestIntegration_ReauthStoreCleanupPopsExpiredChallenge(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewReauthStore(client)
+	ctx := context.Background()
+	tokenHash := session.HashToken("reauth-cleanup-expired-token")
+	data := reauthChallengeData("client.secret.rotate")
+	data.ProviderSessionID = "ps_cleanup_1"
+
+	if err := store.CreateChallenge(ctx, tokenHash, data, 300*time.Millisecond); err != nil {
+		t.Fatalf("create challenge: %v", err)
+	}
+
+	// While the challenge record still exists, nothing is popped.
+	entries, err := store.PopExpiredChallenges(ctx, 10)
+	if err != nil {
+		t.Fatalf("pop: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("pop while live = %d entries, want 0", len(entries))
+	}
+
+	// Abandon the challenge: let its TTL lapse, then the sweep must surface
+	// the cleanup entry with the provider session to revoke.
+	time.Sleep(500 * time.Millisecond)
+	entries, err = store.PopExpiredChallenges(ctx, 10)
+	if err != nil {
+		t.Fatalf("pop after expiry: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("pop after expiry = %d entries, want 1", len(entries))
+	}
+	entry := entries[0]
+	if entry.TokenHash != tokenHash || entry.ProviderSessionID != "ps_cleanup_1" ||
+		entry.UserID != data.UserID || entry.ApplicationID != data.ApplicationID ||
+		entry.ClientID != data.ClientID || entry.Action != data.Action {
+		t.Errorf("cleanup entry = %+v, want challenge binding", entry)
+	}
+
+	// Popping is idempotent: the entry was removed atomically.
+	entries, err = store.PopExpiredChallenges(ctx, 10)
+	if err != nil {
+		t.Fatalf("second pop: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("second pop = %d entries, want 0", len(entries))
+	}
+}
+
+func TestIntegration_ReauthStoreCleanupSkipsLiveChallenge(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewReauthStore(client)
+	ctx := context.Background()
+	tokenHash := session.HashToken("reauth-cleanup-live-token")
+	data := reauthChallengeData("client.delete")
+	data.ProviderSessionID = "ps_cleanup_2"
+
+	if err := store.CreateChallenge(ctx, tokenHash, data, 5*time.Minute); err != nil {
+		t.Fatalf("create challenge: %v", err)
+	}
+
+	// A live challenge must never be surfaced to the cleanup worker.
+	entries, err := store.PopExpiredChallenges(ctx, 10)
+	if err != nil {
+		t.Fatalf("pop: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("pop = %d entries, want 0 for a live challenge", len(entries))
+	}
+}
+
+func TestIntegration_ReauthStoreCleanupAfterConsume(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewReauthStore(client)
+	ctx := context.Background()
+	tokenHash := session.HashToken("reauth-cleanup-consumed-token")
+	data := reauthChallengeData("application.delete")
+	data.ProviderSessionID = "ps_cleanup_3"
+
+	if err := store.CreateChallenge(ctx, tokenHash, data, 300*time.Millisecond); err != nil {
+		t.Fatalf("create challenge: %v", err)
+	}
+	if _, err := store.ClaimChallenge(ctx, tokenHash, "claim-1"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := store.ConsumeChallenge(ctx, tokenHash, "claim-1"); err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+
+	// The record is gone at a terminal state; once the scheduled expiry
+	// passes, the entry surfaces so the worker revokes again (idempotent
+	// double revocation is safe), and it surfaces exactly once.
+	time.Sleep(500 * time.Millisecond)
+	entries, err := store.PopExpiredChallenges(ctx, 10)
+	if err != nil {
+		t.Fatalf("pop after consume: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ProviderSessionID != "ps_cleanup_3" {
+		t.Fatalf("pop after consume = %+v, want the consumed challenge entry", entries)
+	}
+	entries, err = store.PopExpiredChallenges(ctx, 10)
+	if err != nil {
+		t.Fatalf("second pop: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("second pop = %d entries, want 0", len(entries))
+	}
+}

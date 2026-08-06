@@ -309,11 +309,12 @@ func validDevelopmentConfig() Config {
 		},
 
 		Reauth: ReauthConfig{
-			ChallengeTTL: 5 * time.Minute,
-			GrantTTL:     5 * time.Minute,
-			MaxAttempts:  5,
-			RateLimit:    10,
-			RateWindow:   15 * time.Minute,
+			ChallengeTTL:    5 * time.Minute,
+			GrantTTL:        5 * time.Minute,
+			MaxAttempts:     5,
+			RateLimit:       10,
+			RateWindow:      15 * time.Minute,
+			CleanupInterval: 60 * time.Second,
 		},
 
 		Rotation: RotationConfig{

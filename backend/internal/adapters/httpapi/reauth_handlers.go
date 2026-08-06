@@ -47,6 +47,10 @@ type ReauthChallengeStore interface {
 	ReleaseChallenge(ctx context.Context, tokenHash, claimID string) error
 	ConsumeChallenge(ctx context.Context, tokenHash, claimID string) error
 	IncrementChallengeAttempts(ctx context.Context, tokenHash string, maxAttempts int) (int, error)
+	// PopExpiredChallenges atomically pops up to limit cleanup entries for
+	// challenges whose record no longer exists (expired or abandoned), so the
+	// cleanup worker can revoke their temporary provider sessions.
+	PopExpiredChallenges(ctx context.Context, limit int) ([]auth.ExpiredReauthChallenge, error)
 }
 
 // ReauthGrantStore abstracts single-use grant persistence. The Redis adapter
@@ -484,6 +488,11 @@ func (h *ReauthHandlers) issueGrant(w http.ResponseWriter, r *http.Request, prin
 // createChallenge stores a reauthentication challenge and answers 202. Only
 // totp and passkey methods are exposed; without any usable method the
 // request fails closed.
+//
+// Cleanup guard: the password verification above already created a temporary
+// provider session. Every early-exit path below must revoke it — the session
+// is exempt from revocation only once the challenge is safely stored and the
+// terminal-state paths take over (ADR-0004 §7).
 func (h *ReauthHandlers) createChallenge(w http.ResponseWriter, r *http.Request, principal session.Principal, req reauthRequest, result auth.AuthenticationResult) {
 	methods := make([]string, 0, len(result.AvailableMethods))
 	for _, m := range result.AvailableMethods {
@@ -492,6 +501,8 @@ func (h *ReauthHandlers) createChallenge(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	if len(methods) == 0 {
+		h.revokeProviderSession(r, result.ProviderSessionID, principal.UserID,
+			applications.ApplicationID(req.ApplicationID), applications.OAuthClientID(req.ClientID), req.Action)
 		h.logger.Error("reauth challenge has no usable mfa methods", "requestId", requestID(r))
 		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "当前无法完成验证，请稍后重试。", nil)
 		return
@@ -499,6 +510,8 @@ func (h *ReauthHandlers) createChallenge(w http.ResponseWriter, r *http.Request,
 
 	token, err := session.GenerateToken()
 	if err != nil {
+		h.revokeProviderSession(r, result.ProviderSessionID, principal.UserID,
+			applications.ApplicationID(req.ApplicationID), applications.OAuthClientID(req.ClientID), req.Action)
 		h.logger.Error("reauth challenge token generation failed",
 			"requestId", requestID(r),
 			"errorClass", observability.ClassifyError(err),
@@ -520,6 +533,8 @@ func (h *ReauthHandlers) createChallenge(w http.ResponseWriter, r *http.Request,
 		CreatedAt:             now,
 	}
 	if err := h.challenges.CreateChallenge(r.Context(), session.HashToken(token), data, h.challengeTTL); err != nil {
+		h.revokeProviderSession(r, result.ProviderSessionID, principal.UserID,
+			applications.ApplicationID(req.ApplicationID), applications.OAuthClientID(req.ClientID), req.Action)
 		h.logger.Error("reauth challenge creation failed",
 			"requestId", requestID(r),
 			"errorClass", observability.ClassifyError(err),

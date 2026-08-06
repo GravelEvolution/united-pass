@@ -36,6 +36,9 @@ type Server struct {
 	pool           *postgres.Pool
 	redisClient    *redis.Client
 	providerCloser interface{ Close() error }
+	// workerStops stops background workers (e.g. the abandoned reauth
+	// challenge cleanup worker) before infrastructure is closed.
+	workerStops []func()
 }
 
 // NewServer constructs the router, applies middleware, mounts routes and
@@ -176,6 +179,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 
 	var appHandlers *httpapi.ApplicationHandlers
 	var reauthHandlers *httpapi.ReauthHandlers
+	var workerStops []func()
 	if pool != nil && provisioner != nil && userReader != nil && sessionSvc != nil && cfg.Session.EncryptionKey != "" {
 		appRepo, err := postgres.NewApplicationRepository(pool.PgxPool(), cfg.Session.EncryptionKey)
 		if err != nil {
@@ -200,6 +204,12 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 					cfg.Reauth.ChallengeTTL, cfg.Reauth.GrantTTL,
 					cfg.Reauth.MaxAttempts, cfg.Reauth.RateLimit, cfg.Reauth.RateWindow,
 					logger)
+				// Abandoned/expired challenges leak their temporary provider
+				// session unless the cleanup worker revokes them (ADR-0004 §7).
+				cleanupWorker := httpapi.NewReauthCleanupWorker(
+					reauthAuth, reauthStore, appSvc, cfg.Reauth.CleanupInterval, logger)
+				cleanupWorker.Start()
+				workerStops = append(workerStops, cleanupWorker.Stop)
 			}
 		}
 
@@ -299,6 +309,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		pool:           pool,
 		redisClient:    redisClient,
 		providerCloser: providerCloser,
+		workerStops:    workerStops,
 	}, nil
 }
 
@@ -403,6 +414,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info("http server shutting down", "timeout", s.config.ShutdownTimeout.String())
 	if err := s.HTTP.Shutdown(shutdownCtx); err != nil {
 		s.logger.Error("graceful shutdown failed", "error", err)
+	}
+
+	// Stop background workers before their infrastructure (Redis) closes.
+	for _, stop := range s.workerStops {
+		stop()
 	}
 
 	if s.redisClient != nil {

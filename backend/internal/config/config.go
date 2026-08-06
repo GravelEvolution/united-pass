@@ -59,11 +59,12 @@ const (
 	defaultMFARateLimit    = 10
 	defaultMFARateWindow   = 15 * time.Minute
 
-	defaultReauthChallengeTTL = 5 * time.Minute
-	defaultReauthGrantTTL     = 5 * time.Minute
-	defaultReauthMaxAttempts  = 5
-	defaultReauthRateLimit    = 10
-	defaultReauthRateWindow   = 15 * time.Minute
+	defaultReauthChallengeTTL    = 5 * time.Minute
+	defaultReauthGrantTTL        = 5 * time.Minute
+	defaultReauthMaxAttempts     = 5
+	defaultReauthRateLimit       = 10
+	defaultReauthRateWindow      = 15 * time.Minute
+	defaultReauthCleanupInterval = 60 * time.Second
 
 	defaultRotationGracePeriod = time.Duration(0)
 	defaultRotationRateLimit   = 3
@@ -161,6 +162,9 @@ type ReauthConfig struct {
 	MaxAttempts  int
 	RateLimit    int
 	RateWindow   time.Duration
+	// CleanupInterval is how often the abandoned-challenge cleanup worker
+	// sweeps the Redis cleanup index and revokes leaked provider sessions.
+	CleanupInterval time.Duration
 }
 
 // RotationConfig holds OAuth client secret rotation parameters (ADR-0004 §6).
@@ -277,11 +281,12 @@ func Load() (Config, error) {
 		},
 
 		Reauth: ReauthConfig{
-			ChallengeTTL: durationOr("UP_REAUTH_CHALLENGE_TTL", defaultReauthChallengeTTL),
-			GrantTTL:     durationOr("UP_REAUTH_GRANT_TTL", defaultReauthGrantTTL),
-			MaxAttempts:  intOr("UP_REAUTH_MAX_ATTEMPTS", defaultReauthMaxAttempts),
-			RateLimit:    intOr("UP_REAUTH_RATE_LIMIT", defaultReauthRateLimit),
-			RateWindow:   durationOr("UP_REAUTH_RATE_WINDOW", defaultReauthRateWindow),
+			ChallengeTTL:    durationOr("UP_REAUTH_CHALLENGE_TTL", defaultReauthChallengeTTL),
+			GrantTTL:        durationOr("UP_REAUTH_GRANT_TTL", defaultReauthGrantTTL),
+			MaxAttempts:     intOr("UP_REAUTH_MAX_ATTEMPTS", defaultReauthMaxAttempts),
+			RateLimit:       intOr("UP_REAUTH_RATE_LIMIT", defaultReauthRateLimit),
+			RateWindow:      durationOr("UP_REAUTH_RATE_WINDOW", defaultReauthRateWindow),
+			CleanupInterval: durationOr("UP_REAUTH_CLEANUP_INTERVAL", defaultReauthCleanupInterval),
 		},
 
 		Rotation: RotationConfig{
@@ -397,6 +402,9 @@ func (c Config) Validate() error {
 	}
 	if c.Reauth.RateWindow <= 0 {
 		errs = append(errs, errors.New("reauthentication rate window must be positive"))
+	}
+	if c.Reauth.CleanupInterval <= 0 {
+		errs = append(errs, errors.New("reauthentication cleanup interval must be positive"))
 	}
 
 	// Secret rotation validation.

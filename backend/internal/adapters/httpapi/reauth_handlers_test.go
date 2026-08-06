@@ -56,6 +56,8 @@ type memReauthChallenges struct {
 	data      map[string]auth.ReauthChallengeData
 	attempts  map[string]int
 	claimed   map[string]string
+	expires   map[string]time.Time
+	pending   []auth.ExpiredReauthChallenge
 	createErr error
 }
 
@@ -64,16 +66,18 @@ func newMemReauthChallenges() *memReauthChallenges {
 		data:     make(map[string]auth.ReauthChallengeData),
 		attempts: make(map[string]int),
 		claimed:  make(map[string]string),
+		expires:  make(map[string]time.Time),
 	}
 }
 
-func (m *memReauthChallenges) CreateChallenge(_ context.Context, tokenHash string, data auth.ReauthChallengeData, _ time.Duration) error {
+func (m *memReauthChallenges) CreateChallenge(_ context.Context, tokenHash string, data auth.ReauthChallengeData, ttl time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.createErr != nil {
 		return m.createErr
 	}
 	m.data[tokenHash] = data
+	m.expires[tokenHash] = time.Now().Add(ttl)
 	return nil
 }
 
@@ -113,6 +117,7 @@ func (m *memReauthChallenges) ConsumeChallenge(_ context.Context, tokenHash, cla
 	delete(m.data, tokenHash)
 	delete(m.attempts, tokenHash)
 	delete(m.claimed, tokenHash)
+	delete(m.expires, tokenHash)
 	return nil
 }
 
@@ -127,6 +132,54 @@ func (m *memReauthChallenges) IncrementChallengeAttempts(_ context.Context, toke
 		return m.attempts[tokenHash], auth.ErrReauthMaxAttemptsExceeded
 	}
 	return m.attempts[tokenHash], nil
+}
+
+// PopExpiredChallenges drains seeded pending entries first, then scans stored
+// challenges whose record vanished past their expiry (mirroring Redis TTL).
+func (m *memReauthChallenges) PopExpiredChallenges(_ context.Context, limit int) ([]auth.ExpiredReauthChallenge, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []auth.ExpiredReauthChallenge
+	for len(m.pending) > 0 && len(out) < limit {
+		out = append(out, m.pending[0])
+		m.pending = m.pending[1:]
+	}
+	now := time.Now()
+	for hash, expiresAt := range m.expires {
+		if len(out) >= limit {
+			break
+		}
+		if !now.After(expiresAt) {
+			continue
+		}
+		if _, ok := m.data[hash]; ok {
+			continue
+		}
+		delete(m.expires, hash)
+		out = append(out, auth.ExpiredReauthChallenge{TokenHash: hash})
+	}
+	return out, nil
+}
+
+// simulateExpiry removes the challenge record as if its Redis TTL elapsed,
+// leaving the cleanup entry derivable from the stored expiry.
+func (m *memReauthChallenges) simulateExpiry(tokenHash string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if data, ok := m.data[tokenHash]; ok {
+		m.pending = append(m.pending, auth.ExpiredReauthChallenge{
+			TokenHash:         tokenHash,
+			ProviderSessionID: data.ProviderSessionID,
+			UserID:            data.UserID,
+			ApplicationID:     data.ApplicationID,
+			ClientID:          data.ClientID,
+			Action:            data.Action,
+		})
+	}
+	delete(m.data, tokenHash)
+	delete(m.attempts, tokenHash)
+	delete(m.claimed, tokenHash)
+	delete(m.expires, tokenHash)
 }
 
 // memReauthGrants is an in-memory ReauthGrantStore with atomic single-use
@@ -330,6 +383,67 @@ func TestReauthRequest_RevokeFailureStillGrantsButAudits(t *testing.T) {
 	}
 	if !env.auditor.has(applications.EventProviderSessionRevokeFailed, applications.SecurityEventDenied) {
 		t.Error("expected provider_session.revoke_failed audit event")
+	}
+}
+
+func TestReauthRequest_ChallengeStoreFailureRevokesSession(t *testing.T) {
+	env := newReauthEnv()
+	env.authz.verifyResult = auth.AuthenticationResult{
+		Status:            auth.StatusMFARequired,
+		ProviderSessionID: "ps-leak",
+		AvailableMethods:  []auth.MFAMethod{auth.MFAMethodTOTP},
+	}
+	env.challenges.createErr = errors.New("redis down")
+	router := reauthRouter(env.handlers, reauthPrincipal)
+
+	w := doReauthJSON(t, router, "/auth/reauthentication", reauthRotateBody)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
+	}
+	// Cleanup guard: the challenge was never stored, so the temporary
+	// provider session must be revoked instead of leaking.
+	if len(env.authz.revoked) != 1 || env.authz.revoked[0] != "ps-leak" {
+		t.Errorf("revoked = %v, want [ps-leak]", env.authz.revoked)
+	}
+}
+
+func TestReauthRequest_NoUsableMethodsRevokesSession(t *testing.T) {
+	env := newReauthEnv()
+	env.authz.verifyResult = auth.AuthenticationResult{
+		Status:            auth.StatusMFARequired,
+		ProviderSessionID: "ps-leak",
+		AvailableMethods:  []auth.MFAMethod{auth.MFAMethodRecovery},
+	}
+	router := reauthRouter(env.handlers, reauthPrincipal)
+
+	w := doReauthJSON(t, router, "/auth/reauthentication", reauthRotateBody)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body=%s", w.Code, w.Body.String())
+	}
+	// Cleanup guard: failing closed without a challenge must still revoke
+	// the temporary provider session.
+	if len(env.authz.revoked) != 1 || env.authz.revoked[0] != "ps-leak" {
+		t.Errorf("revoked = %v, want [ps-leak]", env.authz.revoked)
+	}
+}
+
+func TestReauthRequest_PendingChallengeKeepsSession(t *testing.T) {
+	env := newReauthEnv()
+	env.authz.verifyResult = auth.AuthenticationResult{
+		Status:            auth.StatusMFARequired,
+		ProviderSessionID: "ps-1",
+		AvailableMethods:  []auth.MFAMethod{auth.MFAMethodTOTP},
+	}
+	router := reauthRouter(env.handlers, reauthPrincipal)
+
+	w := doReauthJSON(t, router, "/auth/reauthentication", reauthRotateBody)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", w.Code, w.Body.String())
+	}
+	// The session must stay alive while the challenge is pending; only
+	// terminal states (or expiry cleanup) may revoke it.
+	if len(env.authz.revoked) != 0 {
+		t.Errorf("revoked = %v, want no revocation while pending", env.authz.revoked)
 	}
 }
 

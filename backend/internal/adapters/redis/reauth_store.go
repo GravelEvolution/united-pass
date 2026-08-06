@@ -31,6 +31,15 @@ const reauthChallengeClaimKeySegment = "reauth:claim:"
 // grants: {prefix}reauth:grant:{sha256(reauthToken)}.
 const reauthGrantKeySegment = "reauth:grant:"
 
+// reauthCleanupIndexKey is the key of the shared sorted set indexing
+// challenge expiry for abandoned-challenge cleanup: {prefix}reauth:cleanup-index.
+// Each member is "{tokenHash}\n{cleanupEntryJSON}" scored by the challenge's
+// expiry timestamp (unix milliseconds). When a challenge expires or is
+// consumed, its record key disappears; the cleanup worker pops index entries
+// whose challenge key no longer exists and revokes the recorded provider
+// session (ADR-0004 §7).
+const reauthCleanupIndexKey = "reauth:cleanup-index"
+
 // reauthClaimTTL bounds how long a challenge claim lock may be held. If the
 // verifying request dies or the provider call hangs, the lock expires and the
 // user can retry. Mirrors the MFA claim TTL.
@@ -71,6 +80,21 @@ func (s *ReauthStore) CreateChallenge(
 	key := s.client.buildKey(reauthChallengeKeySegment, tokenHash)
 	if err := s.client.rdb.Set(ctx, key, payload, ttl).Err(); err != nil {
 		return fmt.Errorf("redis: set reauth challenge: %w", err)
+	}
+
+	// Index the challenge for abandoned-challenge cleanup. If indexing fails,
+	// roll back the challenge key: a challenge without a cleanup index entry
+	// could leak its temporary provider session when abandoned.
+	member, err := reauthCleanupIndexMember(tokenHash, data)
+	if err != nil {
+		s.client.rdb.Del(ctx, key)
+		return err
+	}
+	indexKey := s.client.buildKey(reauthCleanupIndexKey)
+	expiresAt := time.Now().Add(ttl).UnixMilli()
+	if err := s.client.rdb.ZAdd(ctx, indexKey, goredis.Z{Score: float64(expiresAt), Member: member}).Err(); err != nil {
+		s.client.rdb.Del(ctx, key)
+		return fmt.Errorf("redis: index reauth challenge cleanup: %w", err)
 	}
 	return nil
 }
@@ -272,6 +296,89 @@ return count
 		return result, auth.ErrReauthMaxAttemptsExceeded
 	}
 	return result, nil
+}
+
+// reauthCleanupIndexMember builds the sorted set member for the cleanup
+// index: the token hash followed by a newline and the JSON cleanup entry.
+// The Lua pop script splits on the newline to locate the challenge key; the
+// JSON payload lets the worker revoke the provider session after the
+// challenge record itself has expired.
+func reauthCleanupIndexMember(tokenHash string, data auth.ReauthChallengeData) (string, error) {
+	entry := auth.ExpiredReauthChallenge{
+		TokenHash:         tokenHash,
+		ProviderSessionID: data.ProviderSessionID,
+		UserID:            data.UserID,
+		ApplicationID:     data.ApplicationID,
+		ClientID:          data.ClientID,
+		Action:            data.Action,
+	}
+	payload, err := json.Marshal(entry)
+	if err != nil {
+		return "", fmt.Errorf("redis: encode reauth cleanup entry: %w", err)
+	}
+	return tokenHash + "\n" + string(payload), nil
+}
+
+// PopExpiredChallenges atomically pops up to limit cleanup index entries whose
+// challenge record no longer exists (expired or consumed), returning their
+// cleanup entries. Entries whose challenge key still exists are left for the
+// next sweep. Popping is idempotent: each entry is removed from the index by
+// the same atomic script that returns it, so no two workers ever receive the
+// same entry.
+func (s *ReauthStore) PopExpiredChallenges(ctx context.Context, limit int) ([]auth.ExpiredReauthChallenge, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	indexKey := s.client.buildKey(reauthCleanupIndexKey)
+	challengePrefix := s.client.buildKey(reauthChallengeKeySegment)
+
+	script := goredis.NewScript(`
+local indexKey = KEYS[1]
+local challengePrefix = KEYS[2]
+local cutoff = ARGV[1]
+local limit = tonumber(ARGV[2])
+
+local members = redis.call('ZRANGEBYSCORE', indexKey, '-inf', cutoff, 'LIMIT', 0, limit)
+local popped = {}
+for _, member in ipairs(members) do
+	local sep = string.find(member, '\n', 1, true)
+	local tokenHash = member
+	if sep then
+		tokenHash = string.sub(member, 1, sep - 1)
+	end
+	-- A challenge record still present is still live (or being verified);
+	-- leave its index entry for the next sweep.
+	if redis.call('EXISTS', challengePrefix .. tokenHash) == 0 then
+		redis.call('ZREM', indexKey, member)
+		table.insert(popped, member)
+	end
+end
+return popped
+`)
+
+	result, err := script.Run(ctx, s.client.rdb,
+		[]string{indexKey, challengePrefix},
+		time.Now().UnixMilli(), limit,
+	).StringSlice()
+	if err != nil {
+		return nil, fmt.Errorf("redis: pop expired reauth challenges: %w", err)
+	}
+
+	entries := make([]auth.ExpiredReauthChallenge, 0, len(result))
+	for _, member := range result {
+		payload := member
+		if i := strings.Index(member, "\n"); i >= 0 {
+			payload = member[i+1:]
+		}
+		var entry auth.ExpiredReauthChallenge
+		if err := json.Unmarshal([]byte(payload), &entry); err != nil {
+			// Corrupted index entry: it is already removed, skip it.
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
 }
 
 // CreateGrant stores a single-use reauthentication grant under the given
