@@ -338,8 +338,14 @@ func (s *Service) CreateClient(
 ) (ClientCreateResult, error) {
 	// Applications that never finished provisioning are invisible
 	// (anti-enumeration); GetApplication yields ErrNotFound for them.
-	if _, err := s.store.GetApplication(ctx, appID); err != nil {
+	app, err := s.store.GetApplication(ctx, appID)
+	if err != nil {
 		return ClientCreateResult{}, err
+	}
+	// The application-level kill switch is authoritative: new clients can
+	// never be added to a disabled application.
+	if app.Status != StatusActive {
+		return ClientCreateResult{}, ErrParentApplicationDisabled
 	}
 
 	rules, ok := clientIn.Profile.Rules()
@@ -449,6 +455,16 @@ func (s *Service) UpdateClient(
 	requestID string,
 	patch ClientPatch,
 ) (OAuthClient, error) {
+	app, err := s.store.GetApplication(ctx, appID)
+	if err != nil {
+		return OAuthClient{}, err
+	}
+	// Protocol-config mutations are blocked while the parent application is
+	// disabled (application kill switch).
+	if app.Status != StatusActive {
+		return OAuthClient{}, ErrParentApplicationDisabled
+	}
+
 	client, err := s.store.GetClient(ctx, appID, clientID)
 	if err != nil {
 		return OAuthClient{}, err
@@ -555,9 +571,22 @@ func (s *Service) SetClientStatus(
 	requestID string,
 	enable bool,
 ) (OAuthClient, error) {
+	app, err := s.store.GetApplication(ctx, appID)
+	if err != nil {
+		return OAuthClient{}, err
+	}
 	client, err := s.store.GetClient(ctx, appID, clientID)
 	if err != nil {
 		return OAuthClient{}, err
+	}
+	// Enabling a client while the parent application is disabled would
+	// bypass the application-level kill switch: the client would become
+	// usable at the provider although the application is reported disabled.
+	// Effective activeness requires BOTH levels to be active. Disabling a
+	// client is always allowed (it only tightens state). The client's own
+	// transition validity is enforced by client.Enable below.
+	if enable && app.Status != StatusActive {
+		return OAuthClient{}, ErrParentApplicationDisabled
 	}
 
 	target := StatusDisabled
@@ -873,6 +902,17 @@ func (s *Service) RotateClientSecret(
 	c, err := s.store.GetClient(ctx, appID, clientID)
 	if err != nil {
 		return SecretRotationResult{}, err
+	}
+	// Secret rotation is a client mutation and is blocked while the parent
+	// application is disabled (application kill switch).
+	app, err := s.store.GetApplication(ctx, appID)
+	if err != nil {
+		return SecretRotationResult{}, err
+	}
+	if app.Status != StatusActive {
+		s.RecordEvent(ctx, EventSecretRotationFailed, actor, appID, clientID, requestID,
+			"client.secret.rotate", SecurityEventDenied, "state_conflict")
+		return SecretRotationResult{}, ErrParentApplicationDisabled
 	}
 	if !c.CanRotateSecret() {
 		s.RecordEvent(ctx, EventSecretRotationFailed, actor, appID, clientID, requestID,

@@ -27,6 +27,14 @@ var ErrInvalidCursor = errors.New("applications: invalid cursor")
 // to a 422 response.
 var ErrSecretRotationNotAllowed = errors.New("applications: secret rotation not allowed")
 
+// ErrParentApplicationDisabled is returned when a client mutation is attempted
+// while the parent application is disabled. The application-level kill switch
+// is authoritative: effectiveClientActive = application.status == active &&
+// client.status == active. Disabling an application therefore blocks client
+// creation, client enabling, protocol-config updates and secret rotation.
+// HTTP adapters map it to a 409 response.
+var ErrParentApplicationDisabled = errors.New("applications: parent application is disabled")
+
 // ListQuery is the validated application list request. All fields are
 // optional; Sort defaults to "-updatedAt" and Limit to 20 (1–100) in the
 // repository.

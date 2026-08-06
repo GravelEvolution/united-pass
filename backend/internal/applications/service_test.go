@@ -1615,3 +1615,127 @@ func TestRotateClientSecret_LocalFailureAfterProviderReconciles(t *testing.T) {
 		t.Error("expected reconciliation event")
 	}
 }
+
+// --- Parent application lifecycle (parent/child status matrix) ---
+
+func TestEffectiveClientActive_Matrix(t *testing.T) {
+	cases := []struct {
+		app, client Status
+		want        bool
+	}{
+		{StatusActive, StatusActive, true},
+		{StatusActive, StatusDisabled, false},
+		{StatusDisabled, StatusActive, false},
+		{StatusDisabled, StatusDisabled, false},
+	}
+	for _, tc := range cases {
+		if got := EffectiveClientActive(tc.app, tc.client); got != tc.want {
+			t.Errorf("EffectiveClientActive(%s, %s) = %v, want %v", tc.app, tc.client, got, tc.want)
+		}
+	}
+}
+
+func TestParentLifecycle_DisabledAppBlocksClientMutations(t *testing.T) {
+	svc, store, prov, events, seq := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := svc.SetStatus(ctx, "user_actor", res.ApplicationID, "req-2", false); err != nil {
+		t.Fatalf("disable app: %v", err)
+	}
+	provAppID := store.clients[res.ClientID].ProviderApplicationID
+	before := len(*seq)
+
+	// Create client: blocked before any provider call.
+	if _, err := svc.CreateClient(ctx, "user_actor", res.ApplicationID, "req-3", confidentialClientInput()); !errors.Is(err, ErrParentApplicationDisabled) {
+		t.Fatalf("create client err = %v, want ErrParentApplicationDisabled", err)
+	}
+
+	// Enable client: blocked; the provider client must stay disabled.
+	if _, err := svc.SetClientStatus(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-4", true); !errors.Is(err, ErrParentApplicationDisabled) {
+		t.Fatalf("enable client err = %v, want ErrParentApplicationDisabled", err)
+	}
+	if fake := prov.Client(provAppID); fake == nil || !fake.Disabled {
+		t.Error("provider client must stay disabled while the application is disabled")
+	}
+
+	// Protocol-config update: blocked.
+	newName := "Renamed Client"
+	if _, err := svc.UpdateClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-5", ClientPatch{Name: &newName}); !errors.Is(err, ErrParentApplicationDisabled) {
+		t.Fatalf("update client err = %v, want ErrParentApplicationDisabled", err)
+	}
+
+	// Secret rotation: blocked with a denied audit event.
+	if _, err := svc.RotateClientSecret(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-6"); !errors.Is(err, ErrParentApplicationDisabled) {
+		t.Fatalf("rotate err = %v, want ErrParentApplicationDisabled", err)
+	}
+	denied := false
+	for _, ev := range events.events {
+		if ev.EventType == EventSecretRotationFailed && ev.Result == SecurityEventDenied && ev.FailureClass == "state_conflict" {
+			denied = true
+		}
+	}
+	if !denied {
+		t.Error("expected denied rotation event for disabled parent application")
+	}
+
+	// None of the blocked mutations may have reached the provider.
+	for _, step := range (*seq)[before:] {
+		if step == "provider:provision" || step == "provider:enable" || step == "provider:update" || step == "provider:rotate" {
+			t.Fatalf("blocked mutation reached the provider: %s", step)
+		}
+	}
+}
+
+func TestParentLifecycle_DisableAndDeleteStillAllowedOnDisabledApp(t *testing.T) {
+	svc, _, _, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := svc.SetStatus(ctx, "user_actor", res.ApplicationID, "req-2", false); err != nil {
+		t.Fatalf("disable app: %v", err)
+	}
+
+	// Disabling an individually active client only tightens state.
+	if _, err := svc.SetClientStatus(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-3", false); err != nil {
+		t.Fatalf("disable client on disabled app: %v", err)
+	}
+	// Deletion remains possible so resources can be cleaned up.
+	if err := svc.DeleteClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-4"); err != nil {
+		t.Fatalf("delete client on disabled app: %v", err)
+	}
+}
+
+func TestParentLifecycle_EnableClientAfterAppReenabled(t *testing.T) {
+	svc, store, prov, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := svc.SetStatus(ctx, "user_actor", res.ApplicationID, "req-2", false); err != nil {
+		t.Fatalf("disable app: %v", err)
+	}
+	if err := svc.SetStatus(ctx, "user_actor", res.ApplicationID, "req-3", true); err != nil {
+		t.Fatalf("enable app: %v", err)
+	}
+	if _, err := svc.SetClientStatus(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-4", false); err != nil {
+		t.Fatalf("disable client: %v", err)
+	}
+
+	updated, err := svc.SetClientStatus(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-5", true)
+	if err != nil {
+		t.Fatalf("enable client after app re-enabled: %v", err)
+	}
+	if updated.Status != StatusActive {
+		t.Errorf("client status = %s, want active", updated.Status)
+	}
+	fake := prov.Client(store.clients[res.ClientID].ProviderApplicationID)
+	if fake == nil || fake.Disabled {
+		t.Error("provider client must be re-enabled")
+	}
+}

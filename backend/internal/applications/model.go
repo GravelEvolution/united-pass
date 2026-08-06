@@ -150,6 +150,15 @@ func (c *OAuthClient) CanRotateSecret() bool {
 	return c.ClientType == ClientTypeConfidential && c.Status == StatusActive
 }
 
+// EffectiveClientActive computes the client's effective active state: a
+// client is effectively active only when BOTH the parent application and the
+// client itself are active. The application-level kill switch is
+// authoritative; disabling an application must disable all of its clients at
+// the provider and cannot be bypassed by re-enabling an individual client.
+func EffectiveClientActive(appStatus, clientStatus Status) bool {
+	return appStatus == StatusActive && clientStatus == StatusActive
+}
+
 // ScopeDefinition is one entry of the backend-authoritative scope catalog.
 type ScopeDefinition struct {
 	Scope       string

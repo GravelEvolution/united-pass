@@ -567,6 +567,8 @@ func (h *ApplicationHandlers) writeMutationError(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusConflict, CodeConflict, duplicateMessage, nil)
 	case errors.Is(err, applications.ErrInvalidStateTransition), errors.Is(err, applications.ErrConflict):
 		writeError(w, r, http.StatusConflict, CodeConflict, "资源当前状态不允许该操作。", nil)
+	case errors.Is(err, applications.ErrParentApplicationDisabled):
+		writeError(w, r, http.StatusConflict, CodeConflict, "所属应用已停用，无法变更其客户端；请先启用应用。", nil)
 	case errors.Is(err, applications.ErrProviderConflict):
 		writeError(w, r, http.StatusConflict, CodeConflict, "身份提供方报告冲突，请稍后重试。", nil)
 	case errors.Is(err, applications.ErrProviderUnavailable):
