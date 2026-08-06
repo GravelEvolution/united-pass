@@ -4,7 +4,8 @@
 - 范围：Phase 2 任务书 P2.8 —— Apple container machine；ZITADEL v2.71；Provider Provisioning；Rotation；Delete；Compensation；环境清理；验收记录。
 - 结论（如实记录，不写满）：
   - **confidential-client real-provider acceptance: passed**（Part 1–3，2026-08-06 首轮）；
-  - **public-client real-provider acceptance: passed**（Part 4，2026-08-06 安全复核整改期补验，44/44 PASS）。
+  - **public-client real-provider acceptance: passed**（Part 4，2026-08-06 安全复核整改期补验，44/44 PASS）；
+  - **security-remediation real-provider re-acceptance (P2.8b): passed**（Part 5，2026-08-07 第二轮安全复核整改后补验，70/70 PASS，schema 版本 4）。
 - 验收环境已拆除，`.env` 已恢复 fake provider 默认。
 
 ## 1. 验收环境
@@ -15,7 +16,7 @@
 | ZITADEL | v2.71.0，`docker-compose.zitadel.yml`，machine 内 `http://localhost:8080` |
 | 初始化 | `scripts/zitadel-init.sh`（幂等通过）：测试 human 用户（密码 + TOTP）、后端 Service Account + JSON key、SA 授权为组织 ORG_OWNER |
 | 项目 | ZITADEL 项目 "United Pass"（SA 通过 Management API find-or-create） |
-| 后端 | `UP_AUTH_PROVIDER=zitadel`，监听 `127.0.0.1:8090`，迁移至 schema 版本 2；开发权限 override 仅对验收操作者生效 |
+| 后端 | `UP_AUTH_PROVIDER=zitadel`，监听 `127.0.0.1:8090`（首轮）/ `127.0.0.1:8081`（Part 5）；首轮迁移至 schema 版本 2，Part 5 补验时 migrations 已演进至 **版本 4**（00001–00004）并迁移到位；开发权限 override 仅对验收操作者生效 |
 | 数据库访问 | machine 内 `127.0.0.1:15432` 隧道 → 远端 dev PostgreSQL |
 
 ## 2. 验收结果
@@ -76,7 +77,31 @@
 | 删除 | 全新 reauth（`client.delete`）→ 204；ZITADEL 侧 app 同步移除；fixture 应用删除 204 | ✅ |
 | 残留检查 | ZITADEL 项目内无验收残留 app | ✅ |
 
-## 5. 环境清理确认
+## 5. Part 5：P2.8b 第二轮安全复核整改后补验（2026-08-07，70 PASS）
+
+首轮/Part 4 验收发生在第二批安全整改（Application 部分状态回滚、Reauth 放弃清理）之前，且验收时 schema 为版本 2；本轮在同一环境对整改后的实现补验，覆盖复核要求的七个验收点，schema 已迁移至版本 4。
+
+| 场景 | 断言 | 结果 |
+| --- | --- | --- |
+| schema v4 migration | `cmd/migrate` 将测试 schema 从 v2 迁移至 v4（00003 审计强化 + 00004 reconciliation 期望状态）无错误 | ✅ |
+| confidential create | `with-initial-client`（audience=external，profile=web_server）201；一次性 Secret 64 字符；provider app ACTIVE 且 id 回写；第二个 confidential client 同样成功 | ✅ |
+| durable rotation single-winner | 两个并发 reauth grant 同时轮转：恰好一个 200 一个 409；rotation gate 释放回 idle；secret 记录恰 2 条；`secret_rotated` 审计恰 1 条；无 reconciliation_required | ✅ |
+| outcome_unknown | 轮转进行中 docker kill ZITADEL：返回 409 且错误说明结果未知；`secret_rotation_status=outcome_unknown`；`provider_reconciliation_required=true`；job reason=`provider_outcome_unknown`；审计 `secret_rotation_failed`（payload failure_class）+ `provider_reconciliation_required`；人工对账（确认 provider 侧未变更）后状态回 idle | ✅ |
+| application partial enable rollback | A 启用成功、B 失败（provider app 指向不存在 id，409 provider_conflict）：应用本地保持 disabled；**A 被 best-effort 回滚为 INACTIVE（kill switch 未被绕过）**；回滚成功不产生 drift job；恢复后 enable 成功 | ✅ |
+| application partial disable drift | disable 中途失败：应用本地保持 active（不假装成功）；已切换的 A 保持 INACTIVE（fail-safe 方向）；drift job reason=`disable_partial:provider_conflict` 且 **desired_status=disabled**（migration 00004）；审计 `provider_reconciliation_required` 新增 1 条 | ✅ |
+| reauth abandoned challenge cleanup | reauth step1 202 后放弃：cleanup-index 存在含 providerSessionId 的 member；challenge key 存活；TTL（45s）过期后 worker 撤销日志出现且 index 清空（ZCARD=0）；过期 challenge 完成 MFA 被拒 401；ZITADEL 侧 session 确认终态；Phase 自身无新增 `revoke_failed` 审计 | ✅ |
+| transactional audit | 全场景审计表落库 ≥ 10 行；成功审计 outcome 均为 success/denied 枚举；`secret_rotated` 审计与 secret 记录同事务并存 | ✅ |
+| fixture 清理 | reauth（client.delete/application.delete）后全部 204；app 软删除；ZITADEL 项目内无残留 app（APP_COUNT: 0） | ✅ |
+
+### Part 5 如实记录的问题与语义说明
+
+1. **enable/disable 中途失败返回 409 而非 502**：注入方式为将 `provider_application_id` 指向不存在的 provider app，错误被分类为 `provider_conflict`（409），非 `provider.unavailable`（502）。回滚/drift 逻辑与错误分类无关，两种分类下行为一致。
+2. **client 本地 status 不随应用 kill switch 联动（既定模型）**：应用 disable/enable 只切换 provider 侧 Client 状态，不修改 client 本地 `status`；enable 时会跳过被单独禁用的 client（保持禁用）。这与 ADR-0004 的 kill switch 语义一致，验收未将其断言为缺陷。
+3. **Phase 4 期间存在 1 条 `provider_session.revoke_failed` 审计（预期行为）**：ZITADEL down 期间 client.delete 后的 best-effort provider session 撤销失败，按设计落 denied 审计（failure_class=internal）。Part 5 断言采用增量方式，确认 cleanup 路径自身不产生新的 revoke 失败。
+4. **SA PROJECT_OWNER 授权再次需要幂等补授**：与 Part 4 相同，环境封存后 SA 的项目成员身份丢失，验收脚本重新授予后通过；部署要求不变（见第 3 节问题 1）。
+5. **reauth 限流默认偏紧**：补验脚本需显式提高 `UP_REAUTH_RATE_LIMIT`（默认额度不足以支撑连续多场景 reauth）；生产默认值保持不变（fail closed 方向）。
+
+## 6. 环境清理确认
 
 - 验收 fixture 应用与客户端已删除（ZITADEL 项目内 app 列表为空，两轮验收均已确认）；
 - API 进程已停止，`docker compose down` 完成，无残留容器；
@@ -84,7 +109,7 @@
 - 全部临时验收脚本（`.tmp-*`）已删除，未入库；
 - `docs/HANDOFF_260806.md` 保持未跟踪，未提交。
 
-## 6. 复现要点（供下一轮验收参考）
+## 7. 复现要点（供下一轮验收参考）
 
 1. `docker compose -f docker-compose.zitadel.yml up -d` → `./scripts/zitadel-init.sh`；
 2. SA 以 JWT profile（scope 含 `urn:zitadel:iam:org:project:id:zitadel:aud`）find-or-create 项目，并把 SA 加为项目 `PROJECT_OWNER` 成员（该授权可能在环境封存后丢失，脚本应幂等补授）；
