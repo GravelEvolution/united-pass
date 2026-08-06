@@ -52,8 +52,13 @@ const (
 type ClientProfile string
 
 const (
-	ClientProfileWebServer      ClientProfile = "web_server"
-	ClientProfileSPAMobile      ClientProfile = "spa_mobile"
+	ClientProfileWebServer ClientProfile = "web_server"
+	ClientProfileSPAMobile ClientProfile = "spa_mobile"
+	// ClientProfileServerToServer is kept for forward compatibility and
+	// existing records only; creation is rejected by ValidateClientInput
+	// because ZITADEL v2.71 serves client_credentials tokens only for
+	// machine users, so a provisioned OIDC app could never execute the
+	// grant the profile declares.
 	ClientProfileServerToServer ClientProfile = "server_to_server"
 )
 

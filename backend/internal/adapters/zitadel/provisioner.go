@@ -291,14 +291,17 @@ func addOIDCAppRequest(projectID string, spec applications.ClientProvisionSpec, 
 		req.PostLogoutRedirectUris = []string{spec.LogoutURI}
 	}
 	switch spec.Profile {
-	case applications.ClientProfileWebServer, applications.ClientProfileServerToServer:
+	case applications.ClientProfileWebServer:
 		req.AppType = appv1.OIDCAppType_OIDC_APP_TYPE_WEB
 		req.AuthMethodType = appv1.OIDCAuthMethodType_OIDC_AUTH_METHOD_TYPE_BASIC
 	case applications.ClientProfileSPAMobile:
 		req.AppType = appv1.OIDCAppType_OIDC_APP_TYPE_USER_AGENT
 		req.AuthMethodType = appv1.OIDCAuthMethodType_OIDC_AUTH_METHOD_TYPE_NONE
 	default:
-		return nil, fmt.Errorf("%w: unknown profile", applications.ErrProviderConflict)
+		// server_to_server is rejected by domain validation (ZITADEL v2.71
+		// cannot serve client_credentials for provisioned OIDC apps); fail
+		// closed here so no unsupported profile ever reaches the provider.
+		return nil, fmt.Errorf("%w: unsupported profile %q", applications.ErrProviderConflict, string(spec.Profile))
 	}
 	if rules.RedirectURIRequired && len(spec.RedirectURIs) == 0 {
 		return nil, fmt.Errorf("%w: profile requires redirect uris", applications.ErrProviderConflict)
@@ -307,11 +310,11 @@ func addOIDCAppRequest(projectID string, spec applications.ClientProvisionSpec, 
 }
 
 // grantTypesFor maps domain grant types onto the ZITADEL app.v1 enum. The
-// pinned enum has no client_credentials value; server_to_server clients are
-// registered with the authorization_code grant set. P2.8 acceptance confirmed
-// that ZITADEL v2.71 serves client_credentials only for machine users, so
-// provisioned apps cannot mint tokens via client_credentials; the limitation
-// is recorded in ADR-0004 (Follow-up) and docs/p28-acceptance-record.md.
+// pinned enum has no client_credentials value. server_to_server clients are
+// rejected at input validation (ZITADEL v2.71 serves client_credentials only
+// for machine users, so a provisioned app could never execute the grant);
+// the client_credentials case stays mapped defensively should a machine-user
+// backed profile ever be introduced.
 func grantTypesFor(rules applications.ProfileRules) []appv1.OIDCGrantType {
 	grants := make([]appv1.OIDCGrantType, 0, len(rules.GrantTypes))
 	for _, gt := range rules.GrantTypes {

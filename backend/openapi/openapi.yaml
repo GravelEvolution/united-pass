@@ -2242,6 +2242,11 @@ components:
         profile:
           type: string
           enum: [web_server, spa_mobile, server_to_server]
+          description: |
+            `server_to_server` is kept in the enum for forward compatibility
+            but is rejected with a 422 `profile` field error: ZITADEL v2.71
+            serves client_credentials tokens only for machine users, so a
+            provisioned OIDC app could never execute the grant.
         redirectUris:
           type: array
           maxItems: 20

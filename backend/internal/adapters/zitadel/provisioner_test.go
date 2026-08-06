@@ -187,33 +187,21 @@ func TestProvisioner_SPAMobileMappingSuppressesSecret(t *testing.T) {
 	}
 }
 
-func TestProvisioner_ServerToServerMapping(t *testing.T) {
-	stub := &stubManagement{addResp: &management.AddOIDCAppResponse{
-		AppId: "prov-app-3", ClientId: "prov-client-3", ClientSecret: "s2s-secret",
-	}}
+func TestProvisioner_ServerToServerRejected(t *testing.T) {
+	// server_to_server is rejected by domain validation, but the adapter
+	// must fail closed too so an unsupported profile never reaches ZITADEL.
+	stub := &stubManagement{}
 	p := newTestProvisioner(t, stub)
 
-	res, err := p.ProvisionClient(context.Background(), "idem-3", applications.ClientProvisionSpec{
+	_, err := p.ProvisionClient(context.Background(), "idem-3", applications.ClientProvisionSpec{
 		DisplayName: "S2S Client",
 		Profile:     applications.ClientProfileServerToServer,
 	})
-	if err != nil {
-		t.Fatalf("provision: %v", err)
+	if err == nil {
+		t.Fatal("expected server_to_server provisioning to fail")
 	}
-	if res.ClientSecret != "s2s-secret" {
-		t.Errorf("secret: %q", res.ClientSecret)
-	}
-	if stub.addReq.AppType != appv1.OIDCAppType_OIDC_APP_TYPE_WEB ||
-		stub.addReq.AuthMethodType != appv1.OIDCAuthMethodType_OIDC_AUTH_METHOD_TYPE_BASIC {
-		t.Errorf("s2s mapping: app=%v auth=%v", stub.addReq.AppType, stub.addReq.AuthMethodType)
-	}
-	if len(stub.addReq.RedirectUris) != 0 {
-		t.Errorf("s2s must not send redirect uris: %v", stub.addReq.RedirectUris)
-	}
-	// client_credentials has no pinned enum value; the adapter registers
-	// authorization_code and relies on the token endpoint (ADR-0004 §1).
-	if len(stub.addReq.GrantTypes) != 1 || stub.addReq.GrantTypes[0] != appv1.OIDCGrantType_OIDC_GRANT_TYPE_AUTHORIZATION_CODE {
-		t.Errorf("s2s grants: %v", stub.addReq.GrantTypes)
+	if stub.added != 0 {
+		t.Error("AddOIDCApp must not be called for unsupported profiles")
 	}
 }
 

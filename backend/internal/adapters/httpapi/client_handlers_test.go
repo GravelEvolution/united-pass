@@ -129,9 +129,9 @@ func TestCreateClient_ProfileValidation422(t *testing.T) {
 		field string
 	}{
 		{
-			name:  "server_to_server forbids redirect uris",
-			body:  `{"name": "S2S 客户端", "profile": "server_to_server", "redirectUris": ["https://x.example.com/cb"], "allowedScopes": ["profile"], "consentMode": "always"}`,
-			field: "redirectUris",
+			name:  "server_to_server rejected as unsupported provider capability",
+			body:  `{"name": "S2S 客户端", "profile": "server_to_server", "redirectUris": [], "allowedScopes": ["profile"], "consentMode": "always"}`,
+			field: "profile",
 		},
 		{
 			name:  "invalid redirect uri reports the index",
@@ -139,18 +139,13 @@ func TestCreateClient_ProfileValidation422(t *testing.T) {
 			field: "redirectUris[0]",
 		},
 		{
-			name:  "server_to_server forbids openid",
-			body:  `{"name": "S2S 客户端", "profile": "server_to_server", "redirectUris": [], "allowedScopes": ["openid"], "consentMode": "always"}`,
-			field: "allowedScopes",
-		},
-		{
 			name:  "unknown profile",
 			body:  `{"name": "新增客户端", "profile": "bogus", "redirectUris": ["https://x.example.com/cb"], "allowedScopes": ["openid"], "consentMode": "always"}`,
 			field: "profile",
 		},
 		{
-			name:  "first_authorization rejected for non-consent profile",
-			body:  `{"name": "S2S 客户端", "profile": "server_to_server", "redirectUris": [], "allowedScopes": ["profile"], "consentMode": "first_authorization"}`,
+			name:  "unknown consent mode rejected",
+			body:  `{"name": "新增客户端", "profile": "web_server", "redirectUris": ["https://x.example.com/cb"], "allowedScopes": ["openid"], "consentMode": "trusted_first_party"}`,
 			field: "consentMode",
 		},
 	}

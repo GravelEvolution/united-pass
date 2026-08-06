@@ -63,7 +63,11 @@ func TestValidateClientInputWebServer(t *testing.T) {
 	}
 }
 
-func TestValidateClientInputServerToServer(t *testing.T) {
+func TestValidateClientInputRejectsServerToServer(t *testing.T) {
+	// ZITADEL v2.71 serves client_credentials only for machine users, so a
+	// provisioned OIDC app could never execute the grant the profile
+	// declares. Creation must fail closed with a provider capability field
+	// error (surfaced as 422) instead of minting unusable credentials.
 	in := ClientInput{
 		Name:         "服务账号",
 		Profile:      ClientProfileServerToServer,
@@ -71,8 +75,22 @@ func TestValidateClientInputServerToServer(t *testing.T) {
 		Scopes:       []string{"reporting:read"},
 		ConsentMode:  ConsentModeAlways,
 	}
-	if err := ValidateClientInput(in); err != nil {
-		t.Fatalf("valid server_to_server input rejected: %v", err)
+	err := ValidateClientInput(in)
+	if err == nil {
+		t.Fatal("expected server_to_server input to be rejected")
+	}
+	verrs, ok := err.(*ValidationErrors)
+	if !ok {
+		t.Fatalf("expected *ValidationErrors, got %T", err)
+	}
+	found := false
+	for _, fe := range verrs.Errors {
+		if fe.Field == "profile" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("field errors = %+v, want field %q", verrs.Errors, "profile")
 	}
 }
 
@@ -88,33 +106,9 @@ func TestValidateClientInputRejectsInvalidCombinations(t *testing.T) {
 			wantField: "profile",
 		},
 		{
-			name: "server_to_server with redirect uri",
-			mutate: func(in *ClientInput) {
-				in.Profile = ClientProfileServerToServer
-				in.RedirectURIs = []string{"https://a.example.com/cb"}
-			},
-			wantField: "redirectUris",
-		},
-		{
-			name:      "server_to_server with openid",
-			mutate:    func(in *ClientInput) { in.Profile = ClientProfileServerToServer; in.Scopes = []string{"openid"} },
-			wantField: "allowedScopes",
-		},
-		{
-			name: "server_to_server with offline_access",
-			mutate: func(in *ClientInput) {
-				in.Profile = ClientProfileServerToServer
-				in.Scopes = []string{"offline_access"}
-			},
-			wantField: "allowedScopes",
-		},
-		{
-			name: "server_to_server first_authorization consent",
-			mutate: func(in *ClientInput) {
-				in.Profile = ClientProfileServerToServer
-				in.ConsentMode = ConsentModeFirstAuthorization
-			},
-			wantField: "consentMode",
+			name:      "server_to_server rejected as unsupported provider capability",
+			mutate:    func(in *ClientInput) { in.Profile = ClientProfileServerToServer },
+			wantField: "profile",
 		},
 		{
 			name:      "trusted_first_party consent rejected",

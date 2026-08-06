@@ -113,6 +113,15 @@ func ValidateClientInput(in ClientInput) error {
 		return &errs
 	}
 
+	// ZITADEL v2.71 serves client_credentials tokens only for machine users,
+	// so a provisioned OIDC app could never execute the single grant the
+	// server_to_server profile declares. Reject at input validation (422
+	// provider capability) instead of minting credentials that cannot work.
+	if in.Profile == ClientProfileServerToServer {
+		errs.Add("profile", "server_to_server Profile 暂不受支持：当前身份提供方（ZITADEL v2.71）仅允许机器用户通过 client_credentials 获取令牌。请选择 web_server 或 spa_mobile Profile。")
+		return &errs
+	}
+
 	validateRedirectURIs(&errs, in.RedirectURIs, rules)
 	validateLogoutURI(&errs, in.LogoutURI)
 	validateScopes(&errs, in.Scopes, rules)
