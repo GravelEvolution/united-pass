@@ -255,16 +255,19 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
 ### Implemented in Phase 2
 
 - **OAuth Application / Client domain** (`internal/applications`): application + client lifecycle state machines, confidential/public profiles, consent modes, scope catalog validation, soft delete
-- **PostgreSQL schema v2**: `oauth_applications`, `oauth_clients`, `oauth_client_secret_records`, `provider_operations`, `provider_reconciliation_jobs`, `security_events`
-- **ZITADEL provisioning adapter**: OIDC app create/update/disable/remove + secret rotation against the Management API, with a capability-equivalent fake provider for tests; all provider failures mapped to stable error classes (fail closed)
+- **Parent lifecycle enforcement**: a Client's effective state is `application.status == active && client.status == active`; while the Application is disabled, client creation/enable/config update/secret rotation are rejected (state-matrix tested)
+- **PostgreSQL schema v2**: `oauth_applications`, `oauth_clients`, `oauth_client_secret_records`, `provider_operations`, `provider_reconciliation_jobs`, `security_events` (schema v3 adds durable secret-rotation operation state)
+- **ZITADEL provisioning adapter**: OIDC app create/update/disable/remove + secret rotation against the Management API, with a capability-equivalent fake provider for tests; all provider failures mapped to stable error classes (fail closed); provider display names are globally unique (`{application} · {client} · {shortClientId}`) so interrupted provisioning recovers the original provider app instead of conflicting
 - **Application API**: create with initial client, list (cursor pagination), get/update, enable/disable, delete
 - **Client API**: create/get/update/enable/disable/delete with profile-based validation (redirect URIs, token endpoint auth, scopes)
-- **Reauthentication** (`POST /api/v1/auth/reauthentication` + `/mfa`): password + TOTP step-up for high-risk actions; single-use grants bound to action and resource, submitted via `X-Reauthentication-Token`
-- **Secret rotation**: single-winner optimistic gate, one-time secret display (`Cache-Control: no-store`), rate limiting, rotation audit
-- **Compensation**: provider failures during delete/rotation leave `provider_reconciliation_required` flags, reconciliation jobs, and durable audit events; failed deletions are retryable
-- **Durable audit**: `security_events` rows for every management-plane action (log-based audit is not a substitute)
+- **Reauthentication** (`POST /api/v1/auth/reauthentication` + `/mfa`): password + TOTP step-up for high-risk actions; single-use grants bound to action and resource, submitted via `X-Reauthentication-Token`; temporary provider sessions are best-effort revoked at every terminal state
+- **Secret rotation**: durable rotation operation state (`idle` / `in_progress` / `outcome_unknown`) serializes winners; provider timeouts land in `outcome_unknown` + reconciliation instead of assuming the old secret survived; one-time secret display (`Cache-Control: no-store`), rate limiting, rotation audit
+- **Compensation**: provider outcomes for delete/enable/disable/update/rotation are recorded; provider success + local failure leaves `provider_reconciliation_required` flags, reconciliation jobs, and durable audit events; failed deletions are retryable
+- **Durable audit**: success events for every high-risk management-plane action commit in the same transaction as the state change; an audit write failure aborts the operation (log-based audit is not a substitute)
+- **Provider capability gating**: `server_to_server` clients are rejected with 422 on ZITADEL v2.71 (client_credentials is not served for project apps; verified in P2.8 acceptance)
+- **Readiness**: `/readyz` covers PostgreSQL, Redis, auth provider connectivity, and provisioning project readability (`GetProjectByID`); the `PROJECT_OWNER` membership required for `RemoveApp` cannot be probed without side effects and remains a deployment acceptance check
 - ADR-0004 documenting the Phase 2 management-plane architecture
-- Real-provider acceptance against ZITADEL v2.71 (provisioning, rotation, delete, compensation); see [P2.8 acceptance record](docs/p28-acceptance-record.md)
+- Real-provider acceptance against ZITADEL v2.71 (confidential + public client provisioning, rotation, delete, compensation); see [P2.8 acceptance record](docs/p28-acceptance-record.md)
 
 ### Not yet implemented (later phases)
 
@@ -280,15 +283,21 @@ Sign-off](docs/adr-0003.md). Production deployments can start with the
 ZITADEL adapter once the HTTPS instance and secrets are provisioned (see
 [Local ZITADEL Instance](#local-zitadel-instance)).
 
-**Phase 2 status: implementation complete; real-provider acceptance passed.**
+**Phase 2 status: security review remediation in progress.**
 The OAuth Application/Client management plane (provisioning, reauthentication,
-secret rotation, deletion, compensation, durable audit) is implemented and has
-been accepted against a real ZITADEL v2.71.0 instance; details in
-[ADR-0004](docs/adr-0004.md) and the
-[P2.8 acceptance record](docs/p28-acceptance-record.md). Note: the ZITADEL
-service account must hold `PROJECT_OWNER` membership on the provisioning
-project — organization-level `ORG_OWNER` alone is not sufficient for
-`RemoveApp` on v2.71.
+secret rotation, deletion, compensation, durable audit) is implemented and the
+real-provider acceptance covers both confidential and public clients against
+ZITADEL v2.71.0; details in [ADR-0004](docs/adr-0004.md) and the
+[P2.8 acceptance record](docs/p28-acceptance-record.md). A security review
+reopened the freeze and identified 10 remediation items (parent lifecycle
+enforcement, durable rotation serialization, globally unique provisioning
+identity, provider-success reconciliation, reauth session revocation,
+frontend contract sync, server_to_server rejection, public-client acceptance,
+same-transaction success audit, provisioning project readiness); all items
+are implemented and regression-tested, pending re-review sign-off. Note: the
+ZITADEL service account must hold `PROJECT_OWNER` membership on the
+provisioning project — organization-level `ORG_OWNER` alone is not sufficient
+for `RemoveApp` on v2.71.
 
 - Passkey browser ceremony against the real instance (WebAuthn begin fails in the local dev instance; adapter unit tests cover the contract and the fail-closed path)
 - Production HTTPS instance + Secret Manager rollout (Phase 1.2 production operational sign-off)
