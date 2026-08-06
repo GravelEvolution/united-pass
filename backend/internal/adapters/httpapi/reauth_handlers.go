@@ -88,6 +88,8 @@ type ReauthHandlers struct {
 	maxAttempts   int
 	rateLimit     int
 	rateWindow    time.Duration
+	revokeTimeout time.Duration
+	auditTimeout  time.Duration
 	logger        *slog.Logger
 }
 
@@ -114,6 +116,8 @@ func NewReauthHandlers(
 		maxAttempts:   maxAttempts,
 		rateLimit:     rateLimit,
 		rateWindow:    rateWindow,
+		revokeTimeout: reauthRevokeTimeout,
+		auditTimeout:  reauthAuditTimeout,
 		logger:        logger,
 	}
 }
@@ -556,6 +560,12 @@ func (h *ReauthHandlers) createChallenge(w http.ResponseWriter, r *http.Request,
 // the local reauthentication outcome is already decided.
 const reauthRevokeTimeout = 10 * time.Second
 
+// reauthAuditTimeout bounds the failure-audit write. It is always a fresh
+// deadline derived from the detached base context — never from the
+// revocation context, which may already be expired when the provider timed
+// out (an expired audit context would silently drop the security event).
+const reauthAuditTimeout = 3 * time.Second
+
 // revokeProviderSession terminates a temporary provider session at a
 // reauthentication terminal state (ADR-0004 §7). It is strictly best-effort:
 // the local outcome (grant issued or fail closed) is already decided, and a
@@ -570,18 +580,29 @@ func (h *ReauthHandlers) revokeProviderSession(r *http.Request, sessionReference
 	if sessionReference == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), reauthRevokeTimeout)
-	defer cancel()
-	if err := h.authenticator.RevokeProviderSession(ctx, sessionReference); err != nil {
-		h.logger.Warn("reauth provider session revocation failed",
-			"requestId", requestID(r),
-			"errorClass", observability.ClassifyError(err),
-			"errorDetail", observability.RedactedError(err, 256),
-		)
-		h.auditor.RecordEvent(ctx, applications.EventProviderSessionRevokeFailed, actor,
-			appID, clientID, request.ID(r.Context()), action, applications.SecurityEventDenied,
-			string(observability.ClassifyError(err)))
+	baseCtx := context.WithoutCancel(r.Context())
+
+	revokeCtx, revokeCancel := context.WithTimeout(baseCtx, h.revokeTimeout)
+	err := h.authenticator.RevokeProviderSession(revokeCtx, sessionReference)
+	revokeCancel()
+	if err == nil {
+		return
 	}
+
+	h.logger.Warn("reauth provider session revocation failed",
+		"requestId", requestID(r),
+		"errorClass", observability.ClassifyError(err),
+		"errorDetail", observability.RedactedError(err, 256),
+	)
+
+	// Do not reuse revokeCtx: if the provider timed out, that context is
+	// already expired and the audit write would fail immediately. The
+	// "revocation failed" security event must get its own fresh deadline.
+	auditCtx, auditCancel := context.WithTimeout(baseCtx, h.auditTimeout)
+	defer auditCancel()
+	h.auditor.RecordEvent(auditCtx, applications.EventProviderSessionRevokeFailed, actor,
+		appID, clientID, request.ID(r.Context()), action, applications.SecurityEventDenied,
+		string(observability.ClassifyError(err)))
 }
 
 // recordReauthFailure records a denied reauthentication audit row. Audit

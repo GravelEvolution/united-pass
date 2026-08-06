@@ -428,6 +428,68 @@ func TestRevokeProviderSession_SurvivesCancelledRequestContext(t *testing.T) {
 	}
 }
 
+// deadlineAuth blocks until the revocation context expires, then reports the
+// failure — a provider that never answers within the revoke timeout.
+type deadlineAuth struct{ inner *fakeReauthAuth }
+
+func (d *deadlineAuth) VerifyUserPassword(ctx context.Context, userID identity.UserID, password string) (auth.AuthenticationResult, error) {
+	return d.inner.VerifyUserPassword(ctx, userID, password)
+}
+
+func (d *deadlineAuth) CompleteMFA(ctx context.Context, input auth.MFAChallengeInput) (auth.AuthenticationResult, error) {
+	return d.inner.CompleteMFA(ctx, input)
+}
+
+func (d *deadlineAuth) RevokeProviderSession(ctx context.Context, _ string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// ctxRecordingAuditor captures the context state at RecordEvent time so
+// tests can assert the audit write never receives an expired context.
+type ctxRecordingAuditor struct {
+	mu          sync.Mutex
+	recorded    bool
+	auditCtxErr error
+	eventType   string
+	result      applications.SecurityEventResult
+}
+
+func (c *ctxRecordingAuditor) RecordEvent(ctx context.Context, eventType string, _ identity.UserID, _ applications.ApplicationID, _ applications.OAuthClientID, _, _ string, result applications.SecurityEventResult, _ string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recorded = true
+	c.auditCtxErr = ctx.Err()
+	c.eventType = eventType
+	c.result = result
+}
+
+func TestRevokeProviderSession_AuditSurvivesRevokeTimeout(t *testing.T) {
+	env := newReauthEnv()
+	// Short revoke deadline so the provider "hang" exhausts it quickly.
+	env.handlers.revokeTimeout = 50 * time.Millisecond
+	env.handlers.authenticator = &deadlineAuth{inner: env.authz}
+	auditor := &ctxRecordingAuditor{}
+	env.handlers.auditor = auditor
+
+	r := httptest.NewRequest(http.MethodPost, "/auth/reauthentication", nil)
+	env.handlers.revokeProviderSession(r, "ref-1", reauthPrincipal.UserID,
+		applications.ApplicationID("app-1"), applications.OAuthClientID("clt-1"), "client.secret.rotate")
+
+	auditor.mu.Lock()
+	defer auditor.mu.Unlock()
+	if !auditor.recorded {
+		t.Fatal("expected provider_session.revoke_failed audit after revoke timeout")
+	}
+	if auditor.eventType != applications.EventProviderSessionRevokeFailed || auditor.result != applications.SecurityEventDenied {
+		t.Errorf("audit event = %s/%s, want revoke_failed/denied", auditor.eventType, auditor.result)
+	}
+	// The audit context must be a fresh deadline, not the expired revoke ctx.
+	if auditor.auditCtxErr != nil {
+		t.Errorf("audit context already expired: %v; the failure audit must not reuse the timed-out revocation context", auditor.auditCtxErr)
+	}
+}
+
 func TestReauthRequest_ChallengeStoreFailureRevokesSession(t *testing.T) {
 	env := newReauthEnv()
 	env.authz.verifyResult = auth.AuthenticationResult{
