@@ -250,18 +250,23 @@ func (s *Service) CreateWithInitialClient(
 		return CreateResult{}, err
 	}
 
-	// Provider call outside any database transaction.
+	// Provider call outside any database transaction. The provider display
+	// name is globally unique (application · client · short client ID) so
+	// cross-application name collisions are impossible and ambiguous retries
+	// can recover the original provider app (ADR-0004 §1).
 	result, err := s.provisioner.ProvisionClient(ctx, op.IdempotencyKey, ClientProvisionSpec{
-		DisplayName:  client.Name,
-		Profile:      client.Profile,
-		RedirectURIs: clientIn.RedirectURIs,
-		LogoutURI:    clientIn.LogoutURI,
-		Scopes:       clientIn.Scopes,
+		DisplayName:   ProviderDisplayName(app.Name, client.Name, clientID),
+		LocalClientID: clientID,
+		Profile:       client.Profile,
+		RedirectURIs:  clientIn.RedirectURIs,
+		LogoutURI:     clientIn.LogoutURI,
+		Scopes:        clientIn.Scopes,
 	})
 	if err != nil {
 		// Failed rows stay hidden from all listings; the failure class is
 		// the only recorded detail.
 		_ = s.store.MarkInitialProvisioningFailed(ctx, appID, clientID, opID, ErrorClassFor(err))
+		s.recordAmbiguousProvision(ctx, actor, appID, clientID, "", requestID, "application.create", err)
 		if errors.Is(err, ErrProviderConflict) {
 			return CreateResult{}, ErrProviderConflict
 		}
@@ -296,6 +301,34 @@ func (s *Service) CreateWithInitialClient(
 		ClientID:      clientID,
 		ClientSecret:  result.ClientSecret,
 	}, nil
+}
+
+// recordAmbiguousProvision leaves a reconciliation trail when a provisioning
+// call failed with an unknown provider outcome: the provider app may exist
+// even though no response arrived, so the potential orphan must never be
+// leaked silently (ADR-0004 §1).
+func (s *Service) recordAmbiguousProvision(
+	ctx context.Context,
+	actor identity.UserID,
+	appID ApplicationID,
+	clientID OAuthClientID,
+	providerApplicationID string,
+	requestID, operation string,
+	err error,
+) {
+	if !errors.Is(err, ErrProviderOutcomeUnknown) {
+		return
+	}
+	_ = s.store.SetClientReconciliationRequired(ctx, clientID)
+	_ = s.store.CreateReconciliationJob(ctx, ReconciliationJob{
+		ID:                    NewProviderOperationID(),
+		ApplicationID:         appID,
+		ClientID:              clientID,
+		ProviderApplicationID: providerApplicationID,
+		Reason:                "provider_outcome_unknown",
+	})
+	s.RecordEvent(ctx, EventProviderReconciliationNeed, actor, appID, clientID, requestID,
+		operation, SecurityEventSuccess, "provider_outcome_unknown")
 }
 
 // compensateProvision removes a provider resource whose local completion
@@ -402,14 +435,16 @@ func (s *Service) CreateClient(
 
 	// Provider call outside any database transaction.
 	result, err := s.provisioner.ProvisionClient(ctx, op.IdempotencyKey, ClientProvisionSpec{
-		DisplayName:  client.Name,
-		Profile:      client.Profile,
-		RedirectURIs: clientIn.RedirectURIs,
-		LogoutURI:    clientIn.LogoutURI,
-		Scopes:       clientIn.Scopes,
+		DisplayName:   ProviderDisplayName(app.Name, client.Name, clientID),
+		LocalClientID: clientID,
+		Profile:       client.Profile,
+		RedirectURIs:  clientIn.RedirectURIs,
+		LogoutURI:     clientIn.LogoutURI,
+		Scopes:        clientIn.Scopes,
 	})
 	if err != nil {
 		_ = s.store.MarkClientProvisioningFailed(ctx, clientID, opID, ErrorClassFor(err))
+		s.recordAmbiguousProvision(ctx, actor, appID, clientID, "", requestID, "client.create", err)
 		if errors.Is(err, ErrProviderConflict) {
 			return ClientCreateResult{}, ErrProviderConflict
 		}
@@ -518,7 +553,7 @@ func (s *Service) UpdateClient(
 	providerSync := patch.Name != nil || patch.RedirectURIs != nil || patch.LogoutURI != nil
 	if providerSync && client.ProviderApplicationID != "" {
 		if err := s.provisioner.UpdateClient(ctx, client.ProviderApplicationID, ClientUpdateSpec{
-			DisplayName:  name,
+			DisplayName:  ProviderDisplayName(app.Name, name, client.ID),
 			RedirectURIs: uriStrings,
 			LogoutURI:    logoutURI,
 		}); err != nil {

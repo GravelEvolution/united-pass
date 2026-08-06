@@ -69,25 +69,25 @@ func (p *Provisioner) VerifyProject(ctx context.Context) error {
 }
 
 // ProvisionClient creates one ZITADEL OIDC application for a United Pass
-// client. The Management API has no idempotency key, so retries are guarded
-// two ways: a pre-check rejects an app that already carries the display name
-// (a retried create must never produce a duplicate), and AlreadyExists is
-// mapped to applications.ErrProviderConflict.
+// client. The Management API has no idempotency key, so retries rely on the
+// globally unique display name (application · client · short client ID,
+// ADR-0004 §1): an exact-name match is this client's own previously created
+// app and is recovered instead of rejected. Ambiguous failures surface as
+// ErrProviderOutcomeUnknown so the caller leaves a reconciliation trail.
 func (p *Provisioner) ProvisionClient(ctx context.Context, idempotencyKey string, spec applications.ClientProvisionSpec) (applications.ClientProvisionResult, error) {
 	rules, ok := spec.Profile.Rules()
 	if !ok {
 		return applications.ClientProvisionResult{}, fmt.Errorf("%w: unknown profile", applications.ErrProviderConflict)
 	}
 
-	// Duplicate guard for idempotent retries: an app with this name already
-	// in the project means a previous attempt may have succeeded.
-	exists, err := p.appExistsByName(ctx, spec.DisplayName)
+	// Recovery for idempotent retries: an app carrying this globally unique
+	// display name was created by an earlier attempt whose response was lost.
+	existing, err := p.appIDByName(ctx, spec.DisplayName)
 	if err != nil {
 		return applications.ClientProvisionResult{}, err
 	}
-	if exists {
-		p.logFailure("provision_client", "already_exists")
-		return applications.ClientProvisionResult{}, fmt.Errorf("%w: provider app name already provisioned", applications.ErrProviderConflict)
+	if existing != "" {
+		return p.recoverExistingApp(ctx, existing, rules)
 	}
 
 	req, err := addOIDCAppRequest(p.projectID, spec, rules)
@@ -96,7 +96,14 @@ func (p *Provisioner) ProvisionClient(ctx context.Context, idempotencyKey string
 	}
 	resp, err := p.mgmt.AddOIDCApp(ctx, req)
 	if err != nil {
-		return applications.ClientProvisionResult{}, p.mapError("provision_client", err)
+		if st, ok := status.FromError(err); ok && st.Code() == codes.AlreadyExists {
+			// Lost race: another attempt created the app between the
+			// pre-check and the add. Recover it instead of duplicating.
+			if existing, ferr := p.appIDByName(ctx, spec.DisplayName); ferr == nil && existing != "" {
+				return p.recoverExistingApp(ctx, existing, rules)
+			}
+		}
+		return applications.ClientProvisionResult{}, p.mapProvisionError("provision_client", err)
 	}
 
 	// Defensive: never surface a secret for a public client even if the
@@ -110,6 +117,39 @@ func (p *Provisioner) ProvisionClient(ctx context.Context, idempotencyKey string
 		ProviderClientID:      resp.GetClientId(),
 		ClientSecret:          secret,
 	}, nil
+}
+
+// recoverExistingApp returns the provider identifiers of an app created by
+// an ambiguously succeeded earlier attempt. The original secret is
+// unreachable at this point, so confidential clients get a fresh rotation
+// and a valid one-time secret; public clients need none.
+func (p *Provisioner) recoverExistingApp(ctx context.Context, providerApplicationID string, rules applications.ProfileRules) (applications.ClientProvisionResult, error) {
+	appResp, err := p.mgmt.GetAppByID(ctx, &management.GetAppByIDRequest{
+		ProjectId: p.projectID,
+		AppId:     providerApplicationID,
+	})
+	if err != nil {
+		return applications.ClientProvisionResult{}, p.mapError("provision_client_recover", err)
+	}
+	cfg := appResp.GetApp().GetOidcConfig()
+	if cfg == nil {
+		// The matched app is not an OIDC app; adopting it would be unsafe.
+		p.logFailure("provision_client_recover", "unexpected_app_type")
+		return applications.ClientProvisionResult{}, fmt.Errorf("%w: recovered app is not an OIDC application", applications.ErrProviderConflict)
+	}
+	result := applications.ClientProvisionResult{
+		ProviderApplicationID: providerApplicationID,
+		ProviderClientID:      cfg.GetClientId(),
+	}
+	if rules.ClientType == applications.ClientTypePublic {
+		return result, nil
+	}
+	rotation, err := p.RotateClientSecret(ctx, providerApplicationID)
+	if err != nil {
+		return applications.ClientProvisionResult{}, err
+	}
+	result.ClientSecret = rotation.NewSecret
+	return result, nil
 }
 
 // UpdateClient synchronizes the display name and the redirect/logout URIs to
@@ -288,9 +328,9 @@ func grantTypesFor(rules applications.ProfileRules) []appv1.OIDCGrantType {
 	return grants
 }
 
-// appExistsByName reports whether the shared project already contains an app
-// with exactly this name.
-func (p *Provisioner) appExistsByName(ctx context.Context, name string) (bool, error) {
+// appIDByName returns the ID of the project app carrying exactly this name,
+// or an empty string when no such app exists.
+func (p *Provisioner) appIDByName(ctx context.Context, name string) (string, error) {
 	resp, err := p.mgmt.ListApps(ctx, &management.ListAppsRequest{
 		ProjectId: p.projectID,
 		Queries: []*appv1.AppQuery{{
@@ -303,9 +343,14 @@ func (p *Provisioner) appExistsByName(ctx context.Context, name string) (bool, e
 		}},
 	})
 	if err != nil {
-		return false, p.mapError("provision_client_precheck", err)
+		return "", p.mapError("provision_client_precheck", err)
 	}
-	return len(resp.GetResult()) > 0, nil
+	for _, app := range resp.GetResult() {
+		if app.GetName() == name {
+			return app.GetId(), nil
+		}
+	}
+	return "", nil
 }
 
 // appState reads the provider app state.
@@ -344,6 +389,21 @@ func (p *Provisioner) mapError(operation string, err error) error {
 	default:
 		return fmt.Errorf("%w: %s", applications.ErrProviderUnavailable, operation)
 	}
+}
+
+// mapProvisionError classifies provisioning failures. Ambiguous outcomes
+// (deadline, cancellation, transport loss, Unknown/Unavailable/Internal)
+// surface as outcome-unknown: the provider app may already exist and the
+// caller must leave a reconciliation trail instead of assuming failure.
+// Definitive rejections keep the standard mapping.
+func (p *Provisioner) mapProvisionError(operation string, err error) error {
+	class := provisioningErrorClass(err)
+	switch class {
+	case "deadline_exceeded", "canceled", "DeadlineExceeded", "Canceled", "transport", "Unknown", "Unavailable", "Internal":
+		p.logFailure(operation, class)
+		return fmt.Errorf("%w: %s", applications.ErrProviderOutcomeUnknown, operation)
+	}
+	return p.mapError(operation, err)
 }
 
 // mapRotationError classifies rotation failures. Rotation is non-idempotent

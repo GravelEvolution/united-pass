@@ -82,3 +82,22 @@ func randomHex(n int) string {
 	}
 	return hex.EncodeToString(buf)
 }
+
+// ProviderDisplayName builds the provider-side display name for a client:
+// "{applicationName} · {clientName} · {shortClientId}". Local client names
+// are only unique within one application, but every United Pass client
+// shares a single provider project, so the provider identity must embed the
+// globally unique client ID suffix. The deterministic suffix is what makes
+// idempotent recovery possible after an ambiguous create (ADR-0004 §1).
+func ProviderDisplayName(applicationName, clientName string, clientID OAuthClientID) string {
+	return applicationName + " · " + clientName + " · " + shortIDSuffix(string(clientID))
+}
+
+// shortIDSuffix returns the trailing 8 characters of an ID; the full ID for
+// shorter values.
+func shortIDSuffix(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[len(id)-8:]
+}

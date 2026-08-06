@@ -233,19 +233,31 @@ func TestProvisioner_WebServerRequiresRedirectURIs(t *testing.T) {
 	}
 }
 
-func TestProvisioner_ProvisionDuplicatePrecheck(t *testing.T) {
+// TestProvisioner_ProvisionRecoversExistingApp verifies idempotent recovery:
+// an app carrying the spec's globally unique display name (created by an
+// ambiguously succeeded earlier attempt) is adopted instead of rejected, and
+// a confidential client gets a fresh one-time secret via rotation.
+func TestProvisioner_ProvisionRecoversExistingApp(t *testing.T) {
+	spec := webServerSpec()
+	recovered := oidcAppFixture(appv1.AppState_APP_STATE_ACTIVE)
+	recovered.GetApp().GetOidcConfig().ClientId = "prov-client-existing"
 	stub := &stubManagement{
-		listResp: &management.ListAppsResponse{Result: []*appv1.App{{Id: "existing"}}},
-		addResp:  &management.AddOIDCAppResponse{},
+		listResp:   &management.ListAppsResponse{Result: []*appv1.App{{Id: "existing", Name: spec.DisplayName}}},
+		getResp:    recovered,
+		addResp:    &management.AddOIDCAppResponse{},
+		rotateResp: &management.RegenerateOIDCClientSecretResponse{ClientSecret: "recovered-secret"},
 	}
 	p := newTestProvisioner(t, stub)
 
-	_, err := p.ProvisionClient(context.Background(), "idem-5", webServerSpec())
-	if !errors.Is(err, applications.ErrProviderConflict) {
-		t.Fatalf("got %v, want ErrProviderConflict", err)
+	res, err := p.ProvisionClient(context.Background(), "idem-5", spec)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if res.ProviderApplicationID != "existing" || res.ProviderClientID != "prov-client-existing" || res.ClientSecret != "recovered-secret" {
+		t.Fatalf("result: %+v", res)
 	}
 	if stub.added != 0 {
-		t.Error("duplicate precheck must prevent AddOIDCApp")
+		t.Error("recovery must never create a duplicate app")
 	}
 }
 
@@ -258,9 +270,11 @@ func TestProvisioner_ProvisionErrorMapping(t *testing.T) {
 		{"already_exists", status.Error(codes.AlreadyExists, "APP-m92Jx"), applications.ErrProviderConflict},
 		{"not_found", status.Error(codes.NotFound, "QUERY-xxx"), applications.ErrProviderConflict},
 		{"failed_precondition", status.Error(codes.FailedPrecondition, "COMMAND-xxx"), applications.ErrProviderConflict},
-		{"unavailable", status.Error(codes.Unavailable, "transport"), applications.ErrProviderUnavailable},
+		// Ambiguous outcomes: the app may already exist, so the caller must
+		// reconcile instead of assuming failure.
+		{"unavailable", status.Error(codes.Unavailable, "transport"), applications.ErrProviderOutcomeUnknown},
 		{"permission", status.Error(codes.NotFound, "AUTHZ-xxx"), applications.ErrProviderConflict},
-		{"internal", status.Error(codes.Internal, "boom"), applications.ErrProviderUnavailable},
+		{"internal", status.Error(codes.Internal, "boom"), applications.ErrProviderOutcomeUnknown},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

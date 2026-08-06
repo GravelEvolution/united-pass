@@ -28,8 +28,15 @@ var ErrProviderOutcomeUnknown = errors.New("applications: provider outcome unkno
 // client. It carries no secrets and no United Pass internal IDs beyond what
 // the mapping requires.
 type ClientProvisionSpec struct {
-	// DisplayName is the client name registered at the provider.
+	// DisplayName is the client name registered at the provider. It must
+	// be globally unique within the shared provider project; use
+	// ProviderDisplayName to build it.
 	DisplayName string
+	// LocalClientID is the United Pass client ID being provisioned. It is
+	// embedded into the provider display name so an ambiguously created
+	// provider app can be recovered deterministically on retry — never via
+	// a user-chosen name alone.
+	LocalClientID OAuthClientID
 	// Profile determines the provider-side app type, auth method and grant
 	// types mapping (ADR-0004 §1).
 	Profile ClientProfile
@@ -73,6 +80,10 @@ type ClientSecretRotation struct {
 type OAuthClientProvisioner interface {
 	// ProvisionClient creates the provider-side OAuth application for a
 	// United Pass client. idempotencyKey lets retries avoid duplicates.
+	// When a provider app already exists for this spec's globally unique
+	// display name (an ambiguously succeeded earlier attempt), the
+	// implementation must recover and return that app instead of reporting
+	// a conflict.
 	ProvisionClient(ctx context.Context, idempotencyKey string, spec ClientProvisionSpec) (ClientProvisionResult, error)
 
 	// UpdateClient synchronizes mutable settings to the provider.

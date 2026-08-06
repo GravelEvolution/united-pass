@@ -366,7 +366,7 @@ func TestUpdateClient_Success(t *testing.T) {
 	// The provider received the synchronized settings.
 	stored := env.store.clients[applications.OAuthClientID(clientID)]
 	fake := env.prov.Client(stored.ProviderApplicationID)
-	if fake == nil || fake.DisplayName != "重命名客户端" {
+	if fake == nil || fake.DisplayName != applications.ProviderDisplayName("测试应用", "重命名客户端", applications.OAuthClientID(clientID)) {
 		t.Errorf("provider client not synchronized: %+v", fake)
 	}
 }

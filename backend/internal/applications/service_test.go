@@ -1136,7 +1136,7 @@ func TestUpdateClient_MergesAndSyncsProviderFirst(t *testing.T) {
 		t.Fatalf("get client: %v", err)
 	}
 	fake := prov.Client(stored.ProviderApplicationID)
-	if fake == nil || fake.DisplayName != newName {
+	if fake == nil || fake.DisplayName != ProviderDisplayName("Test App", newName, res.ClientID) {
 		t.Errorf("provider client not updated: %+v", fake)
 	}
 	// Provider call must precede the local write.
@@ -1741,6 +1741,91 @@ func TestRotateClientSecret_LocalFailureAfterProviderReconciles(t *testing.T) {
 	}
 	if !reconciled {
 		t.Error("expected reconciliation event")
+	}
+}
+
+// --- Provider identity (globally unique display name + recovery) ---
+
+func TestProviderDisplayName_GloballyUnique(t *testing.T) {
+	got := ProviderDisplayName("App A", "Web Client", OAuthClientID("clt_0123456789abcdef0123456789abcdef"))
+	want := "App A · Web Client · 89abcdef"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	// Short IDs fall back to the full value.
+	if got := ProviderDisplayName("A", "B", "clt_x"); got != "A · B · clt_x" {
+		t.Fatalf("short id: got %q", got)
+	}
+}
+
+func TestCreate_ProviderDisplayNameIsGloballyUnique(t *testing.T) {
+	svc, _, prov, _, _ := newTestService(t)
+	ctx := context.Background()
+
+	// Two applications with an identically named client must never collide
+	// in the shared provider project: the provider display name embeds the
+	// application name and the globally unique client ID suffix.
+	res1, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+	app2In := confidentialAppInput()
+	app2In.Name = "Second App"
+	res2, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-2", app2In, confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+
+	c1, err := svc.GetClient(ctx, res1.ApplicationID, res1.ClientID)
+	if err != nil {
+		t.Fatalf("get client 1: %v", err)
+	}
+	c2, err := svc.GetClient(ctx, res2.ApplicationID, res2.ClientID)
+	if err != nil {
+		t.Fatalf("get client 2: %v", err)
+	}
+	fake1 := prov.Client(c1.ProviderApplicationID)
+	fake2 := prov.Client(c2.ProviderApplicationID)
+	if fake1 == nil || fake2 == nil {
+		t.Fatal("expected both provider clients")
+	}
+	want1 := ProviderDisplayName("Test App", "Test Client", res1.ClientID)
+	want2 := ProviderDisplayName("Second App", "Test Client", res2.ClientID)
+	if fake1.DisplayName != want1 || fake2.DisplayName != want2 {
+		t.Errorf("display names = %q / %q, want %q / %q", fake1.DisplayName, fake2.DisplayName, want1, want2)
+	}
+	if fake1.DisplayName == fake2.DisplayName {
+		t.Error("same client name in different applications must not collide at the provider")
+	}
+	if fake1.Spec.LocalClientID != res1.ClientID || fake2.Spec.LocalClientID != res2.ClientID {
+		t.Error("spec must carry the local client ID for recovery")
+	}
+}
+
+func TestCreate_AmbiguousProvisionLeavesReconciliation(t *testing.T) {
+	svc, store, prov, events, _ := newTestService(t)
+	ctx := context.Background()
+	// An ambiguous provider outcome: the app may exist even though no
+	// response arrived.
+	prov.ProvisionErr = fmt.Errorf("%w: provision_client", ErrProviderOutcomeUnknown)
+
+	if _, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput()); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	if len(store.jobs) != 1 {
+		t.Fatalf("reconciliation jobs = %d, want 1", len(store.jobs))
+	}
+	if store.jobs[0].Reason != "provider_outcome_unknown" {
+		t.Errorf("job reason = %q", store.jobs[0].Reason)
+	}
+	found := false
+	for _, ev := range events.events {
+		if ev.EventType == EventProviderReconciliationNeed && ev.FailureClass == "provider_outcome_unknown" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected provider_outcome_unknown reconciliation event")
 	}
 }
 
