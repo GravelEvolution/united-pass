@@ -17,3 +17,6 @@ coverage.txt
 
 # ZITADEL development instance state (scripts/zitadel-init.sh)
 .zitadel/
+
+# Ephemeral acceptance/dev scripts; never committed
+.tmp-*
