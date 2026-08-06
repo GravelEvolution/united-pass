@@ -66,6 +66,7 @@ export type OAuthApplication = {
   applicationId: string;
   name: string;
   audience: ApplicationAudience;
+  ownerId: string;
   ownerName: string;
   status: ApplicationStatus;
   clientCount: number;
@@ -105,11 +106,15 @@ export type OAuthApplicationDetail = {
   updatedAt: string;
 };
 
+/**
+ * ownerId is the stable United Pass user ID of the accountable owner
+ * (required by the backend contract); ownerName is server-resolved for display.
+ */
 export type ApplicationCreateInput = {
   name: string;
   description: string;
   audience: ApplicationAudience;
-  ownerName: string;
+  ownerId: string;
 };
 
 export type OAuthClientCreateInput = {
@@ -120,10 +125,6 @@ export type OAuthClientCreateInput = {
   logoutUri: string;
   allowedScopes: string[];
   consentMode: ConsentMode;
-};
-
-export type ApplicationCreationResult = {
-  applicationId: string;
 };
 
 export type OAuthClientCreationResult = {
@@ -152,7 +153,7 @@ export type ApplicationUpdateInput = {
   name?: string;
   description?: string;
   audience?: ApplicationAudience;
-  ownerName?: string;
+  ownerId?: string;
 };
 
 export type ClientProfileConfig = {

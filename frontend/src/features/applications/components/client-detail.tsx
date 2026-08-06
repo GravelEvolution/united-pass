@@ -231,7 +231,7 @@ function ClientSecrets({ client }: { client: OAuthClient }) {
       onOk: async () => {
         setRotating(true);
         try {
-          const result = await browserCommands.rotateClientSecret(client.clientId);
+          const result = await browserCommands.rotateClientSecret(client.applicationId, client.clientId);
           setRotatedSecret(result);
           Toast.success({ content: "密钥已轮换，请立即复制新密钥。" });
           router.refresh();

@@ -5,8 +5,6 @@ import type { CursorPage, PageQuery } from "@/types/pagination";
 import { FULL_PERMISSIONS } from "@/types/permissions";
 import type {
   AllowedScope,
-  ApplicationCreateInput,
-  ApplicationCreationResult,
   ApplicationStatus,
   ApplicationUpdateInput,
   ApplicationWithInitialClientInput,
@@ -371,9 +369,9 @@ const syncConflicts: SyncConflict[] = [
 ];
 
 const initialApplications = [
-  { applicationId: "app_workspace", name: "United Workspace", audience: "external", ownerName: "协作产品团队", status: "active", clientCount: 1, updatedAt: "2026-08-01T06:10:00Z" },
-  { applicationId: "app_mobile", name: "United Mobile", audience: "external", ownerName: "移动端团队", status: "active", clientCount: 1, updatedAt: "2026-07-28T02:32:00Z" },
-  { applicationId: "app_legacy", name: "Legacy Reports", audience: "internal", ownerName: "数据团队", status: "disabled", clientCount: 1, updatedAt: "2026-06-16T12:00:00Z" },
+  { applicationId: "app_workspace", name: "United Workspace", audience: "external", ownerId: "owner_workspace", ownerName: "协作产品团队", status: "active", clientCount: 1, updatedAt: "2026-08-01T06:10:00Z" },
+  { applicationId: "app_mobile", name: "United Mobile", audience: "external", ownerId: "owner_mobile", ownerName: "移动端团队", status: "active", clientCount: 1, updatedAt: "2026-07-28T02:32:00Z" },
+  { applicationId: "app_legacy", name: "Legacy Reports", audience: "internal", ownerId: "owner_legacy", ownerName: "数据团队", status: "disabled", clientCount: 1, updatedAt: "2026-06-16T12:00:00Z" },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getApplications"]>>["items"];
 
 const initialApplicationDetails: Record<string, OAuthApplicationDetail> = {
@@ -806,6 +804,20 @@ function filterAuditEvents(items: typeof auditEvents, query?: AuditQuery): Curso
   };
 }
 
+/**
+ * Resolves the display name for an owner user ID, mirroring the backend
+ * contract where ownerId is the stable identifier and ownerName is derived.
+ * Unknown IDs fall back to the raw ID so mutations never silently drop data.
+ */
+function resolveOwnerName(ownerId: string): string {
+  const user = users.find((item) => item.userId === ownerId);
+  if (user) {
+    return user.displayName;
+  }
+  const employee = employees.find((item) => item.userId === ownerId);
+  return employee ? employee.displayName : ownerId;
+}
+
 export function createMockUnitedPassDataSource(): UnitedPassDataSource {
   const applications: OAuthApplication[] = structuredClone(initialApplications);
   const applicationDetails: Record<string, OAuthApplicationDetail> = structuredClone(initialApplicationDetails);
@@ -867,47 +879,6 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       return Promise.resolve(client ?? null);
     },
     getAvailableScopes: () => Promise.resolve(availableScopes),
-    createApplication: (input: ApplicationCreateInput): Promise<ApplicationCreationResult> => {
-      try {
-        validateApplicationCreateInput(input);
-      } catch (error) {
-        return Promise.reject(error);
-      }
-
-      const applicationId = `app_${Math.random().toString(36).slice(2, 10)}`;
-      const now = new Date().toISOString();
-
-      const detail: OAuthApplicationDetail = {
-        applicationId,
-        name: input.name,
-        description: input.description,
-        logoUrl: null,
-        audience: input.audience,
-        ownerId: `owner_${Math.random().toString(36).slice(2, 10)}`,
-        ownerName: input.ownerName,
-        status: "active",
-        clients: [],
-        grants: [],
-        auditEntries: [
-          { eventId: `app_evt_${Math.random().toString(36).slice(2, 8)}`, eventType: "应用创建", actorName: "林知行", occurredAt: now, result: "success" },
-        ],
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      applicationDetails[applicationId] = detail;
-      applications.unshift({
-        applicationId,
-        name: input.name,
-        audience: input.audience,
-        ownerName: input.ownerName,
-        status: "active",
-        clientCount: 0,
-        updatedAt: now,
-      });
-
-      return Promise.resolve({ applicationId });
-    },
     createOAuthClient: (input: OAuthClientCreateInput): Promise<OAuthClientCreationResult> => {
       try {
         validateOAuthClientCreateInput(input);
@@ -994,8 +965,8 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
         description: input.application.description,
         logoUrl: null,
         audience: input.application.audience,
-        ownerId: `owner_${Math.random().toString(36).slice(2, 10)}`,
-        ownerName: input.application.ownerName,
+        ownerId: input.application.ownerId,
+        ownerName: resolveOwnerName(input.application.ownerId),
         status: "active",
         clients: [],
         grants: [],
@@ -1044,7 +1015,8 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
         applicationId,
         name: input.application.name,
         audience: input.application.audience,
-        ownerName: input.application.ownerName,
+        ownerId: input.application.ownerId,
+        ownerName: detail.ownerName,
         status: "active",
         clientCount: 1,
         updatedAt: now,
@@ -1075,36 +1047,42 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       }
       return Promise.resolve();
     },
-    rotateClientSecret: (clientId: string): Promise<SecretRotationResult> => {
+    rotateClientSecret: (applicationId: string, clientId: string): Promise<SecretRotationResult> => {
       const now = new Date().toISOString();
       const expiryMs = Date.now() + 24 * 60 * 60 * 1000;
       const previousSecretExpiresAt = new Date(expiryMs).toISOString();
 
-      for (const detail of Object.values(applicationDetails)) {
-        const client = detail.clients.find((c) => c.clientId === clientId);
-        if (client) {
-          if (client.clientType !== "confidential") {
-            return Promise.reject(new Error("Public clients do not use client secrets."));
-          }
-          const newSecretId = `sec_${Math.random().toString(36).slice(2, 8)}`;
-          client.clientSecrets.push({
-            secretId: newSecretId,
-            label: `轮换密钥 ${new Date().toLocaleString("zh-CN")}`,
-            createdAt: now,
-            lastRotatedAt: now,
-          });
-          client.updatedAt = now;
-          detail.updatedAt = now;
-
-          const newSecret = `sec_${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
-          return Promise.resolve({
-            secretId: newSecretId,
-            clientSecret: newSecret,
-            previousSecretExpiresAt,
-          });
-        }
+      // Mirrors the backend URL resource binding: the client must belong to
+      // the addressed application, so lookups never cross applications.
+      const detail = applicationDetails[applicationId];
+      if (!detail) {
+        return Promise.reject(new Error(`Application ${applicationId} not found.`));
       }
-      return Promise.reject(new Error(`Client ${clientId} not found.`));
+      const client = detail.clients.find((c) => c.clientId === clientId);
+      if (!client) {
+        return Promise.reject(
+          new Error(`Client ${clientId} not found under application ${applicationId}.`),
+        );
+      }
+      if (client.clientType !== "confidential") {
+        return Promise.reject(new Error("Public clients do not use client secrets."));
+      }
+      const newSecretId = `sec_${Math.random().toString(36).slice(2, 8)}`;
+      client.clientSecrets.push({
+        secretId: newSecretId,
+        label: `轮换密钥 ${new Date().toLocaleString("zh-CN")}`,
+        createdAt: now,
+        lastRotatedAt: now,
+      });
+      client.updatedAt = now;
+      detail.updatedAt = now;
+
+      const newSecret = `sec_${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
+      return Promise.resolve({
+        secretId: newSecretId,
+        clientSecret: newSecret,
+        previousSecretExpiresAt,
+      });
     },
     updateApplicationStatus: (applicationId: string, status: ApplicationStatus): Promise<void> => {
       const now = new Date().toISOString();
@@ -1146,14 +1124,20 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       if (input.name !== undefined) detail.name = input.name;
       if (input.description !== undefined) detail.description = input.description;
       if (input.audience !== undefined) detail.audience = input.audience;
-      if (input.ownerName !== undefined) detail.ownerName = input.ownerName;
+      if (input.ownerId !== undefined) {
+        detail.ownerId = input.ownerId;
+        detail.ownerName = resolveOwnerName(input.ownerId);
+      }
       detail.updatedAt = now;
 
       const app = applications.find((item) => item.applicationId === applicationId);
       if (app) {
         if (input.name !== undefined) app.name = input.name;
         if (input.audience !== undefined) app.audience = input.audience;
-        if (input.ownerName !== undefined) app.ownerName = input.ownerName;
+        if (input.ownerId !== undefined) {
+          app.ownerId = input.ownerId;
+          app.ownerName = detail.ownerName;
+        }
         app.updatedAt = now;
       }
       return Promise.resolve();

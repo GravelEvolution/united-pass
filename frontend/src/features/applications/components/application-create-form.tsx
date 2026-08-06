@@ -69,7 +69,7 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
   const [appName, setAppName] = useState("");
   const [appDescription, setAppDescription] = useState("");
   const [audience, setAudience] = useState<ApplicationAudience>("internal");
-  const [ownerName, setOwnerName] = useState("");
+  const [ownerId, setOwnerId] = useState("");
 
   // Step 2 - first client
   const [clientName, setClientName] = useState("");
@@ -130,8 +130,8 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
       return;
     }
 
-    if (ownerName.trim().length < 2) {
-      setFormError("请填写负责人名称。");
+    if (ownerId.trim().length === 0) {
+      setFormError("请填写负责人 User ID。");
       return;
     }
 
@@ -147,8 +147,8 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
       return;
     }
 
-    if (ownerName.trim().length < 2) {
-      setFormError("请填写负责人名称。");
+    if (ownerId.trim().length === 0) {
+      setFormError("请填写负责人 User ID。");
       return;
     }
 
@@ -175,7 +175,7 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
           name: appName.trim(),
           description: appDescription.trim(),
           audience,
-          ownerName: ownerName.trim(),
+          ownerId: ownerId.trim(),
         },
         initialClient: {
           name: clientName.trim(),
@@ -340,15 +340,14 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
 
           <div className={styles.fieldGroup}>
             <label>
-              <span className={styles.fieldLabel}>负责人</span>
+              <span className={styles.fieldLabel}>负责人 User ID</span>
               <Input
-                value={ownerName}
-                onChange={(value) => setOwnerName(value)}
-                placeholder="例如 协作产品团队"
+                value={ownerId}
+                onChange={(value) => setOwnerId(value)}
+                placeholder="例如 usr_01JUP8M8B4Q7R4T6PK1D"
                 required
-                minLength={2}
               />
-              <small className={styles.fieldHint}>应用管理责任人或团队。</small>
+              <small className={styles.fieldHint}>应用管理责任人的稳定用户 ID，后端据此解析显示名称。</small>
             </label>
           </div>
 

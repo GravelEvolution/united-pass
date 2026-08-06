@@ -14,14 +14,14 @@ import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
  * See ADR-0004 for the full architecture.
  */
 export const browserCommands: UnitedPassCommands = {
-  createApplication: (input) => mockUnitedPassDataSource.createApplication(input),
   createOAuthClient: (input) => mockUnitedPassDataSource.createOAuthClient(input),
   createApplicationWithInitialClient: (input) =>
     mockUnitedPassDataSource.createApplicationWithInitialClient(input),
   decideConsent: (requestId, decision) =>
     mockUnitedPassDataSource.decideConsent(requestId, decision),
   revokeGrant: (grantId) => mockUnitedPassDataSource.revokeGrant(grantId),
-  rotateClientSecret: (clientId) => mockUnitedPassDataSource.rotateClientSecret(clientId),
+  rotateClientSecret: (applicationId, clientId) =>
+    mockUnitedPassDataSource.rotateClientSecret(applicationId, clientId),
   updateApplicationStatus: (applicationId, status) =>
     mockUnitedPassDataSource.updateApplicationStatus(applicationId, status),
   deleteApplication: (applicationId) =>

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type { UnitedPassDataSource } from "@/lib/api/united-pass-data-source";
+import type { ApplicationAudience } from "@/features/applications/types";
 import { createMockUnitedPassDataSource } from "./united-pass-data-source";
 
 /**
@@ -9,7 +10,42 @@ import { createMockUnitedPassDataSource } from "./united-pass-data-source";
  * to guarantee full isolation — no shared mutable state between tests,
  * no cleanup boilerlette, and no risk of cross-test pollution when the
  * suite grows or runs in parallel.
+ *
+ * Contract note: standalone application creation does not exist in the
+ * backend REST contract, so every test creates applications through
+ * createApplicationWithInitialClient (the only creation path).
  */
+
+const OWNER_USER_ID = "usr_02F4PXKQ0EZP5F7B9V3C"; // 周予安 in the mock directory
+
+async function createTestApplication(
+  dataSource: UnitedPassDataSource,
+  overrides?: Partial<{
+    name: string;
+    description: string;
+    audience: ApplicationAudience;
+    ownerId: string;
+  }>,
+): Promise<{ applicationId: string; clientId: string }> {
+  const result = await dataSource.createApplicationWithInitialClient({
+    application: {
+      name: overrides?.name ?? "Test App",
+      description: overrides?.description ?? "",
+      audience: overrides?.audience ?? "internal",
+      ownerId: overrides?.ownerId ?? OWNER_USER_ID,
+    },
+    initialClient: {
+      name: "Initial Web Client",
+      profile: "web_server",
+      redirectUris: ["https://example.com/callback"],
+      logoutUri: "",
+      allowedScopes: ["openid"],
+      consentMode: "always",
+    },
+  });
+  return { applicationId: result.applicationId, clientId: result.clientId };
+}
+
 describe("OAuth application lifecycle", () => {
   let dataSource: UnitedPassDataSource;
 
@@ -17,12 +53,22 @@ describe("OAuth application lifecycle", () => {
     dataSource = createMockUnitedPassDataSource();
   });
 
-  it("persists a created application in list and detail", async () => {
-    const result = await dataSource.createApplication({
-      name: "Lifecycle Test App",
-      description: "Integration test application",
-      audience: "internal",
-      ownerName: "Test Owner",
+  it("persists an application created with its initial client in list and detail", async () => {
+    const result = await dataSource.createApplicationWithInitialClient({
+      application: {
+        name: "Lifecycle Test App",
+        description: "Integration test application",
+        audience: "internal",
+        ownerId: OWNER_USER_ID,
+      },
+      initialClient: {
+        name: "Web Client",
+        profile: "web_server",
+        redirectUris: ["https://example.com/callback"],
+        logoutUri: "",
+        allowedScopes: ["openid"],
+        consentMode: "always",
+      },
     });
 
     expect(result.applicationId).toMatch(/^app_/);
@@ -32,25 +78,23 @@ describe("OAuth application lifecycle", () => {
     expect(found).toBeDefined();
     expect(found?.name).toBe("Lifecycle Test App");
     expect(found?.status).toBe("active");
-    expect(found?.clientCount).toBe(0);
+    expect(found?.ownerId).toBe(OWNER_USER_ID);
+    expect(found?.ownerName).toBe("周予安");
+    expect(found?.clientCount).toBe(1);
 
     const detail = await dataSource.getApplicationDetail(result.applicationId);
     expect(detail).not.toBeNull();
     expect(detail?.name).toBe("Lifecycle Test App");
     expect(detail?.audience).toBe("internal");
-    expect(detail?.ownerName).toBe("Test Owner");
-    expect(detail?.clients).toHaveLength(0);
-    expect(detail?.auditEntries.length).toBeGreaterThanOrEqual(1);
+    expect(detail?.ownerId).toBe(OWNER_USER_ID);
+    expect(detail?.ownerName).toBe("周予安");
+    expect(detail?.clients).toHaveLength(1);
+    expect(detail?.auditEntries.length).toBeGreaterThanOrEqual(2);
     expect(detail?.auditEntries[0]?.eventType).toBe("应用创建");
   });
 
   it("persists a created OAuth client in application detail", async () => {
-    const app = await dataSource.createApplication({
-      name: "Client Test App",
-      description: "",
-      audience: "external",
-      ownerName: "Owner",
-    });
+    const app = await createTestApplication(dataSource, { name: "Client Test App", audience: "external" });
 
     const client = await dataSource.createOAuthClient({
       applicationId: app.applicationId,
@@ -67,27 +111,23 @@ describe("OAuth application lifecycle", () => {
     expect(client.clientSecret?.length).toBeGreaterThan(10);
 
     const detail = await dataSource.getApplicationDetail(app.applicationId);
-    expect(detail?.clients).toHaveLength(1);
-    expect(detail?.clients[0]?.name).toBe("Web Client");
-    expect(detail?.clients[0]?.clientType).toBe("confidential");
-    expect(detail?.clients[0]?.grantTypes).toEqual(["authorization_code", "refresh_token"]);
-    expect(detail?.clients[0]?.tokenEndpointAuthMethod).toBe("client_secret_basic");
-    expect(detail?.clients[0]?.clientSecrets).toHaveLength(1);
-    expect(detail?.clients[0]?.redirectUris).toHaveLength(1);
-    expect(detail?.clients[0]?.redirectUris[0]?.uri).toBe("https://example.com/callback");
+    expect(detail?.clients).toHaveLength(2);
+    const created = detail?.clients.find((c) => c.clientId === client.clientId);
+    expect(created?.name).toBe("Web Client");
+    expect(created?.clientType).toBe("confidential");
+    expect(created?.grantTypes).toEqual(["authorization_code", "refresh_token"]);
+    expect(created?.tokenEndpointAuthMethod).toBe("client_secret_basic");
+    expect(created?.clientSecrets).toHaveLength(1);
+    expect(created?.redirectUris).toHaveLength(1);
+    expect(created?.redirectUris[0]?.uri).toBe("https://example.com/callback");
 
     const apps = (await dataSource.getApplications()).items;
     const found = apps.find((a) => a.applicationId === app.applicationId);
-    expect(found?.clientCount).toBe(1);
+    expect(found?.clientCount).toBe(2);
   });
 
   it("creates a public client without a secret", async () => {
-    const app = await dataSource.createApplication({
-      name: "SPA Test App",
-      description: "",
-      audience: "external",
-      ownerName: "Owner",
-    });
+    const app = await createTestApplication(dataSource, { name: "SPA Test App", audience: "external" });
 
     const client = await dataSource.createOAuthClient({
       applicationId: app.applicationId,
@@ -102,18 +142,14 @@ describe("OAuth application lifecycle", () => {
     expect(client.clientSecret).toBeUndefined();
 
     const detail = await dataSource.getApplicationDetail(app.applicationId);
-    expect(detail?.clients[0]?.clientType).toBe("public");
-    expect(detail?.clients[0]?.clientSecrets).toHaveLength(0);
-    expect(detail?.clients[0]?.tokenEndpointAuthMethod).toBe("none");
+    const created = detail?.clients.find((c) => c.clientId === client.clientId);
+    expect(created?.clientType).toBe("public");
+    expect(created?.clientSecrets).toHaveLength(0);
+    expect(created?.tokenEndpointAuthMethod).toBe("none");
   });
 
   it("creates a web_server client without openid (OAuth-only authorization)", async () => {
-    const app = await dataSource.createApplication({
-      name: "OAuth-Only App",
-      description: "",
-      audience: "internal",
-      ownerName: "Owner",
-    });
+    const app = await createTestApplication(dataSource, { name: "OAuth-Only App" });
 
     const client = await dataSource.createOAuthClient({
       applicationId: app.applicationId,
@@ -128,17 +164,13 @@ describe("OAuth application lifecycle", () => {
     expect(client.clientSecret).toBeDefined();
 
     const detail = await dataSource.getApplicationDetail(app.applicationId);
-    expect(detail?.clients[0]?.allowedScopes.map((s) => s.scope)).toEqual(["reporting:read"]);
-    expect(detail?.clients[0]?.allowedScopes.some((s) => s.scope === "openid")).toBe(false);
+    const created = detail?.clients.find((c) => c.clientId === client.clientId);
+    expect(created?.allowedScopes.map((s) => s.scope)).toEqual(["reporting:read"]);
+    expect(created?.allowedScopes.some((s) => s.scope === "openid")).toBe(false);
   });
 
   it("creates a server-to-server client without redirect URIs or openid", async () => {
-    const app = await dataSource.createApplication({
-      name: "M2M Test App",
-      description: "",
-      audience: "internal",
-      ownerName: "Owner",
-    });
+    const app = await createTestApplication(dataSource, { name: "M2M Test App" });
 
     const client = await dataSource.createOAuthClient({
       applicationId: app.applicationId,
@@ -153,47 +185,43 @@ describe("OAuth application lifecycle", () => {
     expect(client.clientSecret).toBeDefined();
 
     const detail = await dataSource.getApplicationDetail(app.applicationId);
-    const c = detail?.clients[0];
-    expect(c?.clientType).toBe("confidential");
-    expect(c?.grantTypes).toEqual(["client_credentials"]);
-    expect(c?.tokenEndpointAuthMethod).toBe("client_secret_basic");
-    expect(c?.redirectUris).toHaveLength(0);
+    const created = detail?.clients.find((c) => c.clientId === client.clientId);
+    expect(created?.clientType).toBe("confidential");
+    expect(created?.grantTypes).toEqual(["client_credentials"]);
+    expect(created?.tokenEndpointAuthMethod).toBe("client_secret_basic");
+    expect(created?.redirectUris).toHaveLength(0);
   });
 
   it("updates application fields and persists changes", async () => {
-    const app = await dataSource.createApplication({
+    const app = await createTestApplication(dataSource, {
       name: "Update Test",
       description: "Original",
-      audience: "internal",
-      ownerName: "Original Owner",
     });
 
     await dataSource.updateApplication(app.applicationId, {
       name: "Updated Name",
       description: "Updated Description",
       audience: "hybrid",
-      ownerName: "New Owner",
+      ownerId: "usr_05QG6E8W4NR7Y2Z1PC9S",
     });
 
     const detail = await dataSource.getApplicationDetail(app.applicationId);
     expect(detail?.name).toBe("Updated Name");
     expect(detail?.description).toBe("Updated Description");
     expect(detail?.audience).toBe("hybrid");
-    expect(detail?.ownerName).toBe("New Owner");
+    expect(detail?.ownerId).toBe("usr_05QG6E8W4NR7Y2Z1PC9S");
+    expect(detail?.ownerName).toBe("顾言");
 
     const apps = (await dataSource.getApplications()).items;
     const found = apps.find((a) => a.applicationId === app.applicationId);
     expect(found?.name).toBe("Updated Name");
     expect(found?.audience).toBe("hybrid");
+    expect(found?.ownerId).toBe("usr_05QG6E8W4NR7Y2Z1PC9S");
+    expect(found?.ownerName).toBe("顾言");
   });
 
   it("disables and re-enables an application with audit trail", async () => {
-    const app = await dataSource.createApplication({
-      name: "Disable Test",
-      description: "",
-      audience: "internal",
-      ownerName: "Owner",
-    });
+    const app = await createTestApplication(dataSource, { name: "Disable Test" });
 
     await dataSource.updateApplicationStatus(app.applicationId, "disabled");
 
@@ -218,43 +246,25 @@ describe("OAuth application lifecycle", () => {
   });
 
   it("rotates a client secret and adds a new secret record", async () => {
-    const app = await dataSource.createApplication({
-      name: "Rotate Test",
-      description: "",
-      audience: "internal",
-      ownerName: "Owner",
-    });
-
-    const client = await dataSource.createOAuthClient({
-      applicationId: app.applicationId,
-      name: "Web",
-      profile: "web_server",
-      redirectUris: ["https://example.com/cb"],
-      logoutUri: "",
-      allowedScopes: ["openid"],
-      consentMode: "always",
-    });
+    const app = await createTestApplication(dataSource, { name: "Rotate Test" });
 
     const beforeDetail = await dataSource.getApplicationDetail(app.applicationId);
-    const beforeSecretCount = beforeDetail?.clients[0]?.clientSecrets.length ?? 0;
+    const beforeClient = beforeDetail?.clients.find((c) => c.clientId === app.clientId);
+    const beforeSecretCount = beforeClient?.clientSecrets.length ?? 0;
 
-    const rotation = await dataSource.rotateClientSecret(client.clientId);
+    const rotation = await dataSource.rotateClientSecret(app.applicationId, app.clientId);
     expect(rotation.secretId).toMatch(/^sec_/);
     expect(rotation.clientSecret).toBeDefined();
     expect(rotation.previousSecretExpiresAt).toBeDefined();
 
     const afterDetail = await dataSource.getApplicationDetail(app.applicationId);
-    const afterSecretCount = afterDetail?.clients[0]?.clientSecrets.length ?? 0;
+    const afterClient = afterDetail?.clients.find((c) => c.clientId === app.clientId);
+    const afterSecretCount = afterClient?.clientSecrets.length ?? 0;
     expect(afterSecretCount).toBe(beforeSecretCount + 1);
   });
 
   it("rejects secret rotation for public clients", async () => {
-    const app = await dataSource.createApplication({
-      name: "Public Rotate Test",
-      description: "",
-      audience: "external",
-      ownerName: "Owner",
-    });
+    const app = await createTestApplication(dataSource, { name: "Public Rotate Test", audience: "external" });
 
     const client = await dataSource.createOAuthClient({
       applicationId: app.applicationId,
@@ -266,18 +276,24 @@ describe("OAuth application lifecycle", () => {
       consentMode: "always",
     });
 
-    await expect(dataSource.rotateClientSecret(client.clientId)).rejects.toThrow(
-      "Public clients do not use client secrets.",
-    );
+    await expect(
+      dataSource.rotateClientSecret(app.applicationId, client.clientId),
+    ).rejects.toThrow("Public clients do not use client secrets.");
+  });
+
+  it("rejects secret rotation when the client is not under the addressed application", async () => {
+    const app = await createTestApplication(dataSource, { name: "Binding Test" });
+    const otherApp = await createTestApplication(dataSource, { name: "Other App" });
+
+    // The initial client exists, but under `app`, not under `otherApp`:
+    // rotation is scoped to the parent application like the backend URL.
+    await expect(
+      dataSource.rotateClientSecret(otherApp.applicationId, app.clientId),
+    ).rejects.toThrow("not found under application");
   });
 
   it("deletes an application and removes it from list and detail", async () => {
-    const app = await dataSource.createApplication({
-      name: "Delete Test",
-      description: "",
-      audience: "internal",
-      ownerName: "Owner",
-    });
+    const app = await createTestApplication(dataSource, { name: "Delete Test" });
 
     await dataSource.deleteApplication(app.applicationId);
 
@@ -303,7 +319,7 @@ describe("OAuth application lifecycle", () => {
     ).rejects.toThrow();
 
     await expect(
-      dataSource.rotateClientSecret("client_nonexistent"),
+      dataSource.rotateClientSecret("app_nonexistent", "client_nonexistent"),
     ).rejects.toThrow();
   });
 
@@ -313,7 +329,7 @@ describe("OAuth application lifecycle", () => {
         name: "Atomic Test App",
         description: "Created atomically",
         audience: "internal",
-        ownerName: "Test Owner",
+        ownerId: OWNER_USER_ID,
       },
       initialClient: {
         name: "Web Client",
@@ -346,7 +362,7 @@ describe("OAuth application lifecycle", () => {
         name: "Atomic SPA App",
         description: "",
         audience: "external",
-        ownerName: "Owner",
+        ownerId: OWNER_USER_ID,
       },
       initialClient: {
         name: "SPA Client",
@@ -387,12 +403,7 @@ describe("OAuth client invariant enforcement", () => {
   });
 
   it("rejects unknown scopes", async () => {
-    const app = await dataSource.createApplication({
-      name: "Scope Test App",
-      description: "",
-      audience: "internal",
-      ownerName: "Owner",
-    });
+    const app = await createTestApplication(dataSource, { name: "Scope Test App" });
 
     await expect(
       dataSource.createOAuthClient({
@@ -408,12 +419,7 @@ describe("OAuth client invariant enforcement", () => {
   });
 
   it("rejects openid on server_to_server profile", async () => {
-    const app = await dataSource.createApplication({
-      name: "M2M Scope Test",
-      description: "",
-      audience: "internal",
-      ownerName: "Owner",
-    });
+    const app = await createTestApplication(dataSource, { name: "M2M Scope Test" });
 
     await expect(
       dataSource.createOAuthClient({
@@ -429,12 +435,7 @@ describe("OAuth client invariant enforcement", () => {
   });
 
   it("rejects trusted_first_party consent mode as unknown in MVP", async () => {
-    const app = await dataSource.createApplication({
-      name: "Consent Test App",
-      description: "",
-      audience: "internal",
-      ownerName: "Owner",
-    });
+    const app = await createTestApplication(dataSource, { name: "Consent Test App" });
 
     await expect(
       dataSource.createOAuthClient({
@@ -450,12 +451,7 @@ describe("OAuth client invariant enforcement", () => {
   });
 
   it("rejects redirect URIs with non-https scheme (except localhost)", async () => {
-    const app = await dataSource.createApplication({
-      name: "URI Test App",
-      description: "",
-      audience: "internal",
-      ownerName: "Owner",
-    });
+    const app = await createTestApplication(dataSource, { name: "URI Test App" });
 
     await expect(
       dataSource.createOAuthClient({
@@ -471,12 +467,7 @@ describe("OAuth client invariant enforcement", () => {
   });
 
   it("accepts localhost http redirect URIs", async () => {
-    const app = await dataSource.createApplication({
-      name: "Localhost Test",
-      description: "",
-      audience: "internal",
-      ownerName: "Owner",
-    });
+    const app = await createTestApplication(dataSource, { name: "Localhost Test" });
 
     const client = await dataSource.createOAuthClient({
       applicationId: app.applicationId,
@@ -492,12 +483,7 @@ describe("OAuth client invariant enforcement", () => {
   });
 
   it("rejects redirect URIs on server_to_server profile", async () => {
-    const app = await dataSource.createApplication({
-      name: "M2M URI Test",
-      description: "",
-      audience: "internal",
-      ownerName: "Owner",
-    });
+    const app = await createTestApplication(dataSource, { name: "M2M URI Test" });
 
     await expect(
       dataSource.createOAuthClient({
@@ -519,7 +505,7 @@ describe("OAuth client invariant enforcement", () => {
           name: "Bad Atomic App",
           description: "",
           audience: "internal",
-          ownerName: "Owner",
+          ownerId: OWNER_USER_ID,
         },
         initialClient: {
           name: "M2M with openid",
@@ -540,7 +526,7 @@ describe("OAuth client invariant enforcement", () => {
           name: "External Trusted",
           description: "",
           audience: "external",
-          ownerName: "Owner",
+          ownerId: OWNER_USER_ID,
         },
         initialClient: {
           name: "Trusted External",
@@ -552,6 +538,27 @@ describe("OAuth client invariant enforcement", () => {
         },
       }),
     ).rejects.toThrow("未知");
+  });
+
+  it("rejects atomic creation without an owner ID", async () => {
+    await expect(
+      dataSource.createApplicationWithInitialClient({
+        application: {
+          name: "No Owner App",
+          description: "",
+          audience: "internal",
+          ownerId: "   ",
+        },
+        initialClient: {
+          name: "Web Client",
+          profile: "web_server",
+          redirectUris: ["https://example.com/callback"],
+          logoutUri: "",
+          allowedScopes: ["openid"],
+          consentMode: "always",
+        },
+      }),
+    ).rejects.toThrow("负责人");
   });
 });
 

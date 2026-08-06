@@ -19,8 +19,6 @@ import type {
 import type { SecurityFactor, UserSession, AuthorizedApplication } from "@/features/account/types";
 import type {
   AllowedScope,
-  ApplicationCreateInput,
-  ApplicationCreationResult,
   ApplicationStatus,
   ApplicationUpdateInput,
   ApplicationWithInitialClientInput,
@@ -88,14 +86,18 @@ export interface UnitedPassQueries {
  * Mutations that change server-side state.
  * Both the mock implementation and the future real HTTP-backed implementation
  * must satisfy this contract so pages can swap data sources without UI changes.
+ *
+ * Mirrors the backend REST contract: standalone application creation is not
+ * exposed (applications are always created with an initial client via
+ * `with-initial-client`), and secret rotation is scoped to its parent
+ * application in the URL.
  */
 export interface UnitedPassCommands {
-  createApplication(input: ApplicationCreateInput): Promise<ApplicationCreationResult>;
   createOAuthClient(input: OAuthClientCreateInput): Promise<OAuthClientCreationResult>;
   createApplicationWithInitialClient(input: ApplicationWithInitialClientInput): Promise<ApplicationWithInitialClientResult>;
   decideConsent(requestId: string, decision: ConsentDecision): Promise<{ redirectUrl: string }>;
   revokeGrant(grantId: string): Promise<void>;
-  rotateClientSecret(clientId: string): Promise<SecretRotationResult>;
+  rotateClientSecret(applicationId: string, clientId: string): Promise<SecretRotationResult>;
   updateApplicationStatus(applicationId: string, status: ApplicationStatus): Promise<void>;
   deleteApplication(applicationId: string): Promise<void>;
   updateApplication(applicationId: string, input: ApplicationUpdateInput): Promise<void>;

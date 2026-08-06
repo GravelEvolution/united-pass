@@ -35,8 +35,8 @@ export function validateApplicationCreateInput(input: ApplicationCreateInput): v
   if (input.name.trim().length > 80) {
     throw new ApplicationValidationError("name", "应用名称不能超过 80 个字符。");
   }
-  if (input.ownerName.trim().length < 2) {
-    throw new ApplicationValidationError("ownerName", "请填写负责人名称。");
+  if (input.ownerId.trim().length === 0) {
+    throw new ApplicationValidationError("ownerId", "请填写负责人 User ID。");
   }
   if (!isValidAudience(input.audience)) {
     throw new ApplicationValidationError("audience", `未知的应用受众类型: ${input.audience}`);
