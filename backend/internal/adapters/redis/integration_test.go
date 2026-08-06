@@ -965,6 +965,48 @@ func TestIntegration_ReauthStoreGrantConcurrentConsume(t *testing.T) {
 	}
 }
 
+// TestIntegration_ReauthStoreCreateIndexesBothKeys verifies the atomic
+// create invariant: right after CreateChallenge returns, the challenge
+// record and its cleanup-index entry both exist. The Lua script leaves no
+// window where a stored challenge is missing from the abandoned-challenge
+// index (which would leak its provider session on abandonment).
+func TestIntegration_ReauthStoreCreateIndexesBothKeys(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewReauthStore(client)
+	ctx := context.Background()
+	tokenHash := session.HashToken("reauth-atomic-index-token")
+	data := reauthChallengeData("client.secret.rotate")
+	data.ProviderSessionID = "ps_atomic"
+
+	if err := store.CreateChallenge(ctx, tokenHash, data, 5*time.Minute); err != nil {
+		t.Fatalf("create challenge: %v", err)
+	}
+
+	key := client.buildKey(reauthChallengeKeySegment, tokenHash)
+	exists, err := client.rdb.Exists(ctx, key).Result()
+	if err != nil {
+		t.Fatalf("exists challenge: %v", err)
+	}
+	if exists != 1 {
+		t.Fatalf("challenge key exists = %d, want 1", exists)
+	}
+
+	members, err := client.rdb.ZRange(ctx, client.buildKey(reauthCleanupIndexKey), 0, -1).Result()
+	if err != nil {
+		t.Fatalf("zrange cleanup index: %v", err)
+	}
+	indexed := false
+	for _, m := range members {
+		if strings.Contains(m, tokenHash) {
+			indexed = true
+			break
+		}
+	}
+	if !indexed {
+		t.Fatalf("cleanup index members = %v, want an entry for the created challenge", members)
+	}
+}
+
 func TestIntegration_ReauthStoreCleanupPopsExpiredChallenge(t *testing.T) {
 	client := setupTestRedis(t)
 	store := NewReauthStore(client)

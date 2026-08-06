@@ -552,22 +552,33 @@ func (h *ReauthHandlers) createChallenge(w http.ResponseWriter, r *http.Request,
 	})
 }
 
+// reauthRevokeTimeout bounds a best-effort provider session revocation after
+// the local reauthentication outcome is already decided.
+const reauthRevokeTimeout = 10 * time.Second
+
 // revokeProviderSession terminates a temporary provider session at a
 // reauthentication terminal state (ADR-0004 §7). It is strictly best-effort:
 // the local outcome (grant issued or fail closed) is already decided, and a
 // revocation failure only records a security event and a warning log — the
 // session then relies on provider-side expiry. Empty references are skipped.
+//
+// Revocation and its failure audit run on a detached, short-timeout context:
+// the request context may already be cancelled when the client disconnects,
+// and the password-direct path has no cleanup-index fallback, so the
+// revocation must not inherit that cancellation.
 func (h *ReauthHandlers) revokeProviderSession(r *http.Request, sessionReference string, actor identity.UserID, appID applications.ApplicationID, clientID applications.OAuthClientID, action string) {
 	if sessionReference == "" {
 		return
 	}
-	if err := h.authenticator.RevokeProviderSession(r.Context(), sessionReference); err != nil {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), reauthRevokeTimeout)
+	defer cancel()
+	if err := h.authenticator.RevokeProviderSession(ctx, sessionReference); err != nil {
 		h.logger.Warn("reauth provider session revocation failed",
 			"requestId", requestID(r),
 			"errorClass", observability.ClassifyError(err),
 			"errorDetail", observability.RedactedError(err, 256),
 		)
-		h.auditor.RecordEvent(r.Context(), applications.EventProviderSessionRevokeFailed, actor,
+		h.auditor.RecordEvent(ctx, applications.EventProviderSessionRevokeFailed, actor,
 			appID, clientID, request.ID(r.Context()), action, applications.SecurityEventDenied,
 			string(observability.ClassifyError(err)))
 	}

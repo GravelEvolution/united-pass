@@ -386,6 +386,48 @@ func TestReauthRequest_RevokeFailureStillGrantsButAudits(t *testing.T) {
 	}
 }
 
+// ctxSensitiveAuth fails revocation when the supplied context is already
+// cancelled, proving whether the handler detaches revocation from the
+// request lifecycle.
+type ctxSensitiveAuth struct{ inner *fakeReauthAuth }
+
+func (c *ctxSensitiveAuth) VerifyUserPassword(ctx context.Context, userID identity.UserID, password string) (auth.AuthenticationResult, error) {
+	return c.inner.VerifyUserPassword(ctx, userID, password)
+}
+
+func (c *ctxSensitiveAuth) CompleteMFA(ctx context.Context, input auth.MFAChallengeInput) (auth.AuthenticationResult, error) {
+	return c.inner.CompleteMFA(ctx, input)
+}
+
+func (c *ctxSensitiveAuth) RevokeProviderSession(ctx context.Context, sessionReference string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.inner.RevokeProviderSession(ctx, sessionReference)
+}
+
+func TestRevokeProviderSession_SurvivesCancelledRequestContext(t *testing.T) {
+	env := newReauthEnv()
+	env.handlers.authenticator = &ctxSensitiveAuth{inner: env.authz}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := httptest.NewRequest(http.MethodPost, "/auth/reauthentication", nil).WithContext(ctx)
+
+	// The request context is already cancelled (client disconnected); the
+	// revocation must still run because the password-direct path has no
+	// cleanup-index fallback.
+	env.handlers.revokeProviderSession(r, "ref-1", reauthPrincipal.UserID,
+		applications.ApplicationID("app-1"), applications.OAuthClientID("clt-1"), "client.secret.rotate")
+
+	if len(env.authz.revoked) != 1 || env.authz.revoked[0] != "ref-1" {
+		t.Fatalf("revoked = %v, want [ref-1]; revocation must not inherit the cancelled request context", env.authz.revoked)
+	}
+	if env.auditor.has(applications.EventProviderSessionRevokeFailed, applications.SecurityEventDenied) {
+		t.Error("unexpected revoke-failed audit for a successful detached revocation")
+	}
+}
+
 func TestReauthRequest_ChallengeStoreFailureRevokesSession(t *testing.T) {
 	env := newReauthEnv()
 	env.authz.verifyResult = auth.AuthenticationResult{

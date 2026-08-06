@@ -59,9 +59,21 @@ func NewReauthStore(client *Client) *ReauthStore {
 	return &ReauthStore{client: client}
 }
 
+// reauthCreateChallengeScript writes the challenge key and its cleanup-index
+// entry atomically. A crash between a plain SET and ZADD could leave a
+// challenge whose provider session is never indexed for abandoned-challenge
+// cleanup; the Lua script closes that window (ADR-0004 §7).
+var reauthCreateChallengeScript = goredis.NewScript(`
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+redis.call('ZADD', KEYS[2], ARGV[3], ARGV[4])
+return 1
+`)
+
 // CreateChallenge stores a reauthentication challenge under the given token
 // hash with the specified TTL. The tokenHash must be the SHA-256 hex hash of
-// the raw challenge token; the raw token must never reach Redis.
+// the raw challenge token; the raw token must never reach Redis. The
+// challenge and its cleanup-index entry are written in one atomic script, so
+// a stored challenge is always covered by abandoned-challenge cleanup.
 func (s *ReauthStore) CreateChallenge(
 	ctx context.Context,
 	tokenHash string,
@@ -77,24 +89,20 @@ func (s *ReauthStore) CreateChallenge(
 		return fmt.Errorf("redis: encode reauth challenge: %w", err)
 	}
 
-	key := s.client.buildKey(reauthChallengeKeySegment, tokenHash)
-	if err := s.client.rdb.Set(ctx, key, payload, ttl).Err(); err != nil {
-		return fmt.Errorf("redis: set reauth challenge: %w", err)
-	}
-
-	// Index the challenge for abandoned-challenge cleanup. If indexing fails,
-	// roll back the challenge key: a challenge without a cleanup index entry
-	// could leak its temporary provider session when abandoned.
 	member, err := reauthCleanupIndexMember(tokenHash, data)
 	if err != nil {
-		s.client.rdb.Del(ctx, key)
 		return err
 	}
+
+	key := s.client.buildKey(reauthChallengeKeySegment, tokenHash)
 	indexKey := s.client.buildKey(reauthCleanupIndexKey)
 	expiresAt := time.Now().Add(ttl).UnixMilli()
-	if err := s.client.rdb.ZAdd(ctx, indexKey, goredis.Z{Score: float64(expiresAt), Member: member}).Err(); err != nil {
-		s.client.rdb.Del(ctx, key)
-		return fmt.Errorf("redis: index reauth challenge cleanup: %w", err)
+	_, err = reauthCreateChallengeScript.Run(ctx, s.client.rdb,
+		[]string{key, indexKey},
+		payload, ttl.Milliseconds(), expiresAt, member,
+	).Result()
+	if err != nil {
+		return fmt.Errorf("redis: create reauth challenge: %w", err)
 	}
 	return nil
 }
