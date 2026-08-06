@@ -163,6 +163,16 @@ func (l *recordingLinker) GetOrCreateUserByProviderSubject(_ context.Context, _,
 	}, nil
 }
 
+// GetIdentityLinkByUserID returns the link bound to the subject recorded by
+// the last GetOrCreateUserByProviderSubject call. Reauthentication paths are
+// not exercised by the recording linker; an empty subject fails closed.
+func (l *recordingLinker) GetIdentityLinkByUserID(_ context.Context, _, _ string, _ identity.UserID) (identity.IdentityLink, error) {
+	if l.subject == "" {
+		return identity.IdentityLink{}, identity.ErrUserNotFound
+	}
+	return identity.IdentityLink{ProviderSubject: l.subject}, nil
+}
+
 // totpCode computes the current RFC 6238 TOTP code (SHA1, 30s period, 6
 // digits) for the given base32 secret, so the E2E test can run unattended.
 func totpCode(t *testing.T, secret string) string {
