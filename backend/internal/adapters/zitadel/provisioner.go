@@ -59,8 +59,9 @@ func NewProvisioner(mgmt managementService, projectID string, logger *slog.Logge
 }
 
 // VerifyProject confirms the configured project is readable with the service
-// account's permissions. Wire it into readiness so a misconfigured provisioner
-// fails closed instead of surfacing as 5xx on first use (ADR-0004 §1).
+// account's permissions. Bootstrap registers it as a readiness check so a
+// misconfigured provisioner fails closed instead of surfacing as 5xx on first
+// use (ADR-0004 §1).
 func (p *Provisioner) VerifyProject(ctx context.Context) error {
 	if _, err := p.mgmt.GetProjectByID(ctx, &management.GetProjectByIDRequest{Id: p.projectID}); err != nil {
 		return fmt.Errorf("%w: verify project: %s", applications.ErrProviderUnavailable, provisioningErrorClass(err))

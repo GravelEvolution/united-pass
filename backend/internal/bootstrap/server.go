@@ -162,6 +162,13 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		}
 		provisioner = prov
 		providerName = zitadel.ProviderName
+		// Project readability joins readiness so a wrong project ID or missing
+		// service-account permission fails /readyz instead of surfacing on the
+		// first admin operation (ADR-0004 §1). The stronger PROJECT_OWNER
+		// permission required for deletions cannot be probed without side
+		// effects and remains covered by deployment acceptance checks.
+		readinessCheckers = append(readinessCheckers,
+			newProjectReadinessChecker(prov, 3*time.Second))
 	} else if _, isFake := authenticator.(*auth.FakeAuthenticator); isFake && !cfg.IsProduction() {
 		provisioner = applications.NewFakeProvisioner()
 		providerName = "fake"
@@ -457,6 +464,37 @@ func (c *postgresReadinessChecker) Name() string { return "postgresql" }
 
 func (c *postgresReadinessChecker) Check(ctx context.Context) error {
 	return c.pool.Ping(ctx, c.timeout)
+}
+
+// projectReadinessChecker verifies that the OAuth provisioning project is
+// readable through the provider Management API. It is registered only for the
+// real (ZITADEL) provisioner; the fake development provisioner has no project
+// to verify.
+type projectReadinessChecker struct {
+	verifier interface {
+		VerifyProject(ctx context.Context) error
+	}
+	timeout time.Duration
+}
+
+func newProjectReadinessChecker(verifier interface {
+	VerifyProject(ctx context.Context) error
+}, timeout time.Duration) *projectReadinessChecker {
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	return &projectReadinessChecker{verifier: verifier, timeout: timeout}
+}
+
+func (c *projectReadinessChecker) Name() string { return "auth_project" }
+
+func (c *projectReadinessChecker) Check(ctx context.Context) error {
+	checkCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	if err := c.verifier.VerifyProject(checkCtx); err != nil {
+		return fmt.Errorf("auth project: %w", err)
+	}
+	return nil
 }
 
 // createDevAuthenticator creates a FakeAuthenticator with a test user for local

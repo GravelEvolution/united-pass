@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -227,6 +228,34 @@ func newRequest(handler http.Handler, method, path string) *httptest.ResponseRec
 	req := httptest.NewRequest(method, path, nil)
 	handler.ServeHTTP(rec, req)
 	return rec
+}
+
+// fakeProjectVerifier stands in for the ZITADEL provisioner in readiness
+// checker tests.
+type fakeProjectVerifier struct{ err error }
+
+func (f fakeProjectVerifier) VerifyProject(context.Context) error { return f.err }
+
+// TestProjectReadinessChecker verifies the provisioning project checker
+// reports the configured project readability outcome, so /readyz fails when
+// the project is unreachable or the service account lacks permission.
+func TestProjectReadinessChecker(t *testing.T) {
+	checker := newProjectReadinessChecker(fakeProjectVerifier{}, time.Second)
+	if checker.Name() != "auth_project" {
+		t.Errorf("Name() = %q, want %q", checker.Name(), "auth_project")
+	}
+	if err := checker.Check(context.Background()); err != nil {
+		t.Errorf("Check() with healthy project: %v, want nil", err)
+	}
+
+	failing := newProjectReadinessChecker(fakeProjectVerifier{err: errors.New("project not found")}, time.Second)
+	err := failing.Check(context.Background())
+	if err == nil {
+		t.Fatal("Check() with unreachable project: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "auth project") {
+		t.Errorf("Check() error = %v, want prefixed with %q", err, "auth project")
+	}
 }
 
 // waitFor polls condition until it returns true or the timeout elapses.
