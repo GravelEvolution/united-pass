@@ -10,13 +10,15 @@ import (
 // FakeAuthRequestProvider is the in-memory AuthRequestProvider used by unit
 // tests. It mirrors every documented provider behavior (ADR-0005 §4, §5,
 // §8): one-shot completion, the consumed/expired indistinguishability after
-// completion, and all stable error classes through injection.
+// completion, provider-success-with-lost-response (outcome_unknown), and
+// all stable error classes through injection.
 type FakeAuthRequestProvider struct {
 	mu        sync.Mutex
 	requests  map[string]*AuthRequestView
 	completed map[string]int
 	getErr    error
 	compErr   error
+	lostErr   error
 	// CallbackBase is the RP callback origin used to build deterministic
 	// callback URLs. Defaults to https://rp.example/callback.
 	CallbackBase string
@@ -31,12 +33,13 @@ func NewFakeAuthRequestProvider() *FakeAuthRequestProvider {
 	}
 }
 
-// AddRequest registers an auth request the fake will serve.
+// AddRequest registers an auth request the fake will serve. The view is
+// deep-copied so later mutation of the caller's value cannot reach the
+// store.
 func (f *FakeAuthRequestProvider) AddRequest(view *AuthRequestView) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	copied := *view
-	f.requests[view.ID] = &copied
+	f.requests[view.ID] = cloneAuthRequestView(view)
 }
 
 // InjectGetError makes every subsequent GetAuthRequest fail with err until
@@ -55,6 +58,19 @@ func (f *FakeAuthRequestProvider) InjectCompleteError(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.compErr = err
+}
+
+// InjectLostCompletionResponse simulates the outcome_unknown crash window
+// (ADR-0005 §5): the completion call reaches the provider, the request is
+// consumed there, but the response is lost on the way back, so the caller
+// observes err (typically provider_unavailable) with no provider_succeeded
+// proof. Unlike InjectCompleteError this DOES consume the one-shot: a later
+// GetAuthRequest reads not_found and any further completion fails with
+// already_completed.
+func (f *FakeAuthRequestProvider) InjectLostCompletionResponse(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lostErr = err
 }
 
 // Completions returns how many completion calls succeeded for an ID.
@@ -84,8 +100,7 @@ func (f *FakeAuthRequestProvider) GetAuthRequest(_ context.Context, authRequestI
 	if !ok {
 		return nil, NewProviderError(ClassNotFound, nil)
 	}
-	copied := *view
-	return &copied, nil
+	return cloneAuthRequestView(view), nil
 }
 
 // CompleteWithSession implements AuthRequestProvider (Allow path).
@@ -117,7 +132,10 @@ func (f *FakeAuthRequestProvider) CompleteWithError(_ context.Context, authReque
 }
 
 // complete runs the shared completion preconditions: ID limits, existence,
-// injected failure, one-shot enforcement.
+// one-shot enforcement, then the two distinct fault injections. The
+// injected transport failure (compErr) happens before the provider is
+// reached and does not consume; the lost-response failure (lostErr)
+// happens after the provider consumed the request, and does.
 func (f *FakeAuthRequestProvider) complete(authRequestID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -134,7 +152,27 @@ func (f *FakeAuthRequestProvider) complete(authRequestID string) error {
 		return f.compErr
 	}
 	f.completed[authRequestID]++
+	if f.lostErr != nil {
+		return f.lostErr
+	}
 	return nil
+}
+
+// cloneAuthRequestView deep-copies a view including its slices and the
+// MaxAge pointer, so neither the store nor returned values share backing
+// storage.
+func cloneAuthRequestView(view *AuthRequestView) *AuthRequestView {
+	if view == nil {
+		return nil
+	}
+	cloned := *view
+	cloned.Scopes = append([]string(nil), view.Scopes...)
+	cloned.Prompts = append([]Prompt(nil), view.Prompts...)
+	if view.MaxAge != nil {
+		maxAge := *view.MaxAge
+		cloned.MaxAge = &maxAge
+	}
+	return &cloned
 }
 
 func (f *FakeAuthRequestProvider) callback(authRequestID string, q url.Values) (CallbackResult, error) {

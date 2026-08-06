@@ -137,8 +137,11 @@ func TestCompleteWithSessionBuildsSessionCallback(t *testing.T) {
 	}
 	adapter := &AuthRequestAdapter{svc: stub}
 
-	result, err := adapter.CompleteWithSession(context.Background(), "V2-x",
-		consent.SessionHandle{SessionID: "sess-1", SessionToken: "tok-1"})
+	handle, err := consent.NewSessionHandle("sess-1", "tok-1")
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	result, err := adapter.CompleteWithSession(context.Background(), "V2-x", handle)
 	if err != nil {
 		t.Fatalf("CompleteWithSession: %v", err)
 	}
@@ -155,8 +158,11 @@ func TestCompleteWithSessionBuildsSessionCallback(t *testing.T) {
 
 	// Empty provider callback URL is an internal fault, never a success.
 	stub.cbResp = &oidcv2.CreateCallbackResponse{}
-	if _, err := adapter.CompleteWithSession(context.Background(), "V2-x",
-		consent.SessionHandle{SessionID: "s", SessionToken: "t"}); !consent.IsClass(err, consent.ClassInternal) {
+	retry, err := consent.NewSessionHandle("s", "t")
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	if _, err := adapter.CompleteWithSession(context.Background(), "V2-x", retry); !consent.IsClass(err, consent.ClassInternal) {
 		t.Fatalf("empty callback url: want internal, got %v", err)
 	}
 }
@@ -169,6 +175,7 @@ func TestCompleteWithErrorMapsReasons(t *testing.T) {
 		consent.ReasonAccountSelectionRequired: oidcv2.ErrorReason_ERROR_REASON_ACCOUNT_SELECTION_REQUIRED,
 		consent.ReasonServerError:              oidcv2.ErrorReason_ERROR_REASON_SERVER_ERROR,
 		consent.ReasonTemporarilyUnavailable:   oidcv2.ErrorReason_ERROR_REASON_TEMPORARY_UNAVAILABLE,
+		consent.ReasonRequestNotSupported:      oidcv2.ErrorReason_ERROR_REASON_REQUEST_NOT_SUPPORTED,
 	}
 	for reason, want := range cases {
 		stub := &stubOIDCService{

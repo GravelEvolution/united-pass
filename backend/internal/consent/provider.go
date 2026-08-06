@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -76,31 +77,67 @@ func (v *AuthRequestView) HasPrompt(p Prompt) bool {
 	return false
 }
 
+// MaxProviderSessionFieldLen bounds the provider session id and token; it
+// mirrors the proto validate max_len=200 on the v2.71 CreateCallback
+// Session message.
+const MaxProviderSessionFieldLen = 200
+
 // SessionHandle carries the provider session identity needed to complete an
 // auth request with Allow (session ID + token on v2.71). It is transient
-// bearer material: never logged, persisted or rendered into errors. The
-// encrypted, versioned at-rest form is the session package's
-// ProviderSessionCredential (ADR-0005 §3); this handle is the narrow
-// in-flight value handed to the adapter.
+// bearer material: the fields are unexported so reflection-based rendering
+// (%+v, %#v, json.Marshal) cannot read them, and String, GoString and
+// LogValue all redact. The encrypted, versioned at-rest form is the session
+// package's ProviderSessionCredential (ADR-0005 §3); this handle is the
+// narrow in-flight value handed to the adapter, read only through its
+// getters.
 type SessionHandle struct {
-	SessionID    string
-	SessionToken string
+	sessionID    string
+	sessionToken string
 }
 
-// Validate rejects handles the provider would refuse anyway (both fields
-// are required, proto-validated min_len=1 on v2.71).
-func (s SessionHandle) Validate() error {
-	if s.SessionID == "" || s.SessionToken == "" {
-		return errors.New("consent: session handle requires session id and token")
+// NewSessionHandle validates and wraps a provider session id/token pair.
+func NewSessionHandle(sessionID, sessionToken string) (SessionHandle, error) {
+	handle := SessionHandle{sessionID: sessionID, sessionToken: sessionToken}
+	if err := handle.Validate(); err != nil {
+		return SessionHandle{}, err
 	}
-	return nil
+	return handle, nil
+}
+
+// SessionID returns the provider session id (narrow adapter access).
+func (s SessionHandle) SessionID() string { return s.sessionID }
+
+// SessionToken returns the provider session token (narrow adapter access;
+// never log the returned value).
+func (s SessionHandle) SessionToken() string { return s.sessionToken }
+
+// Validate enforces the provider's proto limits: both fields required,
+// length 1..200.
+func (s SessionHandle) Validate() error {
+	switch {
+	case len(s.sessionID) < 1 || len(s.sessionID) > MaxProviderSessionFieldLen:
+		return errors.New("consent: invalid provider session id")
+	case len(s.sessionToken) < 1 || len(s.sessionToken) > MaxProviderSessionFieldLen:
+		return errors.New("consent: invalid provider session token")
+	default:
+		return nil
+	}
+}
+
+func (SessionHandle) String() string { return "[redacted provider session handle]" }
+
+func (SessionHandle) GoString() string { return "[redacted provider session handle]" }
+
+func (SessionHandle) LogValue() slog.Value {
+	return slog.StringValue("[redacted provider session handle]")
 }
 
 // CallbackErrorReason is the OIDC error the provider should deliver to the
 // RP through the error callback (ADR-0005 §9, §12). Deny uses
 // ReasonAccessDenied; the non-interactive gateway uses the *_required
-// reasons; gateway-side faults that can still safely reach the RP use
-// ReasonServerError / ReasonTemporarilyUnavailable.
+// reasons; prompt=create fails with ReasonRequestNotSupported; gateway-side
+// faults that can still safely reach the RP use ReasonServerError /
+// ReasonTemporarilyUnavailable.
 type CallbackErrorReason int
 
 // Callback error reasons supported by the provider (all verified present in
@@ -112,6 +149,7 @@ const (
 	ReasonAccountSelectionRequired
 	ReasonServerError
 	ReasonTemporarilyUnavailable
+	ReasonRequestNotSupported
 )
 
 func (r CallbackErrorReason) String() string {
@@ -128,6 +166,8 @@ func (r CallbackErrorReason) String() string {
 		return "server_error"
 	case ReasonTemporarilyUnavailable:
 		return "temporarily_unavailable"
+	case ReasonRequestNotSupported:
+		return "request_not_supported"
 	default:
 		return "unknown"
 	}
@@ -138,8 +178,9 @@ func (r CallbackErrorReason) String() string {
 // error for the RP): the value is only ever forwarded to the browser as the
 // Location header (gateway) or as the frozen redirectUrl field (decision
 // API), never persisted, logged, audited or parsed for code/state
-// (ADR-0005 §3). The redacting String method keeps accidental %s/%v
-// rendering safe.
+// (ADR-0005 §3). String, GoString and LogValue all redact, so %v, %+v,
+// %#v, %q and slog rendering are leak-safe; the raw value is only
+// reachable through Raw.
 type CallbackResult struct {
 	url string
 }
@@ -162,6 +203,15 @@ func (r CallbackResult) String() string {
 		return "[no callback]"
 	}
 	return "[redacted provider callback]"
+}
+
+// GoString redacts the %#v rendering (which would otherwise expose the
+// unexported field via reflection).
+func (CallbackResult) GoString() string { return "[redacted provider callback]" }
+
+// LogValue redacts slog rendering.
+func (CallbackResult) LogValue() slog.Value {
+	return slog.StringValue("[redacted provider callback]")
 }
 
 // AuthRequestProvider is the provider seam for the OAuth authorization

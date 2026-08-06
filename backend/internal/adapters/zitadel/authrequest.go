@@ -78,8 +78,8 @@ func (a *AuthRequestAdapter) CompleteWithSession(ctx context.Context, authReques
 		AuthRequestId: authRequestID,
 		CallbackKind: &oidcv2.CreateCallbackRequest_Session{
 			Session: &oidcv2.Session{
-				SessionId:    session.SessionID,
-				SessionToken: session.SessionToken,
+				SessionId:    session.SessionID(),
+				SessionToken: session.SessionToken(),
 			},
 		},
 	})
@@ -91,9 +91,9 @@ func (a *AuthRequestAdapter) CompleteWithSession(ctx context.Context, authReques
 
 // CompleteWithError fails the auth request with an OIDC error callback
 // (Deny / login_required / consent_required / account_selection_required /
-// gateway faults) and returns the provider-verified error callback URL.
-// One-shot per auth request; the error path performs no project permission
-// check on v2.71.
+// request_not_supported / gateway faults) and returns the provider-verified
+// error callback URL. One-shot per auth request; the error path performs no
+// project permission check on v2.71.
 func (a *AuthRequestAdapter) CompleteWithError(ctx context.Context, authRequestID string, reason consent.CallbackErrorReason) (consent.CallbackResult, error) {
 	if err := consent.ValidateAuthRequestID(authRequestID); err != nil {
 		return consent.CallbackResult{}, consent.NewProviderError(consent.ClassNotFound, err)
@@ -140,6 +140,8 @@ func callbackErrorReasonToProto(reason consent.CallbackErrorReason) (oidcv2.Erro
 		return oidcv2.ErrorReason_ERROR_REASON_SERVER_ERROR, true
 	case consent.ReasonTemporarilyUnavailable:
 		return oidcv2.ErrorReason_ERROR_REASON_TEMPORARY_UNAVAILABLE, true
+	case consent.ReasonRequestNotSupported:
+		return oidcv2.ErrorReason_ERROR_REASON_REQUEST_NOT_SUPPORTED, true
 	default:
 		return oidcv2.ErrorReason_ERROR_REASON_UNSPECIFIED, false
 	}
