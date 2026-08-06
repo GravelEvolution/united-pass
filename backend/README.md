@@ -283,7 +283,14 @@ Sign-off](docs/adr-0003.md). Production deployments can start with the
 ZITADEL adapter once the HTTPS instance and secrets are provisioned (see
 [Local ZITADEL Instance](#local-zitadel-instance)).
 
-**Phase 2 status: second-round security review remediation complete, pending final sign-off.**
+**Phase 2 status: frozen (2026-08-07).**
+
+- Phase 2 implementation: complete
+- Phase 2 local real-provider acceptance: passed
+- Phase 2 local code review: passed
+- GitHub Actions verification: pending quota recovery
+- Production operational sign-off: pending
+
 The OAuth Application/Client management plane (provisioning, reauthentication,
 secret rotation, deletion, compensation, durable audit) is implemented and the
 real-provider acceptance covers both confidential and public clients against
@@ -300,8 +307,13 @@ or record fail-safe drift with desired status (disable), abandoned/expired
 reauthentication challenges are cleaned up by an index-driven worker
 (create-time guard + idempotent sweep), and the frontend disables the
 unsupported `server_to_server` profile. The post-remediation re-acceptance
-(P2.8b, schema version 4) passed 70/70 against the real provider; final
-freeze remains pending re-review sign-off. Note: the
+(P2.8b, schema version 4) passed 70/70 against the real provider. A final
+hardening round closed the remaining edge cases: challenge creation writes
+the record and its cleanup-index entry atomically (Lua), provider session
+revocation runs on a detached context, and the revocation-failure audit uses
+its own fresh deadline so a provider timeout can never drop the security
+event. All code-level review findings are closed; the freeze was granted
+2026-08-07. Note: the
 ZITADEL service account must hold `PROJECT_OWNER` membership on the
 provisioning project — organization-level `ORG_OWNER` alone is not sufficient
 for `RemoveApp` on v2.71.

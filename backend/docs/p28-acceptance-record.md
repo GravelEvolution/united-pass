@@ -6,6 +6,12 @@
   - **confidential-client real-provider acceptance: passed**（Part 1–3，2026-08-06 首轮）；
   - **public-client real-provider acceptance: passed**（Part 4，2026-08-06 安全复核整改期补验，44/44 PASS）；
   - **security-remediation real-provider re-acceptance (P2.8b): passed**（Part 5，2026-08-07 第二轮安全复核整改后补验，70/70 PASS，schema 版本 4）。
+- **P2 最终冻结状态（2026-08-07）**：
+  - Phase 2 implementation: complete
+  - Phase 2 local real-provider acceptance: passed
+  - Phase 2 local code review: passed
+  - GitHub Actions verification: pending quota recovery
+  - Production operational sign-off: pending
 - 验收环境已拆除，`.env` 已恢复 fake provider 默认。
 
 ## 1. 验收环境
