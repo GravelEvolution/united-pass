@@ -28,10 +28,13 @@ import (
 // ReauthAuthenticator verifies the current session user against the
 // authentication provider, keyed by the stable United Pass user ID — never
 // by a browser-supplied identifier, so a challenge can never authenticate a
-// different account than the session's own.
+// different account than the session's own. RevokeProviderSession terminates
+// the temporary provider session a reauthentication created, at every
+// terminal state (ADR-0004 §7).
 type ReauthAuthenticator interface {
 	VerifyUserPassword(ctx context.Context, userID identity.UserID, password string) (auth.AuthenticationResult, error)
 	CompleteMFA(ctx context.Context, input auth.MFAChallengeInput) (auth.AuthenticationResult, error)
+	RevokeProviderSession(ctx context.Context, sessionReference string) error
 }
 
 // ReauthChallengeStore abstracts reauthentication challenge persistence. The
@@ -215,6 +218,10 @@ func (h *ReauthHandlers) Request(w http.ResponseWriter, r *http.Request) {
 
 	switch result.Status {
 	case auth.StatusAuthenticated:
+		// The temporary provider session has served its purpose: revoke it
+		// at this terminal state regardless of whether the grant issuance
+		// below succeeds (fail closed either way).
+		h.revokeProviderSession(r, result.ProviderSessionReference, principal.UserID, appID, clientID, req.Action)
 		h.issueGrant(w, r, principal, req.Action, req.ApplicationID, req.ClientID)
 
 	case auth.StatusMFARequired:
@@ -307,9 +314,13 @@ func (h *ReauthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Binding check: a challenge issued to one user or session can never be
-	// completed from another. Any mismatch consumes the challenge fail closed.
+	// completed from another. Any mismatch consumes the challenge fail closed
+	// and revokes the challenge's temporary provider session.
 	if challenge.UserID != principal.UserID || challenge.SessionID != string(principal.SessionID) {
 		_ = h.challenges.ConsumeChallenge(r.Context(), tokenHash, claimID)
+		h.revokeProviderSession(r, challenge.ProviderSessionID, principal.UserID,
+			applications.ApplicationID(challenge.ApplicationID),
+			applications.OAuthClientID(challenge.ClientID), challenge.Action)
 		h.recordReauthFailure(r, principal.UserID,
 			applications.ApplicationID(challenge.ApplicationID),
 			applications.OAuthClientID(challenge.ClientID),
@@ -346,6 +357,11 @@ func (h *ReauthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 			WriteInternalError(w, r)
 			return
 		}
+		// Terminal success: revoke the temporary provider session before
+		// issuing the grant (best-effort, never blocks the grant).
+		h.revokeProviderSession(r, result.ProviderSessionReference, principal.UserID,
+			applications.ApplicationID(challenge.ApplicationID),
+			applications.OAuthClientID(challenge.ClientID), challenge.Action)
 		h.issueGrant(w, r, principal, challenge.Action, challenge.ApplicationID, challenge.ClientID)
 
 	case auth.StatusInvalidCredentials:
@@ -353,6 +369,11 @@ func (h *ReauthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 		if incErr != nil {
 			if errors.Is(incErr, auth.ErrReauthMaxAttemptsExceeded) {
 				_ = h.challenges.ConsumeChallenge(r.Context(), tokenHash, claimID)
+				// Terminal failure: the challenge is gone, so its temporary
+				// provider session must not outlive it.
+				h.revokeProviderSession(r, challenge.ProviderSessionID, principal.UserID,
+					applications.ApplicationID(challenge.ApplicationID),
+					applications.OAuthClientID(challenge.ClientID), challenge.Action)
 				h.recordReauthFailure(r, principal.UserID,
 					applications.ApplicationID(challenge.ApplicationID),
 					applications.OAuthClientID(challenge.ClientID),
@@ -382,6 +403,10 @@ func (h *ReauthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 
 	case auth.StatusExpired:
 		_ = h.challenges.ConsumeChallenge(r.Context(), tokenHash, claimID)
+		// Terminal failure: revoke the challenge's temporary provider session.
+		h.revokeProviderSession(r, challenge.ProviderSessionID, principal.UserID,
+			applications.ApplicationID(challenge.ApplicationID),
+			applications.OAuthClientID(challenge.ClientID), challenge.Action)
 		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "验证挑战已过期，请重新发起操作。", nil)
 
 	default:
@@ -510,6 +535,27 @@ func (h *ReauthHandlers) createChallenge(w http.ResponseWriter, r *http.Request,
 		PasskeyRequestOptions: result.PasskeyRequestOptions,
 		ExpiresAt:             now.Add(h.challengeTTL),
 	})
+}
+
+// revokeProviderSession terminates a temporary provider session at a
+// reauthentication terminal state (ADR-0004 §7). It is strictly best-effort:
+// the local outcome (grant issued or fail closed) is already decided, and a
+// revocation failure only records a security event and a warning log — the
+// session then relies on provider-side expiry. Empty references are skipped.
+func (h *ReauthHandlers) revokeProviderSession(r *http.Request, sessionReference string, actor identity.UserID, appID applications.ApplicationID, clientID applications.OAuthClientID, action string) {
+	if sessionReference == "" {
+		return
+	}
+	if err := h.authenticator.RevokeProviderSession(r.Context(), sessionReference); err != nil {
+		h.logger.Warn("reauth provider session revocation failed",
+			"requestId", requestID(r),
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
+		)
+		h.auditor.RecordEvent(r.Context(), applications.EventProviderSessionRevokeFailed, actor,
+			appID, clientID, request.ID(r.Context()), action, applications.SecurityEventDenied,
+			string(observability.ClassifyError(err)))
+	}
 }
 
 // recordReauthFailure records a denied reauthentication audit row. Audit

@@ -37,6 +37,11 @@ const (
 	EventReauthenticationRequested = "reauthentication.requested"
 	EventReauthenticationSucceeded = "reauthentication.succeeded"
 	EventReauthenticationFailed    = "reauthentication.failed"
+
+	// EventProviderSessionRevokeFailed marks a best-effort revocation of a
+	// temporary provider session that failed at a reauthentication terminal
+	// state (ADR-0004 §7). The session then relies on provider-side expiry.
+	EventProviderSessionRevokeFailed = "provider_session.revoke_failed"
 )
 
 // SecurityEvent is one durable audit row. This is a real persistence

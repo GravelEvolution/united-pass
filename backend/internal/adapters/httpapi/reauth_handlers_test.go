@@ -28,6 +28,8 @@ type fakeReauthAuth struct {
 	mfaResult    auth.AuthenticationResult
 	mfaErr       error
 	verifyCalls  int
+	revokeErr    error
+	revoked      []string
 }
 
 func (f *fakeReauthAuth) VerifyUserPassword(_ context.Context, _ identity.UserID, _ string) (auth.AuthenticationResult, error) {
@@ -37,6 +39,14 @@ func (f *fakeReauthAuth) VerifyUserPassword(_ context.Context, _ identity.UserID
 
 func (f *fakeReauthAuth) CompleteMFA(_ context.Context, _ auth.MFAChallengeInput) (auth.AuthenticationResult, error) {
 	return f.mfaResult, f.mfaErr
+}
+
+func (f *fakeReauthAuth) RevokeProviderSession(_ context.Context, sessionReference string) error {
+	if f.revokeErr != nil {
+		return f.revokeErr
+	}
+	f.revoked = append(f.revoked, sessionReference)
+	return nil
 }
 
 // memReauthChallenges is an in-memory ReauthChallengeStore mirroring the
@@ -285,6 +295,44 @@ func TestReauthRequest_GrantedImmediately(t *testing.T) {
 	}
 }
 
+func TestReauthRequest_RevokesProviderSessionOnGrant(t *testing.T) {
+	env := newReauthEnv()
+	env.authz.verifyResult = auth.AuthenticationResult{
+		Status:                   auth.StatusAuthenticated,
+		ProviderSessionReference: "ref-1",
+	}
+	router := reauthRouter(env.handlers, reauthPrincipal)
+
+	w := doReauthJSON(t, router, "/auth/reauthentication", reauthRotateBody)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	// The temporary provider session must not outlive the grant issuance.
+	if len(env.authz.revoked) != 1 || env.authz.revoked[0] != "ref-1" {
+		t.Errorf("revoked = %v, want [ref-1]", env.authz.revoked)
+	}
+}
+
+func TestReauthRequest_RevokeFailureStillGrantsButAudits(t *testing.T) {
+	env := newReauthEnv()
+	env.authz.verifyResult = auth.AuthenticationResult{
+		Status:                   auth.StatusAuthenticated,
+		ProviderSessionReference: "ref-1",
+	}
+	env.authz.revokeErr = errors.New("provider down")
+	router := reauthRouter(env.handlers, reauthPrincipal)
+
+	w := doReauthJSON(t, router, "/auth/reauthentication", reauthRotateBody)
+	// Revocation is best-effort: the local grant outcome stands, but the
+	// failed revocation is recorded as a security event.
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if !env.auditor.has(applications.EventProviderSessionRevokeFailed, applications.SecurityEventDenied) {
+		t.Error("expected provider_session.revoke_failed audit event")
+	}
+}
+
 func TestReauthRequest_MFARequired(t *testing.T) {
 	env := newReauthEnv()
 	env.authz.verifyResult = auth.AuthenticationResult{
@@ -434,6 +482,42 @@ func TestReauthCompleteMFA_SuccessIssuesGrant(t *testing.T) {
 	}
 }
 
+func TestReauthCompleteMFA_RevokesProviderSessionOnGrant(t *testing.T) {
+	env := newReauthEnv()
+	challengeToken := startReauthChallenge(t, env)
+
+	env.authz.mfaResult = auth.AuthenticationResult{
+		Status:                   auth.StatusAuthenticated,
+		ProviderSessionReference: "ref-2",
+	}
+	router := reauthRouter(env.handlers, reauthPrincipal)
+	w := doReauthJSON(t, router, "/auth/reauthentication/mfa",
+		`{"reauthToken":"`+challengeToken+`","method":"totp","code":"123456"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if len(env.authz.revoked) != 1 || env.authz.revoked[0] != "ref-2" {
+		t.Errorf("revoked = %v, want [ref-2]", env.authz.revoked)
+	}
+}
+
+func TestReauthCompleteMFA_ExpiredChallengeRevokesProviderSession(t *testing.T) {
+	env := newReauthEnv()
+	challengeToken := startReauthChallenge(t, env)
+
+	env.authz.mfaResult = auth.AuthenticationResult{Status: auth.StatusExpired}
+	router := reauthRouter(env.handlers, reauthPrincipal)
+	w := doReauthJSON(t, router, "/auth/reauthentication/mfa",
+		`{"reauthToken":"`+challengeToken+`","method":"totp","code":"123456"}`)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body=%s", w.Code, w.Body.String())
+	}
+	// The challenge's provider session must not outlive the consumed challenge.
+	if len(env.authz.revoked) != 1 || env.authz.revoked[0] != "ps-1" {
+		t.Errorf("revoked = %v, want [ps-1]", env.authz.revoked)
+	}
+}
+
 func TestReauthCompleteMFA_WrongCodeUsesAttemptBudget(t *testing.T) {
 	env := newReauthEnv()
 	challengeToken := startReauthChallenge(t, env)
@@ -459,6 +543,11 @@ func TestReauthCompleteMFA_WrongCodeUsesAttemptBudget(t *testing.T) {
 	if !env.auditor.has(applications.EventReauthenticationFailed, applications.SecurityEventDenied) {
 		t.Error("expected denied reauthentication.failed events")
 	}
+	// Exhausting the budget is terminal: the challenge's provider session
+	// must be revoked.
+	if len(env.authz.revoked) != 1 || env.authz.revoked[0] != "ps-1" {
+		t.Errorf("revoked = %v, want [ps-1]", env.authz.revoked)
+	}
 }
 
 func TestReauthCompleteMFA_SessionBindingMismatch(t *testing.T) {
@@ -478,6 +567,11 @@ func TestReauthCompleteMFA_SessionBindingMismatch(t *testing.T) {
 	}
 	if env.authz.mfaResult.Status == auth.StatusAuthenticated && len(env.grants.data) != 0 {
 		t.Error("no grant may be issued on binding mismatch")
+	}
+	// Binding mismatch is terminal: the challenge's provider session must
+	// be revoked.
+	if len(env.authz.revoked) != 1 || env.authz.revoked[0] != "ps-1" {
+		t.Errorf("revoked = %v, want [ps-1]", env.authz.revoked)
 	}
 }
 
