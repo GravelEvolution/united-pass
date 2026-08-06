@@ -83,7 +83,7 @@
 
 | 场景 | 断言 | 结果 |
 | --- | --- | --- |
-| schema v4 migration | `cmd/migrate` 将测试 schema 从 v2 迁移至 v4（00003 审计强化 + 00004 reconciliation 期望状态）无错误 | ✅ |
+| schema v4 migration | `cmd/migrate` 将测试 schema 从 v2 迁移至 v4（00003 持久化 Secret Rotation 状态 + 00004 Reconciliation 期望状态）无错误 | ✅ |
 | confidential create | `with-initial-client`（audience=external，profile=web_server）201；一次性 Secret 64 字符；provider app ACTIVE 且 id 回写；第二个 confidential client 同样成功 | ✅ |
 | durable rotation single-winner | 两个并发 reauth grant 同时轮转：恰好一个 200 一个 409；rotation gate 释放回 idle；secret 记录恰 2 条；`secret_rotated` 审计恰 1 条；无 reconciliation_required | ✅ |
 | outcome_unknown | 轮转进行中 docker kill ZITADEL：返回 409 且错误说明结果未知；`secret_rotation_status=outcome_unknown`；`provider_reconciliation_required=true`；job reason=`provider_outcome_unknown`；审计 `secret_rotation_failed`（payload failure_class）+ `provider_reconciliation_required`；人工对账（确认 provider 侧未变更）后状态回 idle | ✅ |
