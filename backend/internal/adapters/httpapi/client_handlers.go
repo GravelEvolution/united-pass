@@ -314,6 +314,8 @@ func (h *ApplicationHandlers) writeRotationError(w http.ResponseWriter, r *http.
 		}})
 	case errors.Is(err, applications.ErrInvalidStateTransition), errors.Is(err, applications.ErrConflict):
 		writeError(w, r, http.StatusConflict, CodeConflict, "资源当前状态不允许该操作。", nil)
+	case errors.Is(err, applications.ErrSecretRotationOutcomeUnknown):
+		writeError(w, r, http.StatusConflict, CodeConflict, "上一次轮转结果未知（提供方响应超时），客户端已锁定待对账，请先完成对账再重试。", nil)
 	case errors.Is(err, applications.ErrParentApplicationDisabled):
 		writeError(w, r, http.StatusConflict, CodeConflict, "所属应用已停用，无法轮转客户端 Secret；请先启用应用。", nil)
 	case errors.Is(err, applications.ErrProviderConflict):

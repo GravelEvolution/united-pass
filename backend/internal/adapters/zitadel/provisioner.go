@@ -224,7 +224,7 @@ func (p *Provisioner) RotateClientSecret(ctx context.Context, providerApplicatio
 		AppId:     providerApplicationID,
 	})
 	if err != nil {
-		return applications.ClientSecretRotation{}, p.mapError("rotate_client_secret", err)
+		return applications.ClientSecretRotation{}, p.mapRotationError("rotate_client_secret", err)
 	}
 	if resp.GetClientSecret() == "" {
 		p.logFailure("rotate_client_secret", "empty_secret")
@@ -340,6 +340,31 @@ func (p *Provisioner) mapError(operation string, err error) error {
 	case codes.NotFound, codes.FailedPrecondition, codes.InvalidArgument, codes.Aborted:
 		// State or argument mismatches: the local and provider state do not
 		// line up; the use case reconciles rather than retrying blindly.
+		return fmt.Errorf("%w: %s", applications.ErrProviderConflict, operation)
+	default:
+		return fmt.Errorf("%w: %s", applications.ErrProviderUnavailable, operation)
+	}
+}
+
+// mapRotationError classifies rotation failures. Rotation is non-idempotent
+// at the provider (v2.71 revokes the previous secret immediately, no grace
+// period), so any ambiguous outcome — deadline, cancellation, transport loss,
+// Unknown/Unavailable/Internal — must surface as outcome-unknown. The caller
+// then parks the client instead of assuming the old secret survived
+// (ADR-0004 §6). Definitive rejections keep the standard mapping.
+func (p *Provisioner) mapRotationError(operation string, err error) error {
+	class := provisioningErrorClass(err)
+	p.logFailure(operation, class)
+	switch class {
+	case "deadline_exceeded", "canceled", "DeadlineExceeded", "Canceled", "transport", "Unknown", "Unavailable", "Internal":
+		return fmt.Errorf("%w: %s", applications.ErrProviderOutcomeUnknown, operation)
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return fmt.Errorf("%w: %s", applications.ErrProviderOutcomeUnknown, operation)
+	}
+	switch st.Code() {
+	case codes.AlreadyExists, codes.NotFound, codes.FailedPrecondition, codes.InvalidArgument, codes.Aborted:
 		return fmt.Errorf("%w: %s", applications.ErrProviderConflict, operation)
 	default:
 		return fmt.Errorf("%w: %s", applications.ErrProviderUnavailable, operation)

@@ -3,6 +3,7 @@ package applications
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -15,37 +16,38 @@ import (
 // fakeStore is an in-memory ApplicationStore. It is intentionally minimal:
 // only the state needed by the orchestration tests is tracked.
 type fakeStore struct {
-	mu      sync.Mutex
-	apps    map[ApplicationID]Application
-	clients map[OAuthClientID]OAuthClient
-	deleted map[OAuthClientID]bool
-	ops     map[ProviderOperationID]ProviderOperation
-	secrets []ClientSecretRecord
-	jobs    []ReconciliationJob
-	seq     *[]string
+	mu       sync.Mutex
+	apps     map[ApplicationID]Application
+	clients  map[OAuthClientID]OAuthClient
+	deleted  map[OAuthClientID]bool
+	ops      map[ProviderOperationID]ProviderOperation
+	secrets  []ClientSecretRecord
+	jobs     []ReconciliationJob
+	rotation map[OAuthClientID]string
+	seq      *[]string
 
-	createAppErr     error
-	completeAppErr   error
-	updateAppErr     error
-	setAppStatusErr  error
-	deleteAppErr     error
-	listErr          error
-	updateClientErr  error
-	markDeletingErr  error
-	completeDelErr   error
-	reconcileMarkErr error
-	beginRotationErr error
-	markRotatedErr   error
-	secretRecordErr  error
+	createAppErr        error
+	completeAppErr      error
+	updateAppErr        error
+	setAppStatusErr     error
+	deleteAppErr        error
+	listErr             error
+	updateClientErr     error
+	markDeletingErr     error
+	completeDelErr      error
+	reconcileMarkErr    error
+	beginRotationErr    error
+	completeRotationErr error
 }
 
 func newFakeStore(seq *[]string) *fakeStore {
 	return &fakeStore{
-		apps:    make(map[ApplicationID]Application),
-		clients: make(map[OAuthClientID]OAuthClient),
-		deleted: make(map[OAuthClientID]bool),
-		ops:     make(map[ProviderOperationID]ProviderOperation),
-		seq:     seq,
+		apps:     make(map[ApplicationID]Application),
+		clients:  make(map[OAuthClientID]OAuthClient),
+		deleted:  make(map[OAuthClientID]bool),
+		ops:      make(map[ProviderOperationID]ProviderOperation),
+		rotation: make(map[OAuthClientID]string),
+		seq:      seq,
 	}
 }
 
@@ -344,17 +346,14 @@ func (s *fakeStore) MarkClientDeleteFailed(_ context.Context, clientID OAuthClie
 	return nil
 }
 
-func (s *fakeStore) CreateSecretRecord(_ context.Context, rec ClientSecretRecord) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.secretRecordErr != nil {
-		return s.secretRecordErr
+func (s *fakeStore) rotationStatus(clientID OAuthClientID) string {
+	if st, ok := s.rotation[clientID]; ok {
+		return st
 	}
-	s.secrets = append(s.secrets, rec)
-	return nil
+	return "idle"
 }
 
-func (s *fakeStore) BeginSecretRotation(_ context.Context, clientID OAuthClientID, expectedVersion int) error {
+func (s *fakeStore) BeginSecretRotation(_ context.Context, clientID OAuthClientID, expectedVersion int, op ProviderOperation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.beginRotationErr != nil {
@@ -367,22 +366,62 @@ func (s *fakeStore) BeginSecretRotation(_ context.Context, clientID OAuthClientI
 	if c.Version != expectedVersion {
 		return ErrConflict
 	}
+	// Only an idle client may acquire the gate; in_progress and
+	// outcome_unknown clients refuse further rotations.
+	if s.rotationStatus(clientID) != "idle" {
+		return ErrConflict
+	}
+	s.rotation[clientID] = "in_progress"
+	c.Version++
+	s.clients[clientID] = c
+	s.ops[op.ID] = op
+	return nil
+}
+
+func (s *fakeStore) CompleteSecretRotation(_ context.Context, clientID OAuthClientID, opID ProviderOperationID, rotatedSecretID ClientSecretID, newRec ClientSecretRecord, rotatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.completeRotationErr != nil {
+		return s.completeRotationErr
+	}
+	if s.rotationStatus(clientID) != "in_progress" {
+		return ErrConflict
+	}
+	for i := range s.secrets {
+		if s.secrets[i].ID == rotatedSecretID {
+			s.secrets[i].LastRotatedAt = &rotatedAt
+		}
+	}
+	s.secrets = append(s.secrets, newRec)
+	s.rotation[clientID] = "idle"
+	op := s.ops[opID]
+	op.Status = ProviderOperationSucceeded
+	s.ops[opID] = op
+	c := s.clients[clientID]
 	c.Version++
 	s.clients[clientID] = c
 	return nil
 }
 
-func (s *fakeStore) MarkSecretRotated(_ context.Context, secretID ClientSecretID, rotatedAt time.Time) error {
+func (s *fakeStore) AbortSecretRotation(_ context.Context, clientID OAuthClientID, opID ProviderOperationID, errorClass string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.markRotatedErr != nil {
-		return s.markRotatedErr
-	}
-	for i := range s.secrets {
-		if s.secrets[i].ID == secretID {
-			s.secrets[i].LastRotatedAt = &rotatedAt
-		}
-	}
+	s.rotation[clientID] = "idle"
+	op := s.ops[opID]
+	op.Status = ProviderOperationFailed
+	op.ErrorClass = errorClass
+	s.ops[opID] = op
+	return nil
+}
+
+func (s *fakeStore) FailSecretRotationUnknown(_ context.Context, clientID OAuthClientID, opID ProviderOperationID, errorClass string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rotation[clientID] = "outcome_unknown"
+	op := s.ops[opID]
+	op.Status = ProviderOperationFailed
+	op.ErrorClass = errorClass
+	s.ops[opID] = op
 	return nil
 }
 
@@ -1487,9 +1526,12 @@ func TestRotateClientSecret_Success(t *testing.T) {
 		t.Errorf("secret states wrong: %d rotated, %d active", rotatedOld, activeNew)
 	}
 
-	// The single-winner gate bumped the client version before the provider call.
-	if store.clients[res.ClientID].Version != 2 {
-		t.Errorf("client version = %d, want 2", store.clients[res.ClientID].Version)
+	// The gate bump (begin) plus the atomic commit each advance the version.
+	if store.clients[res.ClientID].Version != 3 {
+		t.Errorf("client version = %d, want 3", store.clients[res.ClientID].Version)
+	}
+	if store.rotationStatus(res.ClientID) != "idle" {
+		t.Errorf("rotation status = %q, want idle after success", store.rotationStatus(res.ClientID))
 	}
 
 	found := false
@@ -1579,6 +1621,10 @@ func TestRotateClientSecret_ProviderFailureKeepsOldSecret(t *testing.T) {
 	if len(secrets) != 1 || secrets[0].LastRotatedAt != nil {
 		t.Error("a failed rotation must never touch the existing secret")
 	}
+	// A confirmed provider failure aborts the gate back to idle.
+	if store.rotationStatus(res.ClientID) != "idle" {
+		t.Errorf("rotation status = %q, want idle after confirmed failure", store.rotationStatus(res.ClientID))
+	}
 	failed := false
 	for _, ev := range events.events {
 		if ev.EventType == EventSecretRotationFailed && ev.Result == SecurityEventDenied && ev.FailureClass == "provider_unavailable" {
@@ -1590,6 +1636,83 @@ func TestRotateClientSecret_ProviderFailureKeepsOldSecret(t *testing.T) {
 	}
 }
 
+func TestRotateClientSecret_ProviderOutcomeUnknownParksAndBlocksRetry(t *testing.T) {
+	svc, store, prov, events, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Simulate an ambiguous provider outcome: the call may already have
+	// rotated and revoked the old secret.
+	prov.RotateErr = fmt.Errorf("%w: rotate_client_secret", ErrProviderOutcomeUnknown)
+
+	if _, err := svc.RotateClientSecret(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2"); !errors.Is(err, ErrSecretRotationOutcomeUnknown) {
+		t.Fatalf("err = %v, want ErrSecretRotationOutcomeUnknown", err)
+	}
+	// The client is parked in outcome_unknown with a reconciliation trail.
+	if store.rotationStatus(res.ClientID) != "outcome_unknown" {
+		t.Fatalf("rotation status = %q, want outcome_unknown", store.rotationStatus(res.ClientID))
+	}
+	if len(store.jobs) != 1 {
+		t.Fatalf("reconciliation jobs = %d, want 1", len(store.jobs))
+	}
+	secrets, _ := store.GetClientSecretRecords(ctx, res.ClientID)
+	if len(secrets) != 1 || secrets[0].LastRotatedAt != nil {
+		t.Error("an unknown outcome must never touch the existing secret record")
+	}
+
+	// A retry must be refused at the gate and must not reach the provider
+	// again (RotateErr is consumed once by the fake provisioner).
+	if _, err := svc.RotateClientSecret(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-3"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("retry err = %v, want ErrConflict", err)
+	}
+	rotateCalls := 0
+	for _, call := range prov.Calls {
+		if call == "rotate" {
+			rotateCalls++
+		}
+	}
+	if rotateCalls != 1 {
+		t.Fatalf("provider rotate calls = %d, want exactly 1", rotateCalls)
+	}
+
+	denied := false
+	for _, ev := range events.events {
+		if ev.EventType == EventSecretRotationFailed && ev.FailureClass == "provider_outcome_unknown" {
+			denied = true
+		}
+	}
+	if !denied {
+		t.Error("expected provider_outcome_unknown rotation failure event")
+	}
+}
+
+func TestRotateClientSecret_ConfirmedFailureAllowsRetry(t *testing.T) {
+	svc, store, prov, _, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	prov.RotateErr = ErrProviderUnavailable
+
+	if _, err := svc.RotateClientSecret(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2"); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("first err = %v, want ErrProviderUnavailable", err)
+	}
+	// The gate was aborted to idle, so a retry is allowed and succeeds.
+	out, err := svc.RotateClientSecret(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-3")
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if out.ClientSecret == "" {
+		t.Fatal("retry rotation must return the one-time secret")
+	}
+	if store.rotationStatus(res.ClientID) != "idle" {
+		t.Errorf("rotation status = %q, want idle", store.rotationStatus(res.ClientID))
+	}
+}
+
 func TestRotateClientSecret_LocalFailureAfterProviderReconciles(t *testing.T) {
 	svc, store, _, events, _ := newTestService(t)
 	ctx := context.Background()
@@ -1597,10 +1720,15 @@ func TestRotateClientSecret_LocalFailureAfterProviderReconciles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	store.markRotatedErr = errors.New("db down")
+	store.completeRotationErr = errors.New("db down")
 
 	if _, err := svc.RotateClientSecret(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2"); err == nil {
 		t.Fatal("rotation must surface the local failure")
+	}
+	// The provider already rotated; the unconfirmed local commit must park
+	// the client in outcome_unknown, never release the gate.
+	if store.rotationStatus(res.ClientID) != "outcome_unknown" {
+		t.Errorf("rotation status = %q, want outcome_unknown", store.rotationStatus(res.ClientID))
 	}
 	if len(store.jobs) != 1 {
 		t.Fatalf("reconciliation jobs = %d, want 1", len(store.jobs))

@@ -414,11 +414,25 @@ func TestProvisioner_RotateClientSecret(t *testing.T) {
 		t.Fatalf("empty secret: got %v, want ErrProviderUnavailable", err)
 	}
 
-	// Provider failures map to stable classes.
+	// Ambiguous provider outcomes (Unavailable, DeadlineExceeded) map to
+	// outcome-unknown: rotation is non-idempotent, the old secret may
+	// already be revoked (ADR-0004 §6).
 	stub3 := &stubManagement{rotateErr: status.Error(codes.Unavailable, "down")}
 	p3 := newTestProvisioner(t, stub3)
-	if _, err := p3.RotateClientSecret(context.Background(), "prov-app-1"); !errors.Is(err, applications.ErrProviderUnavailable) {
-		t.Fatalf("rotate unavailable: got %v", err)
+	if _, err := p3.RotateClientSecret(context.Background(), "prov-app-1"); !errors.Is(err, applications.ErrProviderOutcomeUnknown) {
+		t.Fatalf("rotate unavailable: got %v, want ErrProviderOutcomeUnknown", err)
+	}
+	stub4 := &stubManagement{rotateErr: status.Error(codes.DeadlineExceeded, "slow")}
+	p4 := newTestProvisioner(t, stub4)
+	if _, err := p4.RotateClientSecret(context.Background(), "prov-app-1"); !errors.Is(err, applications.ErrProviderOutcomeUnknown) {
+		t.Fatalf("rotate deadline: got %v, want ErrProviderOutcomeUnknown", err)
+	}
+
+	// Definitive rejections keep their stable classes.
+	stub5 := &stubManagement{rotateErr: status.Error(codes.NotFound, "APP-gone")}
+	p5 := newTestProvisioner(t, stub5)
+	if _, err := p5.RotateClientSecret(context.Background(), "prov-app-1"); !errors.Is(err, applications.ErrProviderConflict) {
+		t.Fatalf("rotate not found: got %v, want ErrProviderConflict", err)
 	}
 }
 

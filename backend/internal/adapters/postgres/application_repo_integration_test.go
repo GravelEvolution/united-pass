@@ -426,7 +426,7 @@ func TestIntegration_BeginSecretRotationSingleWinner(t *testing.T) {
 	}
 
 	// The first rotation wins and bumps the version.
-	if err := repo.BeginSecretRotation(ctx, clientID, client.Version); err != nil {
+	if err := repo.BeginSecretRotation(ctx, clientID, client.Version, newRotateOp(appID, clientID)); err != nil {
 		t.Fatalf("begin rotation: %v", err)
 	}
 	updated, err := repo.GetClient(ctx, appID, clientID)
@@ -438,14 +438,125 @@ func TestIntegration_BeginSecretRotationSingleWinner(t *testing.T) {
 	}
 
 	// A concurrent rotation holding the stale version loses the gate.
-	if err := repo.BeginSecretRotation(ctx, clientID, client.Version); !errors.Is(err, applications.ErrConflict) {
+	if err := repo.BeginSecretRotation(ctx, clientID, client.Version, newRotateOp(appID, clientID)); !errors.Is(err, applications.ErrConflict) {
 		t.Fatalf("stale begin err = %v, want ErrConflict", err)
 	}
 
 	// Unknown clients yield the same conflict/not-found surface without
 	// revealing existence differences.
-	if err := repo.BeginSecretRotation(ctx, applications.OAuthClientID("clt_missing"), 1); !errors.Is(err, applications.ErrNotFound) {
+	if err := repo.BeginSecretRotation(ctx, applications.OAuthClientID("clt_missing"), 1, newRotateOp(appID, "clt_missing")); !errors.Is(err, applications.ErrNotFound) {
 		t.Fatalf("missing client err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestIntegration_RotationLifecycle verifies the durable rotation state
+// machine: only an idle client can acquire the gate, outcome_unknown parks
+// the client until reconciliation, and abort releases the gate for retries.
+func TestIntegration_RotationLifecycle(t *testing.T) {
+	repo, users := setupAppRepo(t)
+	ctx := context.Background()
+	ownerID := createTestOwner(t, users, "user_rotate_lifecycle")
+	appID, clientID := provisionTestApp(t, repo, "Rotation Lifecycle App", ownerID)
+
+	client, err := repo.GetClient(ctx, appID, clientID)
+	if err != nil {
+		t.Fatalf("get client: %v", err)
+	}
+
+	// An ambiguous provider outcome parks the client in outcome_unknown.
+	op1 := newRotateOp(appID, clientID)
+	if err := repo.BeginSecretRotation(ctx, clientID, client.Version, op1); err != nil {
+		t.Fatalf("begin rotation: %v", err)
+	}
+	if err := repo.FailSecretRotationUnknown(ctx, clientID, op1.ID, "provider_outcome_unknown"); err != nil {
+		t.Fatalf("fail unknown: %v", err)
+	}
+
+	// The parked client refuses further rotations even with a fresh version.
+	client, err = repo.GetClient(ctx, appID, clientID)
+	if err != nil {
+		t.Fatalf("get client after unknown: %v", err)
+	}
+	if err := repo.BeginSecretRotation(ctx, clientID, client.Version, newRotateOp(appID, clientID)); !errors.Is(err, applications.ErrConflict) {
+		t.Fatalf("begin while outcome_unknown err = %v, want ErrConflict", err)
+	}
+}
+
+// TestIntegration_RotationAbortAndComplete verifies a confirmed failure
+// releases the gate for retries and a successful commit atomically stamps
+// the old record, inserts the new one and returns the gate to idle.
+func TestIntegration_RotationAbortAndComplete(t *testing.T) {
+	repo, users := setupAppRepo(t)
+	ctx := context.Background()
+	ownerID := createTestOwner(t, users, "user_rotate_abort")
+	appID, clientID := provisionTestApp(t, repo, "Rotation Abort App", ownerID)
+
+	client, err := repo.GetClient(ctx, appID, clientID)
+	if err != nil {
+		t.Fatalf("get client: %v", err)
+	}
+
+	// Confirmed provider failure: abort returns the gate to idle.
+	failed := newRotateOp(appID, clientID)
+	if err := repo.BeginSecretRotation(ctx, clientID, client.Version, failed); err != nil {
+		t.Fatalf("begin rotation: %v", err)
+	}
+	if err := repo.AbortSecretRotation(ctx, clientID, failed.ID, "provider_unavailable"); err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+
+	// Retry wins the gate again and commits successfully.
+	client, err = repo.GetClient(ctx, appID, clientID)
+	if err != nil {
+		t.Fatalf("get client after abort: %v", err)
+	}
+	op := newRotateOp(appID, clientID)
+	if err := repo.BeginSecretRotation(ctx, clientID, client.Version, op); err != nil {
+		t.Fatalf("retry begin: %v", err)
+	}
+	records, err := repo.GetClientSecretRecords(ctx, clientID)
+	if err != nil || len(records) == 0 {
+		t.Fatalf("secret records: %d, err=%v", len(records), err)
+	}
+	newRec := applications.ClientSecretRecord{
+		ID:        applications.NewClientSecretID(),
+		ClientID:  clientID,
+		Label:     "rotated",
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := repo.CompleteSecretRotation(ctx, clientID, op.ID, records[0].ID, newRec, time.Now().UTC()); err != nil {
+		t.Fatalf("complete rotation: %v", err)
+	}
+
+	// The gate is idle again: another rotation can immediately begin.
+	client, err = repo.GetClient(ctx, appID, clientID)
+	if err != nil {
+		t.Fatalf("get client after complete: %v", err)
+	}
+	if err := repo.BeginSecretRotation(ctx, clientID, client.Version, newRotateOp(appID, clientID)); err != nil {
+		t.Fatalf("begin after complete: %v", err)
+	}
+
+	// The recorded operation is retrievable and succeeded.
+	stored, err := repo.GetOperationByIdempotencyKey(ctx, op.IdempotencyKey)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if stored.Status != applications.ProviderOperationSucceeded {
+		t.Errorf("operation status = %s, want succeeded", stored.Status)
+	}
+}
+
+// newRotateOp builds a pending rotate_client_secret operation record.
+func newRotateOp(appID applications.ApplicationID, clientID applications.OAuthClientID) applications.ProviderOperation {
+	opID := applications.NewProviderOperationID()
+	return applications.ProviderOperation{
+		ID:             opID,
+		Type:           applications.ProviderOperationRotateSecret,
+		ApplicationID:  appID,
+		ClientID:       clientID,
+		IdempotencyKey: "rotate:" + string(opID),
+		Status:         applications.ProviderOperationPending,
 	}
 }
 

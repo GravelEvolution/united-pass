@@ -425,22 +425,141 @@ func (r *ApplicationRepository) MarkSecretRotated(ctx context.Context, secretID 
 	return nil
 }
 
-// BeginSecretRotation acquires the single-winner rotation gate by bumping
-// the client's optimistic-concurrency version before any provider call
-// (ADR-0004 §6). A concurrent rotation or any other concurrent client write
-// makes the version match fail and returns ErrConflict.
-func (r *ApplicationRepository) BeginSecretRotation(ctx context.Context, clientID applications.OAuthClientID, expectedVersion int) error {
-	tag, err := r.pool.Exec(ctx,
+// BeginSecretRotation acquires the durable rotation gate: only an idle
+// client with the expected version can transition to in_progress, and the
+// pending provider operation is recorded in the same transaction (ADR-0004
+// §6). Concurrent rotations, stale versions and outcome_unknown clients all
+// lose the gate with ErrConflict.
+func (r *ApplicationRepository) BeginSecretRotation(ctx context.Context, clientID applications.OAuthClientID, expectedVersion int, op applications.ProviderOperation) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin secret rotation tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE oauth_clients
-		    SET updated_at = NOW(), version = version + 1
+		    SET secret_rotation_status = 'in_progress',
+		        secret_rotation_operation_id = $3,
+		        secret_rotation_started_at = NOW(),
+		        updated_at = NOW(), version = version + 1
 		  WHERE client_id = $1 AND version = $2
-		    AND deleted_at IS NULL AND provisioning_status = 'provisioned'`,
-		string(clientID), expectedVersion)
+		    AND deleted_at IS NULL AND provisioning_status = 'provisioned'
+		    AND secret_rotation_status = 'idle'`,
+		string(clientID), expectedVersion, string(op.ID))
 	if err != nil {
 		return fmt.Errorf("postgres: begin secret rotation: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return r.conflictOrNotFoundClient(ctx, clientID)
+	if tag.RowsAffected() != 1 {
+		return r.conflictOrNotFoundClientTx(ctx, tx, clientID)
+	}
+	if err := insertOperationTx(ctx, tx, op); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit begin rotation: %w", err)
+	}
+	return nil
+}
+
+// CompleteSecretRotation commits a successful rotation in one transaction:
+// the previous secret record is stamped, the new record inserted, the gate
+// released back to idle and the operation marked succeeded.
+func (r *ApplicationRepository) CompleteSecretRotation(ctx context.Context, clientID applications.OAuthClientID, opID applications.ProviderOperationID, rotatedSecretID applications.ClientSecretID, newRec applications.ClientSecretRecord, rotatedAt time.Time) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin complete rotation tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE oauth_clients
+		    SET secret_rotation_status = 'idle',
+		        secret_rotation_operation_id = '',
+		        secret_rotation_started_at = NULL,
+		        updated_at = NOW(), version = version + 1
+		  WHERE client_id = $1 AND deleted_at IS NULL
+		    AND secret_rotation_status = 'in_progress'
+		    AND secret_rotation_operation_id = $2`,
+		string(clientID), string(opID))
+	if err != nil {
+		return fmt.Errorf("postgres: release rotation gate: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return applications.ErrConflict
+	}
+	if rotatedSecretID != "" {
+		if _, err := tx.Exec(ctx,
+			`UPDATE oauth_client_secret_records SET last_rotated_at = $2 WHERE secret_id = $1`,
+			string(rotatedSecretID), rotatedAt); err != nil {
+			return fmt.Errorf("postgres: mark secret rotated: %w", err)
+		}
+	}
+	if err := insertSecretRecordTx(ctx, tx, newRec); err != nil {
+		return err
+	}
+	if err := setOperationOutcomeTx(ctx, tx, opID, applications.ProviderOperationSucceeded, ""); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit complete rotation: %w", err)
+	}
+	return nil
+}
+
+// AbortSecretRotation releases the gate after a confirmed provider failure;
+// the previous secret stays untouched and the operation is marked failed.
+func (r *ApplicationRepository) AbortSecretRotation(ctx context.Context, clientID applications.OAuthClientID, opID applications.ProviderOperationID, errorClass string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin abort rotation tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE oauth_clients
+		    SET secret_rotation_status = 'idle',
+		        secret_rotation_operation_id = '',
+		        secret_rotation_started_at = NULL,
+		        updated_at = NOW()
+		  WHERE client_id = $1 AND secret_rotation_operation_id = $2
+		    AND secret_rotation_status = 'in_progress'`,
+		string(clientID), string(opID)); err != nil {
+		return fmt.Errorf("postgres: abort rotation: %w", err)
+	}
+	if err := setOperationOutcomeTx(ctx, tx, opID, applications.ProviderOperationFailed, errorClass); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit abort rotation: %w", err)
+	}
+	return nil
+}
+
+// FailSecretRotationUnknown parks the rotation in outcome_unknown after an
+// ambiguous provider outcome; the operation ID and started_at lease stay
+// recorded until reconciliation clears them, and further rotations are
+// refused by the idle-only gate.
+func (r *ApplicationRepository) FailSecretRotationUnknown(ctx context.Context, clientID applications.OAuthClientID, opID applications.ProviderOperationID, errorClass string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin unknown rotation tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE oauth_clients
+		    SET secret_rotation_status = 'outcome_unknown', updated_at = NOW()
+		  WHERE client_id = $1 AND secret_rotation_operation_id = $2
+		    AND secret_rotation_status = 'in_progress'`,
+		string(clientID), string(opID)); err != nil {
+		return fmt.Errorf("postgres: park rotation unknown: %w", err)
+	}
+	if err := setOperationOutcomeTx(ctx, tx, opID, applications.ProviderOperationFailed, errorClass); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit unknown rotation: %w", err)
 	}
 	return nil
 }

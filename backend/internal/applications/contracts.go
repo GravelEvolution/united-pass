@@ -27,6 +27,13 @@ var ErrInvalidCursor = errors.New("applications: invalid cursor")
 // to a 422 response.
 var ErrSecretRotationNotAllowed = errors.New("applications: secret rotation not allowed")
 
+// ErrSecretRotationOutcomeUnknown is returned when a rotation's provider
+// outcome is ambiguous (timeout, cancellation, transport loss): the provider
+// may already have rotated and revoked the previous secret, so the client is
+// parked in outcome_unknown and refuses further rotations until
+// reconciliation (ADR-0004 §6). HTTP adapters map it to a 409 response.
+var ErrSecretRotationOutcomeUnknown = errors.New("applications: secret rotation outcome unknown")
+
 // ErrParentApplicationDisabled is returned when a client mutation is attempted
 // while the parent application is disabled. The application-level kill switch
 // is authoritative: effectiveClientActive = application.status == active &&

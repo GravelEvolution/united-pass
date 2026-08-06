@@ -330,19 +330,11 @@ func (s *fakeAppStore) MarkClientDeleteFailed(_ context.Context, clientID applic
 	return nil
 }
 
-func (s *fakeAppStore) CreateSecretRecord(_ context.Context, _ applications.ClientSecretRecord) error {
-	return nil
-}
-
-func (s *fakeAppStore) MarkSecretRotated(_ context.Context, _ applications.ClientSecretID, _ time.Time) error {
-	return nil
-}
-
 func (s *fakeAppStore) GetClientSecretRecords(_ context.Context, _ applications.OAuthClientID) ([]applications.ClientSecretRecord, error) {
 	return nil, nil
 }
 
-func (s *fakeAppStore) BeginSecretRotation(_ context.Context, clientID applications.OAuthClientID, expectedVersion int) error {
+func (s *fakeAppStore) BeginSecretRotation(_ context.Context, clientID applications.OAuthClientID, expectedVersion int, _ applications.ProviderOperation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, ok := s.clients[clientID]
@@ -354,6 +346,18 @@ func (s *fakeAppStore) BeginSecretRotation(_ context.Context, clientID applicati
 	}
 	c.Version++
 	s.clients[clientID] = c
+	return nil
+}
+
+func (s *fakeAppStore) CompleteSecretRotation(_ context.Context, _ applications.OAuthClientID, _ applications.ProviderOperationID, _ applications.ClientSecretID, _ applications.ClientSecretRecord, _ time.Time) error {
+	return nil
+}
+
+func (s *fakeAppStore) AbortSecretRotation(_ context.Context, _ applications.OAuthClientID, _ applications.ProviderOperationID, _ string) error {
+	return nil
+}
+
+func (s *fakeAppStore) FailSecretRotationUnknown(_ context.Context, _ applications.OAuthClientID, _ applications.ProviderOperationID, _ string) error {
 	return nil
 }
 

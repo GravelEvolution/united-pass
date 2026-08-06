@@ -35,14 +35,19 @@ type ApplicationStore interface {
 	CompleteClientDeletion(ctx context.Context, clientID OAuthClientID, opID ProviderOperationID) error
 	MarkClientDeleteFailed(ctx context.Context, clientID OAuthClientID, opID ProviderOperationID, errorClass string) error
 
-	CreateSecretRecord(ctx context.Context, rec ClientSecretRecord) error
-	MarkSecretRotated(ctx context.Context, secretID ClientSecretID, rotatedAt time.Time) error
 	GetClientSecretRecords(ctx context.Context, clientID OAuthClientID) ([]ClientSecretRecord, error)
-	// BeginSecretRotation acquires the single-winner rotation gate by bumping
-	// the client's optimistic-concurrency version before any provider call.
-	// A concurrent rotation (or any other concurrent client write) makes the
-	// version match fail and returns ErrConflict.
-	BeginSecretRotation(ctx context.Context, clientID OAuthClientID, expectedVersion int) error
+	// Secret rotation lifecycle (ADR-0004 §6): BeginSecretRotation is the
+	// only gate acquisition, an atomic idle → in_progress transition paired
+	// with the pending provider operation record. CompleteSecretRotation
+	// commits the new secret metadata and releases the gate in one
+	// transaction. AbortSecretRotation releases the gate after a confirmed
+	// provider failure. FailSecretRotationUnknown parks the client in
+	// outcome_unknown (lease retained) after an ambiguous provider outcome;
+	// further rotations are refused until reconciliation clears it.
+	BeginSecretRotation(ctx context.Context, clientID OAuthClientID, expectedVersion int, op ProviderOperation) error
+	CompleteSecretRotation(ctx context.Context, clientID OAuthClientID, opID ProviderOperationID, rotatedSecretID ClientSecretID, newRec ClientSecretRecord, rotatedAt time.Time) error
+	AbortSecretRotation(ctx context.Context, clientID OAuthClientID, opID ProviderOperationID, errorClass string) error
+	FailSecretRotationUnknown(ctx context.Context, clientID OAuthClientID, opID ProviderOperationID, errorClass string) error
 
 	GetOperationByIdempotencyKey(ctx context.Context, key string) (ProviderOperation, error)
 	CreateReconciliationJob(ctx context.Context, job ReconciliationJob) error
@@ -150,6 +155,8 @@ func NewService(
 // recorded in operations and audit rows. Raw provider detail is never used.
 func ErrorClassFor(err error) string {
 	switch {
+	case errors.Is(err, ErrProviderOutcomeUnknown):
+		return "provider_outcome_unknown"
 	case errors.Is(err, ErrProviderConflict):
 		return "provider_conflict"
 	case errors.Is(err, ErrProviderUnavailable):
@@ -887,11 +894,15 @@ func (s *Service) deleteClient(
 }
 
 // RotateClientSecret regenerates a confidential client's secret at the
-// provider (ADR-0004 §6). The single-winner gate is acquired locally before
-// any provider call; a provider failure never revokes the previous secret.
-// If the provider succeeds but local metadata cannot be updated, a
-// reconciliation trail is left and the error is surfaced. The new secret is
-// returned exactly once and never persisted.
+// provider (ADR-0004 §6). The durable rotation gate (idle → in_progress)
+// is acquired atomically with the provider operation record before any
+// provider call; exactly one rotation can hold a client. A confirmed
+// provider failure aborts back to idle and never touches the previous
+// secret. An ambiguous provider outcome parks the client in outcome_unknown
+// with a reconciliation trail and blocks further rotations. If the provider
+// succeeds but the local commit fails, the same outcome_unknown +
+// reconciliation path is taken. The new secret is returned exactly once and
+// never persisted.
 func (s *Service) RotateClientSecret(
 	ctx context.Context,
 	actor identity.UserID,
@@ -927,9 +938,19 @@ func (s *Service) RotateClientSecret(
 		return SecretRotationResult{}, ErrSecretRotationNotAllowed
 	}
 
-	// Single-winner gate: bump the optimistic-concurrency version before any
-	// provider call. Concurrent rotations (or other client writes) lose here.
-	if err := s.store.BeginSecretRotation(ctx, clientID, c.Version); err != nil {
+	// Durable rotation gate: an atomic idle → in_progress transition with
+	// the pending operation record. Concurrent rotations, other client
+	// writes (version mismatch) and outcome_unknown clients lose here.
+	opID := NewProviderOperationID()
+	op := ProviderOperation{
+		ID:             opID,
+		Type:           ProviderOperationRotateSecret,
+		ApplicationID:  appID,
+		ClientID:       clientID,
+		IdempotencyKey: "rotate:" + string(opID),
+		Status:         ProviderOperationPending,
+	}
+	if err := s.store.BeginSecretRotation(ctx, clientID, c.Version, op); err != nil {
 		if errors.Is(err, ErrConflict) {
 			s.RecordEvent(ctx, EventSecretRotationFailed, actor, appID, clientID, requestID,
 				"client.secret.rotate", SecurityEventDenied, "state_conflict")
@@ -937,11 +958,23 @@ func (s *Service) RotateClientSecret(
 		return SecretRotationResult{}, err
 	}
 
-	// Provider call outside any database transaction.
+	// Provider call outside any database transaction. Rotation is
+	// non-idempotent at the provider: an ambiguous outcome means the old
+	// secret may already be revoked, so it must never be treated as a
+	// plain failure.
 	rotation, err := s.provisioner.RotateClientSecret(ctx, c.ProviderApplicationID)
 	if err != nil {
+		class := ErrorClassFor(err)
+		if errors.Is(err, ErrProviderOutcomeUnknown) {
+			_ = s.store.FailSecretRotationUnknown(ctx, clientID, opID, class)
+			s.recordRotationReconciliation(ctx, actor, appID, c, requestID, class)
+			s.RecordEvent(ctx, EventSecretRotationFailed, actor, appID, clientID, requestID,
+				"client.secret.rotate", SecurityEventDenied, class)
+			return SecretRotationResult{}, ErrSecretRotationOutcomeUnknown
+		}
+		_ = s.store.AbortSecretRotation(ctx, clientID, opID, class)
 		s.RecordEvent(ctx, EventSecretRotationFailed, actor, appID, clientID, requestID,
-			"client.secret.rotate", SecurityEventDenied, ErrorClassFor(err))
+			"client.secret.rotate", SecurityEventDenied, class)
 		if errors.Is(err, ErrProviderConflict) {
 			return SecretRotationResult{}, ErrProviderConflict
 		}
@@ -949,19 +982,17 @@ func (s *Service) RotateClientSecret(
 	}
 
 	now := s.now()
-	// Stamp the currently active secret record (records are returned newest
-	// first; the active one has no rotation timestamp yet).
+	// Locate the currently active secret record (records are returned
+	// newest first; the active one has no rotation timestamp yet).
 	records, err := s.store.GetClientSecretRecords(ctx, clientID)
 	if err != nil {
-		s.recordRotationReconciliation(ctx, actor, appID, c, requestID, "internal")
+		s.failRotationUnknown(ctx, actor, appID, c, opID, requestID, "internal")
 		return SecretRotationResult{}, err
 	}
+	var rotatedSecretID ClientSecretID
 	for _, rec := range records {
 		if rec.LastRotatedAt == nil {
-			if err := s.store.MarkSecretRotated(ctx, rec.ID, now); err != nil {
-				s.recordRotationReconciliation(ctx, actor, appID, c, requestID, "internal")
-				return SecretRotationResult{}, err
-			}
+			rotatedSecretID = rec.ID
 			break
 		}
 	}
@@ -972,8 +1003,12 @@ func (s *Service) RotateClientSecret(
 		Label:     "轮转 Secret",
 		CreatedAt: now,
 	}
-	if err := s.store.CreateSecretRecord(ctx, newRec); err != nil {
-		s.recordRotationReconciliation(ctx, actor, appID, c, requestID, "internal")
+	// Atomic commit: stamp the previous record, insert the new one, release
+	// the gate back to idle and mark the operation succeeded — all in one
+	// transaction. A failure here means the provider already rotated but the
+	// local state cannot confirm it: outcome_unknown + reconciliation.
+	if err := s.store.CompleteSecretRotation(ctx, clientID, opID, rotatedSecretID, newRec, now); err != nil {
+		s.failRotationUnknown(ctx, actor, appID, c, opID, requestID, "internal")
 		return SecretRotationResult{}, err
 	}
 
@@ -986,6 +1021,21 @@ func (s *Service) RotateClientSecret(
 		// timestamp plus the configured overlap window (default zero).
 		PreviousSecretExpiresAt: now.Add(s.rotationGracePeriod),
 	}, nil
+}
+
+// failRotationUnknown parks the rotation in outcome_unknown and leaves the
+// reconciliation trail after the provider already rotated but the local
+// commit could not be confirmed (ADR-0004 §6).
+func (s *Service) failRotationUnknown(
+	ctx context.Context,
+	actor identity.UserID,
+	appID ApplicationID,
+	c OAuthClient,
+	opID ProviderOperationID,
+	requestID, reason string,
+) {
+	_ = s.store.FailSecretRotationUnknown(ctx, c.ID, opID, reason)
+	s.recordRotationReconciliation(ctx, actor, appID, c, requestID, reason)
 }
 
 // recordRotationReconciliation leaves a reconciliation trail after the

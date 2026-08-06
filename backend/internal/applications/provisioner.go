@@ -18,6 +18,12 @@ var ErrProviderUnavailable = errors.New("applications: provider unavailable")
 // conflict (e.g. retry after an unconfirmed success).
 var ErrProviderConflict = errors.New("applications: provider conflict")
 
+// ErrProviderOutcomeUnknown indicates the provider call's result cannot be
+// determined (deadline, cancellation, transport loss). For non-idempotent
+// operations such as secret rotation the caller must assume the mutation may
+// have happened and enter reconciliation instead of retrying blindly.
+var ErrProviderOutcomeUnknown = errors.New("applications: provider outcome unknown")
+
 // ClientProvisionSpec is everything the provider needs to create an OAuth
 // client. It carries no secrets and no United Pass internal IDs beyond what
 // the mapping requires.
@@ -84,6 +90,9 @@ type OAuthClientProvisioner interface {
 
 	// RotateClientSecret regenerates the secret at the provider. The
 	// previous secret handling is provider-defined; see ADR-0004 §6.
+	// Ambiguous failures (timeout, cancellation, transport loss) must wrap
+	// ErrProviderOutcomeUnknown because rotation is non-idempotent: the
+	// provider may already have revoked the previous secret.
 	RotateClientSecret(ctx context.Context, providerApplicationID string) (ClientSecretRotation, error)
 }
 
