@@ -867,6 +867,9 @@ func TestSetStatusLocalFailureAfterProviderSwitchReconciles(t *testing.T) {
 	if len(store.jobs) != 1 {
 		t.Errorf("reconciliation jobs = %d, want 1 per switched client", len(store.jobs))
 	}
+	if len(store.jobs) > 0 && store.jobs[0].DesiredStatus != string(StatusDisabled) {
+		t.Errorf("job desired status = %q, want %q", store.jobs[0].DesiredStatus, StatusDisabled)
+	}
 	fake := prov.Client(store.clients[res.ClientID].ProviderApplicationID)
 	if fake == nil || !fake.Disabled {
 		t.Error("provider client must already be disabled")
@@ -925,6 +928,132 @@ func TestSetStatusInvalidTransition(t *testing.T) {
 	// Enabling an already-active application is rejected.
 	if err := svc.SetStatus(ctx, "user_actor", res.ApplicationID, "req-2", true); !errors.Is(err, ErrInvalidStateTransition) {
 		t.Fatalf("err = %v, want ErrInvalidStateTransition", err)
+	}
+}
+
+// appWithTwoClients creates an application with two confidential clients and
+// disables the application, returning the application ID.
+func appWithTwoClients(t *testing.T, svc *Service, ctx context.Context) ApplicationID {
+	t.Helper()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := svc.CreateClient(ctx, "user_actor", res.ApplicationID, "req-2", confidentialClientInput()); err != nil {
+		t.Fatalf("create second client: %v", err)
+	}
+	if err := svc.SetStatus(ctx, "user_actor", res.ApplicationID, "req-3", false); err != nil {
+		t.Fatalf("disable application: %v", err)
+	}
+	return res.ApplicationID
+}
+
+// TestSetStatusEnablePartialFailureRollsBack covers the kill-switch leak:
+// enabling an application whose second provider client fails must roll the
+// first client back to disabled instead of leaving it active at the provider
+// while the application stays disabled locally.
+func TestSetStatusEnablePartialFailureRollsBack(t *testing.T) {
+	svc, store, prov, _, _ := newTestService(t)
+	ctx := context.Background()
+	appID := appWithTwoClients(t, svc, ctx)
+
+	// The second provider enable fails: whichever client switches first
+	// succeeds, the next one fails and must be rolled back.
+	prov.EnableSkip = 1
+	prov.EnableErr = ErrProviderUnavailable
+	err := svc.SetStatus(ctx, "user_actor", appID, "req-4", true)
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	if store.apps[appID].Status != StatusDisabled {
+		t.Error("application must stay disabled after partial enable failure")
+	}
+	if len(store.jobs) != 0 {
+		t.Errorf("successful rollback leaves no jobs, got %d", len(store.jobs))
+	}
+	for _, c := range store.clients {
+		if fake := prov.Client(c.ProviderApplicationID); fake == nil || !fake.Disabled {
+			t.Errorf("provider client %s must be rolled back to disabled", c.ID)
+		}
+	}
+}
+
+// TestSetStatusEnablePartialRollbackFailureLeavesJob covers the rollback
+// itself failing: the stuck client must carry a reconciliation job with an
+// explicit desired status, never a silent active-at-provider state.
+func TestSetStatusEnablePartialRollbackFailureLeavesJob(t *testing.T) {
+	svc, store, prov, events, _ := newTestService(t)
+	ctx := context.Background()
+	appID := appWithTwoClients(t, svc, ctx)
+
+	prov.EnableSkip = 1
+	prov.EnableErr = ErrProviderUnavailable  // second enable fails
+	prov.DisableErr = ErrProviderUnavailable // rollback of the first fails too
+	err := svc.SetStatus(ctx, "user_actor", appID, "req-4", true)
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	if store.apps[appID].Status != StatusDisabled {
+		t.Error("application must stay disabled")
+	}
+	if len(store.jobs) != 1 {
+		t.Fatalf("reconciliation jobs = %d, want 1 for the failed rollback", len(store.jobs))
+	}
+	if store.jobs[0].DesiredStatus != string(StatusDisabled) {
+		t.Errorf("job desired status = %q, want %q", store.jobs[0].DesiredStatus, StatusDisabled)
+	}
+	found := false
+	for _, ev := range events.events {
+		if ev.EventType == EventProviderReconciliationNeed {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected reconciliation audit event for failed rollback")
+	}
+}
+
+// TestSetStatusDisablePartialFailureRecordsDriftJobs covers the fail-safe
+// direction: when a disable fan-out fails mid-way, already-disabled clients
+// stay disabled and each carries a reconciliation job with the desired
+// status — no silent drift, no re-enable.
+func TestSetStatusDisablePartialFailureRecordsDriftJobs(t *testing.T) {
+	svc, store, prov, _, _ := newTestService(t)
+	ctx := context.Background()
+
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := svc.CreateClient(ctx, "user_actor", res.ApplicationID, "req-2", confidentialClientInput()); err != nil {
+		t.Fatalf("create second client: %v", err)
+	}
+
+	prov.DisableSkip = 1
+	prov.DisableErr = ErrProviderUnavailable // second disable fails
+	err = svc.SetStatus(ctx, "user_actor", res.ApplicationID, "req-3", false)
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	if store.apps[res.ApplicationID].Status != StatusActive {
+		t.Error("application must stay active after partial disable failure")
+	}
+	if len(store.jobs) != 1 {
+		t.Fatalf("reconciliation jobs = %d, want 1 for the switched client", len(store.jobs))
+	}
+	if store.jobs[0].DesiredStatus != string(StatusDisabled) {
+		t.Errorf("job desired status = %q, want %q (fail-safe)", store.jobs[0].DesiredStatus, StatusDisabled)
+	}
+	// Exactly one client switched and it must remain disabled (never
+	// re-enabled by the recovery path).
+	disabled := 0
+	for _, c := range store.clients {
+		if fake := prov.Client(c.ProviderApplicationID); fake != nil && fake.Disabled {
+			disabled++
+		}
+	}
+	if disabled != 1 {
+		t.Errorf("disabled provider clients = %d, want exactly the 1 switched client", disabled)
 	}
 }
 

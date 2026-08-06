@@ -354,6 +354,28 @@ func TestIntegration_ClientLifecycle(t *testing.T) {
 	if err := repo.CreateReconciliationJob(ctx, job); err != nil {
 		t.Fatalf("create reconciliation job: %v", err)
 	}
+	// Status-transition jobs must persist their desired provider status
+	// (schema v4), not only a free-text reason.
+	statusJob := applications.ReconciliationJob{
+		ID:                    applications.NewProviderOperationID(),
+		ApplicationID:         appID,
+		ClientID:              client.ID,
+		ProviderApplicationID: "prov-app-cl",
+		Reason:                "enable_partial_rollback_failed:provider_unavailable",
+		DesiredStatus:         string(applications.StatusDisabled),
+	}
+	if err := repo.CreateReconciliationJob(ctx, statusJob); err != nil {
+		t.Fatalf("create status reconciliation job: %v", err)
+	}
+	var desired string
+	if err := repo.pool.QueryRow(ctx,
+		`SELECT desired_status FROM provider_reconciliation_jobs WHERE job_id = $1`,
+		string(statusJob.ID)).Scan(&desired); err != nil {
+		t.Fatalf("read job desired_status: %v", err)
+	}
+	if desired != string(applications.StatusDisabled) {
+		t.Errorf("job desired_status = %q, want %q", desired, applications.StatusDisabled)
+	}
 	// Retry the delete from delete_failed: MarkClientDeleting requires
 	// provisioned, so drive the final deletion directly for the retry path.
 	retryOp := newTestOperation(appID, client.ID, applications.ProviderOperationDelete)

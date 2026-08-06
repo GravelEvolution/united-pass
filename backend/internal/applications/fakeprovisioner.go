@@ -45,6 +45,12 @@ type FakeProvisioner struct {
 	DeleteErr    error
 	RotateErr    error
 
+	// EnableSkip / DisableSkip delay the matching injected error: the first
+	// N calls succeed, the (N+1)th call consumes the error. This models
+	// partial fan-out failures (first client switches, second fails).
+	EnableSkip  int
+	DisableSkip int
+
 	// DuplicateNextProvision makes the next ProvisionClient report a
 	// provider-side duplicate.
 	DuplicateNextProvision bool
@@ -147,9 +153,13 @@ func (f *FakeProvisioner) EnableClient(ctx context.Context, providerApplicationI
 	f.Calls = append(f.Calls, "enable")
 
 	if f.EnableErr != nil {
-		err := f.EnableErr
-		f.EnableErr = nil
-		return err
+		if f.EnableSkip > 0 {
+			f.EnableSkip--
+		} else {
+			err := f.EnableErr
+			f.EnableErr = nil
+			return err
+		}
 	}
 	client, ok := f.clients[providerApplicationID]
 	if !ok {
@@ -166,9 +176,13 @@ func (f *FakeProvisioner) DisableClient(ctx context.Context, providerApplication
 	f.Calls = append(f.Calls, "disable")
 
 	if f.DisableErr != nil {
-		err := f.DisableErr
-		f.DisableErr = nil
-		return err
+		if f.DisableSkip > 0 {
+			f.DisableSkip--
+		} else {
+			err := f.DisableErr
+			f.DisableErr = nil
+			return err
+		}
 	}
 	client, ok := f.clients[providerApplicationID]
 	if !ok {

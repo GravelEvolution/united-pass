@@ -633,10 +633,10 @@ func (r *ApplicationRepository) GetOperationByIdempotencyKey(ctx context.Context
 func (r *ApplicationRepository) CreateReconciliationJob(ctx context.Context, job applications.ReconciliationJob) error {
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO provider_reconciliation_jobs
-		     (job_id, application_id, client_id, provider_application_id, reason, created_at)
-		 VALUES ($1, $2, $3, $4, $5, NOW())`,
+		     (job_id, application_id, client_id, provider_application_id, reason, desired_status, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
 		string(job.ID), string(job.ApplicationID), string(job.ClientID),
-		job.ProviderApplicationID, job.Reason)
+		job.ProviderApplicationID, job.Reason, job.DesiredStatus)
 	if err != nil {
 		return fmt.Errorf("postgres: create reconciliation job: %w", err)
 	}

@@ -142,11 +142,14 @@ type ProviderOperation struct {
 
 // ReconciliationJob records provider-side cleanup that could not be
 // completed inline (e.g. compensation failure). It is a recoverable,
-// auditable work item — never a silent leak.
+// auditable work item — never a silent leak. DesiredStatus carries the
+// expected provider status ("active"/"disabled") for status-transition
+// drift; it stays empty for non-status jobs (e.g. deletion cleanup).
 type ReconciliationJob struct {
 	ID                    ProviderOperationID
 	ApplicationID         ApplicationID
 	ClientID              OAuthClientID
 	ProviderApplicationID string
 	Reason                string
+	DesiredStatus         string
 }

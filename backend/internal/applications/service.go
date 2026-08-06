@@ -666,7 +666,7 @@ func (s *Service) SetClientStatus(
 	if err := s.store.SetClientStatus(ctx, clientID, target, client.Version,
 		s.successAudit(eventType, actor, appID, clientID, requestID, operation)); err != nil {
 		if client.ProviderApplicationID != "" {
-			s.recordProviderDrift(ctx, actor, appID, client, requestID, operation, ErrorClassFor(err))
+			s.recordProviderDrift(ctx, actor, appID, client, requestID, operation, ErrorClassFor(err), target)
 		}
 		return OAuthClient{}, err
 	}
@@ -677,13 +677,15 @@ func (s *Service) SetClientStatus(
 // recordProviderDrift leaves a reconciliation trail after a provider state
 // change succeeded but the local commit could not be confirmed (ADR-0004
 // §2): the provider row now disagrees with the local row and must never be
-// forgotten.
+// forgotten. desiredStatus is the provider status reconciliation must
+// converge on (empty for non-status drift).
 func (s *Service) recordProviderDrift(
 	ctx context.Context,
 	actor identity.UserID,
 	appID ApplicationID,
 	c OAuthClient,
 	requestID, operation, reason string,
+	desiredStatus Status,
 ) {
 	_ = s.store.SetClientReconciliationRequired(ctx, c.ID)
 	_ = s.store.CreateReconciliationJob(ctx, ReconciliationJob{
@@ -692,6 +694,7 @@ func (s *Service) recordProviderDrift(
 		ClientID:              c.ID,
 		ProviderApplicationID: c.ProviderApplicationID,
 		Reason:                reason,
+		DesiredStatus:         string(desiredStatus),
 	})
 	s.RecordEvent(ctx, EventProviderReconciliationNeed, actor, appID, c.ID, requestID,
 		operation, SecurityEventSuccess, reason)
@@ -857,10 +860,10 @@ func (s *Service) SetStatus(
 			err = s.provisioner.DisableClient(ctx, c.ProviderApplicationID)
 		}
 		if err != nil {
-			// Provider-first: clients already switched keep their new
-			// provider state, but the local application status stays
-			// unchanged and no drift is recorded (a retry re-drives the
-			// remaining clients; enable/disable are idempotent).
+			// Mid-way failure: never leave already-switched clients in a
+			// state the local application status does not cover (the kill
+			// switch must not be partially bypassed).
+			s.recoverPartialStatusSwitch(ctx, actor, appID, switched, enable, requestID, operation, ErrorClassFor(err))
 			return err
 		}
 		switched = append(switched, c)
@@ -871,12 +874,47 @@ func (s *Service) SetStatus(
 		// The provider clients already switched but the local application
 		// status could not be committed: record the drift per client.
 		for _, c := range switched {
-			s.recordProviderDrift(ctx, actor, appID, c, requestID, operation, ErrorClassFor(err))
+			s.recordProviderDrift(ctx, actor, appID, c, requestID, operation, ErrorClassFor(err), target)
 		}
 		return err
 	}
 
 	return nil
+}
+
+// recoverPartialStatusSwitch handles an application status switch that
+// failed mid-fan-out, when some provider clients were already switched. The
+// local application status is never updated on this path, so:
+//
+//   - failed ENABLE: the already-enabled clients would be usable at the
+//     provider while the application stays disabled locally — the kill
+//     switch is rolled back by best-effort disabling them. A client whose
+//     rollback also fails gets a reconciliation job with desired status
+//     disabled.
+//   - failed DISABLE: already-disabled clients stay disabled (fail-safe
+//     direction); each gets a reconciliation job with desired status
+//     disabled so the drift is never silent and a retry converges.
+func (s *Service) recoverPartialStatusSwitch(
+	ctx context.Context,
+	actor identity.UserID,
+	appID ApplicationID,
+	switched []OAuthClient,
+	enable bool,
+	requestID, operation, failureClass string,
+) {
+	for _, c := range switched {
+		if enable {
+			// Best-effort rollback of the partial enable.
+			if err := s.provisioner.DisableClient(ctx, c.ProviderApplicationID); err != nil {
+				s.recordProviderDrift(ctx, actor, appID, c, requestID, operation,
+					"enable_partial_rollback_failed:"+failureClass, StatusDisabled)
+			}
+			continue
+		}
+		// Fail-safe disabled state is kept; record the drift explicitly.
+		s.recordProviderDrift(ctx, actor, appID, c, requestID, operation,
+			"disable_partial:"+failureClass, StatusDisabled)
+	}
 }
 
 // Delete removes an application and all of its clients. Every live client is
