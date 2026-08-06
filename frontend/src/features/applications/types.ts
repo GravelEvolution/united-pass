@@ -175,6 +175,11 @@ export type ClientProfileConfig = {
    */
   openidRequired: boolean;
   consentApplicable: boolean;
+  /**
+   * 该 Profile 当前是否被后端提供方拒绝。非空时表示暂不支持的原因，
+   * 创建表单会禁用该选项；枚举本身保留以兼容历史记录。
+   */
+  unsupportedReason?: string;
 };
 
 export const CLIENT_PROFILES: readonly ClientProfileConfig[] = [
@@ -213,6 +218,7 @@ export const CLIENT_PROFILES: readonly ClientProfileConfig[] = [
     openidAllowed: false,
     openidRequired: false,
     consentApplicable: false,
+    unsupportedReason: "ZITADEL v2.71 暂不支持",
   },
 ] as const;
 

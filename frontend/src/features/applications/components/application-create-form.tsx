@@ -401,16 +401,18 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
           <RadioGroup
             value={profile}
             onChange={(event) => {
-              if (isClientProfile(event.target.value)) {
+              if (isClientProfile(event.target.value) && !getClientProfileConfig(event.target.value).unsupportedReason) {
                 setProfile(event.target.value);
               }
             }}
             direction="vertical"
           >
             {CLIENT_PROFILES.map((config) => (
-              <Radio key={config.profile} value={config.profile}>
+              <Radio key={config.profile} value={config.profile} disabled={Boolean(config.unsupportedReason)}>
                 {config.label}
-                <span className={styles.fieldHint} style={{ marginLeft: 8 }}>{config.description}</span>
+                <span className={styles.fieldHint} style={{ marginLeft: 8 }}>
+                  {config.unsupportedReason ? `${config.description}（${config.unsupportedReason}）` : config.description}
+                </span>
               </Radio>
             ))}
           </RadioGroup>
