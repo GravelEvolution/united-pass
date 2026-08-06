@@ -26,20 +26,24 @@ func NewSecurityEventStore(pool *pgxpool.Pool) *SecurityEventStore {
 
 // Record persists one audit event outside any surrounding transaction.
 func (s *SecurityEventStore) Record(ctx context.Context, ev applications.SecurityEvent) error {
-	return s.exec(ctx, s.pool, ev)
+	return insertSecurityEvent(ctx, s.pool, ev)
 }
 
 // RecordTx persists one audit event inside the caller's transaction so the
 // audit row commits or rolls back with the audited change.
 func (s *SecurityEventStore) RecordTx(ctx context.Context, tx pgx.Tx, ev applications.SecurityEvent) error {
-	return s.exec(ctx, tx, ev)
+	return insertSecurityEvent(ctx, tx, ev)
 }
 
 type eventExecer interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 }
 
-func (s *SecurityEventStore) exec(ctx context.Context, q eventExecer, ev applications.SecurityEvent) error {
+// insertSecurityEvent inserts one audit row through any executor (pool or
+// transaction). It is shared by the standalone store and the repositories,
+// which persist high-risk success audits in the same transaction as the
+// audited terminal state (ADR-0004 §8).
+func insertSecurityEvent(ctx context.Context, q eventExecer, ev applications.SecurityEvent) error {
 	payload, err := eventPayload(ev)
 	if err != nil {
 		return fmt.Errorf("postgres: encode security event payload: %w", err)
@@ -53,6 +57,19 @@ func (s *SecurityEventStore) exec(ctx context.Context, q eventExecer, ev applica
 		string(ev.ApplicationID), string(ev.ClientID), ev.RequestID,
 		ev.Operation, string(ev.Result), payload, ev.OccurredAt); err != nil {
 		return fmt.Errorf("postgres: record security event: %w", err)
+	}
+	return nil
+}
+
+// insertSecurityEventsTx persists durable audit rows inside the caller's
+// transaction so they commit or roll back atomically with the audited
+// terminal state. A failure aborts the whole commit: an operation whose
+// audit could not be persisted must never be reported as fully successful.
+func insertSecurityEventsTx(ctx context.Context, tx pgx.Tx, events []applications.SecurityEvent) error {
+	for _, ev := range events {
+		if err := insertSecurityEvent(ctx, tx, ev); err != nil {
+			return err
+		}
 	}
 	return nil
 }

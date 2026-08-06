@@ -85,7 +85,8 @@ func (r *ApplicationRepository) CreateApplicationWithInitialClient(
 
 // CompleteInitialProvisioning records provider identifiers, flips the
 // application and client to provisioned, marks the operation succeeded and
-// stores optional secret metadata — atomically.
+// stores optional secret metadata — atomically. Durable success audits
+// commit in the same transaction (ADR-0004 §8).
 func (r *ApplicationRepository) CompleteInitialProvisioning(
 	ctx context.Context,
 	appID applications.ApplicationID,
@@ -93,6 +94,7 @@ func (r *ApplicationRepository) CompleteInitialProvisioning(
 	provider, providerProjectID, providerApplicationID, providerClientID string,
 	opID applications.ProviderOperationID,
 	secret *applications.ClientSecretRecord,
+	audit ...applications.SecurityEvent,
 ) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -133,6 +135,9 @@ func (r *ApplicationRepository) CompleteInitialProvisioning(
 		if err := insertSecretRecordTx(ctx, tx, *secret); err != nil {
 			return err
 		}
+	}
+	if err := insertSecurityEventsTx(ctx, tx, audit); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("postgres: commit complete provisioning: %w", err)
@@ -204,9 +209,17 @@ func (r *ApplicationRepository) GetApplication(ctx context.Context, appID applic
 }
 
 // UpdateApplication applies a metadata update with optimistic concurrency.
-// Returns applications.ErrNotFound / applications.ErrConflict.
-func (r *ApplicationRepository) UpdateApplication(ctx context.Context, appID applications.ApplicationID, upd ApplicationUpdate, expectedVersion int) error {
-	tag, err := r.pool.Exec(ctx,
+// Returns applications.ErrNotFound / applications.ErrConflict. Durable
+// success audits commit in the same transaction as the update (ADR-0004
+// §8): an audit write failure aborts the whole commit.
+func (r *ApplicationRepository) UpdateApplication(ctx context.Context, appID applications.ApplicationID, upd ApplicationUpdate, expectedVersion int, audit ...applications.SecurityEvent) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin update application tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE oauth_applications
 		    SET name = $2, description = $3, audience = $4, owner_user_id = $5,
 		        updated_at = NOW(), version = version + 1
@@ -220,14 +233,28 @@ func (r *ApplicationRepository) UpdateApplication(ctx context.Context, appID app
 		return fmt.Errorf("postgres: update application: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return r.conflictOrNotFoundApplication(ctx, appID)
+		return r.conflictOrNotFoundApplicationTx(ctx, tx, appID)
+	}
+	if err := insertSecurityEventsTx(ctx, tx, audit); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit update application: %w", err)
 	}
 	return nil
 }
 
 // SetApplicationStatus flips the public status with optimistic concurrency.
-func (r *ApplicationRepository) SetApplicationStatus(ctx context.Context, appID applications.ApplicationID, status applications.Status, expectedVersion int) error {
-	tag, err := r.pool.Exec(ctx,
+// Durable success audits commit in the same transaction as the status flip
+// (ADR-0004 §8).
+func (r *ApplicationRepository) SetApplicationStatus(ctx context.Context, appID applications.ApplicationID, status applications.Status, expectedVersion int, audit ...applications.SecurityEvent) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin set application status tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE oauth_applications
 		    SET status = $2, updated_at = NOW(), version = version + 1
 		  WHERE application_id = $1 AND version = $3
@@ -237,16 +264,29 @@ func (r *ApplicationRepository) SetApplicationStatus(ctx context.Context, appID 
 		return fmt.Errorf("postgres: set application status: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return r.conflictOrNotFoundApplication(ctx, appID)
+		return r.conflictOrNotFoundApplicationTx(ctx, tx, appID)
+	}
+	if err := insertSecurityEventsTx(ctx, tx, audit); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit set application status: %w", err)
 	}
 	return nil
 }
 
 // DeleteApplication soft-deletes an application. It fails with
 // applications.ErrConflict while live clients still exist — the use case
-// deletes clients first.
-func (r *ApplicationRepository) DeleteApplication(ctx context.Context, appID applications.ApplicationID, expectedVersion int) error {
-	tag, err := r.pool.Exec(ctx,
+// deletes clients first. Durable success audits commit in the same
+// transaction as the soft delete (ADR-0004 §8).
+func (r *ApplicationRepository) DeleteApplication(ctx context.Context, appID applications.ApplicationID, expectedVersion int, audit ...applications.SecurityEvent) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin delete application tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE oauth_applications
 		    SET deleted_at = NOW(), updated_at = NOW()
 		  WHERE application_id = $1 AND version = $2
@@ -259,7 +299,13 @@ func (r *ApplicationRepository) DeleteApplication(ctx context.Context, appID app
 		return fmt.Errorf("postgres: delete application: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return r.conflictOrNotFoundApplication(ctx, appID)
+		return r.conflictOrNotFoundApplicationTx(ctx, tx, appID)
+	}
+	if err := insertSecurityEventsTx(ctx, tx, audit); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit delete application: %w", err)
 	}
 	return nil
 }
@@ -463,11 +509,11 @@ func applicationBoundaryClause(sort string, cur applicationCursor, args *[]any) 
 	return "", ErrInvalidCursor
 }
 
-// conflictOrNotFoundApplication distinguishes 404 from 409 after a
-// conditional update affected no rows.
-func (r *ApplicationRepository) conflictOrNotFoundApplication(ctx context.Context, appID applications.ApplicationID) error {
+// conflictOrNotFoundApplicationTx distinguishes 404 from 409 after a
+// conditional update affected no rows, inside the caller's transaction.
+func (r *ApplicationRepository) conflictOrNotFoundApplicationTx(ctx context.Context, tx pgx.Tx, appID applications.ApplicationID) error {
 	var exists bool
-	err := r.pool.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM oauth_applications
 		                 WHERE application_id = $1 AND deleted_at IS NULL
 		                   AND provisioning_status = 'provisioned')`,

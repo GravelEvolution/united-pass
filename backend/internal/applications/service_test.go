@@ -16,15 +16,16 @@ import (
 // fakeStore is an in-memory ApplicationStore. It is intentionally minimal:
 // only the state needed by the orchestration tests is tracked.
 type fakeStore struct {
-	mu       sync.Mutex
-	apps     map[ApplicationID]Application
-	clients  map[OAuthClientID]OAuthClient
-	deleted  map[OAuthClientID]bool
-	ops      map[ProviderOperationID]ProviderOperation
-	secrets  []ClientSecretRecord
-	jobs     []ReconciliationJob
-	rotation map[OAuthClientID]string
-	seq      *[]string
+	mu        sync.Mutex
+	apps      map[ApplicationID]Application
+	clients   map[OAuthClientID]OAuthClient
+	deleted   map[OAuthClientID]bool
+	ops       map[ProviderOperationID]ProviderOperation
+	secrets   []ClientSecretRecord
+	jobs      []ReconciliationJob
+	rotation  map[OAuthClientID]string
+	seq       *[]string
+	auditSink *fakeEvents
 
 	createAppErr        error
 	completeAppErr      error
@@ -58,6 +59,21 @@ func (s *fakeStore) note(step string) {
 	}
 }
 
+// recordAudit mirrors the repository contract: durable success audits
+// commit with the terminal state, and an audit write failure aborts the
+// whole commit (ADR-0004 §8).
+func (s *fakeStore) recordAudit(audit []SecurityEvent) error {
+	if s.auditSink == nil {
+		return nil
+	}
+	for _, ev := range audit {
+		if err := s.auditSink.Record(context.Background(), ev); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *fakeStore) CreateApplicationWithInitialClient(_ context.Context, app Application, client OAuthClient, op ProviderOperation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -70,7 +86,7 @@ func (s *fakeStore) CreateApplicationWithInitialClient(_ context.Context, app Ap
 	return nil
 }
 
-func (s *fakeStore) CompleteInitialProvisioning(_ context.Context, appID ApplicationID, clientID OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, _ ProviderOperationID, secret *ClientSecretRecord) error {
+func (s *fakeStore) CompleteInitialProvisioning(_ context.Context, appID ApplicationID, clientID OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, _ ProviderOperationID, secret *ClientSecretRecord, audit ...SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.completeAppErr != nil {
@@ -89,7 +105,7 @@ func (s *fakeStore) CompleteInitialProvisioning(_ context.Context, appID Applica
 	if secret != nil {
 		s.secrets = append(s.secrets, *secret)
 	}
-	return nil
+	return s.recordAudit(audit)
 }
 
 func (s *fakeStore) MarkInitialProvisioningFailed(_ context.Context, _ ApplicationID, clientID OAuthClientID, _ ProviderOperationID, _ string) error {
@@ -111,7 +127,7 @@ func (s *fakeStore) GetApplication(_ context.Context, appID ApplicationID) (Appl
 	return app, nil
 }
 
-func (s *fakeStore) UpdateApplication(_ context.Context, appID ApplicationID, upd ApplicationUpdate, expectedVersion int) error {
+func (s *fakeStore) UpdateApplication(_ context.Context, appID ApplicationID, upd ApplicationUpdate, expectedVersion int, audit ...SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.updateAppErr != nil {
@@ -130,10 +146,10 @@ func (s *fakeStore) UpdateApplication(_ context.Context, appID ApplicationID, up
 	app.OwnerID = upd.OwnerID
 	app.Version++
 	s.apps[appID] = app
-	return nil
+	return s.recordAudit(audit)
 }
 
-func (s *fakeStore) SetApplicationStatus(_ context.Context, appID ApplicationID, status Status, expectedVersion int) error {
+func (s *fakeStore) SetApplicationStatus(_ context.Context, appID ApplicationID, status Status, expectedVersion int, audit ...SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.setAppStatusErr != nil {
@@ -150,10 +166,10 @@ func (s *fakeStore) SetApplicationStatus(_ context.Context, appID ApplicationID,
 	app.Status = status
 	app.Version++
 	s.apps[appID] = app
-	return nil
+	return s.recordAudit(audit)
 }
 
-func (s *fakeStore) DeleteApplication(_ context.Context, appID ApplicationID, expectedVersion int) error {
+func (s *fakeStore) DeleteApplication(_ context.Context, appID ApplicationID, expectedVersion int, audit ...SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.deleteAppErr != nil {
@@ -167,7 +183,7 @@ func (s *fakeStore) DeleteApplication(_ context.Context, appID ApplicationID, ex
 		return ErrConflict
 	}
 	delete(s.apps, appID)
-	return nil
+	return s.recordAudit(audit)
 }
 
 func (s *fakeStore) ListApplications(_ context.Context, _ ListQuery) (ListResult, error) {
@@ -225,7 +241,7 @@ func (s *fakeStore) CreateClientWithOperation(_ context.Context, client OAuthCli
 	return nil
 }
 
-func (s *fakeStore) CompleteClientProvisioning(_ context.Context, clientID OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, _ ProviderOperationID, secret *ClientSecretRecord) error {
+func (s *fakeStore) CompleteClientProvisioning(_ context.Context, clientID OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, _ ProviderOperationID, secret *ClientSecretRecord, audit ...SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.clients[clientID]
@@ -238,7 +254,7 @@ func (s *fakeStore) CompleteClientProvisioning(_ context.Context, clientID OAuth
 	if secret != nil {
 		s.secrets = append(s.secrets, *secret)
 	}
-	return nil
+	return s.recordAudit(audit)
 }
 
 func (s *fakeStore) MarkClientProvisioningFailed(_ context.Context, clientID OAuthClientID, _ ProviderOperationID, _ string) error {
@@ -250,7 +266,7 @@ func (s *fakeStore) MarkClientProvisioningFailed(_ context.Context, clientID OAu
 	return nil
 }
 
-func (s *fakeStore) UpdateClientConfig(_ context.Context, clientID OAuthClientID, upd ClientConfigUpdate, expectedVersion int) error {
+func (s *fakeStore) UpdateClientConfig(_ context.Context, clientID OAuthClientID, upd ClientConfigUpdate, expectedVersion int, audit ...SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.updateClientErr != nil {
@@ -271,10 +287,10 @@ func (s *fakeStore) UpdateClientConfig(_ context.Context, clientID OAuthClientID
 	c.Scopes = upd.Scopes
 	c.Version++
 	s.clients[clientID] = c
-	return nil
+	return s.recordAudit(audit)
 }
 
-func (s *fakeStore) SetClientStatus(_ context.Context, clientID OAuthClientID, status Status, expectedVersion int) error {
+func (s *fakeStore) SetClientStatus(_ context.Context, clientID OAuthClientID, status Status, expectedVersion int, audit ...SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.setClientStatusErr != nil {
@@ -291,7 +307,7 @@ func (s *fakeStore) SetClientStatus(_ context.Context, clientID OAuthClientID, s
 	c.Status = status
 	c.Version++
 	s.clients[clientID] = c
-	return nil
+	return s.recordAudit(audit)
 }
 
 func (s *fakeStore) MarkClientDeleting(_ context.Context, clientID OAuthClientID, op ProviderOperation) error {
@@ -331,14 +347,14 @@ func (s *fakeStore) MarkClientDeletingRetry(_ context.Context, clientID OAuthCli
 	return nil
 }
 
-func (s *fakeStore) CompleteClientDeletion(_ context.Context, clientID OAuthClientID, _ ProviderOperationID) error {
+func (s *fakeStore) CompleteClientDeletion(_ context.Context, clientID OAuthClientID, _ ProviderOperationID, audit ...SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.completeDelErr != nil {
 		return s.completeDelErr
 	}
 	s.deleted[clientID] = true
-	return nil
+	return s.recordAudit(audit)
 }
 
 func (s *fakeStore) MarkClientDeleteFailed(_ context.Context, clientID OAuthClientID, _ ProviderOperationID, _ string) error {
@@ -382,7 +398,7 @@ func (s *fakeStore) BeginSecretRotation(_ context.Context, clientID OAuthClientI
 	return nil
 }
 
-func (s *fakeStore) CompleteSecretRotation(_ context.Context, clientID OAuthClientID, opID ProviderOperationID, rotatedSecretID ClientSecretID, newRec ClientSecretRecord, rotatedAt time.Time) error {
+func (s *fakeStore) CompleteSecretRotation(_ context.Context, clientID OAuthClientID, opID ProviderOperationID, rotatedSecretID ClientSecretID, newRec ClientSecretRecord, rotatedAt time.Time, audit ...SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.completeRotationErr != nil {
@@ -404,7 +420,7 @@ func (s *fakeStore) CompleteSecretRotation(_ context.Context, clientID OAuthClie
 	c := s.clients[clientID]
 	c.Version++
 	s.clients[clientID] = c
-	return nil
+	return s.recordAudit(audit)
 }
 
 func (s *fakeStore) AbortSecretRotation(_ context.Context, clientID OAuthClientID, opID ProviderOperationID, errorClass string) error {
@@ -545,6 +561,9 @@ func newTestService(t *testing.T) (*Service, *fakeStore, *FakeProvisioner, *fake
 	fakeProv := NewFakeProvisioner()
 	prov := &seqProvisioner{FakeProvisioner: fakeProv, seq: seq}
 	events := &fakeEvents{}
+	// Durable success audits flow through the store's terminal commits into
+	// the same sink the best-effort recorder uses.
+	store.auditSink = events
 	svc := NewService(store, prov, events, &fakeAudits{}, &fakeUsers{ids: map[identity.UserID]bool{"user_owner_1": true}}, "fake", "proj_test", 0)
 	return svc, store, fakeProv, events, seq
 }
@@ -1611,6 +1630,44 @@ func TestDeleteClient_LocalCommitFailureBecomesRetryable(t *testing.T) {
 	}
 	if !store.deleted[res.ClientID] {
 		t.Error("client not deleted after retry")
+	}
+}
+
+// --- Durable success audit (same-transaction semantics, ADR-0004 §8) ---
+
+func TestDurableAudit_AuditFailureAbortsSuccess(t *testing.T) {
+	svc, _, _, events, _ := newTestService(t)
+	ctx := context.Background()
+
+	// While the audit store works, the success audits commit with the
+	// terminal state and land in the event sink.
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var created int
+	for _, ev := range events.events {
+		if ev.EventType == EventApplicationCreated || ev.EventType == EventOAuthClientCreated {
+			created++
+		}
+	}
+	if created != 2 {
+		t.Fatalf("durable create audits = %d, want 2", created)
+	}
+
+	// Once the audit store starts failing, high-risk success commits must
+	// abort: an operation whose audit cannot be persisted is never reported
+	// as fully successful.
+	events.err = errors.New("audit store down")
+	if _, err := svc.RotateClientSecret(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2"); err == nil {
+		t.Fatal("rotation must fail when the durable success audit fails")
+	}
+	newName := "Renamed App"
+	if _, err := svc.UpdateApplication(ctx, "user_actor", res.ApplicationID, "req-3", ApplicationPatch{Name: &newName}); err == nil {
+		t.Fatal("application update must fail when the durable success audit fails")
+	}
+	if _, err := svc.SetClientStatus(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-4", false); err == nil {
+		t.Fatal("client disable must fail when the durable success audit fails")
 	}
 }
 

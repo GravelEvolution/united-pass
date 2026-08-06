@@ -59,7 +59,7 @@ func (s *fakeAppStore) CreateApplicationWithInitialClient(_ context.Context, app
 	return nil
 }
 
-func (s *fakeAppStore) CompleteInitialProvisioning(_ context.Context, appID applications.ApplicationID, clientID applications.OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, _ applications.ProviderOperationID, secret *applications.ClientSecretRecord) error {
+func (s *fakeAppStore) CompleteInitialProvisioning(_ context.Context, appID applications.ApplicationID, clientID applications.OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, _ applications.ProviderOperationID, secret *applications.ClientSecretRecord, _ ...applications.SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.completeErr != nil {
@@ -98,7 +98,7 @@ func (s *fakeAppStore) GetApplication(_ context.Context, appID applications.Appl
 	return app, nil
 }
 
-func (s *fakeAppStore) UpdateApplication(_ context.Context, appID applications.ApplicationID, upd applications.ApplicationUpdate, expectedVersion int) error {
+func (s *fakeAppStore) UpdateApplication(_ context.Context, appID applications.ApplicationID, upd applications.ApplicationUpdate, expectedVersion int, _ ...applications.SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.updateErr != nil {
@@ -120,7 +120,7 @@ func (s *fakeAppStore) UpdateApplication(_ context.Context, appID applications.A
 	return nil
 }
 
-func (s *fakeAppStore) SetApplicationStatus(_ context.Context, appID applications.ApplicationID, status applications.Status, expectedVersion int) error {
+func (s *fakeAppStore) SetApplicationStatus(_ context.Context, appID applications.ApplicationID, status applications.Status, expectedVersion int, _ ...applications.SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.setStatusErr != nil {
@@ -139,7 +139,7 @@ func (s *fakeAppStore) SetApplicationStatus(_ context.Context, appID application
 	return nil
 }
 
-func (s *fakeAppStore) DeleteApplication(_ context.Context, appID applications.ApplicationID, expectedVersion int) error {
+func (s *fakeAppStore) DeleteApplication(_ context.Context, appID applications.ApplicationID, expectedVersion int, _ ...applications.SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.deleteErr != nil {
@@ -216,7 +216,7 @@ func (s *fakeAppStore) CreateClientWithOperation(_ context.Context, client appli
 	return nil
 }
 
-func (s *fakeAppStore) CompleteClientProvisioning(_ context.Context, clientID applications.OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, _ applications.ProviderOperationID, secret *applications.ClientSecretRecord) error {
+func (s *fakeAppStore) CompleteClientProvisioning(_ context.Context, clientID applications.OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, _ applications.ProviderOperationID, secret *applications.ClientSecretRecord, _ ...applications.SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.clients[clientID]
@@ -239,7 +239,7 @@ func (s *fakeAppStore) MarkClientProvisioningFailed(_ context.Context, clientID 
 	return nil
 }
 
-func (s *fakeAppStore) UpdateClientConfig(_ context.Context, clientID applications.OAuthClientID, upd applications.ClientConfigUpdate, expectedVersion int) error {
+func (s *fakeAppStore) UpdateClientConfig(_ context.Context, clientID applications.OAuthClientID, upd applications.ClientConfigUpdate, expectedVersion int, _ ...applications.SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.updateClientErr != nil {
@@ -266,7 +266,7 @@ func (s *fakeAppStore) UpdateClientConfig(_ context.Context, clientID applicatio
 	return nil
 }
 
-func (s *fakeAppStore) SetClientStatus(_ context.Context, clientID applications.OAuthClientID, status applications.Status, expectedVersion int) error {
+func (s *fakeAppStore) SetClientStatus(_ context.Context, clientID applications.OAuthClientID, status applications.Status, expectedVersion int, _ ...applications.SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, ok := s.clients[clientID]
@@ -314,7 +314,7 @@ func (s *fakeAppStore) MarkClientDeletingRetry(_ context.Context, clientID appli
 	return nil
 }
 
-func (s *fakeAppStore) CompleteClientDeletion(_ context.Context, clientID applications.OAuthClientID, _ applications.ProviderOperationID) error {
+func (s *fakeAppStore) CompleteClientDeletion(_ context.Context, clientID applications.OAuthClientID, _ applications.ProviderOperationID, _ ...applications.SecurityEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deleted[clientID] = true
@@ -349,7 +349,7 @@ func (s *fakeAppStore) BeginSecretRotation(_ context.Context, clientID applicati
 	return nil
 }
 
-func (s *fakeAppStore) CompleteSecretRotation(_ context.Context, _ applications.OAuthClientID, _ applications.ProviderOperationID, _ applications.ClientSecretID, _ applications.ClientSecretRecord, _ time.Time) error {
+func (s *fakeAppStore) CompleteSecretRotation(_ context.Context, _ applications.OAuthClientID, _ applications.ProviderOperationID, _ applications.ClientSecretID, _ applications.ClientSecretRecord, _ time.Time, _ ...applications.SecurityEvent) error {
 	return nil
 }
 

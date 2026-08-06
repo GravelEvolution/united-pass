@@ -531,7 +531,18 @@ func TestIntegration_RotationAbortAndComplete(t *testing.T) {
 		Label:     "rotated",
 		CreatedAt: time.Now().UTC(),
 	}
-	if err := repo.CompleteSecretRotation(ctx, clientID, op.ID, records[0].ID, newRec, time.Now().UTC()); err != nil {
+	if err := repo.CompleteSecretRotation(ctx, clientID, op.ID, records[0].ID, newRec, time.Now().UTC(),
+		applications.SecurityEvent{
+			EventID:       applications.NewSecurityEventID(),
+			EventType:     applications.EventSecretRotated,
+			ActorUserID:   identity.UserID("user_rotate_abort"),
+			ApplicationID: appID,
+			ClientID:      clientID,
+			RequestID:     "req-rotate",
+			Operation:     "client.secret.rotate",
+			Result:        applications.SecurityEventSuccess,
+			OccurredAt:    time.Now().UTC(),
+		}); err != nil {
 		t.Fatalf("complete rotation: %v", err)
 	}
 
@@ -551,6 +562,21 @@ func TestIntegration_RotationAbortAndComplete(t *testing.T) {
 	}
 	if stored.Status != applications.ProviderOperationSucceeded {
 		t.Errorf("operation status = %s, want succeeded", stored.Status)
+	}
+
+	// The durable success audit committed with the rotation.
+	entries, err := NewSecurityEventStore(repo.pool).ListByApplication(ctx, appID)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	rotated := false
+	for _, e := range entries {
+		if e.EventType == applications.EventSecretRotated && e.Result == applications.SecurityEventSuccess {
+			rotated = true
+		}
+	}
+	if !rotated {
+		t.Error("expected the durable secret_rotated audit committed with the rotation")
 	}
 }
 

@@ -12,27 +12,32 @@ import (
 // ApplicationStore is the persistence contract consumed by the use cases.
 // The PostgreSQL ApplicationRepository satisfies it. It is defined here
 // (close to the consumer) per AGENTS.md §8.
+//
+// Every terminal-commit method accepts optional audit events that are
+// persisted in the SAME transaction as the committed state (ADR-0004 §8):
+// a high-risk success audit is durable, and an audit write failure aborts
+// the commit so the operation is never reported as fully successful.
 type ApplicationStore interface {
 	CreateApplicationWithInitialClient(ctx context.Context, app Application, client OAuthClient, op ProviderOperation) error
-	CompleteInitialProvisioning(ctx context.Context, appID ApplicationID, clientID OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, opID ProviderOperationID, secret *ClientSecretRecord) error
+	CompleteInitialProvisioning(ctx context.Context, appID ApplicationID, clientID OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, opID ProviderOperationID, secret *ClientSecretRecord, audit ...SecurityEvent) error
 	MarkInitialProvisioningFailed(ctx context.Context, appID ApplicationID, clientID OAuthClientID, opID ProviderOperationID, errorClass string) error
 	GetApplication(ctx context.Context, appID ApplicationID) (Application, error)
-	UpdateApplication(ctx context.Context, appID ApplicationID, upd ApplicationUpdate, expectedVersion int) error
-	SetApplicationStatus(ctx context.Context, appID ApplicationID, status Status, expectedVersion int) error
-	DeleteApplication(ctx context.Context, appID ApplicationID, expectedVersion int) error
+	UpdateApplication(ctx context.Context, appID ApplicationID, upd ApplicationUpdate, expectedVersion int, audit ...SecurityEvent) error
+	SetApplicationStatus(ctx context.Context, appID ApplicationID, status Status, expectedVersion int, audit ...SecurityEvent) error
+	DeleteApplication(ctx context.Context, appID ApplicationID, expectedVersion int, audit ...SecurityEvent) error
 	ListApplications(ctx context.Context, q ListQuery) (ListResult, error)
 
 	ListClientsByApplication(ctx context.Context, appID ApplicationID) ([]OAuthClient, error)
 	ListLiveClientsByApplication(ctx context.Context, appID ApplicationID) ([]OAuthClient, error)
 	GetClient(ctx context.Context, appID ApplicationID, clientID OAuthClientID) (OAuthClient, error)
 	CreateClientWithOperation(ctx context.Context, client OAuthClient, op ProviderOperation) error
-	CompleteClientProvisioning(ctx context.Context, clientID OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, opID ProviderOperationID, secret *ClientSecretRecord) error
+	CompleteClientProvisioning(ctx context.Context, clientID OAuthClientID, provider, providerProjectID, providerApplicationID, providerClientID string, opID ProviderOperationID, secret *ClientSecretRecord, audit ...SecurityEvent) error
 	MarkClientProvisioningFailed(ctx context.Context, clientID OAuthClientID, opID ProviderOperationID, errorClass string) error
-	UpdateClientConfig(ctx context.Context, clientID OAuthClientID, upd ClientConfigUpdate, expectedVersion int) error
-	SetClientStatus(ctx context.Context, clientID OAuthClientID, status Status, expectedVersion int) error
+	UpdateClientConfig(ctx context.Context, clientID OAuthClientID, upd ClientConfigUpdate, expectedVersion int, audit ...SecurityEvent) error
+	SetClientStatus(ctx context.Context, clientID OAuthClientID, status Status, expectedVersion int, audit ...SecurityEvent) error
 	MarkClientDeleting(ctx context.Context, clientID OAuthClientID, op ProviderOperation) error
 	MarkClientDeletingRetry(ctx context.Context, clientID OAuthClientID, op ProviderOperation) error
-	CompleteClientDeletion(ctx context.Context, clientID OAuthClientID, opID ProviderOperationID) error
+	CompleteClientDeletion(ctx context.Context, clientID OAuthClientID, opID ProviderOperationID, audit ...SecurityEvent) error
 	MarkClientDeleteFailed(ctx context.Context, clientID OAuthClientID, opID ProviderOperationID, errorClass string) error
 
 	GetClientSecretRecords(ctx context.Context, clientID OAuthClientID) ([]ClientSecretRecord, error)
@@ -45,7 +50,7 @@ type ApplicationStore interface {
 	// outcome_unknown (lease retained) after an ambiguous provider outcome;
 	// further rotations are refused until reconciliation clears it.
 	BeginSecretRotation(ctx context.Context, clientID OAuthClientID, expectedVersion int, op ProviderOperation) error
-	CompleteSecretRotation(ctx context.Context, clientID OAuthClientID, opID ProviderOperationID, rotatedSecretID ClientSecretID, newRec ClientSecretRecord, rotatedAt time.Time) error
+	CompleteSecretRotation(ctx context.Context, clientID OAuthClientID, opID ProviderOperationID, rotatedSecretID ClientSecretID, newRec ClientSecretRecord, rotatedAt time.Time, audit ...SecurityEvent) error
 	AbortSecretRotation(ctx context.Context, clientID OAuthClientID, opID ProviderOperationID, errorClass string) error
 	FailSecretRotationUnknown(ctx context.Context, clientID OAuthClientID, opID ProviderOperationID, errorClass string) error
 
@@ -282,19 +287,20 @@ func (s *Service) CreateWithInitialClient(
 			CreatedAt: now,
 		}
 	}
+	// High-risk success audits commit with the terminal state; an audit
+	// write failure aborts the commit (never a silent success).
+	audit := []SecurityEvent{
+		s.successAudit(EventApplicationCreated, actor, appID, "", requestID, "application.create"),
+		s.successAudit(EventOAuthClientCreated, actor, appID, clientID, requestID, "client.create"),
+	}
 	if err := s.store.CompleteInitialProvisioning(ctx, appID, clientID,
 		s.providerName, s.providerProjectID,
-		result.ProviderApplicationID, result.ProviderClientID, opID, secret); err != nil {
+		result.ProviderApplicationID, result.ProviderClientID, opID, secret, audit...); err != nil {
 		// Provider succeeded but the local completion failed: compensate by
 		// removing the provider resource, or hand it to reconciliation.
 		s.compensateProvision(ctx, actor, appID, clientID, result.ProviderApplicationID, requestID)
 		return CreateResult{}, err
 	}
-
-	s.RecordEvent(ctx, EventApplicationCreated, actor, appID, "", requestID,
-		"application.create", SecurityEventSuccess, "")
-	s.RecordEvent(ctx, EventOAuthClientCreated, actor, appID, clientID, requestID,
-		"client.create", SecurityEventSuccess, "")
 
 	return CreateResult{
 		ApplicationID: appID,
@@ -462,13 +468,11 @@ func (s *Service) CreateClient(
 	}
 	if err := s.store.CompleteClientProvisioning(ctx, clientID,
 		s.providerName, s.providerProjectID,
-		result.ProviderApplicationID, result.ProviderClientID, opID, secret); err != nil {
+		result.ProviderApplicationID, result.ProviderClientID, opID, secret,
+		s.successAudit(EventOAuthClientCreated, actor, appID, clientID, requestID, "client.create")); err != nil {
 		s.compensateProvision(ctx, actor, appID, clientID, result.ProviderApplicationID, requestID)
 		return ClientCreateResult{}, err
 	}
-
-	s.RecordEvent(ctx, EventOAuthClientCreated, actor, appID, clientID, requestID,
-		"client.create", SecurityEventSuccess, "")
 
 	return ClientCreateResult{
 		ClientID:     clientID,
@@ -578,7 +582,8 @@ func (s *Service) UpdateClient(
 		upd.Scopes = scopes
 	}
 
-	if err := s.store.UpdateClientConfig(ctx, clientID, upd, client.Version); err != nil {
+	if err := s.store.UpdateClientConfig(ctx, clientID, upd, client.Version,
+		s.successAudit(EventOAuthClientUpdated, actor, appID, clientID, requestID, "client.update")); err != nil {
 		if providerSync && client.ProviderApplicationID != "" {
 			// The provider already has the new settings; record the drift
 			// instead of leaking it silently.
@@ -595,9 +600,6 @@ func (s *Service) UpdateClient(
 		}
 		return OAuthClient{}, err
 	}
-
-	s.RecordEvent(ctx, EventOAuthClientUpdated, actor, appID, clientID, requestID,
-		"client.update", SecurityEventSuccess, "")
 
 	return s.store.GetClient(ctx, appID, clientID)
 }
@@ -661,15 +663,13 @@ func (s *Service) SetClientStatus(
 
 	// The provider already switched; a local commit failure must not leak
 	// the drift silently — record reconciliation and surface the error.
-	if err := s.store.SetClientStatus(ctx, clientID, target, client.Version); err != nil {
+	if err := s.store.SetClientStatus(ctx, clientID, target, client.Version,
+		s.successAudit(eventType, actor, appID, clientID, requestID, operation)); err != nil {
 		if client.ProviderApplicationID != "" {
 			s.recordProviderDrift(ctx, actor, appID, client, requestID, operation, ErrorClassFor(err))
 		}
 		return OAuthClient{}, err
 	}
-
-	s.RecordEvent(ctx, eventType, actor, appID, clientID, requestID, operation,
-		SecurityEventSuccess, "")
 
 	return s.store.GetClient(ctx, appID, clientID)
 }
@@ -794,13 +794,11 @@ func (s *Service) UpdateApplication(
 		Description: description,
 		Audience:    audience,
 		OwnerID:     ownerID,
-	}, app.Version)
+	}, app.Version,
+		s.successAudit(EventApplicationUpdated, actor, appID, "", requestID, "application.update"))
 	if err != nil {
 		return Application{}, err
 	}
-
-	s.RecordEvent(ctx, EventApplicationUpdated, actor, appID, "", requestID,
-		"application.update", SecurityEventSuccess, "")
 
 	return s.store.GetApplication(ctx, appID)
 }
@@ -868,7 +866,8 @@ func (s *Service) SetStatus(
 		switched = append(switched, c)
 	}
 
-	if err := s.store.SetApplicationStatus(ctx, appID, target, app.Version); err != nil {
+	if err := s.store.SetApplicationStatus(ctx, appID, target, app.Version,
+		s.successAudit(eventType, actor, appID, "", requestID, operation)); err != nil {
 		// The provider clients already switched but the local application
 		// status could not be committed: record the drift per client.
 		for _, c := range switched {
@@ -877,8 +876,6 @@ func (s *Service) SetStatus(
 		return err
 	}
 
-	s.RecordEvent(ctx, eventType, actor, appID, "", requestID, operation,
-		SecurityEventSuccess, "")
 	return nil
 }
 
@@ -905,11 +902,10 @@ func (s *Service) Delete(
 			return err
 		}
 	}
-	if err := s.store.DeleteApplication(ctx, appID, app.Version); err != nil {
+	if err := s.store.DeleteApplication(ctx, appID, app.Version,
+		s.successAudit(EventApplicationDeleted, actor, appID, "", requestID, "application.delete")); err != nil {
 		return err
 	}
-	s.RecordEvent(ctx, EventApplicationDeleted, actor, appID, "", requestID,
-		"application.delete", SecurityEventSuccess, "")
 	return nil
 }
 
@@ -973,7 +969,8 @@ func (s *Service) deleteClient(
 	// park the client in deleting forever. Mark it delete_failed with a
 	// reconciliation trail — provider removal is idempotent, so a retry is
 	// always safe (ADR-0004 §7).
-	if err := s.store.CompleteClientDeletion(ctx, c.ID, opID); err != nil {
+	if err := s.store.CompleteClientDeletion(ctx, c.ID, opID,
+		s.successAudit(EventOAuthClientDeleted, actor, appID, c.ID, requestID, "client.delete")); err != nil {
 		_ = s.store.MarkClientDeleteFailed(ctx, c.ID, opID, ErrorClassFor(err))
 		_ = s.store.SetClientReconciliationRequired(ctx, c.ID)
 		_ = s.store.CreateReconciliationJob(ctx, ReconciliationJob{
@@ -987,8 +984,6 @@ func (s *Service) deleteClient(
 			"client.delete", SecurityEventSuccess, "provider_deleted_local_commit_failed")
 		return err
 	}
-	s.RecordEvent(ctx, EventOAuthClientDeleted, actor, appID, c.ID, requestID,
-		"client.delete", SecurityEventSuccess, "")
 	return nil
 }
 
@@ -1103,16 +1098,16 @@ func (s *Service) RotateClientSecret(
 		CreatedAt: now,
 	}
 	// Atomic commit: stamp the previous record, insert the new one, release
-	// the gate back to idle and mark the operation succeeded — all in one
-	// transaction. A failure here means the provider already rotated but the
-	// local state cannot confirm it: outcome_unknown + reconciliation.
-	if err := s.store.CompleteSecretRotation(ctx, clientID, opID, rotatedSecretID, newRec, now); err != nil {
+	// the gate back to idle, mark the operation succeeded and persist the
+	// success audit — all in one transaction. A failure here means the
+	// provider already rotated but the local state cannot confirm it:
+	// outcome_unknown + reconciliation.
+	if err := s.store.CompleteSecretRotation(ctx, clientID, opID, rotatedSecretID, newRec, now,
+		s.successAudit(EventSecretRotated, actor, appID, clientID, requestID, "client.secret.rotate")); err != nil {
 		s.failRotationUnknown(ctx, actor, appID, c, opID, requestID, "internal")
 		return SecretRotationResult{}, err
 	}
 
-	s.RecordEvent(ctx, EventSecretRotated, actor, appID, clientID, requestID,
-		"client.secret.rotate", SecurityEventSuccess, "")
 	return SecretRotationResult{
 		SecretID:     newRec.ID,
 		ClientSecret: rotation.NewSecret,
@@ -1159,9 +1154,35 @@ func (s *Service) recordRotationReconciliation(
 		"client.secret.rotate", SecurityEventSuccess, reason)
 }
 
-// RecordEvent persists one audit row. Audit recording is best-effort at the
-// call site: a failure here must not mask the real operation outcome, and
-// the event payload never contains secrets or raw provider detail.
+// successAudit builds one high-risk success audit event. Unlike best-effort
+// events, these are handed to the store's terminal commit and persisted in
+// the same transaction as the audited state (ADR-0004 §8): the operation is
+// never reported as successful unless its audit row committed.
+func (s *Service) successAudit(
+	eventType string,
+	actor identity.UserID,
+	appID ApplicationID,
+	clientID OAuthClientID,
+	requestID, operation string,
+) SecurityEvent {
+	return SecurityEvent{
+		EventID:       NewSecurityEventID(),
+		EventType:     eventType,
+		ActorUserID:   actor,
+		ApplicationID: appID,
+		ClientID:      clientID,
+		RequestID:     requestID,
+		Operation:     operation,
+		Result:        SecurityEventSuccess,
+		OccurredAt:    s.now(),
+	}
+}
+
+// RecordEvent persists one best-effort audit row for non-success outcomes
+// (denials, reconciliation needs): a failure here must not mask the real
+// operation outcome, and the event payload never contains secrets or raw
+// provider detail. Success events of high-risk operations are durable —
+// see successAudit.
 func (s *Service) RecordEvent(
 	ctx context.Context,
 	eventType string,

@@ -48,6 +48,7 @@ func (r *ApplicationRepository) CompleteClientProvisioning(
 	provider, providerProjectID, providerApplicationID, providerClientID string,
 	opID applications.ProviderOperationID,
 	secret *applications.ClientSecretRecord,
+	audit ...applications.SecurityEvent,
 ) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -75,6 +76,9 @@ func (r *ApplicationRepository) CompleteClientProvisioning(
 		if err := insertSecretRecordTx(ctx, tx, *secret); err != nil {
 			return err
 		}
+	}
+	if err := insertSecurityEventsTx(ctx, tx, audit); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("postgres: commit client provisioning: %w", err)
@@ -210,8 +214,9 @@ func (r *ApplicationRepository) ListLiveClientsByApplication(ctx context.Context
 }
 
 // UpdateClientConfig applies a client metadata update with optimistic
-// concurrency. Redirect URIs and scopes are replaced wholesale.
-func (r *ApplicationRepository) UpdateClientConfig(ctx context.Context, clientID applications.OAuthClientID, upd ClientConfigUpdate, expectedVersion int) error {
+// concurrency. Redirect URIs and scopes are replaced wholesale. Durable
+// success audits commit in the same transaction (ADR-0004 §8).
+func (r *ApplicationRepository) UpdateClientConfig(ctx context.Context, clientID applications.OAuthClientID, upd ClientConfigUpdate, expectedVersion int, audit ...applications.SecurityEvent) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("postgres: begin update client tx: %w", err)
@@ -261,15 +266,26 @@ func (r *ApplicationRepository) UpdateClientConfig(ctx context.Context, clientID
 		}
 	}
 
+	if err := insertSecurityEventsTx(ctx, tx, audit); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("postgres: commit update client: %w", err)
 	}
 	return nil
 }
 
-// SetClientStatus flips the public client status with optimistic concurrency.
-func (r *ApplicationRepository) SetClientStatus(ctx context.Context, clientID applications.OAuthClientID, status applications.Status, expectedVersion int) error {
-	tag, err := r.pool.Exec(ctx,
+// SetClientStatus flips the public client status with optimistic
+// concurrency. Durable success audits commit in the same transaction as the
+// status flip (ADR-0004 §8).
+func (r *ApplicationRepository) SetClientStatus(ctx context.Context, clientID applications.OAuthClientID, status applications.Status, expectedVersion int, audit ...applications.SecurityEvent) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin set client status tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE oauth_clients
 		    SET status = $2, updated_at = NOW(), version = version + 1
 		  WHERE client_id = $1 AND version = $3
@@ -279,7 +295,13 @@ func (r *ApplicationRepository) SetClientStatus(ctx context.Context, clientID ap
 		return fmt.Errorf("postgres: set client status: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return r.conflictOrNotFoundClient(ctx, clientID)
+		return r.conflictOrNotFoundClientTx(ctx, tx, clientID)
+	}
+	if err := insertSecurityEventsTx(ctx, tx, audit); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit set client status: %w", err)
 	}
 	return nil
 }
@@ -350,8 +372,9 @@ func (r *ApplicationRepository) MarkClientDeletingRetry(ctx context.Context, cli
 }
 
 // CompleteClientDeletion soft-deletes the client and marks the delete
-// operation succeeded atomically.
-func (r *ApplicationRepository) CompleteClientDeletion(ctx context.Context, clientID applications.OAuthClientID, opID applications.ProviderOperationID) error {
+// operation succeeded atomically. Durable success audits commit in the same
+// transaction (ADR-0004 §8).
+func (r *ApplicationRepository) CompleteClientDeletion(ctx context.Context, clientID applications.OAuthClientID, opID applications.ProviderOperationID, audit ...applications.SecurityEvent) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("postgres: begin complete deletion tx: %w", err)
@@ -370,6 +393,9 @@ func (r *ApplicationRepository) CompleteClientDeletion(ctx context.Context, clie
 		return applications.ErrConflict
 	}
 	if err := setOperationOutcomeTx(ctx, tx, opID, applications.ProviderOperationSucceeded, ""); err != nil {
+		return err
+	}
+	if err := insertSecurityEventsTx(ctx, tx, audit); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -467,8 +493,9 @@ func (r *ApplicationRepository) BeginSecretRotation(ctx context.Context, clientI
 
 // CompleteSecretRotation commits a successful rotation in one transaction:
 // the previous secret record is stamped, the new record inserted, the gate
-// released back to idle and the operation marked succeeded.
-func (r *ApplicationRepository) CompleteSecretRotation(ctx context.Context, clientID applications.OAuthClientID, opID applications.ProviderOperationID, rotatedSecretID applications.ClientSecretID, newRec applications.ClientSecretRecord, rotatedAt time.Time) error {
+// released back to idle, the operation marked succeeded and the durable
+// success audit persisted (ADR-0004 §6/§8).
+func (r *ApplicationRepository) CompleteSecretRotation(ctx context.Context, clientID applications.OAuthClientID, opID applications.ProviderOperationID, rotatedSecretID applications.ClientSecretID, newRec applications.ClientSecretRecord, rotatedAt time.Time, audit ...applications.SecurityEvent) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("postgres: begin complete rotation tx: %w", err)
@@ -502,6 +529,9 @@ func (r *ApplicationRepository) CompleteSecretRotation(ctx context.Context, clie
 		return err
 	}
 	if err := setOperationOutcomeTx(ctx, tx, opID, applications.ProviderOperationSucceeded, ""); err != nil {
+		return err
+	}
+	if err := insertSecurityEventsTx(ctx, tx, audit); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -826,22 +856,6 @@ func (r *ApplicationRepository) GetClientSecretRecords(ctx context.Context, clie
 		records = append(records, rec)
 	}
 	return records, rows.Err()
-}
-
-func (r *ApplicationRepository) conflictOrNotFoundClient(ctx context.Context, clientID applications.OAuthClientID) error {
-	var exists bool
-	err := r.pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM oauth_clients
-		                 WHERE client_id = $1 AND deleted_at IS NULL
-		                   AND provisioning_status = 'provisioned')`,
-		string(clientID)).Scan(&exists)
-	if err != nil {
-		return fmt.Errorf("postgres: check client existence: %w", err)
-	}
-	if !exists {
-		return applications.ErrNotFound
-	}
-	return applications.ErrConflict
 }
 
 func (r *ApplicationRepository) conflictOrNotFoundClientTx(ctx context.Context, tx pgx.Tx, clientID applications.OAuthClientID) error {
