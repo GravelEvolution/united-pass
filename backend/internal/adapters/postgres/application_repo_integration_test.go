@@ -327,7 +327,14 @@ func TestIntegration_ClientLifecycle(t *testing.T) {
 	if err := repo.MarkClientDeleting(ctx, client.ID, delOp); err != nil {
 		t.Fatalf("mark deleting: %v", err)
 	}
-	if err := repo.MarkClientDeleteFailed(ctx, client.ID, delOp.ID, "provider"); err != nil {
+	// Retrying directly from deleting is allowed: provider removal is
+	// idempotent, so a request that crashed after the provider removal but
+	// before the local commit can safely re-drive the deletion.
+	crashRetryOp := newTestOperation(appID, client.ID, applications.ProviderOperationDelete)
+	if err := repo.MarkClientDeletingRetry(ctx, client.ID, crashRetryOp); err != nil {
+		t.Fatalf("retry from deleting: %v", err)
+	}
+	if err := repo.MarkClientDeleteFailed(ctx, client.ID, crashRetryOp.ID, "provider"); err != nil {
 		t.Fatalf("mark delete failed: %v", err)
 	}
 	if _, err := repo.GetClient(ctx, appID, client.ID); !errors.Is(err, applications.ErrNotFound) {

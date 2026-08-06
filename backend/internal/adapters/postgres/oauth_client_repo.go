@@ -317,8 +317,11 @@ func (r *ApplicationRepository) MarkClientDeleting(ctx context.Context, clientID
 	return nil
 }
 
-// MarkClientDeletingRetry re-arms a client stuck in delete_failed for a
-// delete retry and records the new pending operation atomically.
+// MarkClientDeletingRetry re-arms a client stuck in delete_failed — or still
+// in deleting after the provider removal succeeded but the local commit
+// crashed — for a delete retry, and records the new pending operation
+// atomically. Provider removal is idempotent, so both states are safe to
+// re-drive (ADR-0004 §7).
 func (r *ApplicationRepository) MarkClientDeletingRetry(ctx context.Context, clientID applications.OAuthClientID, op applications.ProviderOperation) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -329,7 +332,7 @@ func (r *ApplicationRepository) MarkClientDeletingRetry(ctx context.Context, cli
 	tag, err := tx.Exec(ctx,
 		`UPDATE oauth_clients
 		    SET provisioning_status = 'deleting', updated_at = NOW()
-		  WHERE client_id = $1 AND deleted_at IS NULL AND provisioning_status = 'delete_failed'`,
+		  WHERE client_id = $1 AND deleted_at IS NULL AND provisioning_status IN ('delete_failed', 'deleting')`,
 		string(clientID))
 	if err != nil {
 		return fmt.Errorf("postgres: re-arm client deleting: %w", err)

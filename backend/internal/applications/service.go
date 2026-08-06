@@ -604,7 +604,8 @@ func (s *Service) UpdateClient(
 
 // SetClientStatus enables or disables one client. The provider-side state is
 // synchronized first; on provider failure the local status is left unchanged
-// (fail closed).
+// (fail closed). If the provider switch succeeds but the local commit fails,
+// the drift is handed to reconciliation.
 func (s *Service) SetClientStatus(
 	ctx context.Context,
 	actor identity.UserID,
@@ -658,7 +659,12 @@ func (s *Service) SetClientStatus(
 		}
 	}
 
+	// The provider already switched; a local commit failure must not leak
+	// the drift silently — record reconciliation and surface the error.
 	if err := s.store.SetClientStatus(ctx, clientID, target, client.Version); err != nil {
+		if client.ProviderApplicationID != "" {
+			s.recordProviderDrift(ctx, actor, appID, client, requestID, operation, ErrorClassFor(err))
+		}
 		return OAuthClient{}, err
 	}
 
@@ -668,9 +674,34 @@ func (s *Service) SetClientStatus(
 	return s.store.GetClient(ctx, appID, clientID)
 }
 
+// recordProviderDrift leaves a reconciliation trail after a provider state
+// change succeeded but the local commit could not be confirmed (ADR-0004
+// §2): the provider row now disagrees with the local row and must never be
+// forgotten.
+func (s *Service) recordProviderDrift(
+	ctx context.Context,
+	actor identity.UserID,
+	appID ApplicationID,
+	c OAuthClient,
+	requestID, operation, reason string,
+) {
+	_ = s.store.SetClientReconciliationRequired(ctx, c.ID)
+	_ = s.store.CreateReconciliationJob(ctx, ReconciliationJob{
+		ID:                    NewProviderOperationID(),
+		ApplicationID:         appID,
+		ClientID:              c.ID,
+		ProviderApplicationID: c.ProviderApplicationID,
+		Reason:                reason,
+	})
+	s.RecordEvent(ctx, EventProviderReconciliationNeed, actor, appID, c.ID, requestID,
+		operation, SecurityEventSuccess, reason)
+}
+
 // DeleteClient removes one client using the delete state machine: local row
 // marked deleting, provider removal (idempotent), then local deletion. A
 // provider failure aborts the deletion and leaves a reconciliation trail.
+// Clients stuck in deleting or delete_failed after an earlier failure are
+// safely re-driven: provider removal is idempotent (ADR-0004 §7).
 func (s *Service) DeleteClient(
 	ctx context.Context,
 	actor identity.UserID,
@@ -778,7 +809,8 @@ func (s *Service) UpdateApplication(
 // synchronized first for every provisioned client: on provider failure the
 // local status is left unchanged (fail closed). Disabling disables all
 // clients at the provider; enabling re-enables only clients whose local
-// status is active.
+// status is active. If the provider switches succeed but the local commit
+// fails, every switched client gets a reconciliation trail.
 func (s *Service) SetStatus(
 	ctx context.Context,
 	actor identity.UserID,
@@ -810,6 +842,9 @@ func (s *Service) SetStatus(
 	if err != nil {
 		return err
 	}
+	// Clients whose provider state was already switched; if the final local
+	// commit fails they carry the drift into reconciliation.
+	var switched []OAuthClient
 	for _, c := range clients {
 		if c.ProviderApplicationID == "" {
 			continue
@@ -824,11 +859,21 @@ func (s *Service) SetStatus(
 			err = s.provisioner.DisableClient(ctx, c.ProviderApplicationID)
 		}
 		if err != nil {
+			// Provider-first: clients already switched keep their new
+			// provider state, but the local application status stays
+			// unchanged and no drift is recorded (a retry re-drives the
+			// remaining clients; enable/disable are idempotent).
 			return err
 		}
+		switched = append(switched, c)
 	}
 
 	if err := s.store.SetApplicationStatus(ctx, appID, target, app.Version); err != nil {
+		// The provider clients already switched but the local application
+		// status could not be committed: record the drift per client.
+		for _, c := range switched {
+			s.recordProviderDrift(ctx, actor, appID, c, requestID, operation, ErrorClassFor(err))
+		}
 		return err
 	}
 
@@ -891,8 +936,12 @@ func (s *Service) deleteClient(
 
 	switch c.Provisioning {
 	case ProvisioningStatusDeleting:
-		// Another deletion is already in flight.
-		return ErrConflict
+		// The previous attempt removed the provider resource (idempotent)
+		// but crashed before the local commit. Re-arm and re-drive the
+		// deletion instead of parking forever in deleting.
+		if err := s.store.MarkClientDeletingRetry(ctx, c.ID, op); err != nil {
+			return err
+		}
 	case ProvisioningStatusDeleteFailed:
 		if err := s.store.MarkClientDeletingRetry(ctx, c.ID, op); err != nil {
 			return err
@@ -920,7 +969,22 @@ func (s *Service) deleteClient(
 		}
 	}
 
+	// The provider resource is already gone; a local commit failure must not
+	// park the client in deleting forever. Mark it delete_failed with a
+	// reconciliation trail — provider removal is idempotent, so a retry is
+	// always safe (ADR-0004 §7).
 	if err := s.store.CompleteClientDeletion(ctx, c.ID, opID); err != nil {
+		_ = s.store.MarkClientDeleteFailed(ctx, c.ID, opID, ErrorClassFor(err))
+		_ = s.store.SetClientReconciliationRequired(ctx, c.ID)
+		_ = s.store.CreateReconciliationJob(ctx, ReconciliationJob{
+			ID:                    NewProviderOperationID(),
+			ApplicationID:         appID,
+			ClientID:              c.ID,
+			ProviderApplicationID: c.ProviderApplicationID,
+			Reason:                "provider_deleted_local_commit_failed",
+		})
+		s.RecordEvent(ctx, EventProviderReconciliationNeed, actor, appID, c.ID, requestID,
+			"client.delete", SecurityEventSuccess, "provider_deleted_local_commit_failed")
 		return err
 	}
 	s.RecordEvent(ctx, EventOAuthClientDeleted, actor, appID, c.ID, requestID,

@@ -33,6 +33,7 @@ type fakeStore struct {
 	deleteAppErr        error
 	listErr             error
 	updateClientErr     error
+	setClientStatusErr  error
 	markDeletingErr     error
 	completeDelErr      error
 	reconcileMarkErr    error
@@ -276,6 +277,9 @@ func (s *fakeStore) UpdateClientConfig(_ context.Context, clientID OAuthClientID
 func (s *fakeStore) SetClientStatus(_ context.Context, clientID OAuthClientID, status Status, expectedVersion int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.setClientStatusErr != nil {
+		return s.setClientStatusErr
+	}
 	s.note("store:set-client-status")
 	c, ok := s.clients[clientID]
 	if !ok {
@@ -318,7 +322,7 @@ func (s *fakeStore) MarkClientDeletingRetry(_ context.Context, clientID OAuthCli
 	if !ok {
 		return ErrNotFound
 	}
-	if c.Provisioning != ProvisioningStatusDeleteFailed {
+	if c.Provisioning != ProvisioningStatusDeleteFailed && c.Provisioning != ProvisioningStatusDeleting {
 		return ErrConflict
 	}
 	c.Provisioning = ProvisioningStatusDeleting
@@ -822,6 +826,43 @@ func TestSetStatusProviderFailureLeavesLocalUnchanged(t *testing.T) {
 	}
 }
 
+func TestSetStatusLocalFailureAfterProviderSwitchReconciles(t *testing.T) {
+	svc, store, prov, events, _ := newTestService(t)
+	ctx := context.Background()
+
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	store.setAppStatusErr = errors.New("db down")
+
+	err = svc.SetStatus(ctx, "user_actor", res.ApplicationID, "req-2", false)
+	if err == nil {
+		t.Fatal("expected local commit failure")
+	}
+	// Every client already disabled at the provider: each carries a drift
+	// trail, and the local application status stays unchanged.
+	if store.apps[res.ApplicationID].Status != StatusActive {
+		t.Error("local application status must stay unchanged")
+	}
+	if len(store.jobs) != 1 {
+		t.Errorf("reconciliation jobs = %d, want 1 per switched client", len(store.jobs))
+	}
+	fake := prov.Client(store.clients[res.ClientID].ProviderApplicationID)
+	if fake == nil || !fake.Disabled {
+		t.Error("provider client must already be disabled")
+	}
+	found := false
+	for _, ev := range events.events {
+		if ev.EventType == EventProviderReconciliationNeed {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected reconciliation audit event")
+	}
+}
+
 func TestSetStatusEnableSkipsDisabledClients(t *testing.T) {
 	svc, store, _, _, seq := newTestService(t)
 	ctx := context.Background()
@@ -920,7 +961,7 @@ func TestDeleteProviderFailureAbortsAndReconciles(t *testing.T) {
 	}
 }
 
-func TestDeleteConcurrentDeletionConflicts(t *testing.T) {
+func TestDeleteStuckDeletingRetriesIdempotently(t *testing.T) {
 	svc, store, _, _, _ := newTestService(t)
 	ctx := context.Background()
 
@@ -928,13 +969,20 @@ func TestDeleteConcurrentDeletionConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	// Simulate a crash after the provider removal succeeded but before the
+	// local commit: the client is stuck in deleting. Provider removal is
+	// idempotent, so the application deletion re-drives it instead of
+	// failing forever.
 	for id := range store.clients {
 		c := store.clients[id]
 		c.Provisioning = ProvisioningStatusDeleting
 		store.clients[id] = c
 	}
-	if err := svc.Delete(ctx, "user_actor", res.ApplicationID, "req-2"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("err = %v, want ErrConflict", err)
+	if err := svc.Delete(ctx, "user_actor", res.ApplicationID, "req-2"); err != nil {
+		t.Fatalf("delete application with stuck deleting client: %v", err)
+	}
+	if _, ok := store.apps[res.ApplicationID]; ok {
+		t.Error("application must be deleted after the retry")
 	}
 }
 
@@ -1363,6 +1411,42 @@ func TestSetClientStatus_InvalidTransition(t *testing.T) {
 	}
 }
 
+func TestSetClientStatus_LocalFailureAfterProviderSwitchReconciles(t *testing.T) {
+	svc, store, prov, events, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	store.setClientStatusErr = errors.New("db down")
+
+	_, err = svc.SetClientStatus(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2", false)
+	if err == nil {
+		t.Fatal("expected local commit failure")
+	}
+	// The provider already disabled the client; the drift must be recorded,
+	// never silently leaked.
+	fake := prov.Client(store.clients[res.ClientID].ProviderApplicationID)
+	if fake == nil || !fake.Disabled {
+		t.Error("provider client must already be disabled")
+	}
+	if store.clients[res.ClientID].Status != StatusActive {
+		t.Error("local status must stay unchanged on local commit failure")
+	}
+	if len(store.jobs) != 1 {
+		t.Errorf("reconciliation jobs = %d, want 1", len(store.jobs))
+	}
+	found := false
+	for _, ev := range events.events {
+		if ev.EventType == EventProviderReconciliationNeed {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected reconciliation audit event")
+	}
+}
+
 // --- Delete client (standalone) ---
 
 func TestDeleteClient_RemovesProviderAndLocal(t *testing.T) {
@@ -1457,19 +1541,76 @@ func TestDeleteClient_NotFoundAndBinding(t *testing.T) {
 	}
 }
 
-func TestDeleteClient_ConcurrentDeletionConflicts(t *testing.T) {
-	svc, store, _, _, _ := newTestService(t)
+func TestDeleteClient_StuckDeletingIsRetryable(t *testing.T) {
+	svc, store, prov, _, _ := newTestService(t)
 	ctx := context.Background()
 	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	// Simulate a crash after provider removal but before the local commit.
 	c := store.clients[res.ClientID]
 	c.Provisioning = ProvisioningStatusDeleting
 	store.clients[res.ClientID] = c
 
-	if err := svc.DeleteClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("err = %v, want ErrConflict", err)
+	// The retry re-drives the idempotent provider removal and completes the
+	// local soft delete instead of returning a permanent conflict.
+	if err := svc.DeleteClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2"); err != nil {
+		t.Fatalf("retry stuck deleting client: %v", err)
+	}
+	if !store.deleted[res.ClientID] {
+		t.Error("client not deleted after retry")
+	}
+	if prov.ClientCount() != 0 {
+		t.Errorf("provider clients = %d, want 0", prov.ClientCount())
+	}
+}
+
+func TestDeleteClient_LocalCommitFailureBecomesRetryable(t *testing.T) {
+	svc, store, prov, events, _ := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.CreateWithInitialClient(ctx, "user_actor", "req-1", confidentialAppInput(), confidentialClientInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	store.completeDelErr = errors.New("db down")
+
+	err = svc.DeleteClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-2")
+	if err == nil {
+		t.Fatal("expected local commit failure")
+	}
+	// The provider resource is already gone; the client must be parked as
+	// delete_failed (retryable) with a reconciliation trail, never stuck in
+	// deleting.
+	if store.deleted[res.ClientID] {
+		t.Error("client must not be marked deleted after a failed commit")
+	}
+	if store.clients[res.ClientID].Provisioning != ProvisioningStatusDeleteFailed {
+		t.Errorf("provisioning = %s, want delete_failed", store.clients[res.ClientID].Provisioning)
+	}
+	if len(store.jobs) != 1 || store.jobs[0].Reason != "provider_deleted_local_commit_failed" {
+		t.Errorf("jobs = %+v, want one provider_deleted_local_commit_failed job", store.jobs)
+	}
+	found := false
+	for _, ev := range events.events {
+		if ev.EventType == EventProviderReconciliationNeed {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected reconciliation audit event")
+	}
+	if prov.ClientCount() != 0 {
+		t.Errorf("provider clients = %d, want 0 (already removed)", prov.ClientCount())
+	}
+
+	// Retry completes the local soft delete.
+	store.completeDelErr = nil
+	if err := svc.DeleteClient(ctx, "user_actor", res.ApplicationID, res.ClientID, "req-3"); err != nil {
+		t.Fatalf("retry delete: %v", err)
+	}
+	if !store.deleted[res.ClientID] {
+		t.Error("client not deleted after retry")
 	}
 }
 
