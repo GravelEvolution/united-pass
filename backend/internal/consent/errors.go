@@ -1,9 +1,10 @@
 // Package consent defines the consent/authorization orchestration seam of
-// United Pass (ADR-0005). Phase 3.1 introduces only the provider port: the
+// United Pass (ADR-0005). Phase 3.1 introduced the provider port: the
 // authorization-request view, the provider callback result type, the stable
 // provider error classes (contract §8), and the fake provider used by unit
-// tests. The consent domain itself (grants, resolution, decision
-// operations, migration 00005) lands in later Phase 3 milestones.
+// tests. Phase 3.2 adds the grant and decision-operation domain model with
+// its store port and migration 00005. Resolution and decision services
+// land in later Phase 3 milestones.
 package consent
 
 import (
