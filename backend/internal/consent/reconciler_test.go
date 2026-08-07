@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 )
@@ -193,6 +194,49 @@ func TestReconcilerStartStop(t *testing.T) {
 	r.Start()
 	time.Sleep(20 * time.Millisecond)
 	r.Stop()
+}
+
+// Lifecycle idempotency is part of the public contract: server
+// shutdown/recovery paths may call Start/Stop more than once and from
+// multiple goroutines, and none of these sequences may panic or leak a
+// second worker.
+func TestReconcilerStartTwice(t *testing.T) {
+	r := newTestReconciler(t, newFakeGrantStore(), stubInFlight{})
+	r.interval = 5 * time.Millisecond
+	r.Start()
+	r.Start() // documented no-op: exactly one loop must exist
+	time.Sleep(20 * time.Millisecond)
+	r.Stop()
+}
+
+func TestReconcilerStopTwice(t *testing.T) {
+	r := newTestReconciler(t, newFakeGrantStore(), stubInFlight{})
+	r.interval = 5 * time.Millisecond
+	r.Start()
+	r.Stop()
+	r.Stop() // repeated Stop must not panic on a closed channel
+}
+
+func TestReconcilerStopBeforeStart(t *testing.T) {
+	r := newTestReconciler(t, newFakeGrantStore(), stubInFlight{})
+	r.Stop() // no worker yet: must be a no-op, not a deadlock
+}
+
+func TestReconcilerConcurrentStop(t *testing.T) {
+	r := newTestReconciler(t, newFakeGrantStore(), stubInFlight{})
+	r.interval = 5 * time.Millisecond
+	r.Start()
+	time.Sleep(20 * time.Millisecond)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.Stop()
+		}()
+	}
+	wg.Wait()
 }
 
 func TestNewReconcilerValidationAndDefaults(t *testing.T) {

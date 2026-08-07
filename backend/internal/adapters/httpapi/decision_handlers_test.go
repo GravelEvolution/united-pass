@@ -96,8 +96,19 @@ func doPost(t *testing.T, router http.Handler, path, body string) *httptest.Resp
 	return rec
 }
 
+// testOutcome wraps a raw callback URL into the redacted decision outcome
+// the way the real orchestration does.
+func testOutcome(t *testing.T, callbackURL string) consent.DecisionOutcome {
+	t.Helper()
+	callback, err := consent.NewCallbackResult(callbackURL)
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	return consent.NewDecisionOutcome(callback)
+}
+
 func TestDecideRequestHappyPath(t *testing.T) {
-	decider := &stubDecider{outcome: consent.DecisionOutcome{RedirectURL: "https://rp.example/callback?code=abc"}}
+	decider := &stubDecider{outcome: testOutcome(t, "https://rp.example/callback?code=abc")}
 	router := buildDecisionRouter(decider, &stubDecrypter{}, true, true)
 
 	rec := doPost(t, router, "/authorization/requests/V2-request-1/decision", `{"decision":"allow"}`)
@@ -124,7 +135,7 @@ func TestDecideRequestHappyPath(t *testing.T) {
 }
 
 func TestDecideRequestForwardsDeny(t *testing.T) {
-	decider := &stubDecider{outcome: consent.DecisionOutcome{RedirectURL: "https://rp.example/callback?error=access_denied"}}
+	decider := &stubDecider{outcome: testOutcome(t, "https://rp.example/callback?error=access_denied")}
 	router := buildDecisionRouter(decider, &stubDecrypter{}, true, true)
 
 	rec := doPost(t, router, "/authorization/requests/V2-request-1/decision", `{"decision":"deny"}`)
@@ -163,6 +174,8 @@ func TestDecideRequestBodyValidation(t *testing.T) {
 		{"missing decision", `{}`},
 		{"empty body", ``},
 		{"not json", `allow`},
+		{"trailing second json", `{"decision":"allow"}{"decision":"deny"}`},
+		{"trailing garbage", `{"decision":"allow"} junk`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -243,23 +256,23 @@ func TestDecideRequestErrorMapping(t *testing.T) {
 // session authenticated on this request.
 func TestDecideRequestCredentialReaderBindsAuthenticatedRecord(t *testing.T) {
 	decider := &stubDecider{
-		outcome:   consent.DecisionOutcome{RedirectURL: "https://rp.example/callback?code=abc"},
+		outcome:   testOutcome(t, "https://rp.example/callback?code=abc"),
 		probeCred: true,
 	}
-	decrypter := &stubDecrypter{cred: session.ProviderSessionCredential{
-		Version:      session.ProviderSessionCredentialVersion2,
-		Provider:     "zitadel",
-		SessionID:    "provider-session-1",
-		SessionToken: "provider-token-1",
-	}}
+	decrypter := &stubDecrypter{cred: session.NewProviderSessionCredential(
+		session.ProviderSessionCredentialVersion2,
+		"zitadel",
+		"provider-session-1",
+		"provider-token-1",
+	)}
 	router := buildDecisionRouter(decider, decrypter, true, true)
 
 	rec := doPost(t, router, "/authorization/requests/V2-request-1/decision", `{"decision":"allow"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
 	}
-	if decider.lastCredErr != nil || decider.lastCred.Provider != "zitadel" {
-		t.Fatalf("probed credential: cred=%+v err=%v", decider.lastCred, decider.lastCredErr)
+	if decider.lastCredErr != nil || decider.lastCred.Provider() != "zitadel" {
+		t.Fatalf("probed credential: err=%v", decider.lastCredErr)
 	}
 	if decrypter.calls != 1 || decrypter.blob != testDecisionBlob {
 		t.Fatalf("decrypter usage: calls=%d blob=%q", decrypter.calls, decrypter.blob)

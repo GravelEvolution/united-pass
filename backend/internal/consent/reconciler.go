@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -48,8 +49,12 @@ type Reconciler struct {
 	batch           int
 	logger          *slog.Logger
 	now             func() time.Time
-	stop            chan struct{}
-	done            chan struct{}
+
+	mu       sync.Mutex
+	started  bool
+	stop     chan struct{}
+	stopOnce sync.Once
+	done     chan struct{}
 }
 
 // NewReconciler builds the consent decision reconciler. All dependencies
@@ -92,15 +97,29 @@ func NewReconciler(
 	}, nil
 }
 
-// Start launches the background loop. Calling Start twice is a no-op
-// after the first call returns; each Reconciler is started once.
+// Start launches the background loop. It is idempotent: only the first
+// call starts the loop, later calls are no-ops.
 func (r *Reconciler) Start() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.started {
+		return
+	}
+	r.started = true
 	go r.loop()
 }
 
-// Stop signals the loop to exit and waits for it.
+// Stop signals the loop to exit and waits for it. It is idempotent and
+// safe to call concurrently: repeated calls return after the single loop
+// has terminated, and Stop before Start is a no-op.
 func (r *Reconciler) Stop() {
-	close(r.stop)
+	r.mu.Lock()
+	if !r.started {
+		r.mu.Unlock()
+		return
+	}
+	r.mu.Unlock()
+	r.stopOnce.Do(func() { close(r.stop) })
 	<-r.done
 }
 

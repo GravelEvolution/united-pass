@@ -99,7 +99,7 @@ func (f *FakeAuthenticator) BeginPasswordAuthentication(
 		UserID:                   user.UserID,
 		Provider:                 user.Provider,
 		ProviderSessionReference: user.SessionRef,
-		ProviderSessionToken:     fakeSessionToken(user.SessionRef),
+		ProviderSessionToken:     NewProviderSessionToken(fakeSessionToken(user.SessionRef)),
 		AuthenticationMethods:    []AuthenticationMethod{MethodPassword},
 	}, nil
 }
@@ -139,7 +139,7 @@ func (f *FakeAuthenticator) CompleteMFA(
 			UserID:                   user.UserID,
 			Provider:                 user.Provider,
 			ProviderSessionReference: user.SessionRef,
-			ProviderSessionToken:     fakeSessionToken(user.SessionRef),
+			ProviderSessionToken:     NewProviderSessionToken(fakeSessionToken(user.SessionRef)),
 			AuthenticationMethods:    []AuthenticationMethod{MethodPassword, AuthenticationMethod(input.Method)},
 		}, nil
 	}
@@ -192,7 +192,7 @@ func (f *FakeAuthenticator) VerifyUserPassword(
 			UserID:                   user.UserID,
 			Provider:                 user.Provider,
 			ProviderSessionReference: user.SessionRef,
-			ProviderSessionToken:     fakeSessionToken(user.SessionRef),
+			ProviderSessionToken:     NewProviderSessionToken(fakeSessionToken(user.SessionRef)),
 			AuthenticationMethods:    []AuthenticationMethod{MethodPassword},
 		}, nil
 	}

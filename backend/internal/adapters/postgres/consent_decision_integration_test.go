@@ -31,12 +31,12 @@ func (r staticCredentialReader) ReadProviderSessionCredential(context.Context, s
 }
 
 func integrationCredential() staticCredentialReader {
-	return staticCredentialReader{cred: session.ProviderSessionCredential{
-		Version:      session.ProviderSessionCredentialVersion2,
-		Provider:     "zitadel",
-		SessionID:    "provider-session-int",
-		SessionToken: "provider-token-int",
-	}}
+	return staticCredentialReader{cred: session.NewProviderSessionCredential(
+		session.ProviderSessionCredentialVersion2,
+		"zitadel",
+		"provider-session-int",
+		"provider-token-int",
+	)}
 }
 
 // decisionFixture wires the real repositories with the fake provider.
@@ -94,8 +94,8 @@ func TestIntegration_DecisionAllowEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	if !strings.Contains(outcome.RedirectURL, "code=fake-code-V2-int-allow") {
-		t.Fatalf("redirectUrl = %q", outcome.RedirectURL)
+	if !strings.Contains(outcome.RedirectURL(), "code=fake-code-V2-int-allow") {
+		t.Fatalf("redirectUrl = %q", outcome.RedirectURL())
 	}
 	if provider.Completions("V2-int-allow") != 1 {
 		t.Fatal("provider completion count != 1")
@@ -145,8 +145,8 @@ func TestIntegration_DecisionDenyEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	if !strings.Contains(outcome.RedirectURL, "error=access_denied") {
-		t.Fatalf("redirectUrl = %q", outcome.RedirectURL)
+	if !strings.Contains(outcome.RedirectURL(), "error=access_denied") {
+		t.Fatalf("redirectUrl = %q", outcome.RedirectURL())
 	}
 
 	stored, err := grants.GetDecisionOperation(ctx, decisionKeyFor("V2-int-deny"))
@@ -196,7 +196,7 @@ func TestIntegration_DecisionNeverSkipsRevalidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	if outcome.RedirectURL == "" || provider.Completions("V2-int-reuse") != 1 {
+	if outcome.RedirectURL() == "" || provider.Completions("V2-int-reuse") != 1 {
 		t.Fatal("reusable grant must not short-circuit the decision")
 	}
 	var opCount int
@@ -236,7 +236,7 @@ func TestIntegration_DecisionConcurrentRaceSingleWinner(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
-			case err == nil && outcome.RedirectURL != "":
+			case err == nil && outcome.RedirectURL() != "":
 				wins++
 			case errors.Is(err, consent.ErrDecisionAlreadyDecided), errors.Is(err, consent.ErrDecisionRequestExpired):
 				conflicts++

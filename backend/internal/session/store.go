@@ -76,11 +76,12 @@ type CreateSessionInput struct {
 	Provider                 string
 	ProviderSessionReference string
 	// ProviderSessionToken is the provider session token returned by the
-	// authenticating provider call. When present it is sealed immediately
-	// into a Version-2 ProviderSessionCredential (ADR-0005 §3); the
-	// plaintext is never stored and must be dropped by the caller once
-	// session creation succeeds. In-memory only — never log or render.
-	ProviderSessionToken  string
+	// authenticating provider call, wrapped in the redacted auth type.
+	// When present it is sealed immediately into a Version-2
+	// ProviderSessionCredential (ADR-0005 §3); the plaintext is never
+	// stored and must be dropped by the caller once session creation
+	// succeeds. In-memory only — never log or render.
+	ProviderSessionToken  auth.ProviderSessionToken
 	AuthenticationMethods []auth.AuthenticationMethod
 	Remember              bool
 	UserAgent             string
@@ -131,16 +132,16 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	// Version-1 sessions cannot finalize OAuth authorization requests and
 	// fail closed into re-login).
 	var sealedCredential EncryptedProviderSessionCredential
-	if input.ProviderSessionToken != "" {
+	if !input.ProviderSessionToken.Empty() {
 		if input.ProviderSessionReference == "" {
 			return CreateSessionResult{}, errors.New("session: provider session token without a session reference")
 		}
-		sealed, err := s.SealProviderSessionCredential(ProviderSessionCredential{
-			Version:      ProviderSessionCredentialVersion2,
-			Provider:     input.Provider,
-			SessionID:    input.ProviderSessionReference,
-			SessionToken: input.ProviderSessionToken,
-		})
+		sealed, err := s.SealProviderSessionCredential(NewProviderSessionCredential(
+			ProviderSessionCredentialVersion2,
+			input.Provider,
+			input.ProviderSessionReference,
+			input.ProviderSessionToken.Token(),
+		))
 		if err != nil {
 			return CreateSessionResult{}, err
 		}

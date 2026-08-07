@@ -1,8 +1,12 @@
 package consent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -225,12 +229,12 @@ func (f *fakeCredentialReader) ReadProviderSessionCredential(_ context.Context, 
 }
 
 func v2Credential() session.ProviderSessionCredential {
-	return session.ProviderSessionCredential{
-		Version:      session.ProviderSessionCredentialVersion2,
-		Provider:     "zitadel",
-		SessionID:    "provider-session-1",
-		SessionToken: "provider-token-1",
-	}
+	return session.NewProviderSessionCredential(
+		session.ProviderSessionCredentialVersion2,
+		"zitadel",
+		"provider-session-1",
+		"provider-token-1",
+	)
 }
 
 func newDecisionService(t *testing.T, provider AuthRequestProvider, clients ConsentClientResolver, grants GrantStore) *DecisionService {
@@ -276,8 +280,8 @@ func TestDecideAllowHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	if !strings.Contains(outcome.RedirectURL, "code=fake-code-V2-request-1") {
-		t.Fatalf("redirectUrl = %q", outcome.RedirectURL)
+	if !strings.Contains(outcome.RedirectURL(), "code=fake-code-V2-request-1") {
+		t.Fatalf("redirectUrl = %q", outcome.RedirectURL())
 	}
 	if provider.Completions("V2-request-1") != 1 {
 		t.Fatal("provider completion count != 1")
@@ -312,8 +316,8 @@ func TestDecideDenyHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	if !strings.Contains(outcome.RedirectURL, "error=access_denied") {
-		t.Fatalf("redirectUrl = %q", outcome.RedirectURL)
+	if !strings.Contains(outcome.RedirectURL(), "error=access_denied") {
+		t.Fatalf("redirectUrl = %q", outcome.RedirectURL())
 	}
 	// Deny still completes through the provider (access_denied callback).
 	if provider.Completions("V2-request-1") != 1 {
@@ -520,13 +524,12 @@ func TestDecideAllowCredentialFailures(t *testing.T) {
 		reader *fakeCredentialReader
 	}{
 		{"missing credential", &fakeCredentialReader{err: session.ErrProviderSessionCredentialMissing}},
-		{"legacy v1 credential", &fakeCredentialReader{cred: session.ProviderSessionCredential{
-			Version: session.ProviderSessionCredentialVersion1, Provider: "zitadel", SessionID: "provider-session-1",
-		}}},
-		{"foreign provider credential", &fakeCredentialReader{cred: session.ProviderSessionCredential{
-			Version: session.ProviderSessionCredentialVersion2, Provider: "other-provider",
-			SessionID: "provider-session-1", SessionToken: "token",
-		}}},
+		{"legacy v1 credential", &fakeCredentialReader{cred: session.NewProviderSessionCredential(
+			session.ProviderSessionCredentialVersion1, "zitadel", "provider-session-1", "",
+		)}},
+		{"foreign provider credential", &fakeCredentialReader{cred: session.NewProviderSessionCredential(
+			session.ProviderSessionCredentialVersion2, "other-provider", "provider-session-1", "token",
+		)}},
 		{"reader failure", &fakeCredentialReader{err: errors.New("redis exploded")}},
 	}
 	for _, tc := range cases {
@@ -711,8 +714,8 @@ func TestDecideCommitFailureStillReturnsRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	if !strings.Contains(outcome.RedirectURL, "code=fake-code-V2-request-1") {
-		t.Fatalf("redirectUrl = %q", outcome.RedirectURL)
+	if !strings.Contains(outcome.RedirectURL(), "code=fake-code-V2-request-1") {
+		t.Fatalf("redirectUrl = %q", outcome.RedirectURL())
 	}
 	if provider.Completions("V2-request-1") != 1 {
 		t.Fatal("provider completion count != 1")
@@ -738,8 +741,52 @@ func TestDecideAdvisoryReuseNeverSkipsExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	if outcome.RedirectURL == "" || provider.Completions("V2-request-1") != 1 || store.allowCommits != 1 {
+	if outcome.RedirectURL() == "" || provider.Completions("V2-request-1") != 1 || store.allowCommits != 1 {
 		t.Fatal("reusable grant must not short-circuit the decision")
+	}
+}
+
+// TestDecisionOutcomeNeverLeaks pins the P3.1 callback redaction on the
+// decision result: the credential-grade callback URL stays wrapped until
+// the HTTP serialization boundary unwraps it via RedirectURL, and every
+// rendering path of the outcome itself stays redacted.
+func TestDecisionOutcomeNeverLeaks(t *testing.T) {
+	callback, err := NewCallbackResult("https://rp.example/callback?code=secret-code&state=secret-state")
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	outcome := NewDecisionOutcome(callback)
+
+	renderings := []string{
+		outcome.String(),
+		outcome.GoString(),
+		fmt.Sprintf("%v", outcome),
+		fmt.Sprintf("%+v", outcome),
+		fmt.Sprintf("%#v", outcome),
+		fmt.Sprintf("%q", outcome),
+		fmt.Sprintf("%v", &outcome),
+		fmt.Sprintf("%+v", &outcome),
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	logger.Info("outcome", "outcome", outcome)
+	renderings = append(renderings, buf.String())
+
+	marshaled, err := json.Marshal(outcome)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	renderings = append(renderings, string(marshaled))
+
+	for _, rendered := range renderings {
+		if strings.Contains(rendered, "secret-code") || strings.Contains(rendered, "secret-state") {
+			t.Fatalf("decision outcome leaked: %q", rendered)
+		}
+	}
+
+	// The HTTP serialization seam still reaches the raw URL exactly once.
+	if outcome.RedirectURL() != "https://rp.example/callback?code=secret-code&state=secret-state" {
+		t.Fatal("redirect URL seam broken")
 	}
 }
 

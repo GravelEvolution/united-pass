@@ -1,8 +1,12 @@
 package session
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -17,13 +21,16 @@ func TestProviderSessionCredentialValidate(t *testing.T) {
 		cred    ProviderSessionCredential
 		wantErr bool
 	}{
-		{"v1 valid", ProviderSessionCredential{Version: ProviderSessionCredentialVersion1, Provider: "zitadel", SessionID: "s1"}, false},
-		{"v1 missing id", ProviderSessionCredential{Version: ProviderSessionCredentialVersion1, Provider: "zitadel"}, true},
-		{"v1 with token", ProviderSessionCredential{Version: ProviderSessionCredentialVersion1, Provider: "zitadel", SessionID: "s1", SessionToken: "t"}, true},
-		{"v2 valid", ProviderSessionCredential{Version: ProviderSessionCredentialVersion2, Provider: "zitadel", SessionID: "s1", SessionToken: "t"}, false},
-		{"v2 missing id", ProviderSessionCredential{Version: ProviderSessionCredentialVersion2, Provider: "zitadel", SessionToken: "t"}, true},
-		{"v2 missing token", ProviderSessionCredential{Version: ProviderSessionCredentialVersion2, Provider: "zitadel", SessionID: "s1"}, true},
-		{"unknown version", ProviderSessionCredential{Version: 99, SessionID: "s1", SessionToken: "t"}, true},
+		{"v1 valid", NewProviderSessionCredential(ProviderSessionCredentialVersion1, "zitadel", "s1", ""), false},
+		{"v1 missing id", NewProviderSessionCredential(ProviderSessionCredentialVersion1, "zitadel", "", ""), true},
+		{"v1 with token", NewProviderSessionCredential(ProviderSessionCredentialVersion1, "zitadel", "s1", "t"), true},
+		{"v2 valid", NewProviderSessionCredential(ProviderSessionCredentialVersion2, "zitadel", "s1", "t"), false},
+		{"v2 missing id", NewProviderSessionCredential(ProviderSessionCredentialVersion2, "zitadel", "", "t"), true},
+		{"v2 missing token", NewProviderSessionCredential(ProviderSessionCredentialVersion2, "zitadel", "s1", ""), true},
+		{"missing provider", NewProviderSessionCredential(ProviderSessionCredentialVersion2, "", "s1", "t"), true},
+		{"unknown version", NewProviderSessionCredential(99, "zitadel", "s1", "t"), true},
+		{"oversized session id", NewProviderSessionCredential(ProviderSessionCredentialVersion2, "zitadel", strings.Repeat("s", 201), "t"), true},
+		{"oversized session token", NewProviderSessionCredential(ProviderSessionCredentialVersion2, "zitadel", "s1", strings.Repeat("t", 201)), true},
 	}
 	for _, tc := range cases {
 		if err := tc.cred.Validate(); (err != nil) != tc.wantErr {
@@ -33,10 +40,10 @@ func TestProviderSessionCredentialValidate(t *testing.T) {
 
 	// Only a complete Version-2 credential can finalize an OAuth
 	// authorization request (legacy sessions fail closed into re-login).
-	if !(ProviderSessionCredential{Version: ProviderSessionCredentialVersion2, SessionID: "s1", SessionToken: "t"}).CanFinalizeAuthorization() {
+	if !NewProviderSessionCredential(ProviderSessionCredentialVersion2, "zitadel", "s1", "t").CanFinalizeAuthorization() {
 		t.Fatal("complete v2 credential must finalize")
 	}
-	if (ProviderSessionCredential{Version: ProviderSessionCredentialVersion1, SessionID: "s1"}).CanFinalizeAuthorization() {
+	if NewProviderSessionCredential(ProviderSessionCredentialVersion1, "zitadel", "s1", "").CanFinalizeAuthorization() {
 		t.Fatal("legacy v1 credential must never finalize")
 	}
 }
@@ -45,12 +52,12 @@ func TestSealAndDecryptProviderSessionCredential(t *testing.T) {
 	svc := newTestService(testEncryptor())
 	ctx := context.Background()
 
-	cred := ProviderSessionCredential{
-		Version:      ProviderSessionCredentialVersion2,
-		Provider:     "zitadel",
-		SessionID:    "session-123",
-		SessionToken: "secret-provider-token",
-	}
+	cred := NewProviderSessionCredential(
+		ProviderSessionCredentialVersion2,
+		"zitadel",
+		"session-123",
+		"secret-provider-token",
+	)
 	sealed, err := svc.SealProviderSessionCredential(cred)
 	if err != nil {
 		t.Fatalf("seal: %v", err)
@@ -66,7 +73,8 @@ func TestSealAndDecryptProviderSessionCredential(t *testing.T) {
 		t.Fatalf("decrypt: %v", err)
 	}
 	if got != cred {
-		t.Fatalf("roundtrip mismatch: %+v", got)
+		t.Fatalf("roundtrip mismatch: version=%d provider=%q sessionId=%q",
+			got.Version(), got.Provider(), got.SessionID())
 	}
 
 	// Missing ciphertext fails closed as a legacy/absent credential.
@@ -89,8 +97,92 @@ func TestSealAndDecryptProviderSessionCredential(t *testing.T) {
 	}
 
 	// Invalid credentials never seal.
-	if _, err := svc.SealProviderSessionCredential(ProviderSessionCredential{Version: ProviderSessionCredentialVersion2, SessionID: "s1"}); err == nil {
+	if _, err := svc.SealProviderSessionCredential(NewProviderSessionCredential(ProviderSessionCredentialVersion2, "zitadel", "s1", "")); err == nil {
 		t.Fatal("token-less v2 credential must not seal")
+	}
+}
+
+// TestProviderSessionCredentialNeverLeaks replicates the P3.1 callback
+// leak battery: every rendering path a log line, panic dump, debugger or
+// serializer could take must stay redacted for the runtime credential.
+func TestProviderSessionCredentialNeverLeaks(t *testing.T) {
+	cred := NewProviderSessionCredential(
+		ProviderSessionCredentialVersion2,
+		"zitadel",
+		"session-123",
+		"secret-provider-token",
+	)
+
+	renderings := []string{
+		cred.String(),
+		cred.GoString(),
+		fmt.Sprintf("%v", cred),
+		fmt.Sprintf("%+v", cred),
+		fmt.Sprintf("%#v", cred),
+		fmt.Sprintf("%q", cred),
+		fmt.Sprintf("%s", cred),
+		fmt.Sprintf("%v", &cred),
+		fmt.Sprintf("%+v", &cred),
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	logger.Info("credential", "cred", cred)
+	renderings = append(renderings, buf.String())
+
+	// Marshaling the runtime type itself must never produce the token:
+	// serialization happens exclusively through the private wire DTO.
+	marshaled, err := json.Marshal(cred)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	renderings = append(renderings, string(marshaled))
+
+	for _, rendered := range renderings {
+		if strings.Contains(rendered, "secret-provider-token") || strings.Contains(rendered, "session-123") {
+			t.Fatalf("credential leaked: %q", rendered)
+		}
+	}
+
+	// The narrow getters still expose the values to the decision seam.
+	if cred.SessionID() != "session-123" || cred.SessionToken() != "secret-provider-token" {
+		t.Fatal("narrow seam getters broken")
+	}
+}
+
+// TestProviderSessionTokenNeverLeaks pins the same guarantee on the
+// in-memory bearer carrier crossing the auth → session boundary.
+func TestProviderSessionTokenNeverLeaks(t *testing.T) {
+	token := auth.NewProviderSessionToken("secret-provider-token")
+
+	renderings := []string{
+		token.String(),
+		token.GoString(),
+		fmt.Sprintf("%v", token),
+		fmt.Sprintf("%+v", token),
+		fmt.Sprintf("%#v", token),
+		fmt.Sprintf("%q", token),
+		fmt.Sprintf("%v", &token),
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	logger.Info("token", "token", token)
+	renderings = append(renderings, buf.String())
+	marshaled, err := json.Marshal(token)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	renderings = append(renderings, string(marshaled))
+
+	for _, rendered := range renderings {
+		if strings.Contains(rendered, "secret-provider-token") {
+			t.Fatalf("provider session token leaked: %q", rendered)
+		}
+	}
+	if token.Empty() || token.Token() != "secret-provider-token" {
+		t.Fatal("narrow seam accessors broken")
+	}
+	if !auth.NewProviderSessionToken("").Empty() {
+		t.Fatal("empty token must report Empty")
 	}
 }
 
@@ -103,7 +195,7 @@ func TestCreateSessionSealsVersion2Credential(t *testing.T) {
 		UserID:                   identity.UserID("user_cred_test"),
 		Provider:                 "fake",
 		ProviderSessionReference: "provider-session-ref",
-		ProviderSessionToken:     "provider-session-token",
+		ProviderSessionToken:     auth.NewProviderSessionToken("provider-session-token"),
 		AuthenticationMethods:    []auth.AuthenticationMethod{auth.MethodPassword},
 	}
 	result, err := svc.CreateSession(ctx, input)
@@ -128,11 +220,12 @@ func TestCreateSessionSealsVersion2Credential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decrypt stored credential: %v", err)
 	}
-	if cred.Version != ProviderSessionCredentialVersion2 ||
-		cred.Provider != "fake" ||
-		cred.SessionID != "provider-session-ref" ||
-		cred.SessionToken != "provider-session-token" {
-		t.Fatalf("unexpected credential: %+v", cred)
+	if cred.Version() != ProviderSessionCredentialVersion2 ||
+		cred.Provider() != "fake" ||
+		cred.SessionID() != "provider-session-ref" ||
+		cred.SessionToken() != "provider-session-token" {
+		t.Fatalf("unexpected credential: version=%d provider=%q sessionId=%q",
+			cred.Version(), cred.Provider(), cred.SessionID())
 	}
 	if !cred.CanFinalizeAuthorization() {
 		t.Fatal("sealed credential must be finalizing")
@@ -169,7 +262,7 @@ func TestCreateSessionLegacyPathWithoutToken(t *testing.T) {
 	if _, err := svc.CreateSession(ctx, CreateSessionInput{
 		UserID:                identity.UserID("user_bad_test"),
 		Provider:              "fake",
-		ProviderSessionToken:  "orphan-token",
+		ProviderSessionToken:  auth.NewProviderSessionToken("orphan-token"),
 		AuthenticationMethods: []auth.AuthenticationMethod{auth.MethodPassword},
 	}); err == nil {
 		t.Fatal("token without reference must fail")

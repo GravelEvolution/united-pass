@@ -157,12 +157,13 @@ func (h *AuthorizationDecisionHandlers) DecideRequest(w http.ResponseWriter, r *
 		return
 	}
 
-	writeJSONNoStore(w, r, http.StatusOK, decisionResponseJSON{RedirectURL: outcome.RedirectURL})
+	writeJSONNoStore(w, r, http.StatusOK, decisionResponseJSON{RedirectURL: outcome.RedirectURL()})
 }
 
 // decodeDecisionBody reads the JSON body exactly once, rejecting unknown
-// fields; the body size is already bounded by the global MaxBodyBytes
-// middleware.
+// fields and any trailing content after the first JSON value (a
+// state-changing endpoint must parse strictly); the body size is already
+// bounded by the global MaxBodyBytes middleware.
 func decodeDecisionBody(r *http.Request, body *decisionRequestJSON) error {
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -170,7 +171,14 @@ func decodeDecisionBody(r *http.Request, body *decisionRequestJSON) error {
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
-	return dec.Decode(body)
+	if err := dec.Decode(body); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("httpapi: unexpected trailing JSON after decision body")
+	}
+	return nil
 }
 
 // writeDecisionError maps decision failures onto stable HTTP outcomes.

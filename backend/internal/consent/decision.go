@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
@@ -94,12 +95,33 @@ type DecisionInput struct {
 	Session       *DecisionSession
 }
 
-// DecisionOutcome is the successful decision result: the provider
-// callback URL to expose as the frozen redirectUrl field. The raw value
-// is credential-grade (ADR-0005 §3) — forwarded once to the user agent,
-// never logged, persisted or parsed.
+// DecisionOutcome is the successful decision result. The provider
+// callback URL stays wrapped in the redacted CallbackResult until the
+// HTTP serialization boundary unwraps it via RedirectURL() — the domain
+// layer never hands out a bare, freely loggable string (ADR-0005 §3,
+// §11). Rendering the outcome itself (%v/%#v/slog/json) is always
+// redacted.
 type DecisionOutcome struct {
-	RedirectURL string
+	callback CallbackResult
+}
+
+// NewDecisionOutcome wraps the provider callback into the redacted
+// decision result.
+func NewDecisionOutcome(callback CallbackResult) DecisionOutcome {
+	return DecisionOutcome{callback: callback}
+}
+
+// RedirectURL unwraps the provider callback URL. Only the HTTP response
+// serialization point may call it; the returned value is credential-grade
+// and must never be logged, persisted or parsed (ADR-0005 §11).
+func (o DecisionOutcome) RedirectURL() string { return o.callback.Raw() }
+
+func (DecisionOutcome) String() string { return "[redacted authorization decision outcome]" }
+
+func (DecisionOutcome) GoString() string { return "[redacted authorization decision outcome]" }
+
+func (DecisionOutcome) LogValue() slog.Value {
+	return slog.StringValue("[redacted authorization decision outcome]")
 }
 
 // DecisionService executes interactive user decisions under the §5
@@ -229,10 +251,10 @@ func (s *DecisionService) Decide(
 			}
 			return DecisionOutcome{}, err
 		}
-		if !cred.CanFinalizeAuthorization() || cred.Provider != s.providerName {
+		if !cred.CanFinalizeAuthorization() || cred.Provider() != s.providerName {
 			return DecisionOutcome{}, ErrDecisionCredentialRequired
 		}
-		handle, err = NewSessionHandle(cred.SessionID, cred.SessionToken)
+		handle, err = NewSessionHandle(cred.SessionID(), cred.SessionToken())
 		if err != nil {
 			return DecisionOutcome{}, ErrDecisionCredentialRequired
 		}
@@ -298,7 +320,7 @@ func (s *DecisionService) Decide(
 		_ = s.grants.CommitDenyDecision(ctx, DenyCommit{OperationID: stored.ID})
 	}
 
-	return DecisionOutcome{RedirectURL: callback.Raw()}, nil
+	return NewDecisionOutcome(callback), nil
 }
 
 // validateInteractiveRequest re-derives every business precondition from

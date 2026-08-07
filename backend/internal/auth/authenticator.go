@@ -6,6 +6,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
@@ -74,6 +75,37 @@ type MFAChallengeInput struct {
 	PasskeyAssertion json.RawMessage
 }
 
+// ProviderSessionToken is the in-memory bearer token returned by the
+// authenticating provider call (StatusAuthenticated only). The type keeps
+// the value unexported and redacts every rendering path (%v/%+v/%#v,
+// slog), so the token can travel from the authenticator to the session
+// service without ever being printable by accident; the session service
+// seals it into the encrypted Version-2 credential immediately and the
+// plaintext is dropped.
+type ProviderSessionToken struct {
+	token string
+}
+
+// NewProviderSessionToken wraps a raw provider session token.
+func NewProviderSessionToken(token string) ProviderSessionToken {
+	return ProviderSessionToken{token: token}
+}
+
+// Empty reports whether no token was issued (legacy/MFA paths).
+func (t ProviderSessionToken) Empty() bool { return t.token == "" }
+
+// Token returns the raw provider session token (narrow seam for sealing
+// into the session credential; never log the returned value).
+func (t ProviderSessionToken) Token() string { return t.token }
+
+func (ProviderSessionToken) String() string { return "[redacted provider session token]" }
+
+func (ProviderSessionToken) GoString() string { return "[redacted provider session token]" }
+
+func (ProviderSessionToken) LogValue() slog.Value {
+	return slog.StringValue("[redacted provider session token]")
+}
+
 // AuthenticationResult is the outcome of an authentication attempt. When
 // Status is Authenticated, UserID and ProviderSessionReference are set.
 // When Status is MFARequired, ProviderSessionID, AvailableMethods and
@@ -97,10 +129,11 @@ type AuthenticationResult struct {
 	ProviderSessionReference string
 	// ProviderSessionToken is the provider session token returned by the
 	// authenticating provider call (StatusAuthenticated only). In-memory
-	// bearer material: the HTTP layer hands it to the session service, which
-	// seals it into the encrypted Version-2 credential immediately; it is
-	// never logged, rendered or persisted in plaintext.
-	ProviderSessionToken  string
+	// bearer material wrapped in the redacted ProviderSessionToken type:
+	// the HTTP layer hands it to the session service, which seals it
+	// into the encrypted Version-2 credential immediately; it is never
+	// logged, rendered or persisted in plaintext.
+	ProviderSessionToken  ProviderSessionToken
 	AuthenticationMethods []AuthenticationMethod
 	// PasskeyRequestOptions carries the WebAuthn PublicKeyCredentialRequestOptions
 	// (JSON object) when StatusMFARequired and passkey is available. The

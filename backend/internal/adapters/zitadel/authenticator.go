@@ -453,7 +453,7 @@ func (a *Authenticator) resolveAuthenticated(
 		UserID:                   user.ID,
 		Provider:                 a.provider,
 		ProviderSessionReference: sessionID,
-		ProviderSessionToken:     sessionToken,
+		ProviderSessionToken:     auth.NewProviderSessionToken(sessionToken),
 		AuthenticationMethods:    methods,
 	}, nil
 }
