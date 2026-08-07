@@ -19,6 +19,7 @@ import (
 
 	appv1 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/app"
 	management "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/management"
+	objectv1 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/object"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -52,6 +53,16 @@ type stubManagement struct {
 	removed       int
 	rotateResp    *management.RegenerateOIDCClientSecretResponse
 	rotateErr     error
+
+	// Backfill hooks. listFn scripts the paginated app listing; getByApp
+	// serves per-app reads; applyLoginVersion makes the stub behave like the
+	// real provider: a successful UpdateOIDCAppConfig persists the submitted
+	// LoginVersion into the stored config, so a read-back observes it.
+	listFn            func(offset uint64, limit uint32) (*management.ListAppsResponse, error)
+	listCalls         int
+	getByApp          map[string]*management.GetAppByIDResponse
+	applyLoginVersion bool
+	updateCfgCount    int
 }
 
 func (s *stubManagement) GetProjectByID(ctx context.Context, in *management.GetProjectByIDRequest, opts ...grpc.CallOption) (*management.GetProjectByIDResponse, error) {
@@ -59,6 +70,10 @@ func (s *stubManagement) GetProjectByID(ctx context.Context, in *management.GetP
 }
 
 func (s *stubManagement) ListApps(ctx context.Context, in *management.ListAppsRequest, opts ...grpc.CallOption) (*management.ListAppsResponse, error) {
+	if s.listFn != nil {
+		s.listCalls++
+		return s.listFn(in.GetQuery().GetOffset(), in.GetQuery().GetLimit())
+	}
 	if s.listErr != nil {
 		return nil, s.listErr
 	}
@@ -69,6 +84,9 @@ func (s *stubManagement) ListApps(ctx context.Context, in *management.ListAppsRe
 }
 
 func (s *stubManagement) GetAppByID(ctx context.Context, in *management.GetAppByIDRequest, opts ...grpc.CallOption) (*management.GetAppByIDResponse, error) {
+	if s.getByApp != nil {
+		return s.getByApp[in.GetAppId()], s.getErr
+	}
 	return s.getResp, s.getErr
 }
 
@@ -85,7 +103,16 @@ func (s *stubManagement) UpdateApp(ctx context.Context, in *management.UpdateApp
 
 func (s *stubManagement) UpdateOIDCAppConfig(ctx context.Context, in *management.UpdateOIDCAppConfigRequest, opts ...grpc.CallOption) (*management.UpdateOIDCAppConfigResponse, error) {
 	s.updateCfgReq = in
-	return &management.UpdateOIDCAppConfigResponse{}, s.updateCfgErr
+	s.updateCfgCount++
+	if s.updateCfgErr != nil {
+		return nil, s.updateCfgErr
+	}
+	if s.applyLoginVersion {
+		if resp, ok := s.getByApp[in.GetAppId()]; ok {
+			resp.GetApp().GetOidcConfig().LoginVersion = in.GetLoginVersion()
+		}
+	}
+	return &management.UpdateOIDCAppConfigResponse{}, nil
 }
 
 func (s *stubManagement) DeactivateApp(ctx context.Context, in *management.DeactivateAppRequest, opts ...grpc.CallOption) (*management.DeactivateAppResponse, error) {
@@ -664,5 +691,265 @@ func TestProvisioner_VerifyProject(t *testing.T) {
 func TestNewProvisioner_FailsClosedWithoutProject(t *testing.T) {
 	if _, err := NewProvisioner(&stubManagement{}, "", testInteractionBase, nil); err == nil {
 		t.Fatal("empty project id must fail closed")
+	}
+}
+
+// --- LoginVersion backfill (ADR-0005 §1 rollout step 4) ---
+
+// backfillAppFixture builds a stored app with an OIDC config carrying the
+// given LoginVersion (nil = unset, the pre-Phase-3 state).
+func backfillAppFixture(appID, name string, loginVersion *appv1.LoginVersion) *management.GetAppByIDResponse {
+	return &management.GetAppByIDResponse{
+		App: &appv1.App{
+			Id:   appID,
+			Name: name,
+			Config: &appv1.App_OidcConfig{
+				OidcConfig: &appv1.OIDCConfig{
+					ClientId:       "client-" + appID,
+					RedirectUris:   []string{"https://legacy.example.com/cb"},
+					ResponseTypes:  []appv1.OIDCResponseType{appv1.OIDCResponseType_OIDC_RESPONSE_TYPE_CODE},
+					GrantTypes:     []appv1.OIDCGrantType{appv1.OIDCGrantType_OIDC_GRANT_TYPE_AUTHORIZATION_CODE},
+					AppType:        appv1.OIDCAppType_OIDC_APP_TYPE_WEB,
+					AuthMethodType: appv1.OIDCAuthMethodType_OIDC_AUTH_METHOD_TYPE_BASIC,
+					DevMode:        true,
+					LoginVersion:   loginVersion,
+				},
+			},
+		},
+	}
+}
+
+func loginV2Fixture(base string) *appv1.LoginVersion {
+	return &appv1.LoginVersion{
+		Version: &appv1.LoginVersion_LoginV2{LoginV2: &appv1.LoginV2{BaseUri: &base}},
+	}
+}
+
+// singleAppList scripts a one-page ListApps containing the given apps.
+func singleAppList(apps ...*appv1.App) func(uint64, uint32) (*management.ListAppsResponse, error) {
+	return func(offset uint64, _ uint32) (*management.ListAppsResponse, error) {
+		if offset > 0 {
+			return &management.ListAppsResponse{}, nil
+		}
+		return &management.ListAppsResponse{
+			Result: apps,
+		}, nil
+	}
+}
+
+func TestBackfill_AlreadyCorrectWritesNothing(t *testing.T) {
+	stub := &stubManagement{
+		listFn:   singleAppList(&appv1.App{Id: "app-1", Name: "Correct App"}),
+		getByApp: map[string]*management.GetAppByIDResponse{"app-1": backfillAppFixture("app-1", "Correct App", loginV2Fixture(testInteractionBase))},
+	}
+	p := newTestProvisioner(t, stub)
+
+	report, err := p.BackfillLoginVersions(context.Background())
+	if err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if !report.Success() || report.Verified != 1 || report.Repaired != 0 || stub.updateCfgCount != 0 {
+		t.Fatalf("report: %+v, updates: %d", report, stub.updateCfgCount)
+	}
+}
+
+func TestBackfill_RepairsMissingLoginVersionAndReadsBack(t *testing.T) {
+	stub := &stubManagement{
+		listFn:            singleAppList(&appv1.App{Id: "app-1", Name: "Legacy App"}),
+		getByApp:          map[string]*management.GetAppByIDResponse{"app-1": backfillAppFixture("app-1", "Legacy App", nil)},
+		applyLoginVersion: true,
+	}
+	p := newTestProvisioner(t, stub)
+
+	report, err := p.BackfillLoginVersions(context.Background())
+	if err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if !report.Success() || report.Repaired != 1 || stub.updateCfgCount != 1 {
+		t.Fatalf("report: %+v, updates: %d", report, stub.updateCfgCount)
+	}
+	wantLoginV2(t, stub.updateCfgReq.LoginVersion, testInteractionBase)
+	// The repair preserves the app's existing config.
+	if len(stub.updateCfgReq.RedirectUris) != 1 || stub.updateCfgReq.RedirectUris[0] != "https://legacy.example.com/cb" {
+		t.Errorf("repair must preserve redirect uris: %v", stub.updateCfgReq.RedirectUris)
+	}
+}
+
+func TestBackfill_RepairsWrongBaseURI(t *testing.T) {
+	stub := &stubManagement{
+		listFn:            singleAppList(&appv1.App{Id: "app-1", Name: "Wrong Base"}),
+		getByApp:          map[string]*management.GetAppByIDResponse{"app-1": backfillAppFixture("app-1", "Wrong Base", loginV2Fixture("https://stale.example.com/_interaction"))},
+		applyLoginVersion: true,
+	}
+	p := newTestProvisioner(t, stub)
+
+	report, err := p.BackfillLoginVersions(context.Background())
+	if err != nil || !report.Success() || report.Repaired != 1 {
+		t.Fatalf("report: %+v, err: %v", report, err)
+	}
+	wantLoginV2(t, stub.updateCfgReq.LoginVersion, testInteractionBase)
+}
+
+func TestBackfill_RepairsLoginV1PreservingConfig(t *testing.T) {
+	fixture := richOIDCAppFixture()
+	fixture.GetApp().Name = "LoginV1 App"
+	stub := &stubManagement{
+		listFn:            singleAppList(&appv1.App{Id: "prov-app-rich", Name: "LoginV1 App"}),
+		getByApp:          map[string]*management.GetAppByIDResponse{"prov-app-rich": fixture},
+		applyLoginVersion: true,
+	}
+	p := newTestProvisioner(t, stub)
+
+	report, err := p.BackfillLoginVersions(context.Background())
+	if err != nil || !report.Success() || report.Repaired != 1 {
+		t.Fatalf("report: %+v, err: %v", report, err)
+	}
+	cfg := stub.updateCfgReq
+	wantLoginV2(t, cfg.LoginVersion, testInteractionBase)
+	// Full-config preservation holds on the backfill path too.
+	if !cfg.AccessTokenRoleAssertion || !cfg.IdTokenRoleAssertion || !cfg.IdTokenUserinfoAssertion {
+		t.Error("role/userinfo assertions not preserved")
+	}
+	if cfg.ClockSkew.AsDuration() != 5*time.Minute || !cfg.SkipNativeAppSuccessPage {
+		t.Error("clock skew / native success page not preserved")
+	}
+	if cfg.BackChannelLogoutUri != "https://old.example.com/backchannel" {
+		t.Errorf("back-channel logout not preserved: %q", cfg.BackChannelLogoutUri)
+	}
+}
+
+func TestBackfill_SkipsNonOIDCApp(t *testing.T) {
+	stub := &stubManagement{
+		listFn: singleAppList(
+			&appv1.App{Id: "app-api", Name: "API App"},
+			&appv1.App{Id: "app-oidc", Name: "OIDC App"},
+		),
+		getByApp: map[string]*management.GetAppByIDResponse{
+			"app-api":  {App: &appv1.App{Id: "app-api", Name: "API App", Config: &appv1.App_ApiConfig{ApiConfig: &appv1.APIConfig{}}}},
+			"app-oidc": backfillAppFixture("app-oidc", "OIDC App", loginV2Fixture(testInteractionBase)),
+		},
+	}
+	p := newTestProvisioner(t, stub)
+
+	report, err := p.BackfillLoginVersions(context.Background())
+	if err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if !report.Success() || report.Skipped != 1 || report.Verified != 1 || stub.updateCfgCount != 0 {
+		t.Fatalf("report: %+v, updates: %d", report, stub.updateCfgCount)
+	}
+}
+
+func TestBackfill_FailsClosedWithoutInteractionBase(t *testing.T) {
+	p := newLegacyProvisioner(t, &stubManagement{})
+	if _, err := p.BackfillLoginVersions(context.Background()); err == nil {
+		t.Fatal("backfill without an interaction base must fail closed")
+	}
+}
+
+func TestBackfill_RepairFailureFailsJob(t *testing.T) {
+	stub := &stubManagement{
+		listFn:       singleAppList(&appv1.App{Id: "app-1", Name: "Legacy App"}),
+		getByApp:     map[string]*management.GetAppByIDResponse{"app-1": backfillAppFixture("app-1", "Legacy App", nil)},
+		updateCfgErr: status.Error(codes.Unavailable, "down"),
+	}
+	p := newTestProvisioner(t, stub)
+
+	report, err := p.BackfillLoginVersions(context.Background())
+	if err == nil || report.Success() || report.Failed != 1 {
+		t.Fatalf("report: %+v, err: %v", report, err)
+	}
+}
+
+func TestBackfill_ReadBackMismatchFailsJob(t *testing.T) {
+	// The provider acknowledges the update but the read-back still shows the
+	// stale configuration: the job must fail instead of trusting the write.
+	stub := &stubManagement{
+		listFn:            singleAppList(&appv1.App{Id: "app-1", Name: "Legacy App"}),
+		getByApp:          map[string]*management.GetAppByIDResponse{"app-1": backfillAppFixture("app-1", "Legacy App", nil)},
+		applyLoginVersion: false,
+	}
+	p := newTestProvisioner(t, stub)
+
+	report, err := p.BackfillLoginVersions(context.Background())
+	if err == nil || report.Success() || report.Failed != 1 {
+		t.Fatalf("report: %+v, err: %v", report, err)
+	}
+}
+
+func TestBackfill_ReadFailureFailsJob(t *testing.T) {
+	stub := &stubManagement{
+		listFn: singleAppList(&appv1.App{Id: "app-1", Name: "Legacy App"}),
+		getErr: status.Error(codes.NotFound, "AUTHZ-x"),
+	}
+	p := newTestProvisioner(t, stub)
+
+	report, err := p.BackfillLoginVersions(context.Background())
+	if err == nil || report.Success() || report.Failed != 1 {
+		t.Fatalf("report: %+v, err: %v", report, err)
+	}
+}
+
+func TestBackfill_PaginatesAllPages(t *testing.T) {
+	apps := []*appv1.App{
+		{Id: "app-1", Name: "One"},
+		{Id: "app-2", Name: "Two"},
+		{Id: "app-3", Name: "Three"},
+	}
+	var offsets []uint64
+	stub := &stubManagement{
+		listFn: func(offset uint64, limit uint32) (*management.ListAppsResponse, error) {
+			offsets = append(offsets, offset)
+			// Page size 2 forces a second page for 3 apps. The provider
+			// reports the total (ZITADEL always does), which is authoritative:
+			// the short final page must not end the walk early.
+			start := int(offset)
+			end := start + 2
+			if end > len(apps) {
+				end = len(apps)
+			}
+			if start >= len(apps) {
+				return &management.ListAppsResponse{Details: &objectv1.ListDetails{TotalResult: uint64(len(apps))}}, nil
+			}
+			return &management.ListAppsResponse{
+				Details: &objectv1.ListDetails{TotalResult: uint64(len(apps))},
+				Result:  apps[start:end],
+			}, nil
+		},
+		getByApp: map[string]*management.GetAppByIDResponse{
+			"app-1": backfillAppFixture("app-1", "One", loginV2Fixture(testInteractionBase)),
+			"app-2": backfillAppFixture("app-2", "Two", loginV2Fixture(testInteractionBase)),
+			"app-3": backfillAppFixture("app-3", "Three", loginV2Fixture(testInteractionBase)),
+		},
+	}
+	p := newTestProvisioner(t, stub)
+
+	report, err := p.BackfillLoginVersions(context.Background())
+	if err != nil || !report.Success() || report.Verified != 3 {
+		t.Fatalf("report: %+v, err: %v", report, err)
+	}
+	if len(offsets) != 2 || offsets[0] != 0 || offsets[1] != 2 {
+		t.Fatalf("pagination offsets = %v, want [0 2]", offsets)
+	}
+}
+
+func TestBackfill_RunTwiceSecondNoOp(t *testing.T) {
+	stub := &stubManagement{
+		listFn:            singleAppList(&appv1.App{Id: "app-1", Name: "Legacy App"}),
+		getByApp:          map[string]*management.GetAppByIDResponse{"app-1": backfillAppFixture("app-1", "Legacy App", nil)},
+		applyLoginVersion: true,
+	}
+	p := newTestProvisioner(t, stub)
+
+	first, err := p.BackfillLoginVersions(context.Background())
+	if err != nil || !first.Success() || first.Repaired != 1 {
+		t.Fatalf("first run: %+v, err: %v", first, err)
+	}
+	second, err := p.BackfillLoginVersions(context.Background())
+	if err != nil || !second.Success() || second.Verified != 1 || second.Repaired != 0 {
+		t.Fatalf("second run: %+v, err: %v", second, err)
+	}
+	if stub.updateCfgCount != 1 {
+		t.Fatalf("second run must be a no-op, got %d config updates", stub.updateCfgCount)
 	}
 }

@@ -243,6 +243,174 @@ func (p *Provisioner) ensureLoginVersion(ctx context.Context, providerApplicatio
 	return nil
 }
 
+// BackfillOutcome classifies one application in the LoginVersion backfill
+// report.
+type BackfillOutcome string
+
+const (
+	// BackfillVerified: the app already carries the exact desired LoginV2
+	// interaction configuration; nothing was written.
+	BackfillVerified BackfillOutcome = "verified"
+	// BackfillRepaired: a missing or stale LoginVersion was rewritten and the
+	// authoritative read-back confirmed the exact desired configuration.
+	BackfillRepaired BackfillOutcome = "repaired"
+	// BackfillSkipped: the app is not an OIDC application and has no
+	// LoginVersion to manage.
+	BackfillSkipped BackfillOutcome = "skipped"
+	// BackfillFailed: repair or authoritative read-back failed; the rollout
+	// must not proceed to cutover while any entry carries this outcome.
+	BackfillFailed BackfillOutcome = "failed"
+)
+
+// BackfillEntry is the per-application result of one backfill pass.
+type BackfillEntry struct {
+	ApplicationID string
+	Name          string
+	Outcome       BackfillOutcome
+}
+
+// BackfillReport is the auditable result of BackfillLoginVersions.
+type BackfillReport struct {
+	Entries  []BackfillEntry
+	Verified int
+	Repaired int
+	Skipped  int
+	Failed   int
+}
+
+// Success reports whether every application is on the desired configuration.
+// Any failure makes the whole job non-successful: the rollout runbook blocks
+// the public OAuth cutover on it (ADR-0005 §1).
+func (r BackfillReport) Success() bool { return r.Failed == 0 }
+
+// backfillPageLimit / backfillMaxPages bound the application listing. The
+// project must never be assumed to fit in a single page, but a provider that
+// keeps returning full pages past the reported total must not loop forever.
+const (
+	backfillPageLimit = 100
+	backfillMaxPages  = 1000
+)
+
+// BackfillLoginVersions enforces the LoginV2 interaction configuration on
+// every OIDC application of the shared project. It is the explicit one-time
+// migration for pre-Phase-3 applications that never pass through
+// ProvisionClient or UpdateClient again: list every app, repair a missing or
+// stale LoginVersion with the same preserving read-modify-write every other
+// path uses, then read the configuration back live and require an exact
+// match — never trust the write response alone. Any repair or read-back
+// failure marks the application failed and makes the whole job
+// non-successful. The job is idempotent: a second run verifies everything
+// and writes nothing.
+func (p *Provisioner) BackfillLoginVersions(ctx context.Context) (BackfillReport, error) {
+	report := BackfillReport{}
+	if p.interactionBaseURI == "" {
+		// Fail closed: a backfill without a derived interaction base would
+		// "verify" apps into the legacy LoginV1 state. Production validation
+		// never allows an empty UP_OAUTH_PUBLIC_ORIGIN.
+		return report, errors.New("zitadel: login version backfill requires the derived interaction base URI (UP_OAUTH_PUBLIC_ORIGIN)")
+	}
+	apps, err := p.listAllApps(ctx)
+	if err != nil {
+		return report, err
+	}
+	desired := p.desiredLoginVersion()
+	for _, app := range apps {
+		entry := BackfillEntry{ApplicationID: app.GetId(), Name: app.GetName()}
+		entry.Outcome = p.backfillApp(ctx, app.GetId(), desired)
+		switch entry.Outcome {
+		case BackfillVerified:
+			report.Verified++
+		case BackfillRepaired:
+			report.Repaired++
+		case BackfillSkipped:
+			report.Skipped++
+		case BackfillFailed:
+			report.Failed++
+		}
+		report.Entries = append(report.Entries, entry)
+	}
+	if !report.Success() {
+		// The per-app report is the audit trail; the error is the rollout
+		// gate. Raw provider detail never leaves the adapter.
+		return report, fmt.Errorf("%w: backfill_login_versions (%d of %d applications failed)",
+			applications.ErrProviderUnavailable, report.Failed, len(report.Entries))
+	}
+	return report, nil
+}
+
+// backfillApp enforces the desired LoginVersion on one application and
+// returns its outcome. Non-OIDC apps are skipped; every repaired app gets an
+// authoritative read-back that must match exactly.
+func (p *Provisioner) backfillApp(ctx context.Context, providerApplicationID string, desired *appv1.LoginVersion) BackfillOutcome {
+	appResp, err := p.mgmt.GetAppByID(ctx, &management.GetAppByIDRequest{
+		ProjectId: p.projectID,
+		AppId:     providerApplicationID,
+	})
+	if err != nil {
+		p.mapError("backfill_read_app", err)
+		return BackfillFailed
+	}
+	cfg := appResp.GetApp().GetOidcConfig()
+	if cfg == nil {
+		// API or SAML apps have no LoginVersion to manage.
+		return BackfillSkipped
+	}
+	if loginVersionMatches(cfg.GetLoginVersion(), desired) {
+		return BackfillVerified
+	}
+	if err := p.ensureLoginVersion(ctx, providerApplicationID, cfg); err != nil {
+		return BackfillFailed
+	}
+	// Authoritative read-back: the write response is never trusted alone.
+	read, err := p.mgmt.GetAppByID(ctx, &management.GetAppByIDRequest{
+		ProjectId: p.projectID,
+		AppId:     providerApplicationID,
+	})
+	if err != nil {
+		p.mapError("backfill_read_back", err)
+		return BackfillFailed
+	}
+	if !loginVersionMatches(read.GetApp().GetOidcConfig().GetLoginVersion(), desired) {
+		p.logFailure("backfill_login_version", "read_back_mismatch")
+		return BackfillFailed
+	}
+	return BackfillRepaired
+}
+
+// listAllApps walks every page of the project application listing.
+func (p *Provisioner) listAllApps(ctx context.Context) ([]*appv1.App, error) {
+	var all []*appv1.App
+	var offset uint64
+	for page := 0; page < backfillMaxPages; page++ {
+		resp, err := p.mgmt.ListApps(ctx, &management.ListAppsRequest{
+			ProjectId: p.projectID,
+			Query:     &objectv1.ListQuery{Offset: offset, Limit: backfillPageLimit},
+		})
+		if err != nil {
+			return nil, p.mapError("backfill_list_apps", err)
+		}
+		result := resp.GetResult()
+		all = append(all, result...)
+		total := resp.GetDetails().GetTotalResult()
+		if total > 0 {
+			// The provider reports the total: it is authoritative, so a short
+			// page (e.g. a server-side limit below the requested one) never
+			// terminates the walk early.
+			if len(result) == 0 || uint64(len(all)) >= total {
+				return all, nil
+			}
+			offset += uint64(len(result))
+			continue
+		}
+		// No reported total: fall back to the short-page heuristic.
+		if len(result) == 0 || len(result) < backfillPageLimit {
+			return all, nil
+		}
+		offset += uint64(len(result))
+	}
+	return nil, fmt.Errorf("%w: backfill_list_apps", applications.ErrProviderUnavailable)
+}
+
 // EnableClient reactivates the provider app. Already-active apps are a
 // no-op so retries stay idempotent.
 func (p *Provisioner) EnableClient(ctx context.Context, providerApplicationID string) error {

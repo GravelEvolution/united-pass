@@ -74,8 +74,21 @@ serves from Next.js — a confusing half-switched state.
 1. Deploy the Gateway + API (this phase's Go changes).
 2. Deploy the proxy topology, **without** cutting production traffic.
 3. Enable provisioner LoginVersion support (P3.6 commit 3).
-4. Backfill existing OIDC apps to `LoginV2{BaseURI=<derived interaction base>}`.
-5. Read-back verify every app's OIDC config (live, not assumed).
+4. Backfill existing OIDC apps and read-back verify every one of them:
+
+   ```
+   go run ./cmd/oauth-topology-backfill
+   ```
+
+   The job lists every project app (all pages), skips non-OIDC apps, repairs
+   a missing or stale LoginVersion with the same preserving read-modify-write
+   the live paths use, and reads each app back live — the write response is
+   never trusted alone. It prints one line per app plus a summary and exits
+   non-zero unless every OIDC app is `verified` or `repaired` (and none
+   `failed`). It is idempotent: a second run repairs nothing and verifies
+   everything. This step MUST exit 0 before step 8; a failed run blocks the
+   cutover.
+5. Re-run the job once to confirm idempotence (all `verified`, zero writes).
 6. Run the live path-prefix probe: `scripts/topology-probe.sh` against the
    real instance; record the observed redirect Location (authRequest redacted).
 7. Verify discovery: `issuer` and all endpoint URLs equal the public origin.

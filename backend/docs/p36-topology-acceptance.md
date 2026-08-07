@@ -5,7 +5,8 @@
 - 结论：
   - **live read-back verification: passed**（创建原子提交 LoginVersion + UpdateClient RMW 后双重读回）；
   - **live path-prefix probe: passed**（集成测试与 `scripts/topology-probe.sh` 两条独立通道均判定 `prefix preserved: YES`）；
-  - **discovery / issuer 一致性: passed**（issuer == public origin，全部协议端点齐备）。
+  - **discovery / issuer 一致性: passed**（issuer == public origin，全部协议端点齐备）；
+  - **pre-P3 app backfill job: passed**（`cmd/oauth-topology-backfill` 实机修复 LoginV1 旧 app，二次运行幂等，修复后 authorize 重定向落入 `/_interaction`）。
 
 ## 1. 验收环境
 
@@ -52,7 +53,24 @@
 
 即：ZITADEL v2.71 的 login redirect 构造保留 `/_interaction` 路径前缀（`url.URL.JoinPath` 语义），无需退到 dedicated interaction host（ADR-0005 §1 的 fallback 分支不触发）。两次 probe 各留下 1 个未完成 auth request，随 provider 默认 TTL 过期作废，未被消费。
 
-## 5. 遗留与后续
+## 5. Pre-P3 application backfill（`cmd/oauth-topology-backfill`）
+
+复现生产场景：手工创建一个 `LoginVersion = LoginV1` 的旧 OIDC app（`appId=385240630600663043`，模拟 pre-P3 状态），然后实跑 backfill job：
+
+| 运行 | 输出 | exit |
+| --- | --- | --- |
+| 第 1 遍 | `repaired 385240630600663043 pre-P3 legacy fixture (backfill test)`；`verified=0 repaired=1 skipped=0 failed=0` | 0 |
+| 第 2 遍（幂等验证） | `verified 385240630600663043 …`；`verified=1 repaired=0 skipped=0 failed=0`（零写入） | 0 |
+
+行为验证（独立于 job 自身的 read-back）：
+
+- Management API 读回修复后的 app：`loginVersion = {"loginV2":{"baseUri":"http://localhost:18080/_interaction"}}`；
+- 该 app 的 `/oauth/v2/authorize` 返回 302 → `http://localhost:18080/_interaction/login?authRequest=V2_38524…（redacted）`——修复前该 app 会走 ZITADEL 自带 LoginV1 `/login`，修复后落入 Gateway 前缀；
+- fixture app 验证后已删除，probe 留下的 1 个未完成 auth request 随 TTL 过期作废。
+
+job 语义：list 全部页 → 非 OIDC skip → 缺失/错误 LoginVersion 用与在线路径相同的保留式 RMW 修复 → 每个修复后强制 live read-back exact-match；任一失败即整体 non-success（exit 非 0），runbook 步骤 4–5 以此为准入 cutover 的门禁。
+
+## 6. 遗留与后续
 
 - P3.9 最终 acceptance 须对同一拓扑再跑一遍上述 probe（runbook §4 步骤 6–7）。
 - 生产部署时 `UP_OAUTH_PUBLIC_ORIGIN` 必须为 HTTPS origin；`interactionBaseURI` 一律派生，禁止独立配置（见 `docs/topology-runbook.md` §2）。
