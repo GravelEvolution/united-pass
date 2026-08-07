@@ -21,6 +21,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
+	"github.com/GravelEvolution/united-pass/backend/internal/consent"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
@@ -177,11 +178,24 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		providerName = "fake"
 	}
 
+	// Authorization-request reader for consent resolution (ADR-0005 §2,
+	// §12): the ZITADEL oidc.v2 adapter in real setups, the fake provider
+	// for development. Resolution only ever reads through this seam — the
+	// completion methods are never reachable from the resolution GET.
+	var authRequestReader consent.AuthRequestReader
+	if sdkClient != nil {
+		authRequestReader = zitadel.NewAuthRequestAdapter(sdkClient.OIDCServiceV2())
+	} else if _, isFake := authenticator.(*auth.FakeAuthenticator); isFake && !cfg.IsProduction() {
+		authRequestReader = consent.NewFakeAuthRequestProvider()
+	}
+
+	var appRepo *postgres.ApplicationRepository
 	var appHandlers *httpapi.ApplicationHandlers
 	var reauthHandlers *httpapi.ReauthHandlers
 	var workerStops []func()
 	if pool != nil && provisioner != nil && userReader != nil && sessionSvc != nil && cfg.Session.EncryptionKey != "" {
-		appRepo, err := postgres.NewApplicationRepository(pool.PgxPool(), cfg.Session.EncryptionKey)
+		var err error
+		appRepo, err = postgres.NewApplicationRepository(pool.PgxPool(), cfg.Session.EncryptionKey)
 		if err != nil {
 			return nil, fmt.Errorf("application repository: %w", err)
 		}
@@ -215,6 +229,21 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 
 		appHandlers = httpapi.NewApplicationHandlers(appSvc, permResolver, reauthVerifier,
 			rotationRates, cfg.Rotation.RateLimit, cfg.Rotation.RateWindow, logger)
+	}
+
+	// Consent resolution (P3.3, ADR-0005 §2): the side-effect free
+	// derivation of the ConsentResolution union. Every dependency must be
+	// present or the route stays unregistered (fail closed).
+	var authorizationHandlers *httpapi.AuthorizationHandlers
+	if pool != nil && sessionSvc != nil && appRepo != nil && authRequestReader != nil && providerName != "" {
+		grantRepo := postgres.NewGrantRepository(pool.PgxPool())
+		resolutionSvc, err := consent.NewResolutionService(
+			authRequestReader, appRepo, grantRepo, providerName,
+			func() time.Time { return time.Now().UTC() })
+		if err != nil {
+			return nil, fmt.Errorf("consent resolution service: %w", err)
+		}
+		authorizationHandlers = httpapi.NewAuthorizationHandlers(resolutionSvc, logger)
 	}
 
 	health := httpapi.NewHealthHandlers(readinessCheckers...)
@@ -251,6 +280,19 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			if reauthHandlers != nil {
 				r.Post("/auth/reauthentication", reauthHandlers.Request)
 				r.Post("/auth/reauthentication/mfa", reauthHandlers.CompleteMFA)
+			}
+		})
+
+		// Consent resolution: side-effect free GET behind an optional
+		// session — an absent session resolves to the unauthenticated
+		// outcome instead of a 401 (frozen ConsentResolution union,
+		// ADR-0005 §12).
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.OptionalSession(sessionSvc, userChecker, logger))
+			}
+			if authorizationHandlers != nil {
+				r.Get("/authorization/requests/{requestId}", authorizationHandlers.ResolveRequest)
 			}
 		})
 
