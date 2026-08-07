@@ -32,20 +32,26 @@ const MFATokenBytes = 32
 // with a TTL. The raw session token and CSRF token are never stored here —
 // only their hashes.
 type SessionRecord struct {
-	Version                  int                         `json:"version"`
-	SessionID                SessionID                   `json:"sessionId"`
-	UserID                   identity.UserID             `json:"userId"`
-	Provider                 string                      `json:"provider"`
-	ProviderSessionReference string                      `json:"providerSessionReference,omitempty"`
-	CreatedAt                time.Time                   `json:"createdAt"`
-	LastSeenAt               time.Time                   `json:"lastSeenAt"`
-	ExpiresAt                time.Time                   `json:"expiresAt"`
-	AuthenticationTime       time.Time                   `json:"authenticationTime"`
-	AuthenticationMethods    []auth.AuthenticationMethod `json:"authenticationMethods"`
-	ReauthenticatedUntil     *time.Time                  `json:"reauthenticatedUntil,omitempty"`
-	CSRFTokenHash            string                      `json:"csrfTokenHash"`
-	UserAgentHash            string                      `json:"userAgentHash,omitempty"`
-	Remember                 bool                        `json:"remember"`
+	Version                  int             `json:"version"`
+	SessionID                SessionID       `json:"sessionId"`
+	UserID                   identity.UserID `json:"userId"`
+	Provider                 string          `json:"provider"`
+	ProviderSessionReference string          `json:"providerSessionReference,omitempty"`
+	// ProviderSessionCredential is the sealed (AES-256-GCM) versioned
+	// provider session handle (ADR-0005 §3). Sessions created before the
+	// ADR-0003 revision carry none — they cannot finalize OAuth
+	// authorization requests and must re-login. Bearer material: never
+	// log, audit, persist elsewhere or expose to HTTP.
+	ProviderSessionCredential EncryptedProviderSessionCredential `json:"providerSessionCredential,omitempty"`
+	CreatedAt                 time.Time                          `json:"createdAt"`
+	LastSeenAt                time.Time                          `json:"lastSeenAt"`
+	ExpiresAt                 time.Time                          `json:"expiresAt"`
+	AuthenticationTime        time.Time                          `json:"authenticationTime"`
+	AuthenticationMethods     []auth.AuthenticationMethod        `json:"authenticationMethods"`
+	ReauthenticatedUntil      *time.Time                         `json:"reauthenticatedUntil,omitempty"`
+	CSRFTokenHash             string                             `json:"csrfTokenHash"`
+	UserAgentHash             string                             `json:"userAgentHash,omitempty"`
+	Remember                  bool                               `json:"remember"`
 }
 
 // Principal is the minimal authenticated identity placed into the request

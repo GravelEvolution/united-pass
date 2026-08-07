@@ -222,6 +222,7 @@ func (h *AuthHandlers) handleAuthenticated(w http.ResponseWriter, r *http.Reques
 		UserID:                   result.UserID,
 		Provider:                 result.Provider,
 		ProviderSessionReference: result.ProviderSessionReference,
+		ProviderSessionToken:     result.ProviderSessionToken,
 		AuthenticationMethods:    result.AuthenticationMethods,
 		Remember:                 remember,
 		UserAgent:                r.UserAgent(),

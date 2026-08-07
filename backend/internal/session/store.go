@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -74,9 +75,15 @@ type CreateSessionInput struct {
 	UserID                   identity.UserID
 	Provider                 string
 	ProviderSessionReference string
-	AuthenticationMethods    []auth.AuthenticationMethod
-	Remember                 bool
-	UserAgent                string
+	// ProviderSessionToken is the provider session token returned by the
+	// authenticating provider call. When present it is sealed immediately
+	// into a Version-2 ProviderSessionCredential (ADR-0005 §3); the
+	// plaintext is never stored and must be dropped by the caller once
+	// session creation succeeds. In-memory only — never log or render.
+	ProviderSessionToken  string
+	AuthenticationMethods []auth.AuthenticationMethod
+	Remember              bool
+	UserAgent             string
 }
 
 // CreateSessionResult contains the newly created session's raw tokens and
@@ -118,20 +125,43 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		return CreateSessionResult{}, err
 	}
 
+	// Seal the provider session handle into the versioned credential
+	// (ADR-0005 §3): a token-bearing Version-2 credential for providers
+	// that returned one, no credential at all otherwise (legacy
+	// Version-1 sessions cannot finalize OAuth authorization requests and
+	// fail closed into re-login).
+	var sealedCredential EncryptedProviderSessionCredential
+	if input.ProviderSessionToken != "" {
+		if input.ProviderSessionReference == "" {
+			return CreateSessionResult{}, errors.New("session: provider session token without a session reference")
+		}
+		sealed, err := s.SealProviderSessionCredential(ProviderSessionCredential{
+			Version:      ProviderSessionCredentialVersion2,
+			Provider:     input.Provider,
+			SessionID:    input.ProviderSessionReference,
+			SessionToken: input.ProviderSessionToken,
+		})
+		if err != nil {
+			return CreateSessionResult{}, err
+		}
+		sealedCredential = sealed
+	}
+
 	record := SessionRecord{
-		Version:                  1,
-		SessionID:                generateSessionID(),
-		UserID:                   input.UserID,
-		Provider:                 input.Provider,
-		ProviderSessionReference: providerRef,
-		CreatedAt:                now,
-		LastSeenAt:               now,
-		ExpiresAt:                now.Add(ttl),
-		AuthenticationTime:       now,
-		AuthenticationMethods:    input.AuthenticationMethods,
-		CSRFTokenHash:            HashToken(csrfToken),
-		UserAgentHash:            HashUserAgent(input.UserAgent),
-		Remember:                 input.Remember,
+		Version:                   1,
+		SessionID:                 generateSessionID(),
+		UserID:                    input.UserID,
+		Provider:                  input.Provider,
+		ProviderSessionReference:  providerRef,
+		ProviderSessionCredential: sealedCredential,
+		CreatedAt:                 now,
+		LastSeenAt:                now,
+		ExpiresAt:                 now.Add(ttl),
+		AuthenticationTime:        now,
+		AuthenticationMethods:     input.AuthenticationMethods,
+		CSRFTokenHash:             HashToken(csrfToken),
+		UserAgentHash:             HashUserAgent(input.UserAgent),
+		Remember:                  input.Remember,
 	}
 
 	tokenHash := HashToken(token)

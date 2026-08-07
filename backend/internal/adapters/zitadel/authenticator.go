@@ -112,8 +112,9 @@ func NewAuthenticator(
 //
 // The returned ProviderSessionID is the ZITADEL session ID; it is stored
 // server-side in the MFA challenge and never exposed to the browser. The
-// session token from CreateSession is discarded immediately (SetSession no
-// longer requires it).
+// session token of the terminal authenticated state is sealed into the
+// encrypted Version-2 provider session credential by the session service
+// (ADR-0005 §3); intermediate tokens of unfinished sessions are discarded.
 func (a *Authenticator) BeginPasswordAuthentication(
 	ctx context.Context,
 	input auth.PasswordAuthenticationInput,
@@ -231,7 +232,7 @@ func (a *Authenticator) beginSession(
 		return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
 	}
 
-	return a.resolveAuthenticated(ctx, create.SessionId, userID,
+	return a.resolveAuthenticated(ctx, create.SessionId, create.SessionToken, userID,
 		[]auth.AuthenticationMethod{auth.MethodPassword})
 }
 
@@ -268,7 +269,7 @@ func (a *Authenticator) CompleteMFA(
 		return auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}, nil
 	}
 
-	_, err := a.sessions.SetSession(ctx, req)
+	setResp, err := a.sessions.SetSession(ctx, req)
 	if err != nil {
 		if status := mapAuthError(err); status != auth.StatusInvalidCredentials {
 			return auth.AuthenticationResult{Status: status}, nil
@@ -290,7 +291,7 @@ func (a *Authenticator) CompleteMFA(
 	case auth.MFAMethodPasskey:
 		methods = append(methods, auth.MethodPasskey)
 	}
-	return a.resolveAuthenticated(ctx, input.ProviderSessionID, userID, methods)
+	return a.resolveAuthenticated(ctx, input.ProviderSessionID, setResp.SessionToken, userID, methods)
 }
 
 // RevokeProviderSession terminates the ZITADEL session referenced by the
@@ -425,11 +426,13 @@ func (a *Authenticator) providerProfile(ctx context.Context, userID string) (ide
 
 // resolveAuthenticated maps the ZITADEL session to the local United Pass
 // user (creating it on first login with the provider profile) and returns an
-// authenticated result. The provider session reference stores only the
-// ZITADEL session ID — the session token is never persisted.
+// authenticated result. The provider session reference stores the ZITADEL
+// session ID; the session token returned by the authenticating call travels
+// alongside it so the session service can seal the Version-2 provider
+// session credential (ADR-0005 §3).
 func (a *Authenticator) resolveAuthenticated(
 	ctx context.Context,
-	sessionID, providerUserID string,
+	sessionID, sessionToken, providerUserID string,
 	methods []auth.AuthenticationMethod,
 ) (auth.AuthenticationResult, error) {
 	profile, err := a.providerProfile(ctx, providerUserID)
@@ -450,6 +453,7 @@ func (a *Authenticator) resolveAuthenticated(
 		UserID:                   user.ID,
 		Provider:                 a.provider,
 		ProviderSessionReference: sessionID,
+		ProviderSessionToken:     sessionToken,
 		AuthenticationMethods:    methods,
 	}, nil
 }

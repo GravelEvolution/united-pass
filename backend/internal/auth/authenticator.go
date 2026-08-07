@@ -91,10 +91,17 @@ type AuthenticationResult struct {
 	ProviderSessionID string
 	// ProviderSessionReference is the provider-side session handle stored
 	// (encrypted at rest) with the created session so logout can revoke it.
-	// For ZITADEL this is the session ID only; the session token is never
-	// persisted.
+	// For ZITADEL this is the session ID; together with
+	// ProviderSessionToken it is sealed into the versioned
+	// ProviderSessionCredential (ADR-0005 §3).
 	ProviderSessionReference string
-	AuthenticationMethods    []AuthenticationMethod
+	// ProviderSessionToken is the provider session token returned by the
+	// authenticating provider call (StatusAuthenticated only). In-memory
+	// bearer material: the HTTP layer hands it to the session service, which
+	// seals it into the encrypted Version-2 credential immediately; it is
+	// never logged, rendered or persisted in plaintext.
+	ProviderSessionToken  string
+	AuthenticationMethods []AuthenticationMethod
 	// PasskeyRequestOptions carries the WebAuthn PublicKeyCredentialRequestOptions
 	// (JSON object) when StatusMFARequired and passkey is available. The
 	// browser uses it for navigator.credentials.get; nil means no passkey

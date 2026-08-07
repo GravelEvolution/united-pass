@@ -53,6 +53,17 @@ func (f *FakeAuthenticator) AddUser(u FakeUser) {
 	f.users[u.Identifier] = u
 }
 
+// fakeSessionToken derives the deterministic fake provider session token of
+// a session reference. Authenticated results carry it so the session
+// service seals a Version-2 provider session credential exactly like the
+// real provider path (ADR-0005 §3).
+func fakeSessionToken(sessionRef string) string {
+	if sessionRef == "" {
+		return ""
+	}
+	return "fake-token-" + sessionRef
+}
+
 // BeginPasswordAuthentication checks the identifier and password against
 // configured fake users. If MFA is required, it returns an MFARequired result
 // whose ProviderSessionID references the fake provider session; the HTTP layer
@@ -88,6 +99,7 @@ func (f *FakeAuthenticator) BeginPasswordAuthentication(
 		UserID:                   user.UserID,
 		Provider:                 user.Provider,
 		ProviderSessionReference: user.SessionRef,
+		ProviderSessionToken:     fakeSessionToken(user.SessionRef),
 		AuthenticationMethods:    []AuthenticationMethod{MethodPassword},
 	}, nil
 }
@@ -127,6 +139,7 @@ func (f *FakeAuthenticator) CompleteMFA(
 			UserID:                   user.UserID,
 			Provider:                 user.Provider,
 			ProviderSessionReference: user.SessionRef,
+			ProviderSessionToken:     fakeSessionToken(user.SessionRef),
 			AuthenticationMethods:    []AuthenticationMethod{MethodPassword, AuthenticationMethod(input.Method)},
 		}, nil
 	}
@@ -179,6 +192,7 @@ func (f *FakeAuthenticator) VerifyUserPassword(
 			UserID:                   user.UserID,
 			Provider:                 user.Provider,
 			ProviderSessionReference: user.SessionRef,
+			ProviderSessionToken:     fakeSessionToken(user.SessionRef),
 			AuthenticationMethods:    []AuthenticationMethod{MethodPassword},
 		}, nil
 	}
