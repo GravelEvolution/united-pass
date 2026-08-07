@@ -28,21 +28,57 @@ func (r *ApplicationRepository) ResolveConsentClient(
 		return consent.ConsentClientFacts{}, consent.ErrClientUnknown
 	}
 	row := r.pool.QueryRow(ctx,
-		`SELECT c.client_id, c.application_id, c.name, c.profile, c.client_type,
-		        c.token_endpoint_auth_method, c.consent_mode, c.logout_uri, c.status,
-		        c.provider, c.provider_project_id, c.provider_application_id,
-		        c.provider_client_id, c.provisioning_status, c.version, c.created_at, c.updated_at,
-		        a.application_id, a.name, a.description, a.logo_url, a.audience,
-		        a.owner_user_id, u.display_name, a.status, a.provisioning_status,
-		        a.version, a.created_at, a.updated_at
-		   FROM oauth_clients c
-		   JOIN oauth_applications a ON a.application_id = c.application_id
-		   JOIN users u ON u.id = a.owner_user_id
-		  WHERE c.provider = $1 AND c.provider_client_id = $2
-		    AND c.deleted_at IS NULL AND c.provisioning_status = 'provisioned'
-		    AND a.deleted_at IS NULL AND a.provisioning_status = 'provisioned'`,
+		clientFactsSelectSQL+`
+		  WHERE c.provider = $1 AND c.provider_client_id = $2`+clientFactsLiveFilter,
 		provider, providerClientID)
+	return r.scanClientFacts(ctx, row)
+}
 
+// GetAuthorizedClientFacts maps a local client ID to the client +
+// application records for the authorized-application display (ADR-0005
+// §6). The same liveness rules as ResolveConsentClient apply: a
+// soft-deleted or not-fully-provisioned client or application is
+// indistinguishable from an unknown one (ErrClientUnknown), so the
+// listing service filters such grants out without leaking which
+// condition failed. Effective status (application × client) is checked
+// by the caller so disabled records follow the same display rule.
+func (r *ApplicationRepository) GetAuthorizedClientFacts(
+	ctx context.Context,
+	clientID applications.OAuthClientID,
+) (consent.ConsentClientFacts, error) {
+	if clientID == "" {
+		return consent.ConsentClientFacts{}, consent.ErrClientUnknown
+	}
+	row := r.pool.QueryRow(ctx,
+		clientFactsSelectSQL+`
+		  WHERE c.client_id = $1`+clientFactsLiveFilter,
+		string(clientID))
+	return r.scanClientFacts(ctx, row)
+}
+
+// clientFactsSelectSQL is the shared fact query of the consent client
+// lookups: client + parent application + owner display name in one row.
+const clientFactsSelectSQL = `SELECT c.client_id, c.application_id, c.name, c.profile, c.client_type,
+        c.token_endpoint_auth_method, c.consent_mode, c.logout_uri, c.status,
+        c.provider, c.provider_project_id, c.provider_application_id,
+        c.provider_client_id, c.provisioning_status, c.version, c.created_at, c.updated_at,
+        a.application_id, a.name, a.description, a.logo_url, a.audience,
+        a.owner_user_id, u.display_name, a.status, a.provisioning_status,
+        a.version, a.created_at, a.updated_at
+   FROM oauth_clients c
+   JOIN oauth_applications a ON a.application_id = c.application_id
+   JOIN users u ON u.id = a.owner_user_id`
+
+// clientFactsLiveFilter keeps both records live and fully provisioned;
+// anything else is indistinguishable from an unknown client
+// (anti-enumeration, ADR-0005 §7).
+const clientFactsLiveFilter = `
+    AND c.deleted_at IS NULL AND c.provisioning_status = 'provisioned'
+    AND a.deleted_at IS NULL AND a.provisioning_status = 'provisioned'`
+
+// scanClientFacts scans one client-fact row and hydrates the client
+// sub-records. Missing rows map to ErrClientUnknown.
+func (r *ApplicationRepository) scanClientFacts(ctx context.Context, row pgx.Row) (consent.ConsentClientFacts, error) {
 	var (
 		client                                                      applications.OAuthClient
 		app                                                         applications.Application

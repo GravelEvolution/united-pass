@@ -378,6 +378,117 @@ func (r *GrantRepository) GetGrant(ctx context.Context, userID identity.UserID, 
 	return grant, nil
 }
 
+// ListActiveGrantsByUser returns the user's active grants with their
+// consented scope sets, newest first (authorized-application listing,
+// ADR-0005 §6). Revoked grants are excluded: the list is the live
+// consent surface, not a history view.
+func (r *GrantRepository) ListActiveGrantsByUser(ctx context.Context, userID identity.UserID) ([]consent.Grant, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT grant_id, user_id, client_id, status, granted_at, revoked_at, updated_at
+		   FROM oauth_authorization_grants
+		  WHERE user_id = $1 AND status = 'active'
+		  ORDER BY granted_at DESC, grant_id`,
+		string(userID))
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list user grants: %w", err)
+	}
+	defer rows.Close()
+
+	var grants []consent.Grant
+	for rows.Next() {
+		var grant consent.Grant
+		var grantID, uid, cid, status string
+		var revokedAt *time.Time
+		if err := rows.Scan(&grantID, &uid, &cid, &status, &grant.GrantedAt, &revokedAt, &grant.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("postgres: scan user grant: %w", err)
+		}
+		grant.ID = consent.GrantID(grantID)
+		grant.UserID = identity.UserID(uid)
+		grant.ClientID = applications.OAuthClientID(cid)
+		grant.Status = consent.GrantStatus(status)
+		if revokedAt != nil {
+			grant.RevokedAt = *revokedAt
+		}
+		grants = append(grants, grant)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list user grants: %w", err)
+	}
+	for i := range grants {
+		scopes, err := readGrantScopes(ctx, r.pool, grants[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		grants[i].Scopes = scopes
+	}
+	return grants, nil
+}
+
+// RevokeGrant transitions the user's own grant to revoked and writes the
+// canonical audit event in one transaction (ADR-0005 §6). The owner
+// binding is enforced by the locking query itself: grants of other users
+// are indistinguishable from unknown grants (ErrGrantNotFound). Revoking
+// an already-revoked grant is an idempotent no-op with the same stable
+// outcome and writes no second audit event. Revocation is purely local:
+// no provider call happens here.
+func (r *GrantRepository) RevokeGrant(ctx context.Context, userID identity.UserID, grantID consent.GrantID) error {
+	if !consent.HasGrantIDPrefix(string(grantID)) {
+		return consent.ErrGrantNotFound
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin revoke grant tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var gid, uid, cid, status string
+	row := tx.QueryRow(ctx,
+		`SELECT grant_id, user_id, client_id, status
+		   FROM oauth_authorization_grants
+		  WHERE grant_id = $1 AND user_id = $2 FOR UPDATE`,
+		string(grantID), string(userID))
+	if err := row.Scan(&gid, &uid, &cid, &status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return consent.ErrGrantNotFound
+		}
+		return fmt.Errorf("postgres: lock grant for revocation: %w", err)
+	}
+	if status == string(consent.GrantRevoked) {
+		// Idempotent repeat call: same stable outcome, row untouched.
+		return nil
+	}
+	if status != string(consent.GrantActive) {
+		// The schema CHECK allows only active|revoked; anything else is
+		// corruption and fails closed.
+		return fmt.Errorf("postgres: grant %s carries unknown status %q", gid, status)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE oauth_authorization_grants
+		    SET status = 'revoked', revoked_at = NOW(), updated_at = NOW()
+		  WHERE grant_id = $1`,
+		string(grantID)); err != nil {
+		return fmt.Errorf("postgres: revoke grant: %w", err)
+	}
+	audit := applications.SecurityEvent{
+		EventID:     applications.NewSecurityEventID(),
+		EventType:   applications.EventConsentGrantRevoked,
+		ActorUserID: identity.UserID(uid),
+		ClientID:    applications.OAuthClientID(cid),
+		RequestID:   gid,
+		Operation:   "consent_revoke",
+		Result:      applications.SecurityEventSuccess,
+		OccurredAt:  time.Now().UTC(),
+	}
+	if err := insertSecurityEvent(ctx, tx, audit); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit grant revocation: %w", err)
+	}
+	return nil
+}
+
 // lockDecisionOperationTx locks one operation row for the enclosing
 // commit transaction and returns it with its scope snapshot. Locking
 // serializes concurrent commits of the same operation; the caller then

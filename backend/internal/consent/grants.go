@@ -99,6 +99,12 @@ func NewGrantID() GrantID {
 	return GrantID(grantIDPrefix + consentRandomHex(consentIDRandomByteLength))
 }
 
+// HasGrantIDPrefix reports whether s looks like a grant ID. Grant
+// lookups by URL-supplied identifiers fail closed on anything else.
+func HasGrantIDPrefix(s string) bool {
+	return len(s) > len(grantIDPrefix) && s[:len(grantIDPrefix)] == grantIDPrefix
+}
+
 // NewDecisionOperationID generates a fresh decision operation ID.
 func NewDecisionOperationID() DecisionOperationID {
 	return DecisionOperationID(decisionOperationIDPrefix + consentRandomHex(consentIDRandomByteLength))

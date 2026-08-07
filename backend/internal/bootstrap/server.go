@@ -238,6 +238,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	// present or the route stays unregistered (fail closed).
 	var authorizationHandlers *httpapi.AuthorizationHandlers
 	var decisionHandlers *httpapi.AuthorizationDecisionHandlers
+	var authorizedAppHandlers *httpapi.AuthorizedApplicationHandlers
 	var grantRepo *postgres.GrantRepository
 	if pool != nil && sessionSvc != nil && appRepo != nil && authRequestProvider != nil && providerName != "" {
 		grantRepo = postgres.NewGrantRepository(pool.PgxPool())
@@ -260,6 +261,15 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			return nil, fmt.Errorf("consent decision service: %w", err)
 		}
 		decisionHandlers = httpapi.NewAuthorizationDecisionHandlers(decisionSvc, sessionSvc, logger)
+
+		// Authorized application management (P3.5, ADR-0005 §6): the
+		// current user's grant listing and owner-bound revocation. Purely
+		// local consent state — no provider token revocation is claimed.
+		grantMgmtSvc, err := consent.NewGrantManagementService(grantRepo, appRepo)
+		if err != nil {
+			return nil, fmt.Errorf("consent grant management service: %w", err)
+		}
+		authorizedAppHandlers = httpapi.NewAuthorizedApplicationHandlers(grantMgmtSvc, logger)
 
 		// Background reconciliation (ADR-0005 §4): forward-repair rows
 		// carrying the provider success proof and fail stale pending rows.
@@ -334,6 +344,21 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			}
 			if decisionHandlers != nil {
 				r.Post("/authorization/requests/{requestId}/decision", decisionHandlers.DecideRequest)
+			}
+		})
+
+		// Authorized applications (ADR-0005 §6): the current user's grant
+		// listing and owner-bound, idempotent revocation. Session required;
+		// the DELETE additionally passes the CSRF check (safe methods skip
+		// the token requirement).
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireCSRF())
+			}
+			if authorizedAppHandlers != nil {
+				r.Get("/me/authorized-applications", authorizedAppHandlers.ListAuthorizedApplications)
+				r.Delete("/me/authorized-applications/{grantId}", authorizedAppHandlers.RevokeGrant)
 			}
 		})
 

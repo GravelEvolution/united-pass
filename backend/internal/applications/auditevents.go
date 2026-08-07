@@ -50,6 +50,11 @@ const (
 	EventConsentGrantAllowed   = "consent.grant_allowed"
 	EventConsentAccessDenied   = "consent.access_denied"
 	EventConsentErrorCompleted = "consent.error_completion"
+
+	// EventConsentGrantRevoked marks a user-initiated local grant revocation
+	// (ADR-0005 §6). Exactly one event is written per revoking transaction,
+	// constructed by the grant store from the locked grant row alone.
+	EventConsentGrantRevoked = "consent.grant_revoked"
 )
 
 // SecurityEvent is one durable audit row. This is a real persistence
