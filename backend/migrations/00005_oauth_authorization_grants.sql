@@ -7,44 +7,66 @@
 --
 -- Provider request payloads, state, nonce, PKCE material, tokens and
 -- provider callback URLs are never written to PostgreSQL (ADR-0005 §2, §5):
--- the decision operation records the auth request identity, the decision
--- kind and the provider_succeeded proof time — nothing more.
+-- the decision operation records the auth request identity, the immutable
+-- completion plan (winner user, client, completion kind, consented scope
+-- snapshot) and the provider_succeeded proof time — nothing more.
 
 -- oauth_authorization_decision_operations: the global single-winner claim
 -- for an authorization request (ADR-0005 §5). Exactly one row exists per
--- (provider, provider_tenant_id, auth_request_id); concurrent decisions —
--- including the same auth request open in two browsers logged in as
+-- (provider, provider_tenant_id, auth_request_id); concurrent completions
+-- — including the same auth request open in two browsers logged in as
 -- different users — serialize on the unique key before any provider call.
--- local_user_id is a binding written by the winner, never part of the
--- unique key.
+--
+-- The completion plan is immutable from claim time: completion_kind,
+-- local_user_id, client_id and the scope snapshot are persisted BEFORE
+-- the provider CreateCallback runs, so reconciliation can complete the
+-- local state from the operation row alone after a crash between the
+-- provider success and the local commit — without a browser, without the
+-- (already consumed) provider request.
+--
+-- completion_kind covers every one-shot CreateCallback path: the user
+-- decisions (allow, access_denied) and the gateway/provider error
+-- callbacks (login_required, consent_required,
+-- account_selection_required, request_not_supported, server_error,
+-- temporarily_unavailable). Error callbacks bind the session user when
+-- one exists; login_required without a session legitimately carries an
+-- empty local_user_id.
 --
 -- Status machine (compare-and-set transitions only):
 --   pending            claimed locally; the provider CreateCallback is in
 --                      flight or has not run yet
---   provider_succeeded CreateCallback returned; the proof (decision kind +
---                      time, never the callback URL) is persisted and the
---                      local commit is pending
---   succeeded          grant + audit + terminal state committed
+--   provider_succeeded CreateCallback returned; the proof (completion kind
+--                      + time, never the callback URL) is persisted and
+--                      the local commit is pending
+--   succeeded          local terminal state committed
 --   failed             terminal failure without provider success proof;
 --                      reconciliation fails closed from this state and
 --                      never backfills a grant (ADR-0005 §4)
 CREATE TABLE oauth_authorization_decision_operations (
     operation_id          TEXT        PRIMARY KEY,
-    provider              TEXT        NOT NULL,
+    provider              TEXT        NOT NULL
+                          CHECK (char_length(provider) BETWEEN 1 AND 64),
     provider_tenant_id    TEXT        NOT NULL DEFAULT '',
     auth_request_id       TEXT        NOT NULL
                           CHECK (char_length(auth_request_id)
                                  BETWEEN 1 AND 200),
-    decision              TEXT        NOT NULL
-                          CHECK (decision IN ('allow', 'deny')),
+    completion_kind       TEXT        NOT NULL
+                          CHECK (completion_kind IN
+                                 ('allow', 'access_denied', 'login_required',
+                                  'consent_required', 'account_selection_required',
+                                  'request_not_supported', 'server_error',
+                                  'temporarily_unavailable')),
     status                TEXT        NOT NULL DEFAULT 'pending'
                           CHECK (status IN
                                  ('pending', 'provider_succeeded',
                                   'succeeded', 'failed')),
-    -- Winner binding; empty until the winner commits.
+    -- Winner binding, persisted at claim time; empty only for error
+    -- callbacks without a session.
     local_user_id         TEXT        NOT NULL DEFAULT '',
     -- The United Pass client resolved for the request (display/audit only;
     -- intentionally not a foreign key, mirroring oauth_provider_operations).
+    -- Required for allow; may be empty for gateway error callbacks that
+    -- fail before the client mapping.
     client_id             TEXT        NOT NULL DEFAULT '',
     -- Stable error class on terminal failure (contract §8); empty otherwise.
     error_class           TEXT        NOT NULL DEFAULT '',
@@ -59,6 +81,18 @@ CREATE TABLE oauth_authorization_decision_operations (
 CREATE INDEX idx_consent_decision_ops_recovery
     ON oauth_authorization_decision_operations (created_at)
     WHERE status IN ('pending', 'provider_succeeded');
+
+-- oauth_authorization_decision_operation_scopes: the consented scope
+-- snapshot of an allow completion plan, written at claim time and never
+-- mutated afterwards. Forward reconciliation rebuilds the grant from this
+-- snapshot alone. Empty for every non-allow completion kind.
+CREATE TABLE oauth_authorization_decision_operation_scopes (
+    operation_id TEXT NOT NULL
+                 REFERENCES oauth_authorization_decision_operations(operation_id)
+                 ON DELETE CASCADE,
+    scope        TEXT NOT NULL,
+    PRIMARY KEY (operation_id, scope)
+);
 
 -- oauth_authorization_grants: the United Pass user-consent ledger
 -- (ADR-0005 §4). A grant row implies consent, not live tokens. Grants are
@@ -97,6 +131,7 @@ CREATE TABLE oauth_authorization_grant_scopes (
 
 DROP TABLE IF EXISTS oauth_authorization_grant_scopes;
 DROP TABLE IF EXISTS oauth_authorization_grants;
+DROP TABLE IF EXISTS oauth_authorization_decision_operation_scopes;
 DROP TABLE IF EXISTS oauth_authorization_decision_operations;
 
 -- +goose StatementEnd

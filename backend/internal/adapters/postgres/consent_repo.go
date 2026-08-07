@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -17,7 +18,8 @@ import (
 // GrantRepository persists consent decision operations and authorization
 // grants (ADR-0005 §2, §4, §5). It implements consent.GrantStore. The
 // provider call never runs inside a repository transaction: callers follow
-// the §5 ordering (claim → provider call → proof → commit).
+// the §5 ordering (claim with the immutable completion plan → provider
+// call → proof → commit).
 type GrantRepository struct {
 	pool *pgxpool.Pool
 }
@@ -30,67 +32,98 @@ func NewGrantRepository(pool *pgxpool.Pool) *GrantRepository {
 // Compile-time proof that the repository satisfies the domain port.
 var _ consent.GrantStore = (*GrantRepository)(nil)
 
+const decisionOperationColumns = `operation_id, provider, provider_tenant_id,
+        auth_request_id, completion_kind, status, local_user_id, client_id,
+        error_class, provider_succeeded_at, created_at, updated_at`
+
 // ClaimDecisionOperation claims the global single-winner row for the
-// operation's auth-request key (ADR-0005 §5). The INSERT ... ON CONFLICT
-// DO NOTHING makes the claim atomic; the losing side reads the existing
-// row and receives consent.ErrDecisionConflict without ever reaching the
-// provider.
+// operation's auth-request key, persisting the full immutable completion
+// plan — kind, bound user, bound client and the scope snapshot — in one
+// atomic statement (ADR-0005 §5). The INSERT ... ON CONFLICT DO NOTHING
+// makes the claim atomic; the winner receives the row exactly as stored
+// (status and timestamps read back from the database), and the losing
+// side reads the existing row and receives consent.ErrDecisionConflict
+// without ever reaching the provider.
 func (r *GrantRepository) ClaimDecisionOperation(ctx context.Context, op consent.DecisionOperation) (consent.DecisionOperation, bool, error) {
-	if !op.Decision.Valid() {
-		return consent.DecisionOperation{}, false, fmt.Errorf("postgres: invalid decision %q", op.Decision)
+	if err := op.ValidateForClaim(); err != nil {
+		return consent.DecisionOperation{}, false, err
 	}
-	if err := (consent.DecisionOperationKey{
+	scopes := normalizeScopes(op.Scopes)
+
+	key := consent.DecisionOperationKey{
 		Provider:         op.Provider,
 		ProviderTenantID: op.ProviderTenantID,
 		AuthRequestID:    op.AuthRequestID,
-	}).Validate(); err != nil {
+	}
+
+	// Single statement: the plan row and its scope snapshot commit
+	// together, or nothing does. The row is read back from the INSERT's
+	// RETURNING output — the primary SELECT cannot see the CTE's inserted
+	// row through its own snapshot; on the conflict path the RETURNING
+	// output is empty and the winner is read back below.
+	row := r.pool.QueryRow(ctx,
+		`WITH ins AS (
+		     INSERT INTO oauth_authorization_decision_operations
+		         (operation_id, provider, provider_tenant_id, auth_request_id,
+		          completion_kind, status, local_user_id, client_id)
+		     VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
+		     ON CONFLICT (provider, provider_tenant_id, auth_request_id) DO NOTHING
+		     RETURNING `+decisionOperationColumns+`
+		 ), scope_ins AS (
+		     INSERT INTO oauth_authorization_decision_operation_scopes
+		         (operation_id, scope)
+		     SELECT ins.operation_id, s.scope
+		       FROM ins, UNNEST($8::text[]) AS s(scope)
+		 )
+		 SELECT `+decisionOperationColumns+`
+		   FROM ins`,
+		string(op.ID), op.Provider, op.ProviderTenantID, op.AuthRequestID,
+		string(op.CompletionKind), string(op.LocalUserID), string(op.ClientID),
+		scopes)
+
+	stored, err := scanDecisionOperation(row.Scan)
+	switch {
+	case err == nil:
+		stored.Scopes = append([]string(nil), scopes...)
+		return stored, true, nil
+	case !errors.Is(err, consent.ErrDecisionNotFound):
 		return consent.DecisionOperation{}, false, err
 	}
 
-	tag, err := r.pool.Exec(ctx,
-		`INSERT INTO oauth_authorization_decision_operations
-		     (operation_id, provider, provider_tenant_id, auth_request_id, decision, status, client_id)
-		 VALUES ($1, $2, $3, $4, $5, 'pending', $6)
-		 ON CONFLICT (provider, provider_tenant_id, auth_request_id) DO NOTHING`,
-		string(op.ID), op.Provider, op.ProviderTenantID, op.AuthRequestID,
-		string(op.Decision), string(op.ClientID))
-	if err != nil {
-		return consent.DecisionOperation{}, false, fmt.Errorf("postgres: claim decision operation: %w", err)
-	}
-	if tag.RowsAffected() == 1 {
-		return op, true, nil
-	}
-
-	existing, err := r.GetDecisionOperation(ctx, consent.DecisionOperationKey{
-		Provider:         op.Provider,
-		ProviderTenantID: op.ProviderTenantID,
-		AuthRequestID:    op.AuthRequestID,
-	})
+	existing, err := r.GetDecisionOperation(ctx, key)
 	if err != nil {
 		return consent.DecisionOperation{}, false, err
 	}
 	return existing, false, consent.ErrDecisionConflict
 }
 
-// GetDecisionOperation reads the operation row by its global key.
+// GetDecisionOperation reads the operation row (including its immutable
+// scope snapshot) by its global key.
 func (r *GrantRepository) GetDecisionOperation(ctx context.Context, key consent.DecisionOperationKey) (consent.DecisionOperation, error) {
 	if err := key.Validate(); err != nil {
 		return consent.DecisionOperation{}, err
 	}
 	row := r.pool.QueryRow(ctx,
-		`SELECT operation_id, provider, provider_tenant_id, auth_request_id,
-		        decision, status, local_user_id, client_id, error_class,
-		        provider_succeeded_at, created_at, updated_at
+		`SELECT `+decisionOperationColumns+`
 		   FROM oauth_authorization_decision_operations
 		  WHERE provider = $1 AND provider_tenant_id = $2 AND auth_request_id = $3`,
 		key.Provider, key.ProviderTenantID, key.AuthRequestID)
-	return scanDecisionOperation(row.Scan)
+	op, err := scanDecisionOperation(row.Scan)
+	if err != nil {
+		return consent.DecisionOperation{}, err
+	}
+	scopes, err := readDecisionOperationScopes(ctx, r.pool, op.ID)
+	if err != nil {
+		return consent.DecisionOperation{}, err
+	}
+	op.Scopes = scopes
+	return op, nil
 }
 
 // RecordProviderSucceeded persists the provider success proof via a
 // pending → provider_succeeded compare-and-set (ADR-0005 §5 step 4). The
-// proof records the decision kind (already on the row) and the time; it
-// never stores the callback URL.
+// completion kind is already bound on the row from claim time; the proof
+// records the time only — never the callback URL.
 func (r *GrantRepository) RecordProviderSucceeded(ctx context.Context, opID consent.DecisionOperationID, at time.Time) error {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE oauth_authorization_decision_operations
@@ -107,11 +140,13 @@ func (r *GrantRepository) RecordProviderSucceeded(ctx context.Context, opID cons
 }
 
 // CommitAllowDecision runs the Allow-side local commit in one transaction
-// (ADR-0005 §5 step 5): grant upsert + scope-set replacement + audit +
-// the provider_succeeded → succeeded terminal transition with the winner
-// user binding. Any failure rolls everything back: an operation whose
-// grant or audit could not be persisted keeps its proof for forward
-// reconciliation (§4).
+// (ADR-0005 §5 step 5). The operation is locked and verified against its
+// bound plan, and the grant is written exclusively from the plan values
+// read back from the operation row — the commit input carries no user,
+// client or scope facts of its own, so the local state can never drift
+// from what the provider completed. Any failure rolls everything back: an
+// operation whose grant or audit could not be persisted keeps its proof
+// for forward reconciliation (§4).
 func (r *GrantRepository) CommitAllowDecision(ctx context.Context, commit consent.AllowCommit) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -119,14 +154,24 @@ func (r *GrantRepository) CommitAllowDecision(ctx context.Context, commit consen
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	grantID, err := upsertGrantTx(ctx, tx, commit.UserID, commit.ClientID)
+	op, err := lockDecisionOperationTx(ctx, tx, commit.OperationID)
 	if err != nil {
 		return err
 	}
-	if err := replaceGrantScopesTx(ctx, tx, grantID, commit.Scopes); err != nil {
+	if op.Status != consent.DecisionOperationProviderSucceeded ||
+		op.CompletionKind != consent.CompletionAllow ||
+		op.LocalUserID == "" || op.ClientID == "" || len(op.Scopes) == 0 {
+		return consent.ErrDecisionStateConflict
+	}
+
+	grantID, err := upsertGrantTx(ctx, tx, op.LocalUserID, op.ClientID)
+	if err != nil {
 		return err
 	}
-	if err := terminalizeDecisionTx(ctx, tx, commit.OperationID, commit.UserID); err != nil {
+	if err := replaceGrantScopesTx(ctx, tx, grantID, op.Scopes); err != nil {
+		return err
+	}
+	if err := terminalizeDecisionTx(ctx, tx, commit.OperationID); err != nil {
 		return err
 	}
 	if err := insertSecurityEventsTx(ctx, tx, commit.Audit); err != nil {
@@ -139,8 +184,9 @@ func (r *GrantRepository) CommitAllowDecision(ctx context.Context, commit consen
 }
 
 // CommitDenyDecision runs the Deny-side local commit in one transaction:
-// audit + terminal transition with the winner binding. Deny creates no
-// grant row (ADR-0005 §5).
+// the locked operation must carry the proof and the access_denied kind;
+// audit + terminal transition commit. Deny creates no grant row
+// (ADR-0005 §5).
 func (r *GrantRepository) CommitDenyDecision(ctx context.Context, commit consent.DenyCommit) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -148,7 +194,15 @@ func (r *GrantRepository) CommitDenyDecision(ctx context.Context, commit consent
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := terminalizeDecisionTx(ctx, tx, commit.OperationID, commit.UserID); err != nil {
+	op, err := lockDecisionOperationTx(ctx, tx, commit.OperationID)
+	if err != nil {
+		return err
+	}
+	if op.Status != consent.DecisionOperationProviderSucceeded ||
+		op.CompletionKind != consent.CompletionAccessDenied {
+		return consent.ErrDecisionStateConflict
+	}
+	if err := terminalizeDecisionTx(ctx, tx, commit.OperationID); err != nil {
 		return err
 	}
 	if err := insertSecurityEventsTx(ctx, tx, commit.Audit); err != nil {
@@ -160,10 +214,46 @@ func (r *GrantRepository) CommitDenyDecision(ctx context.Context, commit consent
 	return nil
 }
 
+// CommitErrorCompletion terminates an error-callback completion
+// (login_required, consent_required, account_selection_required,
+// request_not_supported, server_error, temporarily_unavailable): the
+// locked operation must carry the proof and a matching non-decision kind.
+// No grant is ever involved.
+func (r *GrantRepository) CommitErrorCompletion(ctx context.Context, commit consent.ErrorCompletionCommit) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin commit error completion tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	op, err := lockDecisionOperationTx(ctx, tx, commit.OperationID)
+	if err != nil {
+		return err
+	}
+	if op.Status != consent.DecisionOperationProviderSucceeded ||
+		!op.CompletionKind.Valid() || op.CompletionKind.IsUserDecision() {
+		return consent.ErrDecisionStateConflict
+	}
+	if err := terminalizeDecisionTx(ctx, tx, commit.OperationID); err != nil {
+		return err
+	}
+	if err := insertSecurityEventsTx(ctx, tx, commit.Audit); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit error completion: %w", err)
+	}
+	return nil
+}
+
 // FailDecisionOperation terminates a still-pending operation without
 // provider success proof (fail-closed, ADR-0005 §4). Rows that already
 // carry the proof must be repaired forward by reconciliation instead.
+// Only known stable error classes are accepted.
 func (r *GrantRepository) FailDecisionOperation(ctx context.Context, opID consent.DecisionOperationID, class consent.ErrorClass) error {
+	if !class.Valid() {
+		return fmt.Errorf("postgres: unknown error class %q", class)
+	}
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE oauth_authorization_decision_operations
 		    SET status = 'failed', error_class = $2, updated_at = NOW()
@@ -211,6 +301,31 @@ func (r *GrantRepository) GetGrant(ctx context.Context, userID identity.UserID, 
 	return grant, nil
 }
 
+// lockDecisionOperationTx locks one operation row for the enclosing
+// commit transaction and returns it with its scope snapshot. Locking
+// serializes concurrent commits of the same operation; the caller then
+// verifies the plan before writing any local state.
+func lockDecisionOperationTx(ctx context.Context, tx pgx.Tx, opID consent.DecisionOperationID) (consent.DecisionOperation, error) {
+	if !consent.HasDecisionOperationIDPrefix(string(opID)) {
+		return consent.DecisionOperation{}, consent.ErrDecisionNotFound
+	}
+	row := tx.QueryRow(ctx,
+		`SELECT `+decisionOperationColumns+`
+		   FROM oauth_authorization_decision_operations
+		  WHERE operation_id = $1 FOR UPDATE`,
+		string(opID))
+	op, err := scanDecisionOperation(row.Scan)
+	if err != nil {
+		return consent.DecisionOperation{}, err
+	}
+	scopes, err := readDecisionOperationScopes(ctx, tx, op.ID)
+	if err != nil {
+		return consent.DecisionOperation{}, err
+	}
+	op.Scopes = scopes
+	return op, nil
+}
+
 // upsertGrantTx inserts or reactivates the (user, client) grant row and
 // returns its ID. A re-consent after revocation reuses the same row,
 // refreshes granted_at and clears revoked_at; the unique key makes
@@ -252,15 +367,15 @@ func replaceGrantScopesTx(ctx context.Context, tx pgx.Tx, grantID consent.GrantI
 }
 
 // terminalizeDecisionTx runs the provider_succeeded → succeeded
-// compare-and-set and writes the winner user binding. Committing without
-// the proof is a state conflict: the §5 ordering requires the proof row
-// before the local commit.
-func terminalizeDecisionTx(ctx context.Context, tx pgx.Tx, opID consent.DecisionOperationID, userID identity.UserID) error {
+// compare-and-set. The enclosing transaction already holds the row lock
+// and has verified the completion plan; the status CAS remains as the
+// mechanical last line of defense.
+func terminalizeDecisionTx(ctx context.Context, tx pgx.Tx, opID consent.DecisionOperationID) error {
 	tag, err := tx.Exec(ctx,
 		`UPDATE oauth_authorization_decision_operations
-		    SET status = 'succeeded', local_user_id = $2, updated_at = NOW()
+		    SET status = 'succeeded', updated_at = NOW()
 		  WHERE operation_id = $1 AND status = 'provider_succeeded'`,
-		string(opID), string(userID))
+		string(opID))
 	if err != nil {
 		return fmt.Errorf("postgres: terminalize decision operation: %w", err)
 	}
@@ -275,13 +390,13 @@ type decisionRowScan func(dest ...any) error
 // scanDecisionOperation maps one operation row from any scanner.
 func scanDecisionOperation(scan decisionRowScan) (consent.DecisionOperation, error) {
 	var (
-		op                                    consent.DecisionOperation
-		operationID, decision, status, userID string
-		clientID, errorClass                  string
-		providerSucceededAt                   *time.Time
+		op                                consent.DecisionOperation
+		operationID, kind, status, userID string
+		clientID, errorClass              string
+		providerSucceededAt               *time.Time
 	)
 	if err := scan(&operationID, &op.Provider, &op.ProviderTenantID, &op.AuthRequestID,
-		&decision, &status, &userID, &clientID, &errorClass,
+		&kind, &status, &userID, &clientID, &errorClass,
 		&providerSucceededAt, &op.CreatedAt, &op.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return consent.DecisionOperation{}, consent.ErrDecisionNotFound
@@ -289,7 +404,7 @@ func scanDecisionOperation(scan decisionRowScan) (consent.DecisionOperation, err
 		return consent.DecisionOperation{}, fmt.Errorf("postgres: read decision operation: %w", err)
 	}
 	op.ID = consent.DecisionOperationID(operationID)
-	op.Decision = consent.Decision(decision)
+	op.CompletionKind = consent.CompletionKind(kind)
 	op.Status = consent.DecisionOperationStatus(status)
 	op.LocalUserID = identity.UserID(userID)
 	op.ClientID = applications.OAuthClientID(clientID)
@@ -300,12 +415,26 @@ func scanDecisionOperation(scan decisionRowScan) (consent.DecisionOperation, err
 	return op, nil
 }
 
-type scopeQuerier interface {
+type consentQuerier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
+// readDecisionOperationScopes reads the immutable scope snapshot of a
+// completion plan.
+func readDecisionOperationScopes(ctx context.Context, q consentQuerier, opID consent.DecisionOperationID) ([]string, error) {
+	rows, err := q.Query(ctx,
+		`SELECT scope FROM oauth_authorization_decision_operation_scopes
+		  WHERE operation_id = $1 ORDER BY scope`,
+		string(opID))
+	if err != nil {
+		return nil, fmt.Errorf("postgres: read decision operation scopes: %w", err)
+	}
+	defer rows.Close()
+	return collectScopes(rows)
+}
+
 // readGrantScopes reads the consented scope set of a grant.
-func readGrantScopes(ctx context.Context, q scopeQuerier, grantID consent.GrantID) ([]string, error) {
+func readGrantScopes(ctx context.Context, q consentQuerier, grantID consent.GrantID) ([]string, error) {
 	rows, err := q.Query(ctx,
 		`SELECT scope FROM oauth_authorization_grant_scopes
 		  WHERE grant_id = $1 ORDER BY scope`,
@@ -314,17 +443,36 @@ func readGrantScopes(ctx context.Context, q scopeQuerier, grantID consent.GrantI
 		return nil, fmt.Errorf("postgres: read grant scopes: %w", err)
 	}
 	defer rows.Close()
+	return collectScopes(rows)
+}
 
+func collectScopes(rows pgx.Rows) ([]string, error) {
 	scopes := make([]string, 0)
 	for rows.Next() {
 		var scope string
 		if err := rows.Scan(&scope); err != nil {
-			return nil, fmt.Errorf("postgres: scan grant scope: %w", err)
+			return nil, fmt.Errorf("postgres: scan scope row: %w", err)
 		}
 		scopes = append(scopes, scope)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: iterate grant scopes: %w", err)
+		return nil, fmt.Errorf("postgres: iterate scope rows: %w", err)
 	}
 	return scopes, nil
+}
+
+// normalizeScopes deduplicates and sorts a scope snapshot so the stored
+// plan is deterministic regardless of request ordering.
+func normalizeScopes(scopes []string) []string {
+	seen := make(map[string]bool, len(scopes))
+	out := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		if scope == "" || seen[scope] {
+			continue
+		}
+		seen[scope] = true
+		out = append(out, scope)
+	}
+	sort.Strings(out)
+	return out
 }

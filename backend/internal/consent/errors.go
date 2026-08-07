@@ -55,6 +55,20 @@ const (
 	ClassUserNotEligible ErrorClass = "user_not_eligible"
 )
 
+// Valid reports whether the class is one of the stable contract classes
+// (contract §8 plus the ADR-0005 §8 user-admission failure). Only known
+// classes may be persisted or surfaced.
+func (c ErrorClass) Valid() bool {
+	switch c {
+	case ClassNotFound, ClassExpired, ClassAlreadyCompleted, ClassInvalidRedirect,
+		ClassInvalidScope, ClassProviderConflict, ClassProviderUnavailable,
+		ClassRateLimited, ClassInternal, ClassUserNotEligible:
+		return true
+	default:
+		return false
+	}
+}
+
 // ProviderError is the classified provider authorization failure. Its Error
 // output contains only the stable class — never raw provider messages — so
 // it is safe to log and to surface to callers; the underlying transport

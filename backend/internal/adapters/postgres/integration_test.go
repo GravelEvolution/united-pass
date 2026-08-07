@@ -112,6 +112,7 @@ func setupTestPool(t *testing.T, maxConns int32) *Pool {
 		_, _ = db.Exec(`DROP TABLE IF EXISTS
 			security_events, provider_reconciliation_jobs, oauth_provider_operations,
 			oauth_authorization_grant_scopes, oauth_authorization_grants,
+			oauth_authorization_decision_operation_scopes,
 			oauth_authorization_decision_operations,
 			oauth_client_secret_records, oauth_client_scopes, oauth_client_redirect_uris,
 			oauth_clients, oauth_applications,
