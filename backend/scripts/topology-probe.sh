@@ -12,14 +12,22 @@ set -euo pipefail
 
 # OAuth endpoint topology probe (ADR-0005 §1, P3.6 acceptance).
 #
-# Empirically verifies two things against a live provider instance:
+# Empirically verifies three things against a live provider instance,
+# failing closed (exit non-zero) on every violation (P3.8 hardening):
 #
 #   1. Discovery: the issuer and every protocol endpoint the reverse proxy
 #      must expose verbatim (authorization_endpoint, token_endpoint,
 #      jwks_uri, userinfo_endpoint, end_session_endpoint,
-#      device_authorization_endpoint).
+#      device_authorization_endpoint). A missing issuer or endpoint fails
+#      the probe; the displayed "(absent)" marker is never a verdict.
 #
-#   2. Path-prefix preservation: an authorization request for an app
+#   2. Public-origin integrity: the issuer must equal the probed origin,
+#      and every endpoint must be a parseable absolute URL whose origin
+#      (scheme://host[:port] — the port is part of the public origin)
+#      equals the probed origin. A malformed endpoint URL fails the probe
+#      as a parse failure, never as a plain mismatch.
+#
+#   3. Path-prefix preservation: an authorization request for an app
 #      configured with LoginVersion = LoginV2 and BaseURI =
 #      <interaction-base> must redirect to
 #      <interaction-base>/login?authRequest=…  — i.e. ZITADEL's
@@ -84,10 +92,44 @@ log "  userinfo_endpoint:           $(endpoint userinfo_endpoint)"
 log "  end_session_endpoint:        $(endpoint end_session_endpoint)"
 log "  device_authorization_endpoint: $(endpoint device_authorization_endpoint)"
 
+# --- step 1b: fail-closed discovery checks -----------------------------------
+# The issuer is the probed origin itself; behind the reverse proxy it must
+# equal UP_OAUTH_PUBLIC_ORIGIN. Any deviation fails the probe.
 if [[ "${ISSUER}" != "${PROBE_ORIGIN}" ]]; then
-  log "  WARNING: issuer ${ISSUER} differs from the probed origin ${PROBE_ORIGIN}."
-  log "  Behind the reverse proxy the issuer must equal UP_OAUTH_PUBLIC_ORIGIN."
+  die "issuer ${ISSUER} does not equal the probed origin ${PROBE_ORIGIN} (behind the reverse proxy the issuer must equal UP_OAUTH_PUBLIC_ORIGIN)"
 fi
+
+# url_origin prints the normalized scheme://host[:port] of an absolute URL.
+# Any parse failure (missing scheme, missing host) exits non-zero: a
+# malformed endpoint is never treated as a plain origin mismatch.
+url_origin() {
+  local u="$1" prefix host
+  case "${u}" in
+    http://*)  prefix="http://" ;;
+    https://*) prefix="https://" ;;
+    *) die "endpoint URL ${u} has no http(s) scheme" ;;
+  esac
+  host="${u#"${prefix}"}"
+  host="${host%%/*}"
+  host="${host%%\?*}"
+  host="${host%%#*}"
+  # Strip any userinfo section; credentials have no place in an endpoint.
+  host="${host##*@}"
+  [[ -n "${host}" ]] || die "endpoint URL ${u} has no host"
+  echo "${prefix}${host}"
+}
+
+# Every protocol endpoint the reverse proxy must expose: absent, malformed
+# or served from a different origin (scheme, host or PORT) fails closed.
+REQUIRED_ENDPOINTS=(authorization_endpoint token_endpoint jwks_uri userinfo_endpoint end_session_endpoint device_authorization_endpoint)
+for key in "${REQUIRED_ENDPOINTS[@]}"; do
+  value="$(endpoint "${key}")"
+  [[ "${value}" != "(absent)" ]] || die "required discovery endpoint ${key} is missing"
+  origin="$(url_origin "${value}")"
+  [[ "${origin}" == "${PROBE_ORIGIN}" ]] \
+    || die "endpoint ${key} origin ${origin} differs from the probed origin ${PROBE_ORIGIN}"
+done
+log "discovery checks: issuer and ${#REQUIRED_ENDPOINTS[@]} endpoints all served from ${PROBE_ORIGIN}"
 
 # --- step 2: authorize redirect probe -----------------------------------------
 log "issuing authorization request (one pending auth request will be left unused)"
