@@ -10,14 +10,26 @@ import type { UnitedPassQueries } from "@/lib/api/united-pass-data-source";
 import type { AuditQuery } from "@/features/admin/types";
 import type { PageQuery } from "@/types/pagination";
 import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
+import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
+import { serverFetch } from "@/lib/api/server/server-http-client";
+import {
+  parseAuthorizedApplications,
+  parseConsentResolution,
+  parseCurrentUser,
+} from "@/lib/api/response-validators";
 
 /**
  * Server-side query layer.
  *
  * Server Components import queries from this module instead of the mock
- * data source directly. When the real backend API is available, this module
- * will use `server-http-client.ts` to make authenticated HTTP requests
- * that forward the user's session cookie via `next/headers` cookies().
+ * data source directly. Seams migrate from the mock source to real HTTP
+ * one at a time (frontend-freeze-v1.md §5): migrated seams call
+ * `server-http-client.ts` with session cookie forwarding and narrow the
+ * untrusted response onto the frozen contract types; unmigrated seams keep
+ * the mock source until their backend contract lands.
+ *
+ * Migrated seams: getCurrentUser, getConsentResolution,
+ * getAuthorizedApplications.
  *
  * List endpoints accept PageQuery and return CursorPage<T> so the backend
  * can return partial results without the frontend loading all records.
@@ -26,12 +38,26 @@ import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
  * See ADR-0006 for the deployment topology.
  */
 export const serverQueries: UnitedPassQueries = {
-  getCurrentUser: () => mockUnitedPassDataSource.getCurrentUser(),
+  getCurrentUser: USE_MOCK_DATA_SOURCE
+    ? () => mockUnitedPassDataSource.getCurrentUser()
+    : async () => parseCurrentUser(await serverFetch<unknown>("/me")),
   getCurrentPermissions: () => mockUnitedPassDataSource.getCurrentPermissions(),
   getSecurityFactors: () => mockUnitedPassDataSource.getSecurityFactors(),
   getSessions: () => mockUnitedPassDataSource.getSessions(),
-  getConsentResolution: (requestId) => mockUnitedPassDataSource.getConsentResolution(requestId),
-  getAuthorizedApplications: () => mockUnitedPassDataSource.getAuthorizedApplications(),
+  getConsentResolution: USE_MOCK_DATA_SOURCE
+    ? (requestId) => mockUnitedPassDataSource.getConsentResolution(requestId)
+    : async (requestId) =>
+        parseConsentResolution(
+          await serverFetch<unknown>(
+            `/authorization/requests/${encodeURIComponent(requestId)}`,
+          ),
+        ),
+  getAuthorizedApplications: USE_MOCK_DATA_SOURCE
+    ? () => mockUnitedPassDataSource.getAuthorizedApplications()
+    : async () =>
+        parseAuthorizedApplications(
+          await serverFetch<unknown>("/me/authorized-applications"),
+        ),
   getAdminDashboard: () => mockUnitedPassDataSource.getAdminDashboard(),
   getUsers: (query?: PageQuery) => mockUnitedPassDataSource.getUsers(query),
   getUserDetail: (userId) => mockUnitedPassDataSource.getUserDetail(userId),

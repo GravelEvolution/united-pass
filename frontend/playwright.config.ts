@@ -30,5 +30,10 @@ export default defineConfig({
     url: "http://localhost:3000",
     reuseExistingServer: true,
     timeout: 60_000,
+    env: {
+      // The e2e suite exercises the frozen mock data source; real HTTP
+      // seams (P3.7) must not reach a live backend here.
+      NEXT_PUBLIC_USE_MOCK: "true",
+    },
   },
 });

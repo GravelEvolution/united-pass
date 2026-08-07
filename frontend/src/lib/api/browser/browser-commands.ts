@@ -10,14 +10,24 @@
 
 import type { UnitedPassCommands } from "@/lib/api/united-pass-data-source";
 import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
+import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
+import { browserFetch } from "@/lib/api/browser/browser-http-client";
+import {
+  parseDecisionResponse,
+} from "@/lib/api/response-validators";
 
 /**
  * Browser-side command layer.
  *
  * Client Components import mutations from this module instead of the mock
- * data source directly. When the real backend API is available, this module
- * will use `browser-http-client.ts` to make authenticated HTTP requests with
- * CSRF protection, and the mock import will be removed.
+ * data source directly. Seams migrate from the mock source to real HTTP
+ * one at a time (frontend-freeze-v1.md §5): migrated seams call
+ * `browser-http-client.ts` (same-origin credentials; the `up_csrf` cookie
+ * is attached as `X-CSRF-Token` on every write) and narrow the untrusted
+ * response onto the frozen contract types; unmigrated seams keep the mock
+ * source until their backend contract lands.
+ *
+ * Migrated seams: decideConsent, revokeGrant.
  *
  * See ADR-0004 for the full architecture.
  */
@@ -25,9 +35,24 @@ export const browserCommands: UnitedPassCommands = {
   createOAuthClient: (input) => mockUnitedPassDataSource.createOAuthClient(input),
   createApplicationWithInitialClient: (input) =>
     mockUnitedPassDataSource.createApplicationWithInitialClient(input),
-  decideConsent: (requestId, decision) =>
-    mockUnitedPassDataSource.decideConsent(requestId, decision),
-  revokeGrant: (grantId) => mockUnitedPassDataSource.revokeGrant(grantId),
+  decideConsent: USE_MOCK_DATA_SOURCE
+    ? (requestId, decision) => mockUnitedPassDataSource.decideConsent(requestId, decision)
+    : async (requestId, decision) =>
+        parseDecisionResponse(
+          await browserFetch<unknown>(
+            `/authorization/requests/${encodeURIComponent(requestId)}/decision`,
+            { method: "POST", body: { decision } },
+          ),
+        ),
+  revokeGrant: USE_MOCK_DATA_SOURCE
+    ? (grantId) => mockUnitedPassDataSource.revokeGrant(grantId)
+    : async (grantId) => {
+        // Idempotent backend revocation; 204 carries no body.
+        await browserFetch<unknown>(
+          `/me/authorized-applications/${encodeURIComponent(grantId)}`,
+          { method: "DELETE" },
+        );
+      },
   rotateClientSecret: (applicationId, clientId) =>
     mockUnitedPassDataSource.rotateClientSecret(applicationId, clientId),
   updateApplicationStatus: (applicationId, status) =>

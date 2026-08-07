@@ -28,8 +28,24 @@
 
 ## 替换流程
 
+替换按 seam 逐步推进，由单一环境标志 `NEXT_PUBLIC_USE_MOCK` 控制（唯一读取点在 `src/lib/api/data-source-mode.ts`）：`"true"` 时所有 seam 走 mock；未设置时已迁移的 seam 调用真实后端 HTTP API，未迁移的 seam 仍走 mock。标志必须带 `NEXT_PUBLIC_` 前缀，因为浏览器端命令同样读取它（与 frontend-freeze-v1.md §5 伪代码中的 `USE_MOCK` 命名差异源于 Next.js 只会向客户端内联 `NEXT_PUBLIC_*` 变量）。示例配置见 `.env.example`；e2e 的 Playwright webServer 固定注入 `NEXT_PUBLIC_USE_MOCK=true`，保证 e2e 始终演练冻结的 mock 数据源。
+
+已迁移到真实 HTTP 的 seam（P3.7）：
+
+| Seam | 方向 | 后端路径 |
+| --- | --- | --- |
+| `getCurrentUser` | Query（服务端） | `GET /api/v1/me` |
+| `getConsentResolution` | Query（服务端） | `GET /api/v1/authorization/requests/{requestId}` |
+| `getAuthorizedApplications` | Query（服务端） | `GET /api/v1/me/authorized-applications` |
+| `decideConsent` | Command（浏览器） | `POST /api/v1/authorization/requests/{requestId}/decision` |
+| `revokeGrant` | Command（浏览器） | `DELETE /api/v1/me/authorized-applications/{grantId}` |
+
+未迁移的 seam（账户编辑、会话与安全设置、admin、员工与用户管理等）在标志关闭时仍走 mock，后续阶段逐个替换。
+
+迁移每个 seam 的步骤：
+
 1. 根据 `docs/api-contracts.md` 与后端确认 OpenAPI 合同。
-2. 在 `src/lib/api` 中实现真实 HTTP 数据源并统一处理基础 URL、凭据、取消请求、错误和运行时校验。
+2. 在 `src/lib/api` 的对应 seam 层接线真实 HTTP 调用，统一处理基础 URL、凭据、取消请求、错误和运行时校验；响应体必须经过 `src/lib/api/response-validators.ts` 收窄校验后才能进入冻结的领域类型。
 3. 在服务端组合层选择真实数据源；不要把访问令牌或私密环境变量传入 Client Component。
 4. 移除页面中的 Mock 文案和预览动作，并补齐 pending、失败、unauthorized 与重试状态。
 5. 保留 mock 作为测试 fixture 时，应移入测试专用目录，防止生产环境误用。
