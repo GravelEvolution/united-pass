@@ -178,15 +178,17 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		providerName = "fake"
 	}
 
-	// Authorization-request reader for consent resolution (ADR-0005 §2,
-	// §12): the ZITADEL oidc.v2 adapter in real setups, the fake provider
-	// for development. Resolution only ever reads through this seam — the
-	// completion methods are never reachable from the resolution GET.
-	var authRequestReader consent.AuthRequestReader
+	// Authorization-request provider for consent resolution and decision
+	// orchestration (ADR-0005 §2, §5, §12): the ZITADEL oidc.v2 adapter in
+	// real setups, the fake provider for development. Resolution only ever
+	// reads through the narrow AuthRequestReader view of this seam; the
+	// completion methods are reachable exclusively from the decision
+	// service and the future interaction gateway.
+	var authRequestProvider consent.AuthRequestProvider
 	if sdkClient != nil {
-		authRequestReader = zitadel.NewAuthRequestAdapter(sdkClient.OIDCServiceV2())
+		authRequestProvider = zitadel.NewAuthRequestAdapter(sdkClient.OIDCServiceV2())
 	} else if _, isFake := authenticator.(*auth.FakeAuthenticator); isFake && !cfg.IsProduction() {
-		authRequestReader = consent.NewFakeAuthRequestProvider()
+		authRequestProvider = consent.NewFakeAuthRequestProvider()
 	}
 
 	var appRepo *postgres.ApplicationRepository
@@ -235,15 +237,40 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	// derivation of the ConsentResolution union. Every dependency must be
 	// present or the route stays unregistered (fail closed).
 	var authorizationHandlers *httpapi.AuthorizationHandlers
-	if pool != nil && sessionSvc != nil && appRepo != nil && authRequestReader != nil && providerName != "" {
-		grantRepo := postgres.NewGrantRepository(pool.PgxPool())
+	var decisionHandlers *httpapi.AuthorizationDecisionHandlers
+	var grantRepo *postgres.GrantRepository
+	if pool != nil && sessionSvc != nil && appRepo != nil && authRequestProvider != nil && providerName != "" {
+		grantRepo = postgres.NewGrantRepository(pool.PgxPool())
 		resolutionSvc, err := consent.NewResolutionService(
-			authRequestReader, appRepo, grantRepo, providerName,
+			authRequestProvider, appRepo, grantRepo, providerName,
 			func() time.Time { return time.Now().UTC() })
 		if err != nil {
 			return nil, fmt.Errorf("consent resolution service: %w", err)
 		}
 		authorizationHandlers = httpapi.NewAuthorizationHandlers(resolutionSvc, logger)
+
+		// Decision orchestration (P3.4, ADR-0005 §5): the interactive
+		// allow/deny execution entry. The provider tenant follows the
+		// identity-link tenant convention (the configured project).
+		decisionSvc, err := consent.NewDecisionService(
+			authRequestProvider, appRepo, grantRepo,
+			providerName, cfg.Auth.ProjectID,
+			func() time.Time { return time.Now().UTC() })
+		if err != nil {
+			return nil, fmt.Errorf("consent decision service: %w", err)
+		}
+		decisionHandlers = httpapi.NewAuthorizationDecisionHandlers(decisionSvc, sessionSvc, logger)
+
+		// Background reconciliation (ADR-0005 §4): forward-repair rows
+		// carrying the provider success proof and fail stale pending rows.
+		reconciler, err := consent.NewReconciler(grantRepo, grantRepo,
+			consent.DefaultReconciliationInterval, consent.DefaultPendingStaleAfter,
+			consent.DefaultReconciliationBatch, logger)
+		if err != nil {
+			return nil, fmt.Errorf("consent reconciler: %w", err)
+		}
+		reconciler.Start()
+		workerStops = append(workerStops, reconciler.Stop)
 	}
 
 	health := httpapi.NewHealthHandlers(readinessCheckers...)
@@ -293,6 +320,20 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			}
 			if authorizationHandlers != nil {
 				r.Get("/authorization/requests/{requestId}", authorizationHandlers.ResolveRequest)
+			}
+		})
+
+		// Consent decision (ADR-0005 §5, §11): the interactive allow/deny
+		// execution entry. Session + CSRF required; the response carries
+		// the provider callback URL exclusively as redirectUrl under the
+		// global no-store / no-referrer header policy.
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireCSRF())
+			}
+			if decisionHandlers != nil {
+				r.Post("/authorization/requests/{requestId}/decision", decisionHandlers.DecideRequest)
 			}
 		})
 

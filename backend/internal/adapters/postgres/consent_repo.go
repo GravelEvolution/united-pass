@@ -28,8 +28,11 @@ func NewGrantRepository(pool *pgxpool.Pool) *GrantRepository {
 	return &GrantRepository{pool: pool}
 }
 
-// Compile-time proof that the repository satisfies the domain port.
-var _ consent.GrantStore = (*GrantRepository)(nil)
+// Compile-time proof that the repository satisfies the domain ports.
+var (
+	_ consent.GrantStore                 = (*GrantRepository)(nil)
+	_ consent.InFlightDecisionOperations = (*GrantRepository)(nil)
+)
 
 const decisionOperationColumns = `operation_id, provider, provider_tenant_id,
         auth_request_id, completion_kind, status, local_user_id, client_id,
@@ -303,6 +306,43 @@ func (r *GrantRepository) FailDecisionOperation(ctx context.Context, opID consen
 		return consent.ErrDecisionStateConflict
 	}
 	return nil
+}
+
+// ListInFlightDecisionOperations enumerates the operations needing
+// reconciliation attention (ADR-0005 §4): every provider_succeeded row
+// (forward-repair candidate) plus pending rows claimed before the
+// staleness horizon (fail-closed candidate), oldest first and capped at
+// limit. The scope snapshot is deliberately not read here: commits and
+// repairs carry only the operation ID and re-lock the full plan
+// themselves, so this stays one index-friendly scan.
+func (r *GrantRepository) ListInFlightDecisionOperations(ctx context.Context, staleBefore time.Time, limit int) ([]consent.DecisionOperation, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+decisionOperationColumns+`
+		   FROM oauth_authorization_decision_operations
+		  WHERE status = 'provider_succeeded'
+		     OR (status = 'pending' AND created_at < $1)
+		  ORDER BY created_at ASC
+		  LIMIT $2`,
+		staleBefore, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list in-flight decision operations: %w", err)
+	}
+	defer rows.Close()
+	ops := make([]consent.DecisionOperation, 0)
+	for rows.Next() {
+		op, err := scanDecisionOperation(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, op)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate in-flight decision operations: %w", err)
+	}
+	return ops, nil
 }
 
 // GetGrant reads the (user, client) grant with its consented scopes.
