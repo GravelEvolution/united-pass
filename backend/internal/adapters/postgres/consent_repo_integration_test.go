@@ -677,6 +677,43 @@ func TestCommitCorruptedPlanBindingFailsClosed(t *testing.T) {
 		t.Fatalf("allow commit without a scope snapshot must conflict, got %v", err)
 	}
 
+	// Corrupted allow row: an empty scope token was inserted into the
+	// snapshot out-of-band. The commit re-runs canonicalization on the
+	// persisted set and fails closed instead of completing an inconsistent
+	// grant (ADR-0005 §5).
+	emptyScope := claimAndProve(t, repo, allowOperationFor("V2-corrupt-emptyscope", consent.CompletionAllow, user, clientID, []string{"openid"}))
+	if _, err := repo.pool.Exec(ctx,
+		`INSERT INTO oauth_authorization_decision_operation_scopes
+		     (operation_id, scope) VALUES ($1, '')`,
+		string(emptyScope.ID)); err != nil {
+		t.Fatalf("corrupt empty scope: %v", err)
+	}
+	if err := repo.CommitAllowDecision(ctx, consent.AllowCommit{OperationID: emptyScope.ID}); !errors.Is(err, consent.ErrDecisionStateConflict) {
+		t.Fatalf("allow commit with an empty scope token must conflict, got %v", err)
+	}
+	if _, err := repo.GetGrant(ctx, user, clientID); !errors.Is(err, consent.ErrGrantNotFound) {
+		t.Fatalf("corrupted commit must write no grant, got %v", err)
+	}
+
+	// Corrupted allow row: a malformed (whitespace) scope token appears in
+	// the snapshot. NormalizeScopes rejects it, so the commit conflicts.
+	badScope := claimAndProve(t, repo, allowOperationFor("V2-corrupt-badscope", consent.CompletionAllow, user, clientID, []string{"openid"}))
+	if _, err := repo.pool.Exec(ctx,
+		`INSERT INTO oauth_authorization_decision_operation_scopes
+		     (operation_id, scope) VALUES ($1, 'open id')`,
+		string(badScope.ID)); err != nil {
+		t.Fatalf("corrupt malformed scope: %v", err)
+	}
+	if err := repo.CommitAllowDecision(ctx, consent.AllowCommit{OperationID: badScope.ID}); !errors.Is(err, consent.ErrDecisionStateConflict) {
+		t.Fatalf("allow commit with a malformed scope snapshot must conflict, got %v", err)
+	}
+	if records := readAuditRecords(t, repo, emptyScope.ID); len(records) != 0 {
+		t.Fatalf("corrupted commit must write no audit, got %+v", records)
+	}
+	if records := readAuditRecords(t, repo, badScope.ID); len(records) != 0 {
+		t.Fatalf("corrupted commit must write no audit, got %+v", records)
+	}
+
 	// Corrupted error-completion row: a stray scope snapshot appears.
 	gwOp := claimAndProve(t, repo, allowOperationFor("V2-corrupt-gw", consent.CompletionLoginRequired, "", "", nil))
 	if _, err := repo.pool.Exec(ctx,

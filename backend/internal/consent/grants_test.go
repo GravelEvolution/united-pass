@@ -252,6 +252,11 @@ func TestValidateForClaimEnforcesCompletionPlans(t *testing.T) {
 			op.CompletionKind = CompletionAccessDenied
 			op.Scopes = []string{"openid"}
 		}},
+		{"deny without client", func(op *DecisionOperation) {
+			op.CompletionKind = CompletionAccessDenied
+			op.Scopes = nil
+			op.ClientID = ""
+		}},
 	}
 	for _, tc := range cases {
 		op := allowOperation("V2-1")
@@ -269,7 +274,8 @@ func TestValidateForClaimEnforcesCompletionPlans(t *testing.T) {
 		t.Fatalf("duplicate scopes must normalize and validate: %v", err)
 	}
 
-	// Deny binds the acting user but needs no scope snapshot.
+	// Deny binds the acting user and the client but needs no scope
+	// snapshot.
 	deny := allowOperation("V2-2")
 	deny.CompletionKind = CompletionAccessDenied
 	deny.Scopes = nil
@@ -279,6 +285,11 @@ func TestValidateForClaimEnforcesCompletionPlans(t *testing.T) {
 	deny.LocalUserID = ""
 	if err := deny.ValidateForClaim(); err == nil {
 		t.Fatal("deny without user must be rejected")
+	}
+	deny.LocalUserID = identity.UserID("user-1")
+	deny.ClientID = ""
+	if err := deny.ValidateForClaim(); err == nil {
+		t.Fatal("deny without client must be rejected")
 	}
 
 	// Error callbacks tolerate a missing user (no session) but must never
@@ -294,6 +305,30 @@ func TestValidateForClaimEnforcesCompletionPlans(t *testing.T) {
 	gateway.Scopes = []string{"openid"}
 	if err := gateway.ValidateForClaim(); err == nil {
 		t.Fatal("error callback with scopes must be rejected")
+	}
+}
+
+func TestScopesAreCanonical(t *testing.T) {
+	cases := []struct {
+		name   string
+		scopes []string
+		want   bool
+	}{
+		{"nil", nil, true},
+		{"empty", []string{}, true},
+		{"single", []string{"openid"}, true},
+		{"sorted unique", []string{"email", "openid", "profile"}, true},
+		{"duplicated", []string{"openid", "openid"}, false},
+		{"unsorted", []string{"profile", "openid"}, false},
+		{"empty token", []string{""}, false},
+		{"whitespace token", []string{"open id"}, false},
+		{"oversized token", []string{strings.Repeat("s", MaxScopeTokenLen+1)}, false},
+		{"too many tokens", make([]string, MaxScopeCount+1), false},
+	}
+	for _, tc := range cases {
+		if got := ScopesAreCanonical(tc.scopes); got != tc.want {
+			t.Fatalf("%s: ScopesAreCanonical = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 

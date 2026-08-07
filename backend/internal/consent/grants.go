@@ -71,6 +71,29 @@ func NormalizeScopes(scopes []string) ([]string, error) {
 	return out, nil
 }
 
+// ScopesAreCanonical reports whether a persisted scope set is already in
+// canonical form: re-normalizing it yields exactly the stored sequence
+// (every token valid, no duplicates, deterministically sorted). Commits
+// and reconciliation re-check persisted snapshots with this predicate so
+// a row corrupted after claim time (empty token, whitespace, oversize
+// token, duplicates or unordered entries inserted out-of-band) fails
+// closed instead of completing an inconsistent grant (ADR-0005 §5).
+func ScopesAreCanonical(scopes []string) bool {
+	normalized, err := NormalizeScopes(scopes)
+	if err != nil {
+		return false
+	}
+	if len(normalized) != len(scopes) {
+		return false
+	}
+	for i, scope := range normalized {
+		if scope != scopes[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // NewGrantID generates a fresh grant ID.
 func NewGrantID() GrantID {
 	return GrantID(grantIDPrefix + consentRandomHex(consentIDRandomByteLength))
@@ -289,11 +312,11 @@ func (k DecisionOperationKey) Validate() error {
 // ValidateForClaim enforces the completion-plan invariants before the
 // operation row is written (fail closed): a well-formed operation ID, a
 // valid key, a known completion kind, and the per-kind bindings —
-// user decisions bind the acting user, Allow additionally binds the
-// client and a non-empty NORMALIZED scope snapshot, deny and error
-// callbacks never carry scopes. Scope validation runs on the normalized
-// set, so a set that normalizes to nothing (e.g. []string{""}) can never
-// be claimed.
+// user decisions bind the acting user AND the client (so the canonical
+// audit always carries a client association), Allow additionally binds a
+// non-empty NORMALIZED scope snapshot, deny and error callbacks never
+// carry scopes. Scope validation runs on the normalized set, so a set
+// that normalizes to nothing (e.g. []string{""}) can never be claimed.
 func (op DecisionOperation) ValidateForClaim() error {
 	if !HasDecisionOperationIDPrefix(string(op.ID)) {
 		return errors.New("consent: invalid decision operation id")
@@ -326,6 +349,9 @@ func (op DecisionOperation) ValidateForClaim() error {
 	case op.CompletionKind.IsUserDecision(): // access_denied
 		if op.LocalUserID == "" {
 			return errors.New("consent: deny completion requires a bound user")
+		}
+		if op.ClientID == "" {
+			return errors.New("consent: deny completion requires a bound client")
 		}
 		if len(op.Scopes) > 0 {
 			return errors.New("consent: deny completion must not carry scopes")

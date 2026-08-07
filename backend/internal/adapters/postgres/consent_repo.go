@@ -168,6 +168,14 @@ func (r *GrantRepository) CommitAllowDecision(ctx context.Context, commit consen
 		op.LocalUserID == "" || op.ClientID == "" || len(op.Scopes) == 0 {
 		return consent.ErrDecisionStateConflict
 	}
+	// Second canonicalization check: the claim-time snapshot is already
+	// normalized, but the persisted row is re-verified against the single
+	// canonicalization boundary so out-of-band corruption (duplicate,
+	// empty, whitespace, oversize or unsorted tokens) fails closed here
+	// instead of completing an inconsistent grant (ADR-0005 §4, §5).
+	if !consent.ScopesAreCanonical(op.Scopes) {
+		return consent.ErrDecisionStateConflict
+	}
 
 	grantID, err := upsertGrantTx(ctx, tx, op.LocalUserID, op.ClientID)
 	if err != nil {
