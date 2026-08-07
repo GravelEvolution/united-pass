@@ -47,6 +47,7 @@ func TestLoadParsesOverrides(t *testing.T) {
 	t.Setenv("UP_READ_TIMEOUT", "45s")
 	t.Setenv("UP_MAX_REQUEST_BODY_BYTES", "2097152")
 	t.Setenv("UP_LOG_LEVEL", "debug")
+	t.Setenv("UP_OAUTH_PUBLIC_ORIGIN", "http://localhost:3000")
 
 	cfg, err := Load()
 	if err != nil {
@@ -63,6 +64,12 @@ func TestLoadParsesOverrides(t *testing.T) {
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "debug")
+	}
+	if cfg.OAuth.PublicOrigin != "http://localhost:3000" {
+		t.Errorf("OAuth.PublicOrigin = %q", cfg.OAuth.PublicOrigin)
+	}
+	if cfg.OAuth.InteractionBaseURI() != "http://localhost:3000/_interaction" {
+		t.Errorf("InteractionBaseURI = %q", cfg.OAuth.InteractionBaseURI())
 	}
 }
 
@@ -137,9 +144,18 @@ func TestValidateProductionConstraints(t *testing.T) {
 	cfg.Auth.Provider = "zitadel"
 	cfg.Auth.BaseURL = "https://auth.example.com"
 	cfg.Auth.ServiceAccountKeyFile = "/secrets/zitadel/key.json"
+	cfg.OAuth.PublicOrigin = "https://id.example.com"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate should accept valid production config: %v", err)
 	}
+
+	// Production requires the public OAuth origin: issuer and interaction
+	// base URI are derived from it.
+	cfg.OAuth.PublicOrigin = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate should reject production without UP_OAUTH_PUBLIC_ORIGIN")
+	}
+	cfg.OAuth.PublicOrigin = "https://id.example.com"
 
 	// Production must reject permission dev override.
 	cfg.Permission.DevOverrideEnabled = true
@@ -262,6 +278,7 @@ func TestValidateRejectsInsecureProductionAuthURL(t *testing.T) {
 	base.Session.EncryptionKeyID = "production-v1"
 	base.Auth.Provider = "zitadel"
 	base.Auth.ServiceAccountKeyFile = "/secrets/zitadel/key.json"
+	base.OAuth.PublicOrigin = "https://id.example.com"
 
 	cases := []struct {
 		name string
@@ -280,6 +297,109 @@ func TestValidateRejectsInsecureProductionAuthURL(t *testing.T) {
 				t.Fatalf("Validate should reject %q in production", tc.url)
 			}
 		})
+	}
+}
+
+// TestValidateOAuthPublicOriginSyntax verifies the strict origin grammar:
+// scheme + host (+ port) only — never a base URL with path, userinfo, query
+// or fragment (ADR-0005 §1).
+func TestValidateOAuthPublicOriginSyntax(t *testing.T) {
+	valid := []string{
+		"https://id.example.com",
+		"https://id.example.com:8443",
+		"http://localhost:3000",
+		"http://127.0.0.1:3000",
+		"https://id.example.com/", // trailing slash tolerated, normalized away
+	}
+	for _, origin := range valid {
+		cfg := validDevelopmentConfig()
+		cfg.OAuth.PublicOrigin = origin
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate should accept %q: %v", origin, err)
+		}
+	}
+
+	invalid := []struct {
+		name   string
+		origin string
+	}{
+		{name: "path", origin: "https://id.example.com/foo"},
+		{name: "nested path", origin: "https://id.example.com/foo/bar"},
+		{name: "userinfo", origin: "https://user:pass@id.example.com"},
+		{name: "query", origin: "https://id.example.com?q=x"},
+		{name: "fragment", origin: "https://id.example.com/#x"},
+		{name: "missing host", origin: "https://"},
+		{name: "wrong scheme", origin: "ftp://id.example.com"},
+		{name: "no scheme", origin: "id.example.com"},
+		{name: "whitespace", origin: " https://id.example.com"},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validDevelopmentConfig()
+			cfg.OAuth.PublicOrigin = tc.origin
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("Validate should reject %q", tc.origin)
+			}
+		})
+	}
+}
+
+// TestValidateOAuthPublicOriginProductionHTTPS verifies production rejects a
+// plaintext public origin.
+func TestValidateOAuthPublicOriginProductionHTTPS(t *testing.T) {
+	base := validDevelopmentConfig()
+	base.Environment = EnvironmentProduction
+	base.Database = DatabaseConfig{
+		URL:            "postgres://user:pass@host:5432/db?sslmode=require",
+		Schema:         "united_pass",
+		MaxConns:       10,
+		MinConns:       1,
+		ConnectTimeout: 10 * time.Second,
+	}
+	base.Redis = RedisConfig{
+		URL:            "rediss://:pass@host:6379/0",
+		KeyPrefix:      "up:production:",
+		PoolSize:       10,
+		ConnectTimeout: 10 * time.Second,
+		ReadTimeout:    3 * time.Second,
+		WriteTimeout:   3 * time.Second,
+	}
+	base.Session.CookieSecure = true
+	base.Session.EncryptionKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+	base.Session.EncryptionKeyID = "production-v1"
+	base.Auth.Provider = "zitadel"
+	base.Auth.BaseURL = "https://auth.example.com"
+	base.Auth.ServiceAccountKeyFile = "/secrets/zitadel/key.json"
+
+	cfg := base
+	cfg.OAuth.PublicOrigin = "http://id.example.com"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate should reject http public origin in production")
+	}
+	cfg.OAuth.PublicOrigin = "https://id.example.com"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate should accept https public origin in production: %v", err)
+	}
+}
+
+// TestInteractionBaseURIDerivation verifies the single derivation rule:
+// InteractionBaseURI = PublicOrigin + "/_interaction", never independently
+// configured (ADR-0005 §1).
+func TestInteractionBaseURIDerivation(t *testing.T) {
+	cases := []struct {
+		origin string
+		want   string
+	}{
+		{"", ""},
+		{"https://id.example.com", "https://id.example.com/_interaction"},
+		{"https://id.example.com/", "https://id.example.com/_interaction"},
+		{"http://localhost:3000", "http://localhost:3000/_interaction"},
+	}
+	for _, tc := range cases {
+		got := OAuthConfig{PublicOrigin: tc.origin}.InteractionBaseURI()
+		if got != tc.want {
+			t.Errorf("InteractionBaseURI(%q) = %q, want %q", tc.origin, got, tc.want)
+		}
 	}
 }
 

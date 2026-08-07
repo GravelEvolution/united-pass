@@ -112,6 +112,9 @@ type Config struct {
 	Reauth   ReauthConfig
 	Rotation RotationConfig
 
+	// Phase 3 — OAuth endpoint topology
+	OAuth OAuthConfig
+
 	// Integration tests
 	Test TestConfig
 }
@@ -210,6 +213,34 @@ type PermissionConfig struct {
 	DevOverrideUserID  string
 }
 
+// OAuthConfig describes the public OAuth endpoint topology (ADR-0005 §1).
+// The protocol endpoints themselves (authorize, token, revoke, introspect,
+// keys, userinfo, end_session, device_authorization, discovery) live in the
+// reverse proxy in front of the provider; Go and Next.js never implement
+// them. PublicOrigin is the single browser-visible origin, and every other
+// topology value is derived from it so the pieces can never drift apart.
+type OAuthConfig struct {
+	// PublicOrigin is the origin the reverse proxy serves the public OAuth
+	// endpoints on (e.g. "https://id.example.com"). It is an origin, not an
+	// arbitrary base URL: scheme + host (+ optional port) only — no path
+	// other than "/", no userinfo, query or fragment. It must never be
+	// conflated with UP_AUTH_PROVIDER_BASE_URL, which is the internal
+	// provider management/API address; this value is the browser-visible
+	// issuer origin.
+	PublicOrigin string
+}
+
+// InteractionBaseURI derives the ZITADEL LoginV2 Interaction Base URI from
+// the public origin: <origin>/_interaction. This is the only derivation in
+// the system — there is deliberately no independent interaction base
+// configuration. Returns "" when no public origin is configured.
+func (c OAuthConfig) InteractionBaseURI() string {
+	if c.PublicOrigin == "" {
+		return ""
+	}
+	return strings.TrimRight(c.PublicOrigin, "/") + "/_interaction"
+}
+
 // TestConfig holds integration test environment parameters.
 type TestConfig struct {
 	DatabaseURL    string
@@ -301,6 +332,10 @@ func Load() (Config, error) {
 			GracePeriod: durationOr("UP_SECRET_ROTATION_GRACE_PERIOD", defaultRotationGracePeriod),
 			RateLimit:   intOr("UP_SECRET_ROTATION_RATE_LIMIT", defaultRotationRateLimit),
 			RateWindow:  durationOr("UP_SECRET_ROTATION_RATE_WINDOW", defaultRotationRateWindow),
+		},
+
+		OAuth: OAuthConfig{
+			PublicOrigin: envOr("UP_OAUTH_PUBLIC_ORIGIN", ""),
 		},
 
 		Test: TestConfig{
@@ -471,6 +506,15 @@ func (c Config) Validate() error {
 		}
 	}
 
+	// OAuth topology validation (when configured). The public origin is an
+	// origin, not a base URL; derived URIs (InteractionBaseURI) must never be
+	// poisonable by extra URL components smuggled into the configuration.
+	if c.OAuth.PublicOrigin != "" {
+		if err := validateOAuthPublicOrigin(c.OAuth.PublicOrigin, c.IsProduction()); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	// Integration test validation (when configured).
 	if c.Test.DatabaseURL != "" {
 		if c.Test.DatabaseSchema == "" {
@@ -525,6 +569,12 @@ func (c Config) Validate() error {
 				}
 			}
 		}
+		// The public OAuth topology is mandatory in production: the issuer,
+		// the LoginV2 Interaction Base URI and the provisioned app
+		// configuration are all derived from it.
+		if c.OAuth.PublicOrigin == "" {
+			errs = append(errs, errors.New("production requires UP_OAUTH_PUBLIC_ORIGIN"))
+		}
 		// Production stores provider session references encrypted at rest
 		// (ADR-0002 section 13), so the encryption key is mandatory.
 		if c.Session.EncryptionKey == "" {
@@ -575,6 +625,41 @@ var schemaIdentifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 // use and quoted with pgx.Identifier when concatenated into statements.
 func ValidSchemaIdentifier(s string) bool {
 	return schemaIdentifierPattern.MatchString(s)
+}
+
+// validateOAuthPublicOrigin enforces strict origin syntax: scheme://host[:port]
+// with nothing else. A trailing "/" is tolerated and normalized away by
+// InteractionBaseURI. Production additionally requires HTTPS.
+func validateOAuthPublicOrigin(origin string, requireHTTPS bool) error {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return fmt.Errorf("oauth public origin is invalid: %w", err)
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		if requireHTTPS {
+			return errors.New("oauth public origin must use https in production")
+		}
+	default:
+		return fmt.Errorf("oauth public origin scheme %q must be http or https", u.Scheme)
+	}
+	if u.Host == "" {
+		return errors.New("oauth public origin must include a host")
+	}
+	if u.User != nil {
+		return errors.New("oauth public origin must not contain userinfo")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("oauth public origin must not contain a path, got %q", u.Path)
+	}
+	if u.RawQuery != "" {
+		return errors.New("oauth public origin must not contain a query")
+	}
+	if u.Fragment != "" {
+		return errors.New("oauth public origin must not contain a fragment")
+	}
+	return nil
 }
 
 func parseLogLevel(raw string) (slog.Level, error) {

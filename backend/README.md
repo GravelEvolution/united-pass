@@ -152,6 +152,7 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_AUTH_PROVIDER_CLIENT_SECRET` | | Authentication provider client secret. |
 | `UP_AUTH_PROVIDER_SERVICE_ACCOUNT_KEY_FILE` | | Path to the ZITADEL service account key.json (JWT profile auth). Required for `zitadel`. |
 | `UP_AUTH_PROVIDER_DOMAIN` | | WebAuthn relying-party domain for passkey challenges. Empty disables passkey challenges. |
+| `UP_OAUTH_PUBLIC_ORIGIN` | | Public OAuth origin the reverse proxy serves the protocol endpoints on (browser-visible issuer origin), e.g. `https://id.example.com`. Strict origin syntax: scheme + host (+ port) only — no path, userinfo, query or fragment. HTTPS required in production, where the variable is mandatory. The ZITADEL LoginV2 Interaction Base URI is derived as `<origin>/_interaction`. Do not reuse `UP_AUTH_PROVIDER_BASE_URL` for this value. |
 | `UP_SSH_HOST` | | SSH host for the development tunnel (`scripts/tunnel.sh`). |
 | `UP_SSH_PORT` | `22` | SSH port for the development tunnel. |
 | `UP_SSH_USER` | | SSH user for the development tunnel. |
