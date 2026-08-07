@@ -309,3 +309,19 @@ func TestResolveRequestStoreFailureIsInternal(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 }
+
+func TestResolveRequestVanishedUserStaysInUnion(t *testing.T) {
+	// identity.ErrUserNotFound must degrade into the frozen union, never
+	// into a 401 error body that escapes the ConsentResolution contract.
+	resolver := &stubConsentResolver{err: identity.ErrUserNotFound}
+	router := buildResolutionRouter(resolver, true)
+
+	rec := doGet(t, router, "/authorization/requests/req-1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	if body["status"] != "unauthenticated" || body["requestId"] != "req-1" || len(body) != 2 {
+		t.Fatalf("body = %v, want the frozen unauthenticated shape", body)
+	}
+}

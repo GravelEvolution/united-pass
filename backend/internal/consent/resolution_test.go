@@ -96,6 +96,15 @@ func resolvedSession() *ResolutionSession {
 	}
 }
 
+// freshSession authenticated AFTER baseView's CreatedAt (testNow-1min): the
+// minimal re-authentication proof for prompt=login / max_age=0.
+func freshSession() *ResolutionSession {
+	return &ResolutionSession{
+		UserID:             identity.UserID("user_01TEST"),
+		AuthenticationTime: testNow.Add(-30 * time.Second),
+	}
+}
+
 func TestNewResolutionServiceRequiresAllSeams(t *testing.T) {
 	provider := &stubAuthRequestReader{}
 	clients := &stubClientResolver{}
@@ -329,6 +338,127 @@ func TestResolveEmptyScopesNotAllowed(t *testing.T) {
 	}
 }
 
+// TestResolveScopeCanonicalization pins that resolution shares the single
+// P3.2 NormalizeScopes boundary with the decision execution: anything the
+// claim would reject can never be advertised as continuable by the GET,
+// and every downstream consumer (catalog check, reuse, UI) sees the same
+// deduplicated sorted set.
+func TestResolveScopeCanonicalization(t *testing.T) {
+	t.Run("scope flood fails closed like the claim", func(t *testing.T) {
+		view := baseView()
+		view.Scopes = make([]string, 33)
+		for i := range view.Scopes {
+			view.Scopes[i] = "openid" // 33 tokens: duplicates do not matter
+		}
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()},
+			&stubGrantReader{grant: reusableGrantForFreshness()})
+
+		res, err := svc.Resolve(context.Background(), ResolutionInput{
+			AuthRequestID: "V2-request-1", Session: resolvedSession(),
+		})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != ResolutionScopeNotAllowed || len(res.DisallowedScopes) != 0 {
+			t.Fatalf("resolution = %+v, want scope_not_allowed without echoing raw tokens", res)
+		}
+	})
+
+	t.Run("distinct scope flood fails closed", func(t *testing.T) {
+		view := baseView()
+		view.Scopes = make([]string, 33)
+		for i := range view.Scopes {
+			view.Scopes[i] = "scope-" + string(rune('a'+i%26)) + string(rune('a'+i/26))
+		}
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()}, &stubGrantReader{})
+
+		res, err := svc.Resolve(context.Background(), ResolutionInput{AuthRequestID: "V2-request-1"})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != ResolutionScopeNotAllowed {
+			t.Fatalf("status = %q", res.Status)
+		}
+	})
+
+	t.Run("whitespace token fails closed", func(t *testing.T) {
+		view := baseView()
+		view.Scopes = []string{"openid", "open id"}
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()}, &stubGrantReader{})
+
+		res, err := svc.Resolve(context.Background(), ResolutionInput{AuthRequestID: "V2-request-1"})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != ResolutionScopeNotAllowed {
+			t.Fatalf("status = %q", res.Status)
+		}
+	})
+
+	t.Run("oversized token fails closed", func(t *testing.T) {
+		view := baseView()
+		view.Scopes = []string{"openid", string(make([]rune, MaxScopeTokenLen+1))}
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()}, &stubGrantReader{})
+
+		res, err := svc.Resolve(context.Background(), ResolutionInput{AuthRequestID: "V2-request-1"})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != ResolutionScopeNotAllowed {
+			t.Fatalf("status = %q", res.Status)
+		}
+	})
+
+	t.Run("duplicates deduplicate into a deterministic UI set", func(t *testing.T) {
+		view := baseView()
+		view.Scopes = []string{"profile", "openid", "profile", "openid"}
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()},
+			&stubGrantReader{err: ErrGrantNotFound})
+
+		res, err := svc.Resolve(context.Background(), ResolutionInput{
+			AuthRequestID: "V2-request-1", Session: resolvedSession(),
+		})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != ResolutionValid {
+			t.Fatalf("status = %q", res.Status)
+		}
+		if len(res.Scopes) != 2 || res.Scopes[0].Scope != "openid" || res.Scopes[1].Scope != "profile" {
+			t.Fatalf("scopes = %+v, want deduplicated sorted [openid profile]", res.Scopes)
+		}
+	})
+
+	t.Run("duplicates reuse the normalized set against grants", func(t *testing.T) {
+		view := baseView()
+		view.Scopes = []string{"openid", "openid", "profile", "profile"}
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()},
+			&stubGrantReader{grant: reusableGrantForFreshness()})
+
+		res, err := svc.Resolve(context.Background(), ResolutionInput{
+			AuthRequestID: "V2-request-1", Session: resolvedSession(),
+		})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != ResolutionAlreadyAuthorized {
+			t.Fatalf("status = %q, want already_authorized via normalized subset check", res.Status)
+		}
+	})
+}
+
 func TestResolveUnauthenticated(t *testing.T) {
 	t.Run("no session", func(t *testing.T) {
 		svc := newTestService(t,
@@ -344,7 +474,7 @@ func TestResolveUnauthenticated(t *testing.T) {
 		}
 	})
 
-	t.Run("prompt login forces re-authentication", func(t *testing.T) {
+	t.Run("prompt login with stale session", func(t *testing.T) {
 		view := baseView()
 		view.Prompts = []Prompt{PromptLogin}
 		svc := newTestService(t,
@@ -362,7 +492,7 @@ func TestResolveUnauthenticated(t *testing.T) {
 		}
 	})
 
-	t.Run("max_age zero", func(t *testing.T) {
+	t.Run("max_age zero with stale session", func(t *testing.T) {
 		view := baseView()
 		zero := time.Duration(0)
 		view.MaxAge = &zero
@@ -417,6 +547,120 @@ func TestResolveUnauthenticated(t *testing.T) {
 		}
 		if res.Status != ResolutionValid {
 			t.Fatalf("status = %q", res.Status)
+		}
+	})
+
+	t.Run("prompt login without creation time fails closed", func(t *testing.T) {
+		view := baseView()
+		view.Prompts = []Prompt{PromptLogin}
+		view.CreatedAt = time.Time{} // no proof anchor available
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()},
+			&stubGrantReader{grant: reusableGrantForFreshness()})
+
+		res, err := svc.Resolve(context.Background(), ResolutionInput{
+			AuthRequestID: "V2-request-1", Session: freshSession(),
+		})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != ResolutionUnauthenticated {
+			t.Fatalf("status = %q, want unauthenticated without proof anchor", res.Status)
+		}
+	})
+}
+
+func reusableGrantForFreshness() Grant {
+	return Grant{
+		ID:       GrantID("grt_test"),
+		UserID:   identity.UserID("user_01TEST"),
+		ClientID: applications.OAuthClientID("cli_test"),
+		Status:   GrantActive,
+		Scopes:   []string{"openid", "profile", "email"},
+	}
+}
+
+// TestResolveAuthenticationFreshness pins the single shared freshness
+// predicate (ADR-0005 §9): prompt=login and max_age=0 are satisfied only
+// by an authentication after the auth request was created, so a completed
+// re-login resumes instead of looping, while the pre-request session never
+// satisfies the force flag.
+func TestResolveAuthenticationFreshness(t *testing.T) {
+	t.Run("prompt login after re-authentication proceeds", func(t *testing.T) {
+		view := baseView()
+		view.Prompts = []Prompt{PromptLogin}
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()},
+			&stubGrantReader{err: ErrGrantNotFound})
+
+		res, err := svc.Resolve(context.Background(), ResolutionInput{
+			AuthRequestID: "V2-request-1", Session: freshSession(),
+		})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != ResolutionValid {
+			t.Fatalf("status = %q, want valid after re-authentication", res.Status)
+		}
+	})
+
+	t.Run("prompt login after re-authentication reuses a grant", func(t *testing.T) {
+		view := baseView()
+		view.Prompts = []Prompt{PromptLogin}
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()},
+			&stubGrantReader{grant: reusableGrantForFreshness()})
+
+		res, err := svc.Resolve(context.Background(), ResolutionInput{
+			AuthRequestID: "V2-request-1", Session: freshSession(),
+		})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != ResolutionAlreadyAuthorized {
+			t.Fatalf("status = %q, want already_authorized", res.Status)
+		}
+	})
+
+	t.Run("prompt login plus consent after re-authentication shows consent", func(t *testing.T) {
+		view := baseView()
+		view.Prompts = []Prompt{PromptLogin, PromptConsent}
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()},
+			&stubGrantReader{grant: reusableGrantForFreshness()})
+
+		res, err := svc.Resolve(context.Background(), ResolutionInput{
+			AuthRequestID: "V2-request-1", Session: freshSession(),
+		})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != ResolutionValid {
+			t.Fatalf("status = %q, want valid (consent screen), not reuse or re-login", res.Status)
+		}
+	})
+
+	t.Run("max_age zero after re-authentication proceeds", func(t *testing.T) {
+		view := baseView()
+		zero := time.Duration(0)
+		view.MaxAge = &zero
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()},
+			&stubGrantReader{err: ErrGrantNotFound})
+
+		res, err := svc.Resolve(context.Background(), ResolutionInput{
+			AuthRequestID: "V2-request-1", Session: freshSession(),
+		})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != ResolutionValid {
+			t.Fatalf("status = %q, want valid after re-authentication", res.Status)
 		}
 	})
 }
@@ -633,6 +877,78 @@ func TestResolveNonInteractivePrompts(t *testing.T) {
 			&stubClientResolver{facts: baseFacts()}, &stubGrantReader{})
 
 		_, err := svc.Resolve(context.Background(), ResolutionInput{AuthRequestID: "V2-request-1"})
+		if !errors.Is(err, ErrResolutionNotInteractive) {
+			t.Fatalf("err = %v, want ErrResolutionNotInteractive", err)
+		}
+	})
+
+	t.Run("prompt none with exceeded max_age cannot silently reuse", func(t *testing.T) {
+		view := baseView()
+		view.Prompts = []Prompt{PromptNone}
+		maxAge := time.Minute // session authenticated 5 minutes ago
+		view.MaxAge = &maxAge
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()},
+			&stubGrantReader{grant: reusableGrant})
+
+		_, err := svc.Resolve(context.Background(), ResolutionInput{
+			AuthRequestID: "V2-request-1", Session: resolvedSession(),
+		})
+		if !errors.Is(err, ErrResolutionNotInteractive) {
+			t.Fatalf("err = %v, want ErrResolutionNotInteractive despite reusable grant", err)
+		}
+	})
+
+	t.Run("prompt none with satisfied max_age silently reuses", func(t *testing.T) {
+		view := baseView()
+		view.Prompts = []Prompt{PromptNone}
+		maxAge := time.Hour
+		view.MaxAge = &maxAge
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()},
+			&stubGrantReader{grant: reusableGrant})
+
+		res, err := svc.Resolve(context.Background(), ResolutionInput{
+			AuthRequestID: "V2-request-1", Session: resolvedSession(),
+		})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != ResolutionAlreadyAuthorized {
+			t.Fatalf("status = %q", res.Status)
+		}
+	})
+
+	// Adapter linkage: the zitadel adapter maps every unknown provider
+	// enum onto PromptUnspecified (promptFromProto); resolution must fail
+	// closed on it instead of silently accepting it.
+	t.Run("prompt unspecified rejected", func(t *testing.T) {
+		view := baseView()
+		view.Prompts = []Prompt{PromptUnspecified}
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()}, &stubGrantReader{})
+
+		_, err := svc.Resolve(context.Background(), ResolutionInput{
+			AuthRequestID: "V2-request-1", Session: resolvedSession(),
+		})
+		if !errors.Is(err, ErrResolutionNotInteractive) {
+			t.Fatalf("err = %v, want ErrResolutionNotInteractive", err)
+		}
+	})
+
+	t.Run("out-of-range prompt rejected", func(t *testing.T) {
+		view := baseView()
+		view.Prompts = []Prompt{Prompt(99)}
+		svc := newTestService(t,
+			&stubAuthRequestReader{view: view},
+			&stubClientResolver{facts: baseFacts()}, &stubGrantReader{})
+
+		_, err := svc.Resolve(context.Background(), ResolutionInput{
+			AuthRequestID: "V2-request-1", Session: resolvedSession(),
+		})
 		if !errors.Is(err, ErrResolutionNotInteractive) {
 			t.Fatalf("err = %v, want ErrResolutionNotInteractive", err)
 		}

@@ -228,9 +228,15 @@ func (h *AuthorizationHandlers) writeResolutionError(w http.ResponseWriter, r *h
 	}
 
 	if errors.Is(err, identity.ErrUserNotFound) {
-		// A user that disappeared mid-resolution must not see consent
-		// data; treat the session as absent.
-		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "请先登录以继续。", nil)
+		// A user that disappeared mid-resolution degrades to the anonymous
+		// outcome inside the frozen union; a 401 error body would escape
+		// the ConsentResolution contract. OptionalSession normally already
+		// downgrades such sessions, so this is defense in depth for future
+		// seams.
+		writeJSONNoStore(w, r, http.StatusOK, consentUnauthenticatedJSON{
+			Status:    string(consent.ResolutionUnauthenticated),
+			RequestID: chi.URLParam(r, "requestId"),
+		})
 		return
 	}
 

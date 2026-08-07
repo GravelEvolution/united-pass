@@ -12,12 +12,13 @@ import (
 )
 
 // Authorization-request resolution (ADR-0005 §2, §4, §7, §9, §12): the
-// side-effect free derivation of the ConsentResolution union served by
-// GET /api/v1/authorization/requests/{requestId}. Resolution states are
-// derived on read — no request table, no operation claim, no provider
-// completion, no grant write and no audit write ever happens here. The
-// interaction gateway (P3.6) is the only execution entry for the
-// non-interactive prompt branches.
+// authorization-side-effect free derivation of the ConsentResolution union
+// served by GET /api/v1/authorization/requests/{requestId}. Resolution
+// states are derived on read — no request table, no operation claim, no
+// provider completion, no grant write and no audit write ever happens
+// here. (Transport-level session bookkeeping such as the OptionalSession
+// touch is outside this guarantee.) The interaction gateway (P3.6) is the
+// only execution entry for the non-interactive prompt branches.
 
 // AuthRequestReader is the narrow provider port resolution needs: reading
 // the auth request only. Resolution must never complete or mutate the
@@ -63,11 +64,11 @@ type GrantReader interface {
 
 // ErrResolutionNotInteractive: the auth request cannot proceed through the
 // interactive consent UI — prompt=create, prompt=select_account, an
-// invalid prompt combination, or prompt=none without a silently reusable
-// grant (ADR-0005 §9). Such requests are executed exclusively by the
-// interaction gateway; the resolution GET never renders UI for them and
-// never downgrades or reinterprets them. HTTP adapters map it to a stable
-// 400 outcome.
+// unknown/unspecified prompt value, an invalid prompt combination, or
+// prompt=none without a silently reusable grant (ADR-0005 §9). Such
+// requests are executed exclusively by the interaction gateway; the
+// resolution GET never renders UI for them and never downgrades or
+// reinterprets them. HTTP adapters map it to a stable 400 outcome.
 var ErrResolutionNotInteractive = errors.New("consent: request cannot proceed interactively")
 
 // ResolutionStatus is the ConsentResolution union discriminator frozen by
@@ -185,10 +186,12 @@ func NewResolutionService(
 }
 
 // Resolve derives the ConsentResolution for one auth request. It performs
-// no writes of any kind: no operation claim, no provider completion, no
-// grant mutation and no audit record (ADR-0005 §12). Evaluation order is
-// fixed: provider read → client/application mapping → redirect exact
-// match → scope validation → session state → grant reuse.
+// no authorization writes of any kind: no operation claim, no provider
+// completion, no grant mutation and no audit record (ADR-0005 §12).
+// Evaluation order is fixed: provider read → prompt validation →
+// client/application mapping → redirect exact match → scope
+// canonicalization + validation → session state (including authentication
+// freshness) → grant reuse.
 func (s *ResolutionService) Resolve(ctx context.Context, input ResolutionInput) (Resolution, error) {
 	if err := ValidateAuthRequestID(input.AuthRequestID); err != nil {
 		return Resolution{}, err
@@ -247,11 +250,25 @@ func (s *ResolutionService) Resolve(ctx context.Context, input ResolutionInput) 
 		}, nil
 	}
 
-	// 5. Scope validation: every requested scope must be in the client's
-	// registered catalog. An empty request can never produce a grant and
-	// is reported as not allowed as well.
-	disallowed := disallowedScopes(view.Scopes, facts.Client.Scopes)
-	if len(view.Scopes) == 0 || len(disallowed) > 0 {
+	// 5. Scope canonicalization: the requested scopes are normalized
+	// through the single P3.2 canonicalization boundary before any further
+	// use, so the GET and the decision execution (P3.4) share one scope
+	// fact — a request that cannot survive NormalizeScopes there can never
+	// be advertised as continuable here. Structurally invalid or empty
+	// results are reported as not allowed; the raw tokens are never echoed.
+	requestedScopes, err := NormalizeScopes(view.Scopes)
+	if err != nil || len(requestedScopes) == 0 {
+		return Resolution{
+			Status:           ResolutionScopeNotAllowed,
+			AuthRequestID:    input.AuthRequestID,
+			DisallowedScopes: []string{},
+		}, nil
+	}
+
+	// 6. Catalog validation: every normalized scope must be registered on
+	// the client.
+	disallowed := disallowedScopes(requestedScopes, facts.Client.Scopes)
+	if len(disallowed) > 0 {
 		return Resolution{
 			Status:           ResolutionScopeNotAllowed,
 			AuthRequestID:    input.AuthRequestID,
@@ -259,12 +276,17 @@ func (s *ResolutionService) Resolve(ctx context.Context, input ResolutionInput) 
 		}, nil
 	}
 
-	// 6. prompt=none can only ever be represented by silent reuse on this
+	// 7. prompt=none can only ever be represented by silent reuse on this
 	// entry point: it must never render login or consent UI (ADR-0005
-	// §9). Without a reusable grant the request cannot proceed here; the
-	// gateway is the execution entry for all other branches.
+	// §9). The session must additionally satisfy the request's
+	// authentication requirements (max_age); without both, the request
+	// cannot proceed here and the gateway is the execution entry.
 	if view.HasPrompt(PromptNone) {
-		reusable, err := s.grantReusable(ctx, input.Session, view, facts.Client)
+		if input.Session == nil || input.Session.UserID == "" ||
+			!authenticationSatisfied(view, input.Session, s.now()) {
+			return Resolution{}, ErrResolutionNotInteractive
+		}
+		reusable, err := s.grantReusable(ctx, input.Session, view, facts.Client, requestedScopes)
 		if err != nil {
 			return Resolution{}, err
 		}
@@ -274,34 +296,24 @@ func (s *ResolutionService) Resolve(ctx context.Context, input ResolutionInput) 
 		return Resolution{}, ErrResolutionNotInteractive
 	}
 
-	// 7. Session state. Missing session, forced re-authentication
-	// (prompt=login) and exceeded max_age all require (re-)login; the
-	// frozen union has no reauthentication member, so they surface as
-	// unauthenticated. The gateway routes the real flow through /login.
-	if input.Session == nil || input.Session.UserID == "" {
+	// 8. Session state. A missing session, or one that does not satisfy
+	// the request's authentication freshness requirements (prompt=login,
+	// max_age=0, exceeded max_age), requires (re-)login; the frozen union
+	// has no reauthentication member, so they surface as unauthenticated.
+	// The gateway routes the real flow through /login, and after a genuine
+	// re-authentication the same request resolves past this check instead
+	// of looping (ADR-0005 §9).
+	if input.Session == nil || input.Session.UserID == "" ||
+		!authenticationSatisfied(view, input.Session, s.now()) {
 		return Resolution{
 			Status:        ResolutionUnauthenticated,
 			AuthRequestID: input.AuthRequestID,
 		}, nil
-	}
-	if view.HasPrompt(PromptLogin) {
-		return Resolution{
-			Status:        ResolutionUnauthenticated,
-			AuthRequestID: input.AuthRequestID,
-		}, nil
-	}
-	if view.MaxAge != nil {
-		if *view.MaxAge <= 0 || s.now().Sub(input.Session.AuthenticationTime) > *view.MaxAge {
-			return Resolution{
-				Status:        ResolutionUnauthenticated,
-				AuthRequestID: input.AuthRequestID,
-			}, nil
-		}
 	}
 
-	// 8. Grant reuse evaluation (ADR-0005 §7). The GET is advisory: the
+	// 9. Grant reuse evaluation (ADR-0005 §7). The GET is advisory: the
 	// decision endpoint re-enforces every condition server-side.
-	reusable, err := s.grantReusable(ctx, input.Session, view, facts.Client)
+	reusable, err := s.grantReusable(ctx, input.Session, view, facts.Client, requestedScopes)
 	if err != nil {
 		return Resolution{}, err
 	}
@@ -316,21 +328,22 @@ func (s *ResolutionService) Resolve(ctx context.Context, input ResolutionInput) 
 		ApplicationDescription: facts.Application.Description,
 		ApplicationOwner:       facts.Application.OwnerName,
 		RedirectHost:           verifiedRedirectHost(view.RedirectURI),
-		Scopes:                 resolutionScopes(view.Scopes),
+		Scopes:                 resolutionScopes(requestedScopes),
 	}, nil
 }
 
 // grantReusable evaluates all ADR-0005 §7 reuse preconditions: an active
-// grant for (user, client), requested scopes ⊆ granted scopes (which also
-// guarantees offline_access is present only when it was explicitly
-// consented before), a consent mode permitting reuse and no
-// prompt=consent. Client/application validity is already established by
-// the caller.
+// grant for (user, client), the normalized requested scopes ⊆ granted
+// scopes (which also guarantees offline_access is present only when it was
+// explicitly consented before), a consent mode permitting reuse and no
+// prompt=consent. Client/application validity and authentication freshness
+// are already established by the caller.
 func (s *ResolutionService) grantReusable(
 	ctx context.Context,
 	sess *ResolutionSession,
 	view *AuthRequestView,
 	client applications.OAuthClient,
+	requestedScopes []string,
 ) (bool, error) {
 	if sess == nil || sess.UserID == "" {
 		return false, nil
@@ -351,15 +364,54 @@ func (s *ResolutionService) grantReusable(
 	if grant.Status != GrantActive {
 		return false, nil
 	}
-	return grant.ScopesContain(view.Scopes), nil
+	return grant.ScopesContain(requestedScopes), nil
+}
+
+// authenticationSatisfied is the single authentication-freshness predicate
+// shared by every resolution path (ADR-0005 §9, OIDC Core). The
+// interaction gateway (P3.6) must reuse exactly this judgment:
+//
+//   - prompt=login or max_age<=0 force re-authentication: they are
+//     satisfied only by an authentication that happened AFTER this auth
+//     request was created (session authentication time > view.CreatedAt).
+//     That lets a completed re-login resume at /authorize instead of
+//     looping, while the pre-request session never satisfies the force
+//     flag. A missing creation time fails closed — the proof cannot be
+//     established without it. P3.9 calibrates provider/local clock skew
+//     on the real deployment.
+//   - max_age > 0 bounds the elapsed time since authentication.
+//   - no requirement: any session satisfies.
+func authenticationSatisfied(view *AuthRequestView, sess *ResolutionSession, now time.Time) bool {
+	if sess == nil || sess.UserID == "" {
+		return false
+	}
+	if view.HasPrompt(PromptLogin) || (view.MaxAge != nil && *view.MaxAge <= 0) {
+		if view.CreatedAt.IsZero() {
+			return false
+		}
+		return sess.AuthenticationTime.After(view.CreatedAt)
+	}
+	if view.MaxAge != nil {
+		return now.Sub(sess.AuthenticationTime) <= *view.MaxAge
+	}
+	return true
 }
 
 // validateInteractivePrompts rejects prompt values and combinations that
 // can never proceed through the interactive consent UI (ADR-0005 §9):
+// unknown values (which the adapters map to PromptUnspecified, plus any
+// out-of-range value) fail closed instead of being silently ignored,
 // create and select_account are unsupported in Phase 3, and none combined
 // with any other prompt is an invalid combination that is neither
 // downgraded nor reinterpreted.
 func validateInteractivePrompts(view *AuthRequestView) error {
+	for _, p := range view.Prompts {
+		switch p {
+		case PromptNone, PromptLogin, PromptConsent, PromptSelectAccount, PromptCreate:
+		default:
+			return ErrResolutionNotInteractive
+		}
+	}
 	if view.HasPrompt(PromptNone) && len(view.Prompts) > 1 {
 		return ErrResolutionNotInteractive
 	}

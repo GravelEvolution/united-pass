@@ -99,10 +99,11 @@ func TestIntegration_ResolveConsentClient(t *testing.T) {
 	})
 }
 
-// TestIntegration_ResolutionEndToEnd runs the full side-effect free
-// resolution pipeline against real PostgreSQL records and the fake
-// provider: every union outcome plus the guarantee that the GET writes
-// nothing (no operation rows, no grants, no provider completions).
+// TestIntegration_ResolutionEndToEnd runs the full authorization-side-effect
+// free resolution pipeline against real PostgreSQL records and the fake
+// provider: every union outcome, the authentication-freshness invariants,
+// plus the guarantee that the GET writes nothing on the authorization side
+// (no operation rows, no grants, no provider completions).
 func TestIntegration_ResolutionEndToEnd(t *testing.T) {
 	grants, appRepo, users := setupConsentRepo(t)
 	ownerID := createTestOwner(t, users, "consent-e2e-owner")
@@ -153,6 +154,38 @@ func TestIntegration_ResolutionEndToEnd(t *testing.T) {
 		ID: "V2-int-bad-scope", ClientID: providerClientID,
 		Scopes: []string{"openid", "admin:read"}, RedirectURI: "https://app.example.com/callback",
 		CreatedAt: time.Now().UTC(),
+	})
+	provider.AddRequest(&consent.AuthRequestView{
+		ID: "V2-int-login-stale", ClientID: providerClientID,
+		Scopes: []string{"openid", "profile"}, RedirectURI: "https://app.example.com/callback",
+		Prompts: []consent.Prompt{consent.PromptLogin}, CreatedAt: time.Now().UTC(),
+	})
+	provider.AddRequest(&consent.AuthRequestView{
+		ID: "V2-int-reauth", ClientID: providerClientID,
+		Scopes: []string{"openid", "profile"}, RedirectURI: "https://app.example.com/callback",
+		Prompts:   []consent.Prompt{consent.PromptLogin},
+		CreatedAt: time.Now().UTC().Add(-10 * time.Minute),
+	})
+	provider.AddRequest(&consent.AuthRequestView{
+		ID: "V2-int-unspec", ClientID: providerClientID,
+		Scopes: []string{"openid"}, RedirectURI: "https://app.example.com/callback",
+		Prompts: []consent.Prompt{consent.PromptUnspecified}, CreatedAt: time.Now().UTC(),
+	})
+	flood := make([]string, 33)
+	for i := range flood {
+		flood[i] = "openid"
+	}
+	provider.AddRequest(&consent.AuthRequestView{
+		ID: "V2-int-scope-flood", ClientID: providerClientID,
+		Scopes: flood, RedirectURI: "https://app.example.com/callback",
+		CreatedAt: time.Now().UTC(),
+	})
+	oneSecond := time.Second
+	provider.AddRequest(&consent.AuthRequestView{
+		ID: "V2-int-none-maxage", ClientID: providerClientID,
+		Scopes: []string{"openid", "profile"}, RedirectURI: "https://app.example.com/callback",
+		Prompts: []consent.Prompt{consent.PromptNone}, MaxAge: &oneSecond,
+		CreatedAt: time.Now().UTC().Add(-10 * time.Minute),
 	})
 
 	svc, err := consent.NewResolutionService(provider, appRepo, grants, "zitadel",
@@ -249,6 +282,51 @@ func TestIntegration_ResolutionEndToEnd(t *testing.T) {
 		}
 		if res.Status != consent.ResolutionValid {
 			t.Fatalf("status = %q", res.Status)
+		}
+	})
+
+	t.Run("prompt login with stale session stays unauthenticated", func(t *testing.T) {
+		res, err := svc.Resolve(ctx, sessionInput("V2-int-login-stale"))
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != consent.ResolutionUnauthenticated {
+			t.Fatalf("status = %q, want unauthenticated for pre-request authentication", res.Status)
+		}
+	})
+
+	t.Run("prompt login proceeds after re-authentication", func(t *testing.T) {
+		// V2-int-reauth was created 10 minutes ago; the session
+		// authenticated 1 minute ago — after the request, so the force
+		// flag is satisfied and the seeded grant can be reused.
+		res, err := svc.Resolve(ctx, sessionInput("V2-int-reauth"))
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != consent.ResolutionAlreadyAuthorized {
+			t.Fatalf("status = %q, want already_authorized after re-authentication", res.Status)
+		}
+	})
+
+	t.Run("unknown prompt fails closed", func(t *testing.T) {
+		if _, err := svc.Resolve(ctx, sessionInput("V2-int-unspec")); !errors.Is(err, consent.ErrResolutionNotInteractive) {
+			t.Fatalf("err = %v, want ErrResolutionNotInteractive", err)
+		}
+	})
+
+	t.Run("scope flood fails closed like the claim", func(t *testing.T) {
+		res, err := svc.Resolve(ctx, sessionInput("V2-int-scope-flood"))
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != consent.ResolutionScopeNotAllowed || len(res.DisallowedScopes) != 0 {
+			t.Fatalf("resolution = %+v, want scope_not_allowed sharing the P3.2 limit", res)
+		}
+	})
+
+	t.Run("prompt none with exceeded max_age cannot silently reuse", func(t *testing.T) {
+		if _, err := svc.Resolve(ctx, sessionInput("V2-int-none-maxage")); !errors.Is(err, consent.ErrResolutionNotInteractive) {
+			t.Fatalf("err = %v, want ErrResolutionNotInteractive despite reusable grant", err)
 		}
 	})
 
