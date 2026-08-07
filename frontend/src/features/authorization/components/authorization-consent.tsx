@@ -24,8 +24,13 @@ import {
 import type { ConsentDecision, ConsentResolution } from "@/features/authorization/types";
 import type { CurrentUser } from "@/types/identity";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
-import { isApiError } from "@/lib/api/api-error";
 import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
+import {
+  acquireCompletionFlight,
+  classifyCompletionFailure,
+  evictCompletionFlight,
+  type CompletionFailure,
+} from "@/features/authorization/consent-completion";
 import styles from "./authorization-consent.module.css";
 
 type AuthorizationConsentProps = {
@@ -54,45 +59,10 @@ type DecisionState =
   | { phase: "error"; decision: ConsentDecision; message: string }
   | { phase: "failed"; decision: ConsentDecision; failure: CompletionFailure };
 
-// Outcome of a failed one-shot completion. The backend's global single-winner
-// completion makes same-request retries unsafe: after any ambiguous failure
-// the browser cannot prove the decision was not applied.
-type CompletionFailure =
-  | { outcome: "relogin" }
-  | { outcome: "terminal"; message: string };
-
-function classifyCompletionFailure(error: unknown): CompletionFailure {
-  // 401 (session credential required) is the only recoverable failure: the
-  // login continuation keeps the same opaque request ID. The session gate
-  // rejects before the decision is applied, so nothing was submitted.
-  if (isApiError(error) && error.kind === "unauthorized") {
-    return { outcome: "relogin" };
-  }
-  // 409/410 and ambiguous network/provider errors terminate the transaction;
-  // the user must restart authorization from the client application.
-  return {
-    outcome: "terminal",
-    message: "此授权请求无法继续，请从发起授权的应用重新开始。",
-  };
-}
-
 // Auto-completion of an already-authorized consent silently submits "allow"
-// exactly once per requestId. The module-level flight map survives React
-// StrictMode's unmount/remount: the second effect run attaches to the same
-// in-flight Promise instead of issuing a second POST that would collide with
-// the backend's single-winner completion. Finished (resolved or rejected)
-// flights are kept for the session so revisits never re-POST a completed
-// transaction.
-const autoCompletionFlights = new Map<string, Promise<{ redirectUrl: string }>>();
-
-function acquireAutoCompletionFlight(requestId: string): Promise<{ redirectUrl: string }> {
-  let flight = autoCompletionFlights.get(requestId);
-  if (!flight) {
-    flight = browserCommands.decideConsent(requestId, "allow");
-    autoCompletionFlights.set(requestId, flight);
-  }
-  return flight;
-}
+// through the single-flight store in consent-completion.ts. Effects only run
+// in the browser after commit, and StrictMode's double effect run attaches to
+// the same in-flight Promise instead of double-submitting.
 
 type AutoCompletionState =
   | { phase: "in_flight" }
@@ -113,7 +83,9 @@ export function AuthorizationConsent({ currentUser, resolution }: AuthorizationC
     // Promise instead of double-submitting.
     if (alreadyRequestedId === null) return;
     let disposed = false;
-    acquireAutoCompletionFlight(alreadyRequestedId).then(
+    acquireCompletionFlight(alreadyRequestedId, (requestId) =>
+      browserCommands.decideConsent(requestId, "allow"),
+    ).then(
       (result) => {
         if (disposed) return;
         // Credential-grade callback URL: consumed by an immediate same-window
@@ -122,10 +94,15 @@ export function AuthorizationConsent({ currentUser, resolution }: AuthorizationC
       },
       (error: unknown) => {
         if (disposed) return;
-        setAutoCompletion({
-          phase: "failed",
-          failure: classifyCompletionFailure(error),
-        });
+        const failure = classifyCompletionFailure(error);
+        if (failure.outcome === "relogin") {
+          // The session gate rejected before applying any decision: after the
+          // user logs in and this page remounts, a fresh single-flight POST
+          // may proceed. This effect's dependency is unchanged, so nothing
+          // re-runs inside the current component instance.
+          evictCompletionFlight(alreadyRequestedId);
+        }
+        setAutoCompletion({ phase: "failed", failure });
       },
     );
     return () => {

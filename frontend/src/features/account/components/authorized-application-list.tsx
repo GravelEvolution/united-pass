@@ -32,7 +32,7 @@ export function AuthorizedApplicationList({ applications }: AuthorizedApplicatio
       <PageHeader
         eyebrow="Authorized applications"
         title="授权应用"
-        description="查看你授权过的 OAuth 应用与已授予的 Scope。撤销授权后，应用未来的访问需要重新获得你的确认。"
+        description="查看你授权过的 OAuth 应用与已授予的 Scope。撤销授权后，United Pass 不再为该应用静默复用此授权；未来新的授权请求需要重新获得你的确认。"
       />
 
       {applications.length === 0 ? (
@@ -132,7 +132,7 @@ function RevokeGrantButton({ grant }: { grant: AuthorizedApplication }) {
         <div>
           <p>撤销后：</p>
           <ul>
-            <li>应用未来的访问需要重新获得你的确认（阻止静默授权复用）</li>
+            <li>未来新的授权请求需要重新获得你的确认（不再静默复用此授权记录）</li>
             <li>已签发的 Access Token 与 Refresh Token 不会被 United Pass 立即撤销，可能持续有效直到 Provider 生命周期结束</li>
             <li>如果需要重新授权，需在应用中重新发起授权流程</li>
           </ul>
