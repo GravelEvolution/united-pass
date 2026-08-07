@@ -393,11 +393,22 @@ func (p *Provisioner) listAllApps(ctx context.Context) ([]*appv1.App, error) {
 		all = append(all, result...)
 		total := resp.GetDetails().GetTotalResult()
 		if total > 0 {
-			// The provider reports the total: it is authoritative, so a short
-			// page (e.g. a server-side limit below the requested one) never
-			// terminates the walk early.
-			if len(result) == 0 || uint64(len(all)) >= total {
+			// The provider reports the total: it is authoritative. Terminate
+			// only on an exact match — a short page (e.g. a server-side limit
+			// below the requested one) must not end the walk early, and an
+			// empty page or a count beyond the reported total before it is
+			// reached is a provider pagination inconsistency the rollout gate
+			// must never silently accept.
+			if uint64(len(all)) == total {
 				return all, nil
+			}
+			if uint64(len(all)) > total {
+				return nil, fmt.Errorf("%w: backfill_list_apps inconsistent pagination: collected=%d total=%d",
+					applications.ErrProviderUnavailable, len(all), total)
+			}
+			if len(result) == 0 {
+				return nil, fmt.Errorf("%w: backfill_list_apps incomplete pagination: collected=%d total=%d",
+					applications.ErrProviderUnavailable, len(all), total)
 			}
 			offset += uint64(len(result))
 			continue

@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -930,6 +931,71 @@ func TestBackfill_PaginatesAllPages(t *testing.T) {
 	}
 	if len(offsets) != 2 || offsets[0] != 0 || offsets[1] != 2 {
 		t.Fatalf("pagination offsets = %v, want [0 2]", offsets)
+	}
+}
+
+// TestBackfill_PaginationEmptyPageBeforeTotalFailsClosed verifies the job
+// never treats an empty page as "enumeration complete" while the provider's
+// reported total is not yet reached: a silently truncated listing would make
+// the rollout gate claim success without checking every app.
+func TestBackfill_PaginationEmptyPageBeforeTotalFailsClosed(t *testing.T) {
+	stub := &stubManagement{
+		listFn: func(offset uint64, limit uint32) (*management.ListAppsResponse, error) {
+			// One real app, then an empty page although the total says 3.
+			if offset == 0 {
+				return &management.ListAppsResponse{
+					Details: &objectv1.ListDetails{TotalResult: 3},
+					Result:  []*appv1.App{{Id: "app-1", Name: "One"}},
+				}, nil
+			}
+			return &management.ListAppsResponse{Details: &objectv1.ListDetails{TotalResult: 3}}, nil
+		},
+		getByApp: map[string]*management.GetAppByIDResponse{
+			"app-1": backfillAppFixture("app-1", "One", loginV2Fixture(testInteractionBase)),
+		},
+	}
+	p := newTestProvisioner(t, stub)
+
+	_, err := p.BackfillLoginVersions(context.Background())
+	if !errors.Is(err, applications.ErrProviderUnavailable) {
+		t.Fatalf("got %v, want ErrProviderUnavailable", err)
+	}
+	if !strings.Contains(err.Error(), "incomplete pagination") {
+		t.Errorf("error must name the pagination inconsistency: %v", err)
+	}
+}
+
+// TestBackfill_PaginationExceedsReportedTotalFailsClosed verifies the exact-
+// match invariant in the other direction: collecting more apps than the
+// provider reported (e.g. duplicated pages) is an inconsistency the job must
+// reject instead of masking with a >= comparison.
+func TestBackfill_PaginationExceedsReportedTotalFailsClosed(t *testing.T) {
+	stub := &stubManagement{
+		listFn: func(offset uint64, limit uint32) (*management.ListAppsResponse, error) {
+			// First page already carries more entries than the reported total.
+			return &management.ListAppsResponse{
+				Details: &objectv1.ListDetails{TotalResult: 2},
+				Result: []*appv1.App{
+					{Id: "app-1", Name: "One"},
+					{Id: "app-2", Name: "Two"},
+					{Id: "app-3", Name: "Three"},
+				},
+			}, nil
+		},
+		getByApp: map[string]*management.GetAppByIDResponse{
+			"app-1": backfillAppFixture("app-1", "One", loginV2Fixture(testInteractionBase)),
+			"app-2": backfillAppFixture("app-2", "Two", loginV2Fixture(testInteractionBase)),
+			"app-3": backfillAppFixture("app-3", "Three", loginV2Fixture(testInteractionBase)),
+		},
+	}
+	p := newTestProvisioner(t, stub)
+
+	_, err := p.BackfillLoginVersions(context.Background())
+	if !errors.Is(err, applications.ErrProviderUnavailable) {
+		t.Fatalf("got %v, want ErrProviderUnavailable", err)
+	}
+	if !strings.Contains(err.Error(), "inconsistent pagination") {
+		t.Errorf("error must name the pagination inconsistency: %v", err)
 	}
 }
 
