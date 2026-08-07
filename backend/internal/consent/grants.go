@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
@@ -30,7 +32,44 @@ const (
 	// MaxProviderNameLen bounds the provider identifier stored on decision
 	// operations. United Pass currently runs a single provider.
 	MaxProviderNameLen = 64
+	// MaxScopeTokenLen bounds one scope token. OIDC scopes are short opaque
+	// identifiers; anything longer is malformed input, not a scope.
+	MaxScopeTokenLen = 128
+	// MaxScopeCount bounds the scope set of one completion plan. Real OIDC
+	// requests carry a handful of scopes; unbounded sets are abuse surface.
+	MaxScopeCount = 32
 )
+
+// NormalizeScopes returns the canonical form of a scope set: every token
+// validated, duplicates removed and the result deterministically sorted.
+// This is the ONLY place scope facts are canonicalized — the claim
+// snapshot and the provider call must consume the same normalized result,
+// never compute their own.
+func NormalizeScopes(scopes []string) ([]string, error) {
+	if len(scopes) > MaxScopeCount {
+		return nil, fmt.Errorf("consent: more than %d scopes", MaxScopeCount)
+	}
+	seen := make(map[string]bool, len(scopes))
+	out := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		if scope == "" {
+			return nil, errors.New("consent: empty scope token")
+		}
+		if strings.ContainsAny(scope, " \t\n\r\v\f") {
+			return nil, fmt.Errorf("consent: scope token %q contains whitespace", scope)
+		}
+		if len(scope) > MaxScopeTokenLen {
+			return nil, fmt.Errorf("consent: scope token exceeds %d bytes", MaxScopeTokenLen)
+		}
+		if seen[scope] {
+			continue
+		}
+		seen[scope] = true
+		out = append(out, scope)
+	}
+	sort.Strings(out)
+	return out, nil
+}
 
 // NewGrantID generates a fresh grant ID.
 func NewGrantID() GrantID {
@@ -127,6 +166,52 @@ func (k CompletionKind) CallbackReason() (CallbackErrorReason, bool) {
 	}
 }
 
+// AuditEventType is the canonical audit event type of a committed
+// completion. The audit row is constructed from the operation row alone
+// after it is locked, so reconciliation never needs a second audit fact
+// source (ADR-0005 §5).
+func (k CompletionKind) AuditEventType() string {
+	switch k {
+	case CompletionAllow:
+		return applications.EventConsentGrantAllowed
+	case CompletionAccessDenied:
+		return applications.EventConsentAccessDenied
+	default:
+		return applications.EventConsentErrorCompleted
+	}
+}
+
+// AuditOperation is the canonical audit operation name of the kind.
+func (k CompletionKind) AuditOperation() string {
+	switch k {
+	case CompletionAllow:
+		return "consent_allow"
+	case CompletionAccessDenied:
+		return "consent_deny"
+	default:
+		return "consent_error_completion"
+	}
+}
+
+// AuditResult is the canonical audit outcome of the kind: only Allow is a
+// success; every denial and error-callback completion is recorded denied.
+func (k CompletionKind) AuditResult() applications.SecurityEventResult {
+	if k == CompletionAllow {
+		return applications.SecurityEventSuccess
+	}
+	return applications.SecurityEventDenied
+}
+
+// AuditFailureClass distinguishes error-callback completions inside the
+// audit payload (login_required vs server_error vs …). User decisions
+// carry no failure class.
+func (k CompletionKind) AuditFailureClass() string {
+	if k.IsUserDecision() {
+		return ""
+	}
+	return string(k)
+}
+
 // DecisionOperationStatus is the durable state of a decision operation
 // (ADR-0005 §2 lifecycle, §5 ordering). Transitions are compare-and-set.
 type DecisionOperationStatus string
@@ -205,8 +290,10 @@ func (k DecisionOperationKey) Validate() error {
 // operation row is written (fail closed): a well-formed operation ID, a
 // valid key, a known completion kind, and the per-kind bindings —
 // user decisions bind the acting user, Allow additionally binds the
-// client and a non-empty scope snapshot, error callbacks never carry a
-// scope snapshot.
+// client and a non-empty NORMALIZED scope snapshot, deny and error
+// callbacks never carry scopes. Scope validation runs on the normalized
+// set, so a set that normalizes to nothing (e.g. []string{""}) can never
+// be claimed.
 func (op DecisionOperation) ValidateForClaim() error {
 	if !HasDecisionOperationIDPrefix(string(op.ID)) {
 		return errors.New("consent: invalid decision operation id")
@@ -229,12 +316,19 @@ func (op DecisionOperation) ValidateForClaim() error {
 		if op.ClientID == "" {
 			return errors.New("consent: allow completion requires a bound client")
 		}
-		if len(op.Scopes) == 0 {
+		normalized, err := NormalizeScopes(op.Scopes)
+		if err != nil {
+			return err
+		}
+		if len(normalized) == 0 {
 			return errors.New("consent: allow completion requires a non-empty scope snapshot")
 		}
 	case op.CompletionKind.IsUserDecision(): // access_denied
 		if op.LocalUserID == "" {
 			return errors.New("consent: deny completion requires a bound user")
+		}
+		if len(op.Scopes) > 0 {
+			return errors.New("consent: deny completion must not carry scopes")
 		}
 	default: // error callbacks: user optional (none without a session)
 		if len(op.Scopes) > 0 {
@@ -308,29 +402,29 @@ var (
 )
 
 // AllowCommit carries the winner's Allow-side local commit inputs (ADR-0005
-// §5 step 5). User, client and scopes are deliberately absent: they are
-// read from the immutable plan bound on the operation row at claim time,
-// so the commit can never drift from what the provider completed. Only
-// the durable audit events accompany the commit.
+// §5 step 5). It deliberately carries NOTHING but the operation ID: user,
+// client, scopes and the audit event are all read from / constructed from
+// the immutable plan bound on the operation row at claim time, so the
+// commit can never drift from what the provider completed and a
+// reconciler needs only the operation ID.
 type AllowCommit struct {
 	OperationID DecisionOperationID
-	Audit       []applications.SecurityEvent
 }
 
 // DenyCommit carries the winner's Deny-side local commit inputs. Deny
-// creates no grant row (ADR-0005 §5).
+// creates no grant row (ADR-0005 §5); like AllowCommit it carries only
+// the operation ID — the canonical audit is built from the row.
 type DenyCommit struct {
 	OperationID DecisionOperationID
-	Audit       []applications.SecurityEvent
 }
 
 // ErrorCompletionCommit carries the local terminal commit of a gateway or
 // provider error-callback completion (login_required, consent_required,
 // account_selection_required, request_not_supported, server_error,
-// temporarily_unavailable). No grant is ever involved.
+// temporarily_unavailable). No grant is ever involved; only the operation
+// ID travels with the commit.
 type ErrorCompletionCommit struct {
 	OperationID DecisionOperationID
-	Audit       []applications.SecurityEvent
 }
 
 // GrantStore persists consent decisions and grants (ADR-0005 §4, §5). The
@@ -362,24 +456,28 @@ type GrantStore interface {
 
 	// CommitAllowDecision runs the Allow-side local commit in one
 	// transaction: the operation is locked and verified against its bound
-	// plan (status provider_succeeded, kind allow), then the grant upsert,
-	// scope-set replacement and audit events are written using the plan
-	// values read back from the operation row, and the terminal transition
-	// commits. A re-consent reactivates a revoked row and refreshes
-	// granted_at; the (user, client) unique key forbids duplicates.
+	// plan (status provider_succeeded, kind allow, complete user/client/
+	// scope bindings), then the grant upsert, scope-set replacement, the
+	// single canonical audit event (constructed from the locked row) and
+	// the terminal transition commit. A re-consent reactivates a revoked
+	// row and refreshes granted_at; the (user, client) unique key forbids
+	// duplicates. The caller supplies no user, client, scope or audit
+	// facts of its own.
 	CommitAllowDecision(ctx context.Context, commit AllowCommit) error
 
 	// CommitDenyDecision runs the Deny-side local commit in one
 	// transaction: the locked operation must be provider_succeeded with
-	// kind access_denied; audit + terminal transition commit. It creates
-	// no grant row.
+	// kind access_denied and a complete binding (non-empty user); the
+	// canonical audit + terminal transition commit. It creates no grant
+	// row.
 	CommitDenyDecision(ctx context.Context, commit DenyCommit) error
 
 	// CommitErrorCompletion terminates an error-callback completion
 	// (login_required, consent_required, account_selection_required,
 	// request_not_supported, server_error, temporarily_unavailable): the
 	// locked operation must be provider_succeeded with a matching
-	// non-decision kind; audit + terminal transition commit, no grant.
+	// non-decision kind and no scope snapshot; the canonical audit +
+	// terminal transition commit, no grant.
 	CommitErrorCompletion(ctx context.Context, commit ErrorCompletionCommit) error
 
 	// FailDecisionOperation terminates an operation without provider

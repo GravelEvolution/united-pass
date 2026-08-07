@@ -42,6 +42,14 @@ const (
 	// temporary provider session that failed at a reauthentication terminal
 	// state (ADR-0004 §7). The session then relies on provider-side expiry.
 	EventProviderSessionRevokeFailed = "provider_session.revoke_failed"
+
+	// Phase 3 consent completion events (ADR-0005 §5). Exactly one of these
+	// is written per terminal commit, constructed by the grant store from
+	// the locked decision-operation row alone — callers never supply audit
+	// facts.
+	EventConsentGrantAllowed   = "consent.grant_allowed"
+	EventConsentAccessDenied   = "consent.access_denied"
+	EventConsentErrorCompleted = "consent.error_completion"
 )
 
 // SecurityEvent is one durable audit row. This is a real persistence

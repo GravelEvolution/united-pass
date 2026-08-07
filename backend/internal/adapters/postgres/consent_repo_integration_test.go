@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,17 +51,44 @@ func allowOperationFor(authRequestID string, kind consent.CompletionKind, user i
 	}
 }
 
-func consentAuditEvent(clientID applications.OAuthClientID, actor identity.UserID, result applications.SecurityEventResult) applications.SecurityEvent {
-	return applications.SecurityEvent{
-		EventID:     applications.NewSecurityEventID(),
-		EventType:   "consent.decision",
-		ActorUserID: actor,
-		ClientID:    clientID,
-		RequestID:   "req-test",
-		Operation:   "consent_decision",
-		Result:      result,
-		OccurredAt:  time.Now().UTC(),
+// auditRecord is one canonical consent audit row read back from the
+// database; the commit path never accepts audit facts from the caller, so
+// these rows are the only audit source of truth.
+type auditRecord struct {
+	EventType   string
+	ActorUserID string
+	ClientID    string
+	Result      string
+	Operation   string
+	Payload     string
+}
+
+// readAuditRecords returns the audit events correlated with a decision
+// operation (the canonical audit stores the operation ID in request_id).
+func readAuditRecords(t *testing.T, repo *GrantRepository, opID consent.DecisionOperationID) []auditRecord {
+	t.Helper()
+	rows, err := repo.pool.Query(context.Background(),
+		`SELECT event_type, actor_user_id, client_id, result, operation, payload::text
+		   FROM security_events
+		  WHERE request_id = $1
+		  ORDER BY event_id`,
+		string(opID))
+	if err != nil {
+		t.Fatalf("query audit records: %v", err)
 	}
+	defer rows.Close()
+	records := make([]auditRecord, 0)
+	for rows.Next() {
+		var r auditRecord
+		if err := rows.Scan(&r.EventType, &r.ActorUserID, &r.ClientID, &r.Result, &r.Operation, &r.Payload); err != nil {
+			t.Fatalf("scan audit record: %v", err)
+		}
+		records = append(records, r)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate audit records: %v", err)
+	}
+	return records
 }
 
 // claimAndProve runs the §5 steps 2 and 4 for a fresh completion plan and
@@ -205,6 +233,25 @@ func TestClaimValidationRejectsMalformedPlans(t *testing.T) {
 	if _, _, err := repo.ClaimDecisionOperation(ctx, bad); err == nil {
 		t.Fatal("foreign operation id must be rejected")
 	}
+	// A scope set that normalizes to nothing must never be claimed.
+	bad = allowOperationFor("V2-bad", consent.CompletionAllow, user, clientID, []string{""})
+	if _, _, err := repo.ClaimDecisionOperation(ctx, bad); err == nil {
+		t.Fatal("empty-string scope set must be rejected")
+	}
+	bad = allowOperationFor("V2-bad", consent.CompletionAllow, user, clientID, []string{"", ""})
+	if _, _, err := repo.ClaimDecisionOperation(ctx, bad); err == nil {
+		t.Fatal("all-empty scope set must be rejected")
+	}
+	bad = allowOperationFor("V2-bad", consent.CompletionAllow, user, clientID, []string{"open id"})
+	if _, _, err := repo.ClaimDecisionOperation(ctx, bad); err == nil {
+		t.Fatal("whitespace scope token must be rejected")
+	}
+	// Rejected plans must never leave an operation row behind.
+	if _, err := repo.GetDecisionOperation(ctx, consent.DecisionOperationKey{
+		Provider: "zitadel", AuthRequestID: "V2-bad",
+	}); !errors.Is(err, consent.ErrDecisionNotFound) {
+		t.Fatalf("rejected plans must produce no operation row, got %v", err)
+	}
 }
 
 func TestConcurrentClaimHasExactlyOneWinner(t *testing.T) {
@@ -274,10 +321,10 @@ func TestCommitAllowUsesOnlyTheBoundPlan(t *testing.T) {
 	user := createConsentUser(t, users, "consent-user-bound", "consent-bound@example.com")
 	ctx := context.Background()
 
-	// Forward-repair shape: the commit carries only the operation ID and
-	// audit; user, client and scopes must come from the row bound at claim
-	// time. Simulate the crash window by re-reading the operation through
-	// the store (fresh process) before committing.
+	// Forward-repair shape: the commit carries ONLY the operation ID;
+	// user, client, scopes and the audit event must all come from the row
+	// bound at claim time. Simulate the crash window by re-reading the
+	// operation through the store (fresh process) before committing.
 	plan := allowOperationFor("V2-bound-1", consent.CompletionAllow, user, clientID,
 		[]string{"openid", "profile"})
 	claimed := claimAndProve(t, repo, plan)
@@ -294,10 +341,7 @@ func TestCommitAllowUsesOnlyTheBoundPlan(t *testing.T) {
 		t.Fatalf("operation row alone must be sufficient for repair: %+v", recovered)
 	}
 
-	err = repo.CommitAllowDecision(ctx, consent.AllowCommit{
-		OperationID: claimed.ID,
-		Audit:       []applications.SecurityEvent{consentAuditEvent(clientID, user, applications.SecurityEventSuccess)},
-	})
+	err = repo.CommitAllowDecision(ctx, consent.AllowCommit{OperationID: claimed.ID})
 	if err != nil {
 		t.Fatalf("commit allow: %v", err)
 	}
@@ -328,6 +372,21 @@ func TestCommitAllowUsesOnlyTheBoundPlan(t *testing.T) {
 	if !errors.Is(err, consent.ErrDecisionStateConflict) {
 		t.Fatalf("double commit must conflict, got %v", err)
 	}
+
+	// Exactly one canonical audit event, constructed from the operation
+	// row alone — no caller-supplied audit facts exist anymore. The
+	// failed double commit must not have added a second row.
+	records := readAuditRecords(t, repo, claimed.ID)
+	if len(records) != 1 {
+		t.Fatalf("expected exactly one canonical audit event, got %d: %+v", len(records), records)
+	}
+	r := records[0]
+	if r.EventType != applications.EventConsentGrantAllowed ||
+		r.ActorUserID != string(user) || r.ClientID != string(clientID) ||
+		r.Result != string(applications.SecurityEventSuccess) ||
+		r.Operation != "consent_allow" {
+		t.Fatalf("canonical allow audit mismatch: %+v", r)
+	}
 }
 
 func TestCommitKindAndPlanMismatchFailsClosed(t *testing.T) {
@@ -341,15 +400,15 @@ func TestCommitKindAndPlanMismatchFailsClosed(t *testing.T) {
 	// commit path reached.
 	denyPlan := allowOperationFor("V2-mismatch-deny", consent.CompletionAccessDenied, user, clientID, nil)
 	denyOp := claimAndProve(t, repo, denyPlan)
-	err := repo.CommitAllowDecision(ctx, consent.AllowCommit{
-		OperationID: denyOp.ID,
-		Audit:       []applications.SecurityEvent{consentAuditEvent(clientID, user, applications.SecurityEventSuccess)},
-	})
+	err := repo.CommitAllowDecision(ctx, consent.AllowCommit{OperationID: denyOp.ID})
 	if !errors.Is(err, consent.ErrDecisionStateConflict) {
 		t.Fatalf("allow commit of deny operation must conflict, got %v", err)
 	}
 	if _, err := repo.GetGrant(ctx, user, clientID); !errors.Is(err, consent.ErrGrantNotFound) {
 		t.Fatalf("mismatched commit must leave no grant, got %v", err)
+	}
+	if records := readAuditRecords(t, repo, denyOp.ID); len(records) != 0 {
+		t.Fatalf("mismatched commit must write no audit, got %+v", records)
 	}
 
 	// Allow operation through the deny path.
@@ -368,6 +427,9 @@ func TestCommitKindAndPlanMismatchFailsClosed(t *testing.T) {
 	}
 	if stored.Status != consent.DecisionOperationProviderSucceeded {
 		t.Fatalf("proof must survive a mismatched commit: %+v", stored)
+	}
+	if records := readAuditRecords(t, repo, allowOp.ID); len(records) != 0 {
+		t.Fatalf("mismatched commit must write no audit, got %+v", records)
 	}
 
 	// User decisions through the error-completion path.
@@ -423,20 +485,18 @@ func TestCommitAllowAuditFailureRollsBackEverything(t *testing.T) {
 	plan := allowOperationFor("V2-audit-1", consent.CompletionAllow, user, clientID, []string{"openid"})
 	claimed := claimAndProve(t, repo, plan)
 
-	// Pre-persist an audit event, then reuse its ID inside the commit: the
-	// duplicate primary key must abort the whole transaction — grant,
-	// terminal transition and audit are one atomic unit.
-	dup := consentAuditEvent(clientID, user, applications.SecurityEventSuccess)
-	store := NewSecurityEventStore(repo.pool)
-	if err := store.Record(ctx, dup); err != nil {
-		t.Fatalf("pre-record audit: %v", err)
+	// Force the canonical audit insert to fail: a hostile CHECK rejects
+	// the consent event type. The audit is generated inside the commit
+	// transaction, so the whole commit — grant and terminal transition
+	// included — must roll back.
+	if _, err := repo.pool.Exec(ctx,
+		`ALTER TABLE security_events ADD CONSTRAINT test_reject_consent_audit
+		 CHECK (event_type <> '`+applications.EventConsentGrantAllowed+`')`); err != nil {
+		t.Fatalf("add audit blocker: %v", err)
 	}
-	err := repo.CommitAllowDecision(ctx, consent.AllowCommit{
-		OperationID: claimed.ID,
-		Audit:       []applications.SecurityEvent{dup},
-	})
+	err := repo.CommitAllowDecision(ctx, consent.AllowCommit{OperationID: claimed.ID})
 	if err == nil {
-		t.Fatal("commit with duplicate audit event must fail")
+		t.Fatal("commit with a failing audit insert must fail")
 	}
 	if _, err := repo.GetGrant(ctx, user, clientID); !errors.Is(err, consent.ErrGrantNotFound) {
 		t.Fatalf("failed audit must roll back the grant, got %v", err)
@@ -450,17 +510,25 @@ func TestCommitAllowAuditFailureRollsBackEverything(t *testing.T) {
 	if stored.Status != consent.DecisionOperationProviderSucceeded {
 		t.Fatalf("failed audit must leave the proof for forward repair: %+v", stored)
 	}
+	if records := readAuditRecords(t, repo, claimed.ID); len(records) != 0 {
+		t.Fatalf("failed audit must roll back its own row, got %+v", records)
+	}
 
-	// The repair retry with a fresh audit succeeds.
-	err = repo.CommitAllowDecision(ctx, consent.AllowCommit{
-		OperationID: claimed.ID,
-		Audit:       []applications.SecurityEvent{consentAuditEvent(clientID, user, applications.SecurityEventSuccess)},
-	})
-	if err != nil {
+	// The repair retry (same operation ID, no extra facts) succeeds and
+	// produces exactly one final audit event.
+	if _, err := repo.pool.Exec(ctx,
+		`ALTER TABLE security_events DROP CONSTRAINT test_reject_consent_audit`); err != nil {
+		t.Fatalf("drop audit blocker: %v", err)
+	}
+	if err := repo.CommitAllowDecision(ctx, consent.AllowCommit{OperationID: claimed.ID}); err != nil {
 		t.Fatalf("repair commit: %v", err)
 	}
 	if _, err := repo.GetGrant(ctx, user, clientID); err != nil {
 		t.Fatalf("grant after repair: %v", err)
+	}
+	records := readAuditRecords(t, repo, claimed.ID)
+	if len(records) != 1 {
+		t.Fatalf("repair must produce exactly one audit event, got %d: %+v", len(records), records)
 	}
 }
 
@@ -511,10 +579,7 @@ func TestCommitDenyDecisionCreatesNoGrant(t *testing.T) {
 	ctx := context.Background()
 
 	denyOp := claimAndProve(t, repo, allowOperationFor("V2-deny-1", consent.CompletionAccessDenied, user, clientID, nil))
-	err := repo.CommitDenyDecision(ctx, consent.DenyCommit{
-		OperationID: denyOp.ID,
-		Audit:       []applications.SecurityEvent{consentAuditEvent(clientID, user, applications.SecurityEventDenied)},
-	})
+	err := repo.CommitDenyDecision(ctx, consent.DenyCommit{OperationID: denyOp.ID})
 	if err != nil {
 		t.Fatalf("commit deny: %v", err)
 	}
@@ -531,6 +596,100 @@ func TestCommitDenyDecisionCreatesNoGrant(t *testing.T) {
 	if got.Status != consent.DecisionOperationSucceeded ||
 		got.CompletionKind != consent.CompletionAccessDenied || got.LocalUserID != user {
 		t.Fatalf("deny operation not terminalized: %+v", got)
+	}
+
+	// The canonical deny audit: actor from the bound row, denied result.
+	records := readAuditRecords(t, repo, denyOp.ID)
+	if len(records) != 1 {
+		t.Fatalf("expected exactly one deny audit event, got %d: %+v", len(records), records)
+	}
+	if records[0].EventType != applications.EventConsentAccessDenied ||
+		records[0].ActorUserID != string(user) ||
+		records[0].Result != string(applications.SecurityEventDenied) ||
+		records[0].Operation != "consent_deny" {
+		t.Fatalf("canonical deny audit mismatch: %+v", records[0])
+	}
+}
+
+// TestCommitCorruptedPlanBindingFailsClosed simulates database corruption
+// (or pre-completion-plan legacy rows) by mutating persisted bindings
+// directly, then proves every commit path fails closed instead of
+// completing an incomplete plan.
+func TestCommitCorruptedPlanBindingFailsClosed(t *testing.T) {
+	repo, appRepo, users := setupConsentRepo(t)
+	ownerID := createTestOwner(t, users, "consent-corrupt")
+	_, clientID := provisionTestApp(t, appRepo, "consent-corrupt-app", ownerID)
+	user := createConsentUser(t, users, "consent-user-corrupt", "consent-corrupt@example.com")
+	ctx := context.Background()
+
+	// Corrupted deny row: the bound user was wiped.
+	denyOp := claimAndProve(t, repo, allowOperationFor("V2-corrupt-deny", consent.CompletionAccessDenied, user, clientID, nil))
+	if _, err := repo.pool.Exec(ctx,
+		`UPDATE oauth_authorization_decision_operations
+		    SET local_user_id = '' WHERE operation_id = $1`,
+		string(denyOp.ID)); err != nil {
+		t.Fatalf("corrupt deny binding: %v", err)
+	}
+	err := repo.CommitDenyDecision(ctx, consent.DenyCommit{OperationID: denyOp.ID})
+	if !errors.Is(err, consent.ErrDecisionStateConflict) {
+		t.Fatalf("deny commit of a user-less row must conflict, got %v", err)
+	}
+	stored, err := repo.GetDecisionOperation(ctx, consent.DecisionOperationKey{
+		Provider: "zitadel", AuthRequestID: "V2-corrupt-deny",
+	})
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if stored.Status != consent.DecisionOperationProviderSucceeded {
+		t.Fatalf("corrupted row must keep its proof for manual repair: %+v", stored)
+	}
+	if records := readAuditRecords(t, repo, denyOp.ID); len(records) != 0 {
+		t.Fatalf("corrupted commit must write no audit, got %+v", records)
+	}
+	if _, err := repo.GetGrant(ctx, user, clientID); !errors.Is(err, consent.ErrGrantNotFound) {
+		t.Fatalf("corrupted commit must write no grant, got %v", err)
+	}
+
+	// Corrupted allow row: the bound client was wiped.
+	allowOp := claimAndProve(t, repo, allowOperationFor("V2-corrupt-client", consent.CompletionAllow, user, clientID, []string{"openid"}))
+	if _, err := repo.pool.Exec(ctx,
+		`UPDATE oauth_authorization_decision_operations
+		    SET client_id = '' WHERE operation_id = $1`,
+		string(allowOp.ID)); err != nil {
+		t.Fatalf("corrupt allow client binding: %v", err)
+	}
+	if err := repo.CommitAllowDecision(ctx, consent.AllowCommit{OperationID: allowOp.ID}); !errors.Is(err, consent.ErrDecisionStateConflict) {
+		t.Fatalf("allow commit of a client-less row must conflict, got %v", err)
+	}
+	if records := readAuditRecords(t, repo, allowOp.ID); len(records) != 0 {
+		t.Fatalf("corrupted commit must write no audit, got %+v", records)
+	}
+
+	// Corrupted allow row: the scope snapshot was deleted.
+	noScopes := claimAndProve(t, repo, allowOperationFor("V2-corrupt-scopes", consent.CompletionAllow, user, clientID, []string{"openid"}))
+	if _, err := repo.pool.Exec(ctx,
+		`DELETE FROM oauth_authorization_decision_operation_scopes
+		  WHERE operation_id = $1`,
+		string(noScopes.ID)); err != nil {
+		t.Fatalf("corrupt scope snapshot: %v", err)
+	}
+	if err := repo.CommitAllowDecision(ctx, consent.AllowCommit{OperationID: noScopes.ID}); !errors.Is(err, consent.ErrDecisionStateConflict) {
+		t.Fatalf("allow commit without a scope snapshot must conflict, got %v", err)
+	}
+
+	// Corrupted error-completion row: a stray scope snapshot appears.
+	gwOp := claimAndProve(t, repo, allowOperationFor("V2-corrupt-gw", consent.CompletionLoginRequired, "", "", nil))
+	if _, err := repo.pool.Exec(ctx,
+		`INSERT INTO oauth_authorization_decision_operation_scopes
+		     (operation_id, scope) VALUES ($1, 'openid')`,
+		string(gwOp.ID)); err != nil {
+		t.Fatalf("corrupt gateway scopes: %v", err)
+	}
+	if err := repo.CommitErrorCompletion(ctx, consent.ErrorCompletionCommit{OperationID: gwOp.ID}); !errors.Is(err, consent.ErrDecisionStateConflict) {
+		t.Fatalf("error completion with a scope snapshot must conflict, got %v", err)
+	}
+	if records := readAuditRecords(t, repo, gwOp.ID); len(records) != 0 {
+		t.Fatalf("corrupted commit must write no audit, got %+v", records)
 	}
 }
 
@@ -560,10 +719,7 @@ func TestGatewayErrorCompletionsClaimGloballyAndCommit(t *testing.T) {
 	if err := repo.RecordProviderSucceeded(ctx, stored.ID, time.Now().UTC()); err != nil {
 		t.Fatalf("record proof: %v", err)
 	}
-	err = repo.CommitErrorCompletion(ctx, consent.ErrorCompletionCommit{
-		OperationID: stored.ID,
-		Audit:       []applications.SecurityEvent{consentAuditEvent(clientID, "", applications.SecurityEventDenied)},
-	})
+	err = repo.CommitErrorCompletion(ctx, consent.ErrorCompletionCommit{OperationID: stored.ID})
 	if err != nil {
 		t.Fatalf("commit error completion: %v", err)
 	}
@@ -578,6 +734,19 @@ func TestGatewayErrorCompletionsClaimGloballyAndCommit(t *testing.T) {
 	}
 	if _, err := repo.GetGrant(ctx, "nobody", clientID); !errors.Is(err, consent.ErrGrantNotFound) {
 		t.Fatalf("gateway completion must never create a grant, got %v", err)
+	}
+	// Canonical gateway audit: session-less (empty actor), denied result,
+	// the completion kind recorded as the failure class.
+	records := readAuditRecords(t, repo, stored.ID)
+	if len(records) != 1 {
+		t.Fatalf("expected exactly one gateway audit event, got %d: %+v", len(records), records)
+	}
+	if records[0].EventType != applications.EventConsentErrorCompleted ||
+		records[0].ActorUserID != "" ||
+		records[0].Result != string(applications.SecurityEventDenied) ||
+		records[0].Operation != "consent_error_completion" ||
+		!strings.Contains(records[0].Payload, string(consent.CompletionLoginRequired)) {
+		t.Fatalf("canonical gateway audit mismatch: %+v", records[0])
 	}
 
 	// prompt=create: request_not_supported follows the same path.

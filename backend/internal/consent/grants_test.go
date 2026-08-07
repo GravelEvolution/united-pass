@@ -8,6 +8,54 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 )
 
+func TestNormalizeScopes(t *testing.T) {
+	// Duplicates are removed and the result deterministically sorted.
+	got, err := NormalizeScopes([]string{"profile", "openid", "profile", "email"})
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if len(got) != 3 || got[0] != "email" || got[1] != "openid" || got[2] != "profile" {
+		t.Fatalf("unexpected normalized set: %+v", got)
+	}
+	// An empty input normalizes to an empty set (callers decide whether
+	// that is legal for their kind).
+	if empty, err := NormalizeScopes(nil); err != nil || len(empty) != 0 {
+		t.Fatalf("empty normalize: %v %v", empty, err)
+	}
+
+	rejected := [][]string{
+		{""},
+		{"", ""},
+		{"openid", ""},
+		{" "},
+		{"open id"},
+		{"openid\t"},
+		{"\nopenid"},
+		{strings.Repeat("s", MaxScopeTokenLen+1)},
+	}
+	for _, scopes := range rejected {
+		if _, err := NormalizeScopes(scopes); err == nil {
+			t.Fatalf("scopes %q must be rejected", scopes)
+		}
+	}
+
+	overflow := make([]string, MaxScopeCount+1)
+	for i := range overflow {
+		overflow[i] = "scope"
+	}
+	if _, err := NormalizeScopes(overflow); err == nil {
+		t.Fatalf("more than %d scopes must be rejected", MaxScopeCount)
+	}
+	// Exactly at the limit is fine (duplicates collapse below it).
+	atLimit := make([]string, MaxScopeCount)
+	for i := range atLimit {
+		atLimit[i] = "scope"
+	}
+	if _, err := NormalizeScopes(atLimit); err != nil {
+		t.Fatalf("duplicate set at the limit must normalize: %v", err)
+	}
+}
+
 func TestConsentIDPrefixes(t *testing.T) {
 	if id := NewGrantID(); !strings.HasPrefix(string(id), grantIDPrefix) || len(id) <= len(grantIDPrefix) {
 		t.Fatalf("bad grant id: %q", id)
@@ -83,6 +131,42 @@ func TestCompletionKindSemantics(t *testing.T) {
 	}
 }
 
+func TestCompletionKindAuditMapping(t *testing.T) {
+	// Allow is the only success; everything else audits as denied.
+	if CompletionAllow.AuditEventType() != applications.EventConsentGrantAllowed ||
+		CompletionAllow.AuditOperation() != "consent_allow" ||
+		CompletionAllow.AuditResult() != applications.SecurityEventSuccess ||
+		CompletionAllow.AuditFailureClass() != "" {
+		t.Fatalf("allow audit mapping wrong: %q %q %q %q",
+			CompletionAllow.AuditEventType(), CompletionAllow.AuditOperation(),
+			CompletionAllow.AuditResult(), CompletionAllow.AuditFailureClass())
+	}
+	if CompletionAccessDenied.AuditEventType() != applications.EventConsentAccessDenied ||
+		CompletionAccessDenied.AuditOperation() != "consent_deny" ||
+		CompletionAccessDenied.AuditResult() != applications.SecurityEventDenied ||
+		CompletionAccessDenied.AuditFailureClass() != "" {
+		t.Fatalf("deny audit mapping wrong: %q %q %q %q",
+			CompletionAccessDenied.AuditEventType(), CompletionAccessDenied.AuditOperation(),
+			CompletionAccessDenied.AuditResult(), CompletionAccessDenied.AuditFailureClass())
+	}
+	// Error callbacks share the error-completion event type, and the kind
+	// itself is the failure class distinguishing them in the payload.
+	for _, kind := range []CompletionKind{
+		CompletionLoginRequired, CompletionConsentRequired,
+		CompletionAccountSelectionNeeded, CompletionRequestNotSupported,
+		CompletionServerError, CompletionTemporarilyUnavailable,
+	} {
+		if kind.AuditEventType() != applications.EventConsentErrorCompleted ||
+			kind.AuditOperation() != "consent_error_completion" ||
+			kind.AuditResult() != applications.SecurityEventDenied ||
+			kind.AuditFailureClass() != string(kind) {
+			t.Fatalf("kind %q audit mapping wrong: %q %q %q %q", kind,
+				kind.AuditEventType(), kind.AuditOperation(),
+				kind.AuditResult(), kind.AuditFailureClass())
+		}
+	}
+}
+
 func TestDecisionOperationStatusInFlight(t *testing.T) {
 	inFlight := []DecisionOperationStatus{
 		DecisionOperationPending,
@@ -151,6 +235,23 @@ func TestValidateForClaimEnforcesCompletionPlans(t *testing.T) {
 		{"allow without user", func(op *DecisionOperation) { op.LocalUserID = "" }},
 		{"allow without client", func(op *DecisionOperation) { op.ClientID = "" }},
 		{"allow without scopes", func(op *DecisionOperation) { op.Scopes = nil }},
+		{"allow with empty-string scope", func(op *DecisionOperation) { op.Scopes = []string{""} }},
+		{"allow with only empty-string scopes", func(op *DecisionOperation) { op.Scopes = []string{"", ""} }},
+		{"allow with whitespace scope", func(op *DecisionOperation) { op.Scopes = []string{"open id"} }},
+		{"allow with oversized scope token", func(op *DecisionOperation) {
+			op.Scopes = []string{strings.Repeat("s", MaxScopeTokenLen+1)}
+		}},
+		{"allow with too many scopes", func(op *DecisionOperation) {
+			scopes := make([]string, MaxScopeCount+1)
+			for i := range scopes {
+				scopes[i] = "scope-" + strings.Repeat("x", i%7)
+			}
+			op.Scopes = scopes
+		}},
+		{"deny with scopes", func(op *DecisionOperation) {
+			op.CompletionKind = CompletionAccessDenied
+			op.Scopes = []string{"openid"}
+		}},
 	}
 	for _, tc := range cases {
 		op := allowOperation("V2-1")
@@ -158,6 +259,14 @@ func TestValidateForClaimEnforcesCompletionPlans(t *testing.T) {
 		if err := op.ValidateForClaim(); err == nil {
 			t.Fatalf("%s: must be rejected", tc.name)
 		}
+	}
+
+	// Duplicates with valid scopes normalize fine (validation passes on
+	// the normalized set).
+	dupes := allowOperation("V2-1")
+	dupes.Scopes = []string{"profile", "openid", "profile"}
+	if err := dupes.ValidateForClaim(); err != nil {
+		t.Fatalf("duplicate scopes must normalize and validate: %v", err)
 	}
 
 	// Deny binds the acting user but needs no scope snapshot.

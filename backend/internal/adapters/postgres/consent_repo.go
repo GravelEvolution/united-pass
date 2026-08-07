@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -48,7 +47,12 @@ func (r *GrantRepository) ClaimDecisionOperation(ctx context.Context, op consent
 	if err := op.ValidateForClaim(); err != nil {
 		return consent.DecisionOperation{}, false, err
 	}
-	scopes := normalizeScopes(op.Scopes)
+	// The domain owns scope canonicalization; the persisted snapshot is the
+	// normalized set, and provider calls must consume that same result.
+	scopes, err := consent.NormalizeScopes(op.Scopes)
+	if err != nil {
+		return consent.DecisionOperation{}, false, err
+	}
 
 	key := consent.DecisionOperationKey{
 		Provider:         op.Provider,
@@ -144,8 +148,9 @@ func (r *GrantRepository) RecordProviderSucceeded(ctx context.Context, opID cons
 // bound plan, and the grant is written exclusively from the plan values
 // read back from the operation row — the commit input carries no user,
 // client or scope facts of its own, so the local state can never drift
-// from what the provider completed. Any failure rolls everything back: an
-// operation whose grant or audit could not be persisted keeps its proof
+// from what the provider completed. The single canonical audit event is
+// constructed from the same locked row. Any failure rolls everything back:
+// an operation whose grant or audit could not be persisted keeps its proof
 // for forward reconciliation (§4).
 func (r *GrantRepository) CommitAllowDecision(ctx context.Context, commit consent.AllowCommit) error {
 	tx, err := r.pool.Begin(ctx)
@@ -171,10 +176,10 @@ func (r *GrantRepository) CommitAllowDecision(ctx context.Context, commit consen
 	if err := replaceGrantScopesTx(ctx, tx, grantID, op.Scopes); err != nil {
 		return err
 	}
-	if err := terminalizeDecisionTx(ctx, tx, commit.OperationID); err != nil {
+	if err := insertSecurityEvent(ctx, tx, canonicalCompletionAudit(op)); err != nil {
 		return err
 	}
-	if err := insertSecurityEventsTx(ctx, tx, commit.Audit); err != nil {
+	if err := terminalizeDecisionTx(ctx, tx, commit.OperationID); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -184,9 +189,10 @@ func (r *GrantRepository) CommitAllowDecision(ctx context.Context, commit consen
 }
 
 // CommitDenyDecision runs the Deny-side local commit in one transaction:
-// the locked operation must carry the proof and the access_denied kind;
-// audit + terminal transition commit. Deny creates no grant row
-// (ADR-0005 §5).
+// the locked operation must carry the proof, the access_denied kind and a
+// complete binding (non-empty user — corrupted or legacy rows fail
+// closed); the canonical audit + terminal transition commit. Deny creates
+// no grant row (ADR-0005 §5).
 func (r *GrantRepository) CommitDenyDecision(ctx context.Context, commit consent.DenyCommit) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -199,13 +205,14 @@ func (r *GrantRepository) CommitDenyDecision(ctx context.Context, commit consent
 		return err
 	}
 	if op.Status != consent.DecisionOperationProviderSucceeded ||
-		op.CompletionKind != consent.CompletionAccessDenied {
+		op.CompletionKind != consent.CompletionAccessDenied ||
+		op.LocalUserID == "" || len(op.Scopes) != 0 {
 		return consent.ErrDecisionStateConflict
 	}
-	if err := terminalizeDecisionTx(ctx, tx, commit.OperationID); err != nil {
+	if err := insertSecurityEvent(ctx, tx, canonicalCompletionAudit(op)); err != nil {
 		return err
 	}
-	if err := insertSecurityEventsTx(ctx, tx, commit.Audit); err != nil {
+	if err := terminalizeDecisionTx(ctx, tx, commit.OperationID); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -217,7 +224,8 @@ func (r *GrantRepository) CommitDenyDecision(ctx context.Context, commit consent
 // CommitErrorCompletion terminates an error-callback completion
 // (login_required, consent_required, account_selection_required,
 // request_not_supported, server_error, temporarily_unavailable): the
-// locked operation must carry the proof and a matching non-decision kind.
+// locked operation must carry the proof, a known non-decision kind and no
+// scope snapshot (the per-kind binding rule; corrupted rows fail closed).
 // No grant is ever involved.
 func (r *GrantRepository) CommitErrorCompletion(ctx context.Context, commit consent.ErrorCompletionCommit) error {
 	tx, err := r.pool.Begin(ctx)
@@ -231,19 +239,40 @@ func (r *GrantRepository) CommitErrorCompletion(ctx context.Context, commit cons
 		return err
 	}
 	if op.Status != consent.DecisionOperationProviderSucceeded ||
-		!op.CompletionKind.Valid() || op.CompletionKind.IsUserDecision() {
+		!op.CompletionKind.Valid() || op.CompletionKind.IsUserDecision() ||
+		len(op.Scopes) != 0 {
 		return consent.ErrDecisionStateConflict
 	}
-	if err := terminalizeDecisionTx(ctx, tx, commit.OperationID); err != nil {
+	if err := insertSecurityEvent(ctx, tx, canonicalCompletionAudit(op)); err != nil {
 		return err
 	}
-	if err := insertSecurityEventsTx(ctx, tx, commit.Audit); err != nil {
+	if err := terminalizeDecisionTx(ctx, tx, commit.OperationID); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("postgres: commit error completion: %w", err)
 	}
 	return nil
+}
+
+// canonicalCompletionAudit builds the ONE audit event of a terminal
+// commit entirely from the locked operation row: actor and client come
+// from the bound plan, event type / operation / result from the
+// completion kind. The request_id column correlates the event with the
+// decision operation — reconciled commits have no HTTP request context.
+// Nothing here is ever taken from the commit caller.
+func canonicalCompletionAudit(op consent.DecisionOperation) applications.SecurityEvent {
+	return applications.SecurityEvent{
+		EventID:      applications.NewSecurityEventID(),
+		EventType:    op.CompletionKind.AuditEventType(),
+		ActorUserID:  op.LocalUserID,
+		ClientID:     op.ClientID,
+		RequestID:    string(op.ID),
+		Operation:    op.CompletionKind.AuditOperation(),
+		Result:       op.CompletionKind.AuditResult(),
+		FailureClass: op.CompletionKind.AuditFailureClass(),
+		OccurredAt:   time.Now().UTC(),
+	}
 }
 
 // FailDecisionOperation terminates a still-pending operation without
@@ -459,20 +488,4 @@ func collectScopes(rows pgx.Rows) ([]string, error) {
 		return nil, fmt.Errorf("postgres: iterate scope rows: %w", err)
 	}
 	return scopes, nil
-}
-
-// normalizeScopes deduplicates and sorts a scope snapshot so the stored
-// plan is deterministic regardless of request ordering.
-func normalizeScopes(scopes []string) []string {
-	seen := make(map[string]bool, len(scopes))
-	out := make([]string, 0, len(scopes))
-	for _, scope := range scopes {
-		if scope == "" || seen[scope] {
-			continue
-		}
-		seen[scope] = true
-		out = append(out, scope)
-	}
-	sort.Strings(out)
-	return out
 }
