@@ -169,6 +169,110 @@ func TestResolveValidHappyPath(t *testing.T) {
 	}
 }
 
+// TestResolveIsSideEffectFree pins the complete frozen invariant set of the
+// resolution GET (ADR-0005 §12): even wired against fully write-capable
+// seams, Resolve must leave every write surface untouched —
+//
+//	operation Claim/write   == 0
+//	provider completion     == 0  (attempts, not merely successes)
+//	grant write             == 0
+//	audit write             == 0  (operation rows and commits ARE the audit
+//	                             trail; the service holds no audit seam)
+//
+// across every outcome branch of the frozen union.
+func TestResolveIsSideEffectFree(t *testing.T) {
+	redirectMismatch := baseView()
+	redirectMismatch.RedirectURI = "https://evil.example/steal"
+	disallowedScope := baseView()
+	disallowedScope.Scopes = []string{"openid", "admin:read"}
+
+	cases := []struct {
+		name       string
+		view       *AuthRequestView
+		resolver   *stubClientResolver
+		seedGrant  bool
+		session    *ResolutionSession
+		wantStatus ResolutionStatus
+	}{
+		{"valid consent required", baseView(), &stubClientResolver{facts: baseFacts()}, false, resolvedSession(), ResolutionValid},
+		{"already authorized", baseView(), &stubClientResolver{facts: baseFacts()}, true, resolvedSession(), ResolutionAlreadyAuthorized},
+		{"unauthenticated", baseView(), &stubClientResolver{facts: baseFacts()}, false, nil, ResolutionUnauthenticated},
+		{"client not found", baseView(), &stubClientResolver{err: ErrClientUnknown}, false, resolvedSession(), ResolutionClientNotFound},
+		{"redirect mismatch", redirectMismatch, &stubClientResolver{facts: baseFacts()}, false, resolvedSession(), ResolutionRedirectMismatch},
+		{"scope not allowed", disallowedScope, &stubClientResolver{facts: baseFacts()}, false, resolvedSession(), ResolutionScopeNotAllowed},
+	}
+
+	assertReadOnly := func(provider *FakeAuthRequestProvider, store *fakeGrantStore, grantsBefore int) {
+		t.Helper()
+		if provider.CompletionAttempts() != 0 {
+			t.Fatal("resolution GET attempted a provider completion")
+		}
+		if store.ClaimCalls() != 0 || store.OperationRows() != 0 {
+			t.Fatal("resolution GET claimed or wrote an operation row")
+		}
+		if store.RecordProofCalls() != 0 || store.FailCalls() != 0 {
+			t.Fatal("resolution GET mutated an operation state")
+		}
+		if allow, deny, errored := store.CommitCalls(); allow+deny+errored != 0 {
+			t.Fatal("resolution GET committed a decision")
+		}
+		if store.GrantRows() != grantsBefore {
+			t.Fatal("resolution GET wrote a grant")
+		}
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := NewFakeAuthRequestProvider()
+			provider.AddRequest(tc.view)
+			store := newFakeGrantStore()
+			if tc.seedGrant {
+				store.grants["user_01TEST|cli_test"] = Grant{
+					ID:       GrantID("grt_side_effect"),
+					UserID:   identity.UserID("user_01TEST"),
+					ClientID: applications.OAuthClientID("cli_test"),
+					Status:   GrantActive,
+					Scopes:   []string{"openid", "profile"},
+				}
+			}
+			grantsBefore := store.GrantRows()
+			svc := newTestService(t, provider, tc.resolver, store)
+
+			res, err := svc.Resolve(context.Background(), ResolutionInput{
+				AuthRequestID: tc.view.ID,
+				Session:       tc.session,
+			})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if res.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q (branch not actually exercised)", res.Status, tc.wantStatus)
+			}
+			assertReadOnly(provider, store, grantsBefore)
+		})
+	}
+
+	t.Run("expired", func(t *testing.T) {
+		provider := NewFakeAuthRequestProvider()
+		provider.AddRequest(baseView())
+		store := newFakeGrantStore()
+		grantsBefore := store.GrantRows()
+		svc := newTestService(t, provider, &stubClientResolver{facts: baseFacts()}, store)
+
+		res, err := svc.Resolve(context.Background(), ResolutionInput{
+			AuthRequestID: "V2-gone-1",
+			Session:       resolvedSession(),
+		})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Status != ResolutionExpired {
+			t.Fatalf("status = %q, want expired (branch not actually exercised)", res.Status)
+		}
+		assertReadOnly(provider, store, grantsBefore)
+	})
+}
+
 func TestResolveExpiredOnVanishedRequests(t *testing.T) {
 	for _, class := range []ErrorClass{ClassNotFound, ClassExpired, ClassAlreadyCompleted} {
 		svc := newTestService(t,

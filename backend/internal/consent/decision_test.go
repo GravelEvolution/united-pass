@@ -47,6 +47,14 @@ type fakeGrantStore struct {
 	errorCommits  int
 	failed        map[DecisionOperationID]ErrorClass
 	providerProof map[DecisionOperationID]time.Time
+
+	// attempt counters: every write-method call is counted regardless of
+	// outcome, so read-only invariants can assert zero ATTEMPTS, not
+	// merely zero successes (P3.8). All counters sit behind mu, keeping
+	// the fakes safe under -race suites.
+	claimCalls       int
+	recordProofCalls int
+	failCalls        int
 }
 
 func newFakeGrantStore() *fakeGrantStore {
@@ -73,6 +81,7 @@ func (s *fakeGrantStore) ClaimDecisionOperation(_ context.Context, op DecisionOp
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.claimCalls++
 	key := decisionKeyStr(DecisionOperationKey{Provider: op.Provider, ProviderTenantID: op.ProviderTenantID, AuthRequestID: op.AuthRequestID})
 	if existingID, ok := s.keys[key]; ok {
 		return s.ops[existingID], false, ErrDecisionConflict
@@ -100,6 +109,7 @@ func (s *fakeGrantStore) GetDecisionOperation(_ context.Context, key DecisionOpe
 func (s *fakeGrantStore) RecordProviderSucceeded(_ context.Context, opID DecisionOperationID, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.recordProofCalls++
 	if s.recordProofErr != nil {
 		return s.recordProofErr
 	}
@@ -169,6 +179,7 @@ func (s *fakeGrantStore) FailDecisionOperation(_ context.Context, opID DecisionO
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.failCalls++
 	op, ok := s.ops[opID]
 	if !ok || op.Status != DecisionOperationPending {
 		return ErrDecisionStateConflict
@@ -188,6 +199,45 @@ func (s *fakeGrantStore) GetGrant(_ context.Context, userID identity.UserID, cli
 		return Grant{}, ErrGrantNotFound
 	}
 	return grant, nil
+}
+
+// Locked read accessors for the attempt counters (P3.8): assertions stay
+// race-free even when the fakes participate in -race suites.
+
+func (s *fakeGrantStore) ClaimCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.claimCalls
+}
+
+func (s *fakeGrantStore) RecordProofCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.recordProofCalls
+}
+
+func (s *fakeGrantStore) FailCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failCalls
+}
+
+func (s *fakeGrantStore) CommitCalls() (allow, deny, errored int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.allowCommits, s.denyCommits, s.errorCommits
+}
+
+func (s *fakeGrantStore) OperationRows() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.ops)
+}
+
+func (s *fakeGrantStore) GrantRows() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.grants)
 }
 
 func (s *fakeGrantStore) ListInFlightDecisionOperations(_ context.Context, staleBefore time.Time, limit int) ([]DecisionOperation, error) {

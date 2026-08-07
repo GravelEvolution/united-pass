@@ -27,6 +27,10 @@ type FakeAuthRequestProvider struct {
 	getErr    error
 	compErr   error
 	lostErr   error
+	// completionAttempts counts EVERY completion call that reached the
+	// fake (successful or not), so read-only invariants can assert that
+	// no completion was even ATTEMPTED (P3.8).
+	completionAttempts int
 	// CallbackBase is the RP callback origin used to build deterministic
 	// callback URLs. Defaults to https://rp.example/callback.
 	CallbackBase string
@@ -88,6 +92,15 @@ func (f *FakeAuthRequestProvider) Completions(id string) int {
 	return f.completed[id]
 }
 
+// CompletionAttempts returns how many completion calls reached the fake at
+// all, regardless of outcome — the read-only invariant of the resolution
+// GET demands zero attempts, not merely zero successes (P3.8).
+func (f *FakeAuthRequestProvider) CompletionAttempts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.completionAttempts
+}
+
 // GetAuthRequest implements AuthRequestProvider. Unknown and already
 // completed requests both surface as ClassNotFound — the fake deliberately
 // reproduces the provider ambiguity that keeps reconciliation fail-closed
@@ -147,6 +160,7 @@ func (f *FakeAuthRequestProvider) CompleteWithError(_ context.Context, authReque
 func (f *FakeAuthRequestProvider) complete(authRequestID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.completionAttempts++
 	if err := ValidateAuthRequestID(authRequestID); err != nil {
 		return NewProviderError(ClassNotFound, err)
 	}

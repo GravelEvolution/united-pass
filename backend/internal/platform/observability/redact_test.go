@@ -55,6 +55,21 @@ func TestRedactedErrorStripsSensitiveContent(t *testing.T) {
 	}
 }
 
+// TestRedactedErrorStripsCallbackURLs pins the callback-leakage regression
+// (P3.8): a provider callback URL embedded in a dependency error is
+// credential-grade (authorization code / state for the RP) and must never
+// survive into an operational log line.
+func TestRedactedErrorStripsCallbackURLs(t *testing.T) {
+	raw := "provider completion failed: redirect to https://rp.example/callback?code=secret-code&state=abc123"
+	got := RedactedError(errors.New(raw), 0)
+
+	for _, forbidden := range []string{"secret-code", "state=abc123", "rp.example", "https://"} {
+		if contains(got, forbidden) {
+			t.Errorf("RedactedError output %q still contains %q", got, forbidden)
+		}
+	}
+}
+
 func TestRedactedErrorTruncates(t *testing.T) {
 	got := RedactedError(errors.New("a very long error message that should be cut short"), 20)
 	if len(got) > 30 {
