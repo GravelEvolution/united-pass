@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Identity domain types (user, user ID, user status)
+//
+
 // Package identity defines the core user identity domain types for United Pass.
 // These types are independent of any infrastructure concern (HTTP, SQL, Redis).
 package identity

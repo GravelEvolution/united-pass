@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Phase 1 default (fail-closed) and dev-override permission resolvers
+//
+
 // Package permissions also provides the default and dev-override permission
 // resolvers for Phase 1. The default resolver is fail-closed (all false).
 // The dev-override resolver grants all capabilities to a configured user ID

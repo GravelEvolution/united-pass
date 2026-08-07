@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-06
+// Description: Domain model types for the OAuth application and client management plane
+//
+
 package applications
 
 import (

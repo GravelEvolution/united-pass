@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+#
+# Copyright (c) 2026 Chen Jiajie(Ariakage)
+#
+# Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+# Date: 2026-08-05
+# Description: One-time ZITADEL instance bootstrap (org, project, service account)
+#
+
 set -euo pipefail
 
 # ZITADEL development instance initializer.

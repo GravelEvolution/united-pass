@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Structured logging setup (log/slog)
+//
+
 // Package observability provides structured logging setup for the United Pass
 // API service. Logging uses log/slog so structured fields flow consistently to
 // logs, error responses and audit records.

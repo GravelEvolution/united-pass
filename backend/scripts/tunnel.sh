@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+#
+# Copyright (c) 2026 Chen Jiajie(Ariakage)
+#
+# Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+# Date: 2026-08-05
+# Description: SSH tunnel helper for the remote PostgreSQL and Redis test instances
+#
+
 set -euo pipefail
 
 # United Pass development SSH tunnel manager.

@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-04
+// Description: Admin page: employee listing
+//
+
 import type { Metadata } from "next";
 import { EmployeesTable } from "@/features/admin/components/tables/employees-table";
 import { serverQueries } from "@/lib/api/server/server-queries";

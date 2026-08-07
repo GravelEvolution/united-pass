@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Email verification panel
+//
+
 "use client";
 
 import { useEffect, useState } from "react";

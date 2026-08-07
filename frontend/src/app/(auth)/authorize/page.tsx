@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-04
+// Description: OAuth authorization and consent page
+//
+
 import type { Metadata } from "next";
 import { AuthorizationConsent } from "@/features/authorization/components/authorization-consent";
 import { serverQueries } from "@/lib/api/server/server-queries";

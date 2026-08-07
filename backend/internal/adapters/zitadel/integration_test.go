@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: ZITADEL adapter integration tests against a live instance
+//
+
 //go:build integration
 
 // Package zitadel integration tests exercise the adapter against a real

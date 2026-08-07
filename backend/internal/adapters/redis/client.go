@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Redis client construction and connection check
+//
+
 // Package redis provides Redis adapter implementations for United Pass
 // ephemeral state: browser sessions, MFA challenges, and rate limit counters.
 // This package owns all go-redis interaction; domain and application packages

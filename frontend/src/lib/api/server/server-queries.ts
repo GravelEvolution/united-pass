@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Server-side read-only API queries
+//
+
 import type { UnitedPassQueries } from "@/lib/api/united-pass-data-source";
 import type { AuditQuery } from "@/features/admin/types";
 import type { PageQuery } from "@/types/pagination";

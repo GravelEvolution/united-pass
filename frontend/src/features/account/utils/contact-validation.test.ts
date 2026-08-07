@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Unit tests for the contact validation
+//
+
 import { describe, it, expect } from "vitest";
 import { validateContactValue } from "./contact-validation";
 

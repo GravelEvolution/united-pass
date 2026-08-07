@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-04
+// Description: Dashboard layout shell (sidebar and top bar)
+//
+
 "use client";
 
 import type { ReactNode } from "react";

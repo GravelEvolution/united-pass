@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: In-memory fake authenticator for tests and development
+//
+
 // Package auth also provides a FakeAuthenticator for testing and local
 // development when no real authentication provider is configured. This fake
 // is NOT a production implementation and must never be used as one.

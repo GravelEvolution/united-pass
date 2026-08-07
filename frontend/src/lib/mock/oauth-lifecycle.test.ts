@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Unit tests for the mocked OAuth lifecycle
+//
+
 import { describe, it, expect, beforeEach } from "vitest";
 import type { UnitedPassDataSource } from "@/lib/api/united-pass-data-source";
 import type { ApplicationAudience } from "@/features/applications/types";

@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Authentication port contracts and result types
+//
+
 // Package auth defines the authentication domain interface and types.
 // The Authenticator interface abstracts the authentication provider so that
 // domain and HTTP code never depend on a specific provider SDK.

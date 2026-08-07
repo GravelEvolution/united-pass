@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Redis integration test setup and store coverage
+//
+
 //go:build integration
 
 // Redis integration tests verify session store, MFA store, and rate limiter

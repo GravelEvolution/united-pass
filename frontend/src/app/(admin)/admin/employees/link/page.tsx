@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Admin page: employee identity linking
+//
+
 import type { Metadata } from "next";
 import { EmployeeLinkForm } from "@/features/admin/components/employee-link-form";
 import { serverQueries } from "@/lib/api/server/server-queries";

@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Application configuration model and environment loading
+//
+
 // Package config loads and validates typed runtime configuration for the
 // United Pass API service. Configuration is concentrated here so the rest of
 // the codebase never reads environment variables directly.

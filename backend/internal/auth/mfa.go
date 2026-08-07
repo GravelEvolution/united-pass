@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: MFA challenge types shared by the Redis store and the HTTP handlers
+//
+
 // Package auth also defines MFA challenge types that are shared between the
 // Redis adapter (storage) and the HTTP handlers (consumer).
 package auth

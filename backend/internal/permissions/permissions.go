@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Permission capability types and the resolver contract
+//
+
 // Package permissions defines the permission capability types and the
 // PermissionResolver interface. In Phase 1, the resolver is a temporary
 // fail-closed implementation. Phase 7 replaces it with Cerbos without

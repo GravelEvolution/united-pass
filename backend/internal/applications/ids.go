@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-06
+// Description: Identifier generation and validation for the applications domain
+//
+
 // Package applications defines the Phase 2 domain model for the OAuth
 // application and client management plane. It is infrastructure-free: no
 // HTTP, SQL, Redis or provider SDK dependencies. See docs/adr-0004.md.

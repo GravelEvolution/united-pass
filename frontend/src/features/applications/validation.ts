@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Client-side validation for the application and client forms
+//
+
 import type {
   ApplicationAudience,
   ApplicationCreateInput,

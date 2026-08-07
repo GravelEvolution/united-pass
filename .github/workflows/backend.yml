@@ -1,3 +1,11 @@
+#
+# Copyright (c) 2026 Chen Jiajie(Ariakage)
+#
+# Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+# Date: 2026-08-07
+# Description: GitHub Actions CI workflow for the Go backend
+#
+
 name: Backend Quality Checks
 
 on:

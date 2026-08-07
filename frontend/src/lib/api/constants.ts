@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: API route constants
+//
+
 /**
  * Shared API constants for Cookie names, CSRF header, and API base URL.
  *

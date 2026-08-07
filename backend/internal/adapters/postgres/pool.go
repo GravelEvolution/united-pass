@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: PostgreSQL connection pool construction and health check
+//
+
 // Package postgres provides PostgreSQL adapter implementations for United Pass
 // domain repositories. This package owns all SQL and pgx interaction; domain
 // and application packages depend on repository interfaces, never on pgx types.

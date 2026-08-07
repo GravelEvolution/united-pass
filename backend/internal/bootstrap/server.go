@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Server assembly: configuration wiring, dependency construction and route registration
+//
+
 // Package bootstrap assembles the HTTP server, router and middleware for the
 // United Pass API service. It is the only place that imports chi; handlers and
 // middleware stay compatible with standard net/http types.

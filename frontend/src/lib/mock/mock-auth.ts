@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Mock authentication state helpers for the frozen frontend
+//
+
 export type MockLoginDestination = "/account" | "/admin";
 
 type MockLoginAccount = {

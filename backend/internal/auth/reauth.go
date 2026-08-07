@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-06
+// Description: Re-authentication challenge and grant records for sensitive operations
+//
+
 // Reauthentication challenge and grant records for high-risk operations
 // (ADR-0004 §7). Like MFA challenges, raw tokens are never stored — only
 // their SHA-256 hashes are used as Redis keys. Challenges and grants are

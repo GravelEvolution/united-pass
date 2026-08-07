@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Password reset page
+//
+
 import type { Metadata } from "next";
 import { ResetPasswordPanel } from "@/features/auth/components/reset-password-panel";
 import { InvalidLinkNotice } from "@/features/auth/components/invalid-link-notice";

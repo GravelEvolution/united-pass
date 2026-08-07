@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-07
+// Description: Consent domain error sentinels
+//
+
 // Package consent defines the consent/authorization orchestration seam of
 // United Pass (ADR-0005). Phase 3.1 introduced the provider port: the
 // authorization-request view, the provider callback result type, the stable

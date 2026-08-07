@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: HTTP middleware: request ID, CSRF enforcement, security headers and panic recovery
+//
+
 package httpapi
 
 import (

@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-04
+// Description: Security overview panel
+//
+
 "use client";
 
 import type { FormEvent } from "react";

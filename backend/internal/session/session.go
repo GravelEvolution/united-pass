@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Server-side session domain types and opaque token generation
+//
+
 // Package session defines the server-side session domain types and token
 // generation utilities. Session tokens are opaque, cryptographically random
 // values stored in a Cookie. Only the SHA-256 hash of the token reaches Redis.

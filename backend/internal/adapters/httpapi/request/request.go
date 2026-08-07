@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Request-scoped context values and request ID helpers
+//
+
 // Package request carries per-request values through the handler chain using
 // context.Context. Keeping the context key in a dedicated subpackage prevents
 // collisions and keeps chi-specific code out of shared helpers.

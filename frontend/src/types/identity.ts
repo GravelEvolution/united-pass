@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-04
+// Description: Identity contract types shared across the frontend
+//
+
 export type UserPersona = "consumer" | "employee";
 
 export type EmployeeProfile = {

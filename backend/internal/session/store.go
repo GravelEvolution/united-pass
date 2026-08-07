@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Session store port contracts and session record types
+//
+
 // Package session also defines the Store interface and Service that
 // orchestrates session lifecycle. The Store interface is satisfied by the
 // Redis adapter; the Service wraps it with token generation, expiry checks,

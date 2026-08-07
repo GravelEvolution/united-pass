@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Privacy policy document page
+//
+
 import type { Metadata } from "next";
 import { LegalDocument } from "@/features/legal/components/legal-document";
 import { privacySections } from "@/features/legal/data/privacy-sections";

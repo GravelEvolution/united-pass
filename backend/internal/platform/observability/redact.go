@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Mechanical redaction helpers for sensitive values in logs
+//
+
 // Package observability also provides error classification and redaction
 // helpers for structured logging. Dependency errors may embed internal URLs,
 // hostnames, or connection parameters, so raw error messages must never reach

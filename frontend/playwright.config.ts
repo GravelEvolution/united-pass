@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Playwright end-to-end test configuration
+//
+
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({

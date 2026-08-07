@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Account page: personal data export
+//
+
 import type { Metadata } from "next";
 import { PageHeader } from "@/components/common/page-header";
 import { UnavailableNotice } from "@/features/account/components/unavailable-notice";

@@ -1,3 +1,11 @@
+#
+# Copyright (c) 2026 Chen Jiajie(Ariakage)
+#
+# Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+# Date: 2026-08-05
+# Description: OpenAPI contract for the United Pass backend API
+#
+
 openapi: 3.1.0
 
 info:

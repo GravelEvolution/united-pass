@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: ZITADEL authenticator adapter (password and MFA verification)
+//
+
 // Package zitadel implements the authentication provider adapter for ZITADEL
 // using the LoginV2 API (zitadel.session.v2) and the user API
 // (zitadel.user.v2). It satisfies the auth.Authenticator and

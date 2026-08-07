@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Database migration CLI entry point (goose up/down/status)
+//
+
 // Package main implements the migration command for United Pass.
 //
 // Usage:

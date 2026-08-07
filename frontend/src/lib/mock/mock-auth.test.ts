@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Unit tests for the mock authentication helpers
+//
+
 import { describe, it, expect } from "vitest";
 import { authenticateMockAccount, MOCK_LOGIN_ACCOUNTS } from "./mock-auth";
 

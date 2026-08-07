@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-04
+// Description: Mock data source implementation backing the frozen frontend
+//
+
 import type { UnitedPassDataSource } from "@/lib/api/united-pass-data-source";
 import { SYSTEM_NAME } from "@/lib/branding";
 import type { AuthorizedApplication } from "@/features/account/types";

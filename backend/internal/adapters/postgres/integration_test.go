@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Shared PostgreSQL integration test setup (test pool and schema migration)
+//
+
 //go:build integration
 
 // Package postgres integration tests verify repository behavior against a real

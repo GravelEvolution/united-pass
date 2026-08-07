@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Playwright end-to-end tests for the account self-service pages
+//
+
 import { test, expect } from "@playwright/test";
 
 test.describe("账户中心流程", () => {

@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-04
+// Description: Semi Design theme definitions (light and dark)
+//
+
 export type ColorTheme = "light" | "dark";
 
 export const THEME_STORAGE_KEY = "united-pass-color-theme";

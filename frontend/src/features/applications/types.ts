@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-04
+// Description: Applications feature contract types
+//
+
 export type ApplicationAudience = "internal" | "external" | "hybrid";
 
 export type ApplicationStatus = "active" | "disabled";

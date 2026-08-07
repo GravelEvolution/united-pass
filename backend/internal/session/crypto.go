@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Session encryption helpers (key derivation and AEAD sealing)
+//
+
 // Package session also provides at-rest encryption for provider session
 // references. Per ADR-0002 section 13, if the provider session reference
 // contains sensitive data (e.g. a refresh token), it is encrypted with

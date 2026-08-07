@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: API service entry point: loads configuration, assembles dependencies and starts the HTTP server
+//
+
 // Command api is the entry point for the United Pass API service. It loads
 // configuration, constructs structured logging, builds the HTTP server, starts
 // it, and performs graceful shutdown on operating-system signals. Business

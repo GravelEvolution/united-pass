@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-04
+// Description: Admin page: policy listing
+//
+
 import type { Metadata } from "next";
 import { PoliciesTable } from "@/features/admin/components/tables/policies-table";
 import { serverQueries } from "@/lib/api/server/server-queries";

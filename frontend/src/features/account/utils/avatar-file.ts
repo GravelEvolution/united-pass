@@ -1,3 +1,11 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-05
+// Description: Avatar file validation utilities
+//
+
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 const MIN_AVATAR_EDGE = 64;
 const MAX_AVATAR_EDGE = 4096;
