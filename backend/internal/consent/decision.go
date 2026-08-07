@@ -334,9 +334,13 @@ func (s *DecisionService) DecideSilently(
 
 	// 2. Silent execution belongs exclusively to exactly prompt=none; any
 	// other value or combination is neither downgraded nor reinterpreted
-	// (ADR-0005 §9). The gateway performs the same structural check
-	// before routing here; this re-check keeps the seam fail-closed.
-	if len(view.Prompts) != 1 || !view.HasPrompt(PromptNone) {
+	// (ADR-0005 §9). The shared structural rule rejects unknown values and
+	// none combinations; the gateway runs the same check before routing
+	// here, and this re-check keeps the seam fail-closed.
+	if err := validatePromptStructure(view); err != nil {
+		return DecisionOutcome{}, ErrResolutionNotInteractive
+	}
+	if !view.HasPrompt(PromptNone) {
 		return DecisionOutcome{}, ErrResolutionNotInteractive
 	}
 

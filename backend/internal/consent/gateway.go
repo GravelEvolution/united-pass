@@ -155,19 +155,16 @@ func (g *InteractionGatewayService) Route(
 		return GatewayAction{}, err
 	}
 
-	// 2. Structural prompt validation BEFORE any semantic short-circuit:
-	// unknown values and invalid combinations are neither downgraded nor
+	// 2. Structural prompt validation BEFORE any semantic short-circuit,
+	// through the single shared rule (validatePromptStructure): unknown
+	// values and invalid combinations are neither downgraded nor
 	// reinterpreted (ADR-0005 §9) — they fail locally, never through a
-	// *_required callback that would assign them a meaning.
-	for _, p := range view.Prompts {
-		if p == PromptUnspecified {
-			return GatewayAction{Kind: ActionLocalFailure, Failure: LocalFailureBadRequest}, nil
-		}
-	}
-	hasNone := view.HasPrompt(PromptNone)
-	if hasNone && len(view.Prompts) > 1 {
+	// *_required callback that would assign them a meaning. Structure only:
+	// create/select_account stay semantically routable below.
+	if err := validatePromptStructure(view); err != nil {
 		return GatewayAction{Kind: ActionLocalFailure, Failure: LocalFailureBadRequest}, nil
 	}
+	hasNone := view.HasPrompt(PromptNone)
 
 	// 3. Semantic routing.
 	switch {

@@ -415,6 +415,11 @@ func TestDecideRevalidationFailuresTerminateAsExpired(t *testing.T) {
 			Scopes: []string{"openid"}, RedirectURI: "https://rp.example/callback",
 			Prompts: []Prompt{PromptUnspecified}, CreatedAt: testNow.Add(-time.Minute),
 		}},
+		{"out-of-range prompt", &AuthRequestView{
+			ID: "V2-d-range-prompt", ClientID: "provider-client-1",
+			Scopes: []string{"openid"}, RedirectURI: "https://rp.example/callback",
+			Prompts: []Prompt{Prompt(42)}, CreatedAt: testNow.Add(-time.Minute),
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

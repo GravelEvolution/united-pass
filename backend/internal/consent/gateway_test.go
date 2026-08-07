@@ -156,6 +156,7 @@ func TestGatewayRouteStructuralPromptValidationPrecedesSemantics(t *testing.T) {
 		prompts []Prompt
 	}{
 		{"unknown prompt", []Prompt{PromptUnspecified}},
+		{"out-of-range prompt value", []Prompt{Prompt(42)}},
 		{"none combined with login", []Prompt{PromptNone, PromptLogin}},
 		{"none combined with create", []Prompt{PromptNone, PromptCreate}},
 	}

@@ -91,6 +91,7 @@ func TestDecideSilentlyRejectsInteractivePrompts(t *testing.T) {
 	}{
 		{"no prompts", nil},
 		{"prompt=login", []Prompt{PromptLogin}},
+		{"out-of-range prompt value", []Prompt{Prompt(42)}},
 		{"none combined", []Prompt{PromptNone, PromptLogin}},
 	}
 	for _, tc := range cases {

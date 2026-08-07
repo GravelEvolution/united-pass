@@ -794,6 +794,47 @@ func TestResolveGrantReuse(t *testing.T) {
 	})
 }
 
+// TestValidatePromptStructureIsStructureOnly pins the single shared prompt
+// rule consumed by the gateway, resolution, interactive decision and silent
+// decision paths: only unknown values and none combinations are rejected.
+// create and select_account are structurally VALID — their meaning stays
+// with each caller (gateway error callbacks vs interactive rejection) and
+// must never collapse into a generic structural rejection (ADR-0005 §9).
+func TestValidatePromptStructureIsStructureOnly(t *testing.T) {
+	structurallyValid := [][]Prompt{
+		nil,
+		{PromptNone},
+		{PromptLogin},
+		{PromptConsent},
+		{PromptCreate},
+		{PromptSelectAccount},
+		{PromptLogin, PromptConsent},
+	}
+	for _, prompts := range structurallyValid {
+		view := baseView()
+		view.Prompts = prompts
+		if err := validatePromptStructure(view); err != nil {
+			t.Fatalf("prompts %v must be structurally valid, got %v", prompts, err)
+		}
+	}
+
+	structurallyInvalid := [][]Prompt{
+		{PromptUnspecified},
+		{Prompt(42)},
+		{PromptLogin, Prompt(42)},
+		{PromptNone, PromptLogin},
+		{PromptNone, PromptCreate},
+		{PromptNone, PromptSelectAccount},
+	}
+	for _, prompts := range structurallyInvalid {
+		view := baseView()
+		view.Prompts = prompts
+		if err := validatePromptStructure(view); !errors.Is(err, errPromptSetInvalid) {
+			t.Fatalf("prompts %v must fail closed, got %v", prompts, err)
+		}
+	}
+}
+
 func TestResolveNonInteractivePrompts(t *testing.T) {
 	reusableGrant := Grant{
 		ID:       GrantID("grt_test"),

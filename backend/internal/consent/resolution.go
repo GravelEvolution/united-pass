@@ -79,6 +79,12 @@ type GrantReader interface {
 // reinterprets them. HTTP adapters map it to a stable 400 outcome.
 var ErrResolutionNotInteractive = errors.New("consent: request cannot proceed interactively")
 
+// errPromptSetInvalid is the shared structural verdict returned by
+// validatePromptStructure. Callers map it onto their own stable outcomes
+// (gateway local bad-request, interactive/silent not-interactive) — the
+// verdict itself never crosses a service boundary.
+var errPromptSetInvalid = errors.New("consent: prompt set is structurally invalid")
+
 // ResolutionStatus is the ConsentResolution union discriminator frozen by
 // the frontend contract. No new members may be introduced (ADR-0005 §12).
 type ResolutionStatus string
@@ -422,22 +428,41 @@ func authenticationSatisfied(view *AuthRequestView, sess *ResolutionSession, now
 	return true
 }
 
-// validateInteractivePrompts rejects prompt values and combinations that
-// can never proceed through the interactive consent UI (ADR-0005 §9):
-// unknown values (which the adapters map to PromptUnspecified, plus any
-// out-of-range value) fail closed instead of being silently ignored,
-// create and select_account are unsupported in Phase 3, and none combined
-// with any other prompt is an invalid combination that is neither
-// downgraded nor reinterpreted.
-func validateInteractivePrompts(view *AuthRequestView) error {
+// validatePromptStructure is the single structural prompt validation shared
+// by every path that consumes an auth request — gateway routing,
+// interactive resolution, interactive decision and silent decision
+// (ADR-0005 §9). It rejects exactly two shapes:
+//
+//   - any value outside the known enum; the adapters map unknown strings to
+//     PromptUnspecified, and every out-of-range value fails closed instead
+//     of being silently ignored;
+//   - none combined with any other prompt — an invalid combination that is
+//     neither downgraded nor reinterpreted.
+//
+// The check is deliberately structure-only: create and select_account are
+// structurally valid, and their MEANING stays with each caller (gateway
+// error callbacks request_not_supported / account_selection_required;
+// interactive paths reject them). A shared validator that decided those
+// semantics would turn provider error callbacks into generic bad requests.
+func validatePromptStructure(view *AuthRequestView) error {
 	for _, p := range view.Prompts {
 		switch p {
 		case PromptNone, PromptLogin, PromptConsent, PromptSelectAccount, PromptCreate:
 		default:
-			return ErrResolutionNotInteractive
+			return errPromptSetInvalid
 		}
 	}
 	if view.HasPrompt(PromptNone) && len(view.Prompts) > 1 {
+		return errPromptSetInvalid
+	}
+	return nil
+}
+
+// validateInteractivePrompts layers the interactive-path semantics on top of
+// the shared structural rule: create and select_account can never proceed
+// through the interactive consent UI in Phase 3 (ADR-0005 §9).
+func validateInteractivePrompts(view *AuthRequestView) error {
+	if err := validatePromptStructure(view); err != nil {
 		return ErrResolutionNotInteractive
 	}
 	if view.HasPrompt(PromptCreate) || view.HasPrompt(PromptSelectAccount) {
