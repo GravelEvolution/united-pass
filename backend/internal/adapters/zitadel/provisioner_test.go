@@ -13,6 +13,7 @@ import (
 	"errors"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 
@@ -21,6 +22,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 // stubManagement is a scripted Management API for adapter tests.
@@ -105,13 +107,33 @@ func (s *stubManagement) RegenerateOIDCClientSecret(ctx context.Context, in *man
 	return s.rotateResp, s.rotateErr
 }
 
+const testInteractionBase = "https://id.example.com/_interaction"
+
 func newTestProvisioner(t *testing.T, stub *stubManagement) *Provisioner {
 	t.Helper()
-	p, err := NewProvisioner(stub, "proj-test", slog.New(slog.DiscardHandler))
+	p, err := NewProvisioner(stub, "proj-test", testInteractionBase, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("new provisioner: %v", err)
 	}
 	return p
+}
+
+// newLegacyProvisioner builds a provisioner with no interaction base: the
+// pre-Phase-3.6 behavior where LoginVersion is never managed.
+func newLegacyProvisioner(t *testing.T, stub *stubManagement) *Provisioner {
+	t.Helper()
+	p, err := NewProvisioner(stub, "proj-test", "", slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("new legacy provisioner: %v", err)
+	}
+	return p
+}
+
+func wantLoginV2(t *testing.T, got *appv1.LoginVersion, base string) {
+	t.Helper()
+	if got.GetLoginV2().GetBaseUri() != base {
+		t.Fatalf("LoginVersion = %+v, want LoginV2{BaseUri=%q}", got, base)
+	}
 }
 
 func webServerSpec() applications.ClientProvisionSpec {
@@ -166,6 +188,13 @@ func TestProvisioner_WebServerMapping(t *testing.T) {
 	}
 	if len(req.PostLogoutRedirectUris) != 1 || req.PostLogoutRedirectUris[0] != "https://app.example.com/logout" {
 		t.Errorf("PostLogoutRedirectUris: %v", req.PostLogoutRedirectUris)
+	}
+	// LoginVersion must be submitted atomically with the creation request
+	// (ADR-0005 §1): no follow-up update may be required for the app to be
+	// usable by the gateway.
+	wantLoginV2(t, req.LoginVersion, testInteractionBase)
+	if stub.updateCfgReq != nil {
+		t.Error("creation must not issue a follow-up OIDC config update")
 	}
 }
 
@@ -312,11 +341,44 @@ func oidcAppFixture(state appv1.AppState) *management.GetAppByIDResponse {
 	}
 }
 
+// richOIDCAppFixture seeds every provider-owned field the read-modify-write
+// must carry back, including a stale LoginV1 configuration that must be
+// replaced by the enforced LoginV2.
+func richOIDCAppFixture() *management.GetAppByIDResponse {
+	return &management.GetAppByIDResponse{
+		App: &appv1.App{
+			Id:    "prov-app-rich",
+			State: appv1.AppState_APP_STATE_ACTIVE,
+			Config: &appv1.App_OidcConfig{
+				OidcConfig: &appv1.OIDCConfig{
+					RedirectUris:             []string{"https://old.example.com/cb"},
+					ResponseTypes:            []appv1.OIDCResponseType{appv1.OIDCResponseType_OIDC_RESPONSE_TYPE_CODE},
+					GrantTypes:               []appv1.OIDCGrantType{appv1.OIDCGrantType_OIDC_GRANT_TYPE_AUTHORIZATION_CODE},
+					AppType:                  appv1.OIDCAppType_OIDC_APP_TYPE_WEB,
+					AuthMethodType:           appv1.OIDCAuthMethodType_OIDC_AUTH_METHOD_TYPE_BASIC,
+					PostLogoutRedirectUris:   []string{"https://old.example.com/logout"},
+					Version:                  appv1.OIDCVersion_OIDC_VERSION_1_0,
+					DevMode:                  true,
+					AccessTokenType:          appv1.OIDCTokenType_OIDC_TOKEN_TYPE_JWT,
+					AccessTokenRoleAssertion: true,
+					IdTokenRoleAssertion:     true,
+					IdTokenUserinfoAssertion: true,
+					ClockSkew:                durationpb.New(5 * time.Minute),
+					AdditionalOrigins:        []string{"https://extra.example.com"},
+					SkipNativeAppSuccessPage: true,
+					BackChannelLogoutUri:     "https://old.example.com/backchannel",
+					LoginVersion:             &appv1.LoginVersion{Version: &appv1.LoginVersion_LoginV1{LoginV1: &appv1.LoginV1{}}},
+				},
+			},
+		},
+	}
+}
+
 func TestProvisioner_UpdatePreservesProviderConfig(t *testing.T) {
-	stub := &stubManagement{getResp: oidcAppFixture(appv1.AppState_APP_STATE_ACTIVE)}
+	stub := &stubManagement{getResp: richOIDCAppFixture()}
 	p := newTestProvisioner(t, stub)
 
-	err := p.UpdateClient(context.Background(), "prov-app-1", applications.ClientUpdateSpec{
+	err := p.UpdateClient(context.Background(), "prov-app-rich", applications.ClientUpdateSpec{
 		DisplayName:  "Renamed",
 		RedirectURIs: []string{"https://new.example.com/cb"},
 		LogoutURI:    "https://new.example.com/logout",
@@ -331,16 +393,155 @@ func TestProvisioner_UpdatePreservesProviderConfig(t *testing.T) {
 	if cfg == nil {
 		t.Fatal("UpdateOIDCAppConfig not called")
 	}
+	// Owned fields take the spec values.
 	if len(cfg.RedirectUris) != 1 || cfg.RedirectUris[0] != "https://new.example.com/cb" {
 		t.Errorf("RedirectUris: %v", cfg.RedirectUris)
 	}
 	if len(cfg.PostLogoutRedirectUris) != 1 || cfg.PostLogoutRedirectUris[0] != "https://new.example.com/logout" {
 		t.Errorf("PostLogout: %v", cfg.PostLogoutRedirectUris)
 	}
-	// Fields the adapter does not own must be preserved verbatim.
+	// Every field the adapter does not own must come back verbatim from the
+	// provider read — the RMW contract must hold for the full config, not a
+	// hand-picked subset.
 	if !cfg.DevMode || cfg.AccessTokenType != appv1.OIDCTokenType_OIDC_TOKEN_TYPE_JWT ||
-		cfg.AppType != appv1.OIDCAppType_OIDC_APP_TYPE_WEB {
+		cfg.AppType != appv1.OIDCAppType_OIDC_APP_TYPE_WEB ||
+		cfg.AuthMethodType != appv1.OIDCAuthMethodType_OIDC_AUTH_METHOD_TYPE_BASIC {
 		t.Errorf("provider config not preserved: %+v", cfg)
+	}
+	if !cfg.AccessTokenRoleAssertion || !cfg.IdTokenRoleAssertion || !cfg.IdTokenUserinfoAssertion {
+		t.Error("role/userinfo assertions not preserved")
+	}
+	if cfg.ClockSkew.AsDuration() != 5*time.Minute {
+		t.Errorf("ClockSkew not preserved: %v", cfg.ClockSkew)
+	}
+	if len(cfg.AdditionalOrigins) != 1 || cfg.AdditionalOrigins[0] != "https://extra.example.com" {
+		t.Errorf("AdditionalOrigins not preserved: %v", cfg.AdditionalOrigins)
+	}
+	if !cfg.SkipNativeAppSuccessPage {
+		t.Error("SkipNativeAppSuccessPage not preserved")
+	}
+	if cfg.BackChannelLogoutUri != "https://old.example.com/backchannel" {
+		t.Errorf("BackChannelLogoutUri not preserved: %q", cfg.BackChannelLogoutUri)
+	}
+	if len(cfg.ResponseTypes) != 1 || len(cfg.GrantTypes) != 1 {
+		t.Errorf("response/grant types not preserved: %+v", cfg)
+	}
+	// LoginVersion is enforced to the desired LoginV2 even though the app
+	// still carries LoginV1 (the production backfill path).
+	wantLoginV2(t, cfg.LoginVersion, testInteractionBase)
+}
+
+// TestProvisioner_RecoverRepairsLoginVersion verifies that adopting an app
+// from an ambiguously succeeded creation repairs a missing or stale
+// LoginVersion before the app is treated as usable.
+func TestProvisioner_RecoverRepairsLoginVersion(t *testing.T) {
+	spec := webServerSpec()
+	recovered := oidcAppFixture(appv1.AppState_APP_STATE_ACTIVE) // LoginVersion absent
+	recovered.GetApp().GetOidcConfig().ClientId = "prov-client-existing"
+	stub := &stubManagement{
+		listResp:   &management.ListAppsResponse{Result: []*appv1.App{{Id: "existing", Name: spec.DisplayName}}},
+		getResp:    recovered,
+		addResp:    &management.AddOIDCAppResponse{},
+		rotateResp: &management.RegenerateOIDCClientSecretResponse{ClientSecret: "recovered-secret"},
+	}
+	p := newTestProvisioner(t, stub)
+
+	res, err := p.ProvisionClient(context.Background(), "idem-repair", spec)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if res.ProviderApplicationID != "existing" || res.ClientSecret != "recovered-secret" {
+		t.Fatalf("result: %+v", res)
+	}
+	if stub.updateCfgReq == nil {
+		t.Fatal("recovery must repair the missing LoginVersion via UpdateOIDCAppConfig")
+	}
+	wantLoginV2(t, stub.updateCfgReq.LoginVersion, testInteractionBase)
+	// The repair preserves the adopted app's existing config.
+	if len(stub.updateCfgReq.RedirectUris) != 1 || stub.updateCfgReq.RedirectUris[0] != "https://old.example.com/cb" {
+		t.Errorf("repair must preserve redirect uris: %v", stub.updateCfgReq.RedirectUris)
+	}
+}
+
+// TestProvisioner_RecoverSkipsRepairWhenAlreadyDesired verifies recovery is
+// idempotent: an app already carrying the exact LoginV2 configuration is
+// adopted without a redundant config write.
+func TestProvisioner_RecoverSkipsRepairWhenAlreadyDesired(t *testing.T) {
+	spec := webServerSpec()
+	recovered := oidcAppFixture(appv1.AppState_APP_STATE_ACTIVE)
+	recovered.GetApp().GetOidcConfig().ClientId = "prov-client-existing"
+	base := testInteractionBase
+	recovered.GetApp().GetOidcConfig().LoginVersion = &appv1.LoginVersion{
+		Version: &appv1.LoginVersion_LoginV2{LoginV2: &appv1.LoginV2{BaseUri: &base}},
+	}
+	stub := &stubManagement{
+		listResp:   &management.ListAppsResponse{Result: []*appv1.App{{Id: "existing", Name: spec.DisplayName}}},
+		getResp:    recovered,
+		rotateResp: &management.RegenerateOIDCClientSecretResponse{ClientSecret: "recovered-secret"},
+	}
+	p := newTestProvisioner(t, stub)
+
+	if _, err := p.ProvisionClient(context.Background(), "idem-already", spec); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if stub.updateCfgReq != nil {
+		t.Error("an app already on the desired LoginVersion must not be rewritten")
+	}
+}
+
+// TestProvisioner_RecoverFailsClosedWhenRepairFails verifies a failed
+// LoginVersion repair blocks adoption: a bad app must never be surfaced as a
+// successful provision.
+func TestProvisioner_RecoverFailsClosedWhenRepairFails(t *testing.T) {
+	spec := webServerSpec()
+	recovered := oidcAppFixture(appv1.AppState_APP_STATE_ACTIVE)
+	recovered.GetApp().GetOidcConfig().ClientId = "prov-client-existing"
+	stub := &stubManagement{
+		listResp:     &management.ListAppsResponse{Result: []*appv1.App{{Id: "existing", Name: spec.DisplayName}}},
+		getResp:      recovered,
+		updateCfgErr: status.Error(codes.Unavailable, "down"),
+		rotateResp:   &management.RegenerateOIDCClientSecretResponse{ClientSecret: "must-not-surface"},
+	}
+	p := newTestProvisioner(t, stub)
+
+	res, err := p.ProvisionClient(context.Background(), "idem-broken", spec)
+	if err == nil {
+		t.Fatalf("repair failure must block adoption, got result %+v", res)
+	}
+	if res.ClientSecret != "" {
+		t.Error("a failed repair must never surface a secret")
+	}
+}
+
+// TestProvisioner_EmptyInteractionBaseKeepsLegacyBehavior verifies that
+// without a configured public origin the provisioner keeps the pre-Phase-3.6
+// behavior: LoginVersion is neither submitted nor enforced. Production
+// validation never allows this state (UP_OAUTH_PUBLIC_ORIGIN is mandatory).
+func TestProvisioner_EmptyInteractionBaseKeepsLegacyBehavior(t *testing.T) {
+	stub := &stubManagement{addResp: &management.AddOIDCAppResponse{
+		AppId: "prov-app-legacy", ClientId: "prov-client-legacy", ClientSecret: "s",
+	}}
+	p := newLegacyProvisioner(t, stub)
+
+	if _, err := p.ProvisionClient(context.Background(), "idem-legacy", webServerSpec()); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if stub.addReq.LoginVersion != nil {
+		t.Error("legacy creation must not submit a LoginVersion")
+	}
+
+	// Update preserves the provider's existing LoginVersion instead of
+	// forcing one.
+	stub2 := &stubManagement{getResp: richOIDCAppFixture()}
+	p2 := newLegacyProvisioner(t, stub2)
+	err := p2.UpdateClient(context.Background(), "prov-app-rich", applications.ClientUpdateSpec{
+		RedirectURIs: []string{"https://new.example.com/cb"},
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if stub2.updateCfgReq.LoginVersion.GetLoginV1() == nil {
+		t.Errorf("legacy update must preserve the existing LoginVersion, got %+v", stub2.updateCfgReq.LoginVersion)
 	}
 }
 
@@ -461,7 +662,7 @@ func TestProvisioner_VerifyProject(t *testing.T) {
 }
 
 func TestNewProvisioner_FailsClosedWithoutProject(t *testing.T) {
-	if _, err := NewProvisioner(&stubManagement{}, "", nil); err == nil {
+	if _, err := NewProvisioner(&stubManagement{}, "", testInteractionBase, nil); err == nil {
 		t.Fatal("empty project id must fail closed")
 	}
 }

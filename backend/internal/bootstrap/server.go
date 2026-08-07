@@ -168,7 +168,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var provisioner applications.OAuthClientProvisioner
 	providerName := ""
 	if sdkClient != nil {
-		prov, err := zitadel.NewProvisioner(sdkClient.ManagementService(), cfg.Auth.ProjectID, logger)
+		prov, err := zitadel.NewProvisioner(sdkClient.ManagementService(), cfg.Auth.ProjectID, cfg.OAuth.InteractionBaseURI(), logger)
 		if err != nil {
 			return nil, err
 		}

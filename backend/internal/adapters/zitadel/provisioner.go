@@ -48,22 +48,33 @@ type managementService interface {
 // one-time API response; they are never logged, persisted or included in
 // errors (ADR-0004 §6). Provider errors are reduced to stable error classes
 // before leaving the adapter.
+//
+// Every OIDC app is created with LoginVersion = LoginV2{BaseURI = the
+// derived Interaction Base URI} and every read-modify-write enforces that
+// configuration (ADR-0005 §1): ZITADEL must generate
+// <interaction-base>/login?authRequest=… for the gateway, never fall back to
+// its own LoginV1 UI.
 type Provisioner struct {
-	mgmt      managementService
-	projectID string
-	logger    *slog.Logger
+	mgmt               managementService
+	projectID          string
+	interactionBaseURI string
+	logger             *slog.Logger
 }
 
 // NewProvisioner builds the provisioner. projectID must be the configured
-// shared ZITADEL project; an empty value fails closed.
-func NewProvisioner(mgmt managementService, projectID string, logger *slog.Logger) (*Provisioner, error) {
+// shared ZITADEL project; an empty value fails closed. interactionBaseURI is
+// the ZITADEL LoginV2 Interaction Base URI derived from
+// UP_OAUTH_PUBLIC_ORIGIN (config.OAuthConfig.InteractionBaseURI); an empty
+// value keeps the legacy behavior (no LoginVersion management), which
+// production validation never allows.
+func NewProvisioner(mgmt managementService, projectID, interactionBaseURI string, logger *slog.Logger) (*Provisioner, error) {
 	if projectID == "" {
 		return nil, errors.New("zitadel: provisioner requires UP_AUTH_PROVIDER_PROJECT_ID")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Provisioner{mgmt: mgmt, projectID: projectID, logger: logger}, nil
+	return &Provisioner{mgmt: mgmt, projectID: projectID, interactionBaseURI: interactionBaseURI, logger: logger}, nil
 }
 
 // VerifyProject confirms the configured project is readable with the service
@@ -99,7 +110,7 @@ func (p *Provisioner) ProvisionClient(ctx context.Context, idempotencyKey string
 		return p.recoverExistingApp(ctx, existing, rules)
 	}
 
-	req, err := addOIDCAppRequest(p.projectID, spec, rules)
+	req, err := addOIDCAppRequest(p.projectID, p.desiredLoginVersion(), spec, rules)
 	if err != nil {
 		return applications.ClientProvisionResult{}, err
 	}
@@ -131,7 +142,10 @@ func (p *Provisioner) ProvisionClient(ctx context.Context, idempotencyKey string
 // recoverExistingApp returns the provider identifiers of an app created by
 // an ambiguously succeeded earlier attempt. The original secret is
 // unreachable at this point, so confidential clients get a fresh rotation
-// and a valid one-time secret; public clients need none.
+// and a valid one-time secret; public clients need none. The adopted app is
+// also repaired: a pre-Phase-3.6 app or one left behind by an abnormal
+// creation path may still lack the LoginV2 interaction configuration and
+// must never be treated as usable without it.
 func (p *Provisioner) recoverExistingApp(ctx context.Context, providerApplicationID string, rules applications.ProfileRules) (applications.ClientProvisionResult, error) {
 	appResp, err := p.mgmt.GetAppByID(ctx, &management.GetAppByIDRequest{
 		ProjectId: p.projectID,
@@ -145,6 +159,9 @@ func (p *Provisioner) recoverExistingApp(ctx context.Context, providerApplicatio
 		// The matched app is not an OIDC app; adopting it would be unsafe.
 		p.logFailure("provision_client_recover", "unexpected_app_type")
 		return applications.ClientProvisionResult{}, fmt.Errorf("%w: recovered app is not an OIDC application", applications.ErrProviderConflict)
+	}
+	if err := p.ensureLoginVersion(ctx, providerApplicationID, cfg); err != nil {
+		return applications.ClientProvisionResult{}, err
 	}
 	result := applications.ClientProvisionResult{
 		ProviderApplicationID: providerApplicationID,
@@ -164,7 +181,10 @@ func (p *Provisioner) recoverExistingApp(ctx context.Context, providerApplicatio
 // UpdateClient synchronizes the display name and the redirect/logout URIs to
 // the provider. The OIDC config update is read-modify-write: the current
 // provider config is fetched first and every field this adapter does not own
-// is preserved verbatim.
+// is preserved verbatim — the request is built from the full provider config,
+// never from a hand-picked subset. United Pass then overwrites the fields it
+// owns (redirect URIs, post-logout URIs) and enforces LoginVersion = the
+// desired LoginV2 interaction configuration (ADR-0005 §1).
 func (p *Provisioner) UpdateClient(ctx context.Context, providerApplicationID string, spec applications.ClientUpdateSpec) error {
 	if spec.DisplayName != "" {
 		if _, err := p.mgmt.UpdateApp(ctx, &management.UpdateAppRequest{
@@ -194,19 +214,31 @@ func (p *Provisioner) UpdateClient(ctx context.Context, providerApplicationID st
 	if spec.LogoutURI != "" {
 		postLogout = []string{spec.LogoutURI}
 	}
-	if _, err := p.mgmt.UpdateOIDCAppConfig(ctx, &management.UpdateOIDCAppConfigRequest{
-		ProjectId:              p.projectID,
-		AppId:                  providerApplicationID,
-		RedirectUris:           spec.RedirectURIs,
-		ResponseTypes:          cfg.GetResponseTypes(),
-		GrantTypes:             cfg.GetGrantTypes(),
-		AppType:                cfg.GetAppType(),
-		AuthMethodType:         cfg.GetAuthMethodType(),
-		PostLogoutRedirectUris: postLogout,
-		DevMode:                cfg.GetDevMode(),
-		AccessTokenType:        cfg.GetAccessTokenType(),
-	}); err != nil {
+	req := preservedOIDCConfigUpdate(p.projectID, providerApplicationID, cfg)
+	req.RedirectUris = spec.RedirectURIs
+	req.PostLogoutRedirectUris = postLogout
+	if desired := p.desiredLoginVersion(); desired != nil {
+		req.LoginVersion = desired
+	}
+	if _, err := p.mgmt.UpdateOIDCAppConfig(ctx, req); err != nil {
 		return p.mapError("update_client_config", err)
+	}
+	return nil
+}
+
+// ensureLoginVersion forces the desired LoginV2 interaction configuration on
+// an existing app while preserving every other provider-owned field. It is a
+// no-op when no interaction base is configured (legacy behavior) or the app
+// already carries the exact desired configuration.
+func (p *Provisioner) ensureLoginVersion(ctx context.Context, providerApplicationID string, cfg *appv1.OIDCConfig) error {
+	desired := p.desiredLoginVersion()
+	if desired == nil || loginVersionMatches(cfg.GetLoginVersion(), desired) {
+		return nil
+	}
+	req := preservedOIDCConfigUpdate(p.projectID, providerApplicationID, cfg)
+	req.LoginVersion = desired
+	if _, err := p.mgmt.UpdateOIDCAppConfig(ctx, req); err != nil {
+		return p.mapError("ensure_login_version", err)
 	}
 	return nil
 }
@@ -284,10 +316,66 @@ func (p *Provisioner) RotateClientSecret(ctx context.Context, providerApplicatio
 
 // --- helpers ---
 
+// desiredLoginVersion builds the LoginVersion United Pass enforces on every
+// OIDC app: LoginV2 with the derived Interaction Base URI. It returns nil
+// when no interaction base is configured; callers treat nil as "no
+// LoginVersion management" (production validation never allows that state).
+func (p *Provisioner) desiredLoginVersion() *appv1.LoginVersion {
+	if p.interactionBaseURI == "" {
+		return nil
+	}
+	base := p.interactionBaseURI
+	return &appv1.LoginVersion{
+		Version: &appv1.LoginVersion_LoginV2{
+			LoginV2: &appv1.LoginV2{BaseUri: &base},
+		},
+	}
+}
+
+// loginVersionMatches reports whether the provider config already carries
+// exactly the desired LoginV2 interaction configuration. Any other state —
+// LoginV1, LoginV2 without a base URI, or a different base URI — needs
+// repair.
+func loginVersionMatches(current, desired *appv1.LoginVersion) bool {
+	return current.GetLoginV2().GetBaseUri() == desired.GetLoginV2().GetBaseUri()
+}
+
+// preservedOIDCConfigUpdate copies every field of the current provider OIDC
+// config verbatim into an UpdateOIDCAppConfigRequest. Callers then overwrite
+// only the fields United Pass owns. Building from the full provider config —
+// never a hand-picked subset — is what makes the read-modify-write contract
+// honest: no provider-owned field may ever be reset to a zero value by an
+// update.
+func preservedOIDCConfigUpdate(projectID, appID string, cfg *appv1.OIDCConfig) *management.UpdateOIDCAppConfigRequest {
+	return &management.UpdateOIDCAppConfigRequest{
+		ProjectId:                projectID,
+		AppId:                    appID,
+		RedirectUris:             cfg.GetRedirectUris(),
+		ResponseTypes:            cfg.GetResponseTypes(),
+		GrantTypes:               cfg.GetGrantTypes(),
+		AppType:                  cfg.GetAppType(),
+		AuthMethodType:           cfg.GetAuthMethodType(),
+		PostLogoutRedirectUris:   cfg.GetPostLogoutRedirectUris(),
+		DevMode:                  cfg.GetDevMode(),
+		AccessTokenType:          cfg.GetAccessTokenType(),
+		AccessTokenRoleAssertion: cfg.GetAccessTokenRoleAssertion(),
+		IdTokenRoleAssertion:     cfg.GetIdTokenRoleAssertion(),
+		IdTokenUserinfoAssertion: cfg.GetIdTokenUserinfoAssertion(),
+		ClockSkew:                cfg.GetClockSkew(),
+		AdditionalOrigins:        cfg.GetAdditionalOrigins(),
+		SkipNativeAppSuccessPage: cfg.GetSkipNativeAppSuccessPage(),
+		BackChannelLogoutUri:     cfg.GetBackChannelLogoutUri(),
+		LoginVersion:             cfg.GetLoginVersion(),
+	}
+}
+
 // addOIDCAppRequest maps a United Pass client profile to the ZITADEL
 // AddOIDCApp parameters (ADR-0004 §1). Redirect URIs are passed through
-// verbatim; no normalization is ever applied.
-func addOIDCAppRequest(projectID string, spec applications.ClientProvisionSpec, rules applications.ProfileRules) (*management.AddOIDCAppRequest, error) {
+// verbatim; no normalization is ever applied. LoginVersion is submitted with
+// the same request — atomically at creation — so a crash between create and
+// any follow-up update can never leave an app behind on LoginV1 (ADR-0005
+// §1).
+func addOIDCAppRequest(projectID string, loginVersion *appv1.LoginVersion, spec applications.ClientProvisionSpec, rules applications.ProfileRules) (*management.AddOIDCAppRequest, error) {
 	req := &management.AddOIDCAppRequest{
 		ProjectId:     projectID,
 		Name:          spec.DisplayName,
@@ -295,6 +383,7 @@ func addOIDCAppRequest(projectID string, spec applications.ClientProvisionSpec, 
 		ResponseTypes: []appv1.OIDCResponseType{appv1.OIDCResponseType_OIDC_RESPONSE_TYPE_CODE},
 		GrantTypes:    grantTypesFor(rules),
 		Version:       appv1.OIDCVersion_OIDC_VERSION_1_0,
+		LoginVersion:  loginVersion,
 	}
 	if spec.LogoutURI != "" {
 		req.PostLogoutRedirectUris = []string{spec.LogoutURI}
