@@ -45,6 +45,13 @@ export function classifyCompletionFailure(error: unknown): CompletionFailure {
 // - relogin rejections are evicted by the caller: the session gate rejected
 //   before applying anything, so after the user logs in and the page
 //   remounts, a fresh single-flight POST may proceed.
+//
+// Capacity (P3.8 review): the map is deliberately unbounded. Keys are only
+// the request IDs this tab actually visited /authorize with — a handful in
+// practice — and each entry is a single settled Promise. Any LRU/TTL
+// eviction would risk breaking the one-shot retention above (an evicted
+// terminal flight would re-POST on remount), so a negligible memory cost
+// buys the safe semantics; do not add cleanup without re-proving retention.
 const completionFlights = new Map<string, Promise<ConsentDecisionOutcome>>();
 
 export function acquireCompletionFlight(
