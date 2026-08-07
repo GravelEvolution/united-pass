@@ -8,7 +8,7 @@
 
 "use client";
 
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Avatar, Button, Toast } from "@douyinfe/semi-ui";
@@ -24,6 +24,7 @@ import {
 import type { ConsentDecision, ConsentResolution } from "@/features/authorization/types";
 import type { CurrentUser } from "@/types/identity";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
+import { isApiError } from "@/lib/api/api-error";
 import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import styles from "./authorization-consent.module.css";
 
@@ -45,94 +46,92 @@ const consentStateDemos = [
 type DecisionState =
   | { phase: "idle" }
   | { phase: "submitting"; decision: ConsentDecision }
+  // "done" is the frozen mock demo result card. Real mode never renders it:
+  // it navigates immediately and keeps the callback URL out of the DOM.
   | { phase: "done"; decision: ConsentDecision; redirectUrl: string }
-  | { phase: "error"; decision: ConsentDecision; message: string };
+  | { phase: "navigating"; decision: ConsentDecision }
+  // "error" is the mock retry demo. Real one-shot completions use "failed".
+  | { phase: "error"; decision: ConsentDecision; message: string }
+  | { phase: "failed"; decision: ConsentDecision; failure: CompletionFailure };
 
-// Auto-completion of an already-authorized consent silently submits "allow"
-// exactly once per requestId. Module-level state survives React StrictMode's
-// unmount/remount, which would otherwise double-submit and trip the backend's
-// single-winner completion into a 409 conflict.
-const autoCompletedRequestIds = new Set<string>();
-const autoCompletionListeners = new Set<() => void>();
+// Outcome of a failed one-shot completion. The backend's global single-winner
+// completion makes same-request retries unsafe: after any ambiguous failure
+// the browser cannot prove the decision was not applied.
+type CompletionFailure =
+  | { outcome: "relogin" }
+  | { outcome: "terminal"; message: string };
 
-function markAutoCompletionStarted(requestId: string) {
-  autoCompletedRequestIds.add(requestId);
-  autoCompletionListeners.forEach((listener) => listener());
-}
-
-function clearAutoCompletion(requestId: string) {
-  autoCompletedRequestIds.delete(requestId);
-  autoCompletionListeners.forEach((listener) => listener());
-}
-
-function subscribeAutoCompletion(listener: () => void) {
-  autoCompletionListeners.add(listener);
-  return () => {
-    autoCompletionListeners.delete(listener);
+function classifyCompletionFailure(error: unknown): CompletionFailure {
+  // 401 (session credential required) is the only recoverable failure: the
+  // login continuation keeps the same opaque request ID. The session gate
+  // rejects before the decision is applied, so nothing was submitted.
+  if (isApiError(error) && error.kind === "unauthorized") {
+    return { outcome: "relogin" };
+  }
+  // 409/410 and ambiguous network/provider errors terminate the transaction;
+  // the user must restart authorization from the client application.
+  return {
+    outcome: "terminal",
+    message: "此授权请求无法继续，请从发起授权的应用重新开始。",
   };
 }
 
-// Hydration-safe "am I in the browser" flag: the server snapshot stays false
-// so the silent allow never starts during SSR of the dynamic /authorize route.
-function subscribeNoop() {
-  return () => undefined;
+// Auto-completion of an already-authorized consent silently submits "allow"
+// exactly once per requestId. The module-level flight map survives React
+// StrictMode's unmount/remount: the second effect run attaches to the same
+// in-flight Promise instead of issuing a second POST that would collide with
+// the backend's single-winner completion. Finished (resolved or rejected)
+// flights are kept for the session so revisits never re-POST a completed
+// transaction.
+const autoCompletionFlights = new Map<string, Promise<{ redirectUrl: string }>>();
+
+function acquireAutoCompletionFlight(requestId: string): Promise<{ redirectUrl: string }> {
+  let flight = autoCompletionFlights.get(requestId);
+  if (!flight) {
+    flight = browserCommands.decideConsent(requestId, "allow");
+    autoCompletionFlights.set(requestId, flight);
+  }
+  return flight;
 }
 
 type AutoCompletionState =
-  | { phase: "submitting" }
-  | { phase: "done"; redirectUrl: string }
-  | { phase: "error"; message: string };
+  | { phase: "in_flight" }
+  | { phase: "failed"; failure: CompletionFailure };
 
 export function AuthorizationConsent({ currentUser, resolution }: AuthorizationConsentProps) {
   const [decisionState, setDecisionState] = useState<DecisionState>({ phase: "idle" });
-  const [autoCompletion, setAutoCompletion] = useState<AutoCompletionState | null>(null);
+  const [autoCompletion, setAutoCompletion] = useState<AutoCompletionState>({
+    phase: "in_flight",
+  });
   const router = useRouter();
-  const isBrowser = useSyncExternalStore(
-    subscribeNoop,
-    () => true,
-    () => false,
-  );
-  const alreadyRequested = resolution.status === "already_authorized";
-  const alreadyRequestedId = alreadyRequested ? resolution.requestId : null;
-  const autoCompletionStarted = useSyncExternalStore(
-    subscribeAutoCompletion,
-    () => (alreadyRequestedId !== null && autoCompletedRequestIds.has(alreadyRequestedId)),
-    // The submission only ever starts in the browser, so SSR sees false.
-    () => false,
-  );
-
-  const completeAlreadyAuthorized = useCallback(async (requestId: string) => {
-    setAutoCompletion({ phase: "submitting" });
-    try {
-      const result = await browserCommands.decideConsent(requestId, "allow");
-      setAutoCompletion({ phase: "done", redirectUrl: result.redirectUrl });
-    } catch {
-      // Let a manual retry re-run the one-shot submission.
-      clearAutoCompletion(requestId);
-      setAutoCompletion({
-        phase: "error",
-        message: "自动返回应用失败，请重试。",
-      });
-    }
-  }, []);
-
-  if (isBrowser && autoCompletion === null && alreadyRequestedId !== null && !autoCompletionStarted) {
-    // React's sanctioned render-time state adjustment: start the silent allow
-    // exactly once per requestId. The module-level store survives StrictMode's
-    // remount, so the submission is a one-shot even under double mounting.
-    // The autoCompletion guard keeps a failed attempt parked on its error
-    // card until the user presses the explicit retry button.
-    markAutoCompletionStarted(alreadyRequestedId);
-    void completeAlreadyAuthorized(alreadyRequestedId);
-  }
+  const alreadyRequestedId =
+    resolution.status === "already_authorized" ? resolution.requestId : null;
 
   useEffect(() => {
-    // The decision endpoint returns the client's validated Redirect URI;
-    // completion follows it with a full navigation like the manual flow.
-    if (autoCompletion?.phase === "done") {
-      window.location.assign(autoCompletion.redirectUrl);
-    }
-  }, [autoCompletion]);
+    // Side effects stay out of render: the POST starts after commit, and
+    // StrictMode's double effect run attaches to the same single-flight
+    // Promise instead of double-submitting.
+    if (alreadyRequestedId === null) return;
+    let disposed = false;
+    acquireAutoCompletionFlight(alreadyRequestedId).then(
+      (result) => {
+        if (disposed) return;
+        // Credential-grade callback URL: consumed by an immediate same-window
+        // navigation — never rendered, parsed, or kept in visible state.
+        window.location.assign(result.redirectUrl);
+      },
+      (error: unknown) => {
+        if (disposed) return;
+        setAutoCompletion({
+          phase: "failed",
+          failure: classifyCompletionFailure(error),
+        });
+      },
+    );
+    return () => {
+      disposed = true;
+    };
+  }, [alreadyRequestedId]);
 
   async function handleDecision(choice: ConsentDecision) {
     if (resolution.status !== "valid") return;
@@ -143,8 +142,27 @@ export function AuthorizationConsent({ currentUser, resolution }: AuthorizationC
         resolution.request.requestId,
         choice,
       );
+      if (!USE_MOCK_DATA_SOURCE) {
+        // Real mode: the callback URL may carry the authorization code or
+        // the OAuth error response. It is consumed by an immediate
+        // same-window navigation and never enters the visible DOM.
+        setDecisionState({ phase: "navigating", decision: choice });
+        window.location.assign(result.redirectUrl);
+        return;
+      }
+      // Mock mode keeps the frozen interactive result card.
       setDecisionState({ phase: "done", decision: choice, redirectUrl: result.redirectUrl });
-    } catch {
+    } catch (error) {
+      if (!USE_MOCK_DATA_SOURCE) {
+        // One-shot completion: the browser cannot prove the decision was not
+        // applied, so real mode never offers a same-request retry.
+        setDecisionState({
+          phase: "failed",
+          decision: choice,
+          failure: classifyCompletionFailure(error),
+        });
+        return;
+      }
       setDecisionState({
         phase: "error",
         decision: choice,
@@ -155,7 +173,7 @@ export function AuthorizationConsent({ currentUser, resolution }: AuthorizationC
   }
 
   if (resolution.status === "valid") {
-    if (decisionState.phase === "submitting") {
+    if (decisionState.phase === "submitting" || decisionState.phase === "navigating") {
       return (
         <DecisionPending
           decision={decisionState.decision}
@@ -194,6 +212,16 @@ export function AuthorizationConsent({ currentUser, resolution }: AuthorizationC
       );
     }
 
+    if (decisionState.phase === "failed") {
+      return (
+        <CompletionFailedCard
+          decision={decisionState.decision}
+          failure={decisionState.failure}
+          requestId={resolution.request.requestId}
+        />
+      );
+    }
+
     if (!currentUser) {
       return null;
     }
@@ -213,13 +241,7 @@ export function AuthorizationConsent({ currentUser, resolution }: AuthorizationC
   }
 
   if (resolution.status === "already_authorized") {
-    return (
-      <AlreadyAuthorizedCard
-        resolution={resolution}
-        autoCompletion={autoCompletion}
-        onRetry={() => void completeAlreadyAuthorized(resolution.requestId)}
-      />
-    );
+    return <AlreadyAuthorizedCard resolution={resolution} autoCompletion={autoCompletion} />;
   }
 
   return (
@@ -352,7 +374,9 @@ function ConsentStateCard({ resolution }: { resolution: ConsentResolution }) {
           <p>请求 <code>{resolution.requestId}</code> 需要已登录的用户身份才能完成授权。</p>
           <p>登录后请使用原授权链接返回此页面继续流程。</p>
           <div className={styles.stateActions}>
-            <Link href={`/login?requestId=${resolution.requestId}`}><Button theme="solid" type="primary">前往登录</Button></Link>
+            <Link href={{ pathname: "/login", query: { requestId: resolution.requestId } }}>
+              <Button theme="solid" type="primary">前往登录</Button>
+            </Link>
           </div>
         </div>
       );
@@ -390,32 +414,25 @@ function ConsentStateCard({ resolution }: { resolution: ConsentResolution }) {
 function AlreadyAuthorizedCard({
   resolution,
   autoCompletion,
-  onRetry,
 }: {
   resolution: Extract<ConsentResolution, { status: "already_authorized" }>;
-  autoCompletion: AutoCompletionState | null;
-  onRetry: () => void;
+  autoCompletion: AutoCompletionState;
 }) {
-  if (autoCompletion?.phase === "error") {
+  if (autoCompletion.phase === "failed") {
+    // One-shot semantics: a failed silent completion is classified like a
+    // failed manual decision and never retried against the same request.
     return (
-      <div className={styles.stateCard}>
-        <div className={`${styles.stateIcon} ${styles.stateIconDanger}`}>
-          <IconAlertTriangle size="extra-large" />
-        </div>
-        <h1>返回应用失败</h1>
-        <p>{autoCompletion.message}</p>
-        <p>你已授权 <strong>{resolution.applicationName}</strong>，无需再次确认。</p>
-        <div className={styles.stateActions}>
-          <Button theme="solid" type="primary" onClick={onRetry}>重试并返回应用</Button>
-          <Link href="/account/applications"><Button theme="outline">查看授权应用</Button></Link>
-        </div>
-      </div>
+      <CompletionFailedCard
+        decision="allow"
+        failure={autoCompletion.failure}
+        requestId={resolution.requestId}
+      />
     );
   }
 
-  // Initial, submitting and done phases all share the completion view: the
-  // silent allow has been (or is being) submitted and the browser will follow
-  // the validated Redirect URI via window.location.assign().
+  // In-flight view: the silent allow is being submitted and the browser will
+  // follow the validated Redirect URI via window.location.assign(). The
+  // callback URL itself never enters the DOM.
   return (
     <div className={styles.stateCard}>
       <div className={`${styles.stateIcon} ${styles.stateIconSuccess}`}>
@@ -424,6 +441,54 @@ function AlreadyAuthorizedCard({
       <h1>已经授权过此应用</h1>
       <p>你此前已授权 <strong>{resolution.applicationName}</strong> 访问相关数据。</p>
       <p>无需再次确认，正在返回 <strong>{resolution.redirectHost}</strong>…</p>
+    </div>
+  );
+}
+
+function CompletionFailedCard({
+  decision,
+  failure,
+  requestId,
+}: {
+  decision: ConsentDecision;
+  failure: CompletionFailure;
+  requestId: string;
+}) {
+  if (failure.outcome === "relogin") {
+    // 401 continuation: the session gate rejected the request before any
+    // decision was applied, so logging in with the same request ID resumes
+    // the flow safely.
+    return (
+      <div className={styles.stateCard}>
+        <div className={`${styles.stateIcon} ${styles.stateIconWarning}`}>
+          <IconUser size="extra-large" />
+        </div>
+        <h1>需要重新登录</h1>
+        <p>登录状态未能验证，你的{decision === "allow" ? "授权" : "拒绝"}决定未被提交。</p>
+        <p>请重新登录后继续此授权请求。</p>
+        <div className={styles.stateActions}>
+          <Link href={{ pathname: "/login", query: { requestId } }}>
+            <Button theme="solid" type="primary">前往登录</Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  // Terminal failures (409/410, ambiguous network/provider errors): the
+  // completion is one-shot and the browser cannot prove the decision was not
+  // applied, so no same-request retry is offered.
+  return (
+    <div className={styles.stateCard}>
+      <div className={`${styles.stateIcon} ${styles.stateIconDanger}`}>
+        <IconAlertTriangle size="extra-large" />
+      </div>
+      <h1>无法继续此授权请求</h1>
+      <p>{failure.message}</p>
+      <p>授权请求只能完成一次，United Pass 无法确认决定是否已提交，因此不会对同一请求再次提交。</p>
+      <div className={styles.stateActions}>
+        <Link href="/account"><Button theme="solid" type="primary">返回账户中心</Button></Link>
+      </div>
     </div>
   );
 }
