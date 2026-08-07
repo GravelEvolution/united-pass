@@ -340,14 +340,31 @@ func (s *ResolutionService) Resolve(ctx context.Context, input ResolutionInput) 
 	}, nil
 }
 
+// grantReusable delegates to the package-level reuse predicate using the
+// resolution service's grant reader.
+func (s *ResolutionService) grantReusable(
+	ctx context.Context,
+	sess *ResolutionSession,
+	view *AuthRequestView,
+	client applications.OAuthClient,
+	requestedScopes []string,
+) (bool, error) {
+	return grantReusable(ctx, s.grants, sess, view, client, requestedScopes)
+}
+
 // grantReusable evaluates all ADR-0005 §7 reuse preconditions: an active
 // grant for (user, client), the normalized requested scopes ⊆ granted
 // scopes (which also guarantees offline_access is present only when it was
 // explicitly consented before), a consent mode permitting reuse and no
 // prompt=consent. Client/application validity and authentication freshness
-// are already established by the caller.
-func (s *ResolutionService) grantReusable(
+// are already established by the caller. It is the single reuse judgment
+// shared by the resolution GET, the interaction gateway pre-check and the
+// authoritative re-check inside DecideSilently (ADR-0005 §12): a gateway
+// pre-check only decides which branch to attempt, never constitutes the
+// authorization fact.
+func grantReusable(
 	ctx context.Context,
+	grants GrantReader,
 	sess *ResolutionSession,
 	view *AuthRequestView,
 	client applications.OAuthClient,
@@ -362,7 +379,7 @@ func (s *ResolutionService) grantReusable(
 	if client.ConsentMode != applications.ConsentModeFirstAuthorization {
 		return false, nil
 	}
-	grant, err := s.grants.GetGrant(ctx, sess.UserID, client.ID)
+	grant, err := grants.GetGrant(ctx, sess.UserID, client.ID)
 	if err != nil {
 		if errors.Is(err, ErrGrantNotFound) {
 			return false, nil

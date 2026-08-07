@@ -247,6 +247,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var authorizationHandlers *httpapi.AuthorizationHandlers
 	var decisionHandlers *httpapi.AuthorizationDecisionHandlers
 	var authorizedAppHandlers *httpapi.AuthorizedApplicationHandlers
+	var interactionHandlers *httpapi.InteractionGatewayHandlers
 	var grantRepo *postgres.GrantRepository
 	if pool != nil && sessionSvc != nil && appRepo != nil && authRequestProvider != nil && providerName != "" {
 		grantRepo = postgres.NewGrantRepository(pool.PgxPool())
@@ -279,6 +280,19 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		}
 		authorizedAppHandlers = httpapi.NewAuthorizedApplicationHandlers(grantMgmtSvc, logger)
 
+		// Authorization Interaction Gateway (P3.6, ADR-0005 §12): the
+		// server-side execution entry for prompt=none and the router into
+		// the Next.js login/consent pages. It reuses the resolution and
+		// decision services — no second authorization judgment exists.
+		gatewaySvc, err := consent.NewInteractionGatewayService(
+			authRequestProvider, appRepo, grantRepo,
+			resolutionSvc, decisionSvc,
+			providerName, func() time.Time { return time.Now().UTC() })
+		if err != nil {
+			return nil, fmt.Errorf("consent interaction gateway: %w", err)
+		}
+		interactionHandlers = httpapi.NewInteractionGatewayHandlers(gatewaySvc, sessionSvc, logger)
+
 		// Background reconciliation (ADR-0005 §4): forward-repair rows
 		// carrying the provider success proof and fail stale pending rows.
 		reconciler, err := consent.NewReconciler(grantRepo, grantRepo,
@@ -294,6 +308,20 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	health := httpapi.NewHealthHandlers(readinessCheckers...)
 	router.Get("/healthz", health.Healthz)
 	router.Get("/readyz", health.Readyz)
+
+	// Authorization Interaction Gateway (ADR-0005 §1, §12): the sole entry
+	// point ZITADEL generates for LoginV2 clients, served on the public
+	// origin under the /_interaction prefix the reverse proxy routes to
+	// this backend. Optional session (prompt=none must run without one);
+	// GET-only, every outcome is a 302 or the fixed local failure page.
+	router.Group(func(r chi.Router) {
+		if sessionSvc != nil {
+			r.Use(httpapi.OptionalSession(sessionSvc, userChecker, logger))
+		}
+		if interactionHandlers != nil {
+			r.Get("/_interaction/login", interactionHandlers.InteractionLogin)
+		}
+	})
 
 	// API v1 routes.
 	router.Route("/api/v1", func(r chi.Router) {

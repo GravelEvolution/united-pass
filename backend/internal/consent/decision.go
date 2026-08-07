@@ -137,7 +137,9 @@ func (DecisionOutcome) LogValue() slog.Value {
 // after construction. The session credential reader is NOT a service
 // dependency: decryption is keyed by the currently valid session of each
 // request and released after use, so Decide receives the per-request
-// reader directly (ADR-0005 §3).
+// reader directly (ADR-0005 §3). DecideSilently and
+// CompleteWithErrorCallback additionally serve the interaction gateway
+// (§12) through the exact same claim → provider → proof → commit model.
 type DecisionService struct {
 	provider         AuthRequestProvider
 	clients          ConsentClientResolver
@@ -252,19 +254,9 @@ func (s *DecisionService) Decide(
 	// (ADR-0005 §3).
 	var handle SessionHandle
 	if input.Decision == DecisionAllow {
-		cred, err := credentials.ReadProviderSessionCredential(ctx, input.Session.SessionID)
+		handle, err = s.readAllowCredential(ctx, credentials, input.Session)
 		if err != nil {
-			if errors.Is(err, session.ErrProviderSessionCredentialMissing) {
-				return DecisionOutcome{}, ErrDecisionCredentialRequired
-			}
 			return DecisionOutcome{}, err
-		}
-		if !cred.CanFinalizeAuthorization() || cred.Provider() != s.providerName {
-			return DecisionOutcome{}, ErrDecisionCredentialRequired
-		}
-		handle, err = NewSessionHandle(cred.SessionID(), cred.SessionToken())
-		if err != nil {
-			return DecisionOutcome{}, ErrDecisionCredentialRequired
 		}
 	}
 
@@ -285,6 +277,216 @@ func (s *DecisionService) Decide(
 	if input.Decision == DecisionAllow {
 		op.Scopes = requestedScopes
 	}
+	var complete func(context.Context) (CallbackResult, error)
+	if input.Decision == DecisionAllow {
+		complete = func(ctx context.Context) (CallbackResult, error) {
+			return s.provider.CompleteWithSession(ctx, input.AuthRequestID, handle)
+		}
+	} else {
+		complete = func(ctx context.Context) (CallbackResult, error) {
+			return s.provider.CompleteWithError(ctx, input.AuthRequestID, ReasonAccessDenied)
+		}
+	}
+	return s.claimCompleteAndCommit(ctx, op, complete)
+}
+
+// ErrSilentReuseUnavailable: the authoritative grant re-check inside
+// DecideSilently found the consent no longer silently reusable (revoked,
+// scope-reduced, consent-mode change or prompt=consent). The gateway maps
+// it onto the consent_required error callback; nothing was claimed
+// (ADR-0005 §7, §12).
+var ErrSilentReuseUnavailable = errors.New("consent: grant no longer silently reusable")
+
+// DecideSilently executes the prompt=none silent Allow under the exact §5
+// ordering — re-read the provider request, re-validate every fact,
+// freshness through the shared predicate, an AUTHORITATIVE grant re-check
+// before anything is claimed, the sealed credential, the global claim,
+// provider completion, proof and canonical commit. The re-check closes the
+// revocation window between the gateway pre-check and the claim: a grant
+// revoked in between can never be silently reused, and the failure leaves
+// no operation row behind (ADR-0005 §12).
+func (s *DecisionService) DecideSilently(
+	ctx context.Context,
+	input DecisionInput,
+	credentials ProviderSessionCredentialReader,
+) (DecisionOutcome, error) {
+	if err := ValidateAuthRequestID(input.AuthRequestID); err != nil {
+		return DecisionOutcome{}, err
+	}
+	if input.Decision != DecisionAllow {
+		return DecisionOutcome{}, fmt.Errorf("consent: silent execution supports only the allow decision, got %q", input.Decision)
+	}
+	if input.Session == nil || input.Session.UserID == "" {
+		return DecisionOutcome{}, errors.New("consent: silent decision requires an authenticated session")
+	}
+	if credentials == nil {
+		return DecisionOutcome{}, errors.New("consent: silent decision requires a session credential reader")
+	}
+
+	// 1. Provider re-read.
+	view, err := s.provider.GetAuthRequest(ctx, input.AuthRequestID)
+	if err != nil {
+		if IsClass(err, ClassNotFound) || IsClass(err, ClassExpired) || IsClass(err, ClassAlreadyCompleted) {
+			return DecisionOutcome{}, ErrDecisionRequestExpired
+		}
+		return DecisionOutcome{}, err
+	}
+
+	// 2. Silent execution belongs exclusively to exactly prompt=none; any
+	// other value or combination is neither downgraded nor reinterpreted
+	// (ADR-0005 §9). The gateway performs the same structural check
+	// before routing here; this re-check keeps the seam fail-closed.
+	if len(view.Prompts) != 1 || !view.HasPrompt(PromptNone) {
+		return DecisionOutcome{}, ErrResolutionNotInteractive
+	}
+
+	// 3. Full business re-validation with the exact helpers resolution
+	// uses.
+	facts, requestedScopes, err := validateBusinessFacts(ctx, s.clients, s.providerName, view)
+	if err != nil {
+		if errors.Is(err, ErrClientUnknown) {
+			return DecisionOutcome{}, ErrDecisionRequestExpired
+		}
+		return DecisionOutcome{}, err
+	}
+
+	// 4. Freshness through the single shared predicate.
+	sess := &ResolutionSession{
+		UserID:             input.Session.UserID,
+		AuthenticationTime: input.Session.AuthenticationTime,
+	}
+	if !authenticationSatisfied(view, sess, s.now()) {
+		return DecisionOutcome{}, ErrDecisionRequestExpired
+	}
+
+	// 5. Authoritative grant re-check BEFORE the credential read and the
+	// claim: the gateway pre-check only selected this branch, it never
+	// constituted the authorization fact (ADR-0005 §7, §12).
+	reusable, err := grantReusable(ctx, s.grants, sess, view, facts.Client, requestedScopes)
+	if err != nil {
+		return DecisionOutcome{}, err
+	}
+	if !reusable {
+		return DecisionOutcome{}, ErrSilentReuseUnavailable
+	}
+
+	// 6. Credential (before the claim; unusable fails closed with no
+	// pending row).
+	handle, err := s.readAllowCredential(ctx, credentials, input.Session)
+	if err != nil {
+		return DecisionOutcome{}, err
+	}
+
+	// 7. Claim → provider completion → proof → canonical commit, exactly
+	// as the interactive Allow.
+	op := DecisionOperation{
+		ID:               NewDecisionOperationID(),
+		Provider:         s.providerName,
+		ProviderTenantID: s.providerTenantID,
+		AuthRequestID:    input.AuthRequestID,
+		CompletionKind:   CompletionAllow,
+		Status:           DecisionOperationPending,
+		LocalUserID:      input.Session.UserID,
+		ClientID:         facts.Client.ID,
+		Scopes:           requestedScopes,
+	}
+	return s.claimCompleteAndCommit(ctx, op, func(ctx context.Context) (CallbackResult, error) {
+		return s.provider.CompleteWithSession(ctx, input.AuthRequestID, handle)
+	})
+}
+
+// CompleteWithErrorCallback executes a NON-user-decision error-callback
+// completion (login_required, consent_required, account_selection_required,
+// request_not_supported, server_error, temporarily_unavailable) under the
+// same §5 model: provider re-read → global claim → provider error callback
+// → success proof → canonical error commit. User decisions (allow /
+// access_denied) are rejected at the seam. The optional bindings (acting
+// user, validated client) enrich the canonical audit whenever the gateway
+// has already established them; no grant row is ever created (ADR-0005
+// §5, §12).
+func (s *DecisionService) CompleteWithErrorCallback(
+	ctx context.Context,
+	authRequestID string,
+	kind CompletionKind,
+	sess *DecisionSession,
+	clientID applications.OAuthClientID,
+) (DecisionOutcome, error) {
+	if !kind.Valid() || kind.IsUserDecision() {
+		return DecisionOutcome{}, fmt.Errorf("consent: %q is not an error-callback completion kind", kind)
+	}
+	reason, ok := kind.CallbackReason()
+	if !ok {
+		return DecisionOutcome{}, fmt.Errorf("consent: completion kind %q has no callback reason", kind)
+	}
+	if err := ValidateAuthRequestID(authRequestID); err != nil {
+		return DecisionOutcome{}, err
+	}
+
+	// A vanished or already-finalized request can receive no callback
+	// either; terminate the completion as expired.
+	if _, err := s.provider.GetAuthRequest(ctx, authRequestID); err != nil {
+		if IsClass(err, ClassNotFound) || IsClass(err, ClassExpired) || IsClass(err, ClassAlreadyCompleted) {
+			return DecisionOutcome{}, ErrDecisionRequestExpired
+		}
+		return DecisionOutcome{}, err
+	}
+
+	op := DecisionOperation{
+		ID:               NewDecisionOperationID(),
+		Provider:         s.providerName,
+		ProviderTenantID: s.providerTenantID,
+		AuthRequestID:    authRequestID,
+		CompletionKind:   kind,
+		Status:           DecisionOperationPending,
+		ClientID:         clientID,
+	}
+	if sess != nil {
+		op.LocalUserID = sess.UserID
+	}
+	return s.claimCompleteAndCommit(ctx, op, func(ctx context.Context) (CallbackResult, error) {
+		return s.provider.CompleteWithError(ctx, authRequestID, reason)
+	})
+}
+
+// readAllowCredential reads and validates the sealed Version-2 provider
+// session credential for an Allow completion. It runs before the claim so
+// an unusable credential fails closed without leaving a pending operation
+// row behind (ADR-0005 §3).
+func (s *DecisionService) readAllowCredential(
+	ctx context.Context,
+	credentials ProviderSessionCredentialReader,
+	sess *DecisionSession,
+) (SessionHandle, error) {
+	cred, err := credentials.ReadProviderSessionCredential(ctx, sess.SessionID)
+	if err != nil {
+		if errors.Is(err, session.ErrProviderSessionCredentialMissing) {
+			return SessionHandle{}, ErrDecisionCredentialRequired
+		}
+		return SessionHandle{}, err
+	}
+	if !cred.CanFinalizeAuthorization() || cred.Provider() != s.providerName {
+		return SessionHandle{}, ErrDecisionCredentialRequired
+	}
+	handle, err := NewSessionHandle(cred.SessionID(), cred.SessionToken())
+	if err != nil {
+		return SessionHandle{}, ErrDecisionCredentialRequired
+	}
+	return handle, nil
+}
+
+// claimCompleteAndCommit runs the global single-winner claim, the one-shot
+// provider completion (outside any store transaction), the provider
+// success proof and the canonical local commit dispatched from the locked
+// plan's completion kind. Every completion — interactive decisions, silent
+// allows and gateway error callbacks — flows through this single sequence,
+// so the §5 consistency model has exactly one implementation (ADR-0005
+// §5, §12). A commit failure does not swallow the redirect: forward
+// reconciliation repairs the local state from the persisted proof.
+func (s *DecisionService) claimCompleteAndCommit(
+	ctx context.Context,
+	op DecisionOperation,
+	complete func(context.Context) (CallbackResult, error),
+) (DecisionOutcome, error) {
 	stored, won, err := s.grants.ClaimDecisionOperation(ctx, op)
 	if err != nil {
 		if errors.Is(err, ErrDecisionConflict) {
@@ -297,38 +499,58 @@ func (s *DecisionService) Decide(
 		return DecisionOutcome{}, s.resolveClaimConflict(ctx, stored)
 	}
 
-	// 6. Provider completion (one-shot). The provider call never runs
-	// inside a store transaction (§5).
-	var callback CallbackResult
-	if input.Decision == DecisionAllow {
-		callback, err = s.provider.CompleteWithSession(ctx, input.AuthRequestID, handle)
-	} else {
-		callback, err = s.provider.CompleteWithError(ctx, input.AuthRequestID, ReasonAccessDenied)
-	}
+	callback, err := complete(ctx)
 	if err != nil {
 		return DecisionOutcome{}, s.handleProviderFailure(ctx, stored.ID, err)
 	}
 
-	// 7. Persist the provider success proof (kind + time, never the
-	// callback URL). A CAS conflict here means the row was terminated or
-	// committed out from under us — the provider outcome can no longer be
-	// surfaced as this caller's win.
+	// Persist the provider success proof (kind + time, never the callback
+	// URL). A CAS conflict here means the row was terminated or committed
+	// out from under us — the provider outcome can no longer be surfaced
+	// as this caller's win.
 	if err := s.grants.RecordProviderSucceeded(ctx, stored.ID, s.now()); err != nil {
 		return DecisionOutcome{}, ErrDecisionAlreadyDecided
 	}
 
-	// 8. Canonical local commit from the locked plan. The provider
+	// Canonical local commit from the locked plan. The provider
 	// completion already happened and the callback URL is unrecoverable
-	// (one-shot API), so a commit failure must NOT swallow the redirect:
-	// forward reconciliation repairs the local state from the persisted
-	// proof while the user agent still reaches the RP (ADR-0005 §4, §5).
-	if input.Decision == DecisionAllow {
-		_ = s.grants.CommitAllowDecision(ctx, AllowCommit{OperationID: stored.ID})
-	} else {
-		_ = s.grants.CommitDenyDecision(ctx, DenyCommit{OperationID: stored.ID})
-	}
+	// (one-shot API), so a commit failure must NOT swallow the redirect
+	// (ADR-0005 §4, §5).
+	_ = repairCompletionForward(ctx, s.grants, stored)
 
 	return NewDecisionOutcome(callback), nil
+}
+
+// validateBusinessFacts re-derives every business precondition from the
+// provider view and the local records, consuming the exact helpers
+// resolution uses. Any failure terminates the decision as expired: the
+// request can no longer be served through this entry point, and the
+// precise reason is never surfaced (client anti-enumeration, ADR-0005
+// §7) — only logged by the HTTP layer through the stable classes.
+func validateBusinessFacts(
+	ctx context.Context,
+	clients ConsentClientResolver,
+	providerName string,
+	view *AuthRequestView,
+) (ConsentClientFacts, []string, error) {
+	facts, err := clients.ResolveConsentClient(ctx, providerName, view.ClientID)
+	if err != nil {
+		return ConsentClientFacts{}, nil, err
+	}
+	if !applications.EffectiveClientActive(facts.Application.Status, facts.Client.Status) {
+		return ConsentClientFacts{}, nil, ErrClientUnknown
+	}
+	if !hasExactRedirectURI(facts.Client.RedirectURIs, view.RedirectURI) {
+		return ConsentClientFacts{}, nil, ErrClientUnknown
+	}
+	requestedScopes, err := NormalizeScopes(view.Scopes)
+	if err != nil || len(requestedScopes) == 0 {
+		return ConsentClientFacts{}, nil, ErrClientUnknown
+	}
+	if len(disallowedScopes(requestedScopes, facts.Client.Scopes)) > 0 {
+		return ConsentClientFacts{}, nil, ErrClientUnknown
+	}
+	return facts, requestedScopes, nil
 }
 
 // validateInteractiveRequest re-derives every business precondition from
@@ -341,25 +563,12 @@ func (s *DecisionService) validateInteractiveRequest(ctx context.Context, view *
 	if err := validateInteractivePrompts(view); err != nil {
 		return ConsentClientFacts{}, nil, ErrDecisionRequestExpired
 	}
-	facts, err := s.clients.ResolveConsentClient(ctx, s.providerName, view.ClientID)
+	facts, requestedScopes, err := validateBusinessFacts(ctx, s.clients, s.providerName, view)
 	if err != nil {
 		if errors.Is(err, ErrClientUnknown) {
 			return ConsentClientFacts{}, nil, ErrDecisionRequestExpired
 		}
 		return ConsentClientFacts{}, nil, err
-	}
-	if !applications.EffectiveClientActive(facts.Application.Status, facts.Client.Status) {
-		return ConsentClientFacts{}, nil, ErrDecisionRequestExpired
-	}
-	if !hasExactRedirectURI(facts.Client.RedirectURIs, view.RedirectURI) {
-		return ConsentClientFacts{}, nil, ErrDecisionRequestExpired
-	}
-	requestedScopes, err := NormalizeScopes(view.Scopes)
-	if err != nil || len(requestedScopes) == 0 {
-		return ConsentClientFacts{}, nil, ErrDecisionRequestExpired
-	}
-	if len(disallowedScopes(requestedScopes, facts.Client.Scopes)) > 0 {
-		return ConsentClientFacts{}, nil, ErrDecisionRequestExpired
 	}
 	return facts, requestedScopes, nil
 }
