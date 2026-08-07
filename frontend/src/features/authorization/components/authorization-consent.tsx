@@ -8,7 +8,7 @@
 
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Avatar, Button, Toast } from "@douyinfe/semi-ui";
@@ -24,6 +24,7 @@ import {
 import type { ConsentDecision, ConsentResolution } from "@/features/authorization/types";
 import type { CurrentUser } from "@/types/identity";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
+import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import styles from "./authorization-consent.module.css";
 
 type AuthorizationConsentProps = {
@@ -47,9 +48,91 @@ type DecisionState =
   | { phase: "done"; decision: ConsentDecision; redirectUrl: string }
   | { phase: "error"; decision: ConsentDecision; message: string };
 
+// Auto-completion of an already-authorized consent silently submits "allow"
+// exactly once per requestId. Module-level state survives React StrictMode's
+// unmount/remount, which would otherwise double-submit and trip the backend's
+// single-winner completion into a 409 conflict.
+const autoCompletedRequestIds = new Set<string>();
+const autoCompletionListeners = new Set<() => void>();
+
+function markAutoCompletionStarted(requestId: string) {
+  autoCompletedRequestIds.add(requestId);
+  autoCompletionListeners.forEach((listener) => listener());
+}
+
+function clearAutoCompletion(requestId: string) {
+  autoCompletedRequestIds.delete(requestId);
+  autoCompletionListeners.forEach((listener) => listener());
+}
+
+function subscribeAutoCompletion(listener: () => void) {
+  autoCompletionListeners.add(listener);
+  return () => {
+    autoCompletionListeners.delete(listener);
+  };
+}
+
+// Hydration-safe "am I in the browser" flag: the server snapshot stays false
+// so the silent allow never starts during SSR of the dynamic /authorize route.
+function subscribeNoop() {
+  return () => undefined;
+}
+
+type AutoCompletionState =
+  | { phase: "submitting" }
+  | { phase: "done"; redirectUrl: string }
+  | { phase: "error"; message: string };
+
 export function AuthorizationConsent({ currentUser, resolution }: AuthorizationConsentProps) {
   const [decisionState, setDecisionState] = useState<DecisionState>({ phase: "idle" });
+  const [autoCompletion, setAutoCompletion] = useState<AutoCompletionState | null>(null);
   const router = useRouter();
+  const isBrowser = useSyncExternalStore(
+    subscribeNoop,
+    () => true,
+    () => false,
+  );
+  const alreadyRequested = resolution.status === "already_authorized";
+  const alreadyRequestedId = alreadyRequested ? resolution.requestId : null;
+  const autoCompletionStarted = useSyncExternalStore(
+    subscribeAutoCompletion,
+    () => (alreadyRequestedId !== null && autoCompletedRequestIds.has(alreadyRequestedId)),
+    // The submission only ever starts in the browser, so SSR sees false.
+    () => false,
+  );
+
+  const completeAlreadyAuthorized = useCallback(async (requestId: string) => {
+    setAutoCompletion({ phase: "submitting" });
+    try {
+      const result = await browserCommands.decideConsent(requestId, "allow");
+      setAutoCompletion({ phase: "done", redirectUrl: result.redirectUrl });
+    } catch {
+      // Let a manual retry re-run the one-shot submission.
+      clearAutoCompletion(requestId);
+      setAutoCompletion({
+        phase: "error",
+        message: "自动返回应用失败，请重试。",
+      });
+    }
+  }, []);
+
+  if (isBrowser && autoCompletion === null && alreadyRequestedId !== null && !autoCompletionStarted) {
+    // React's sanctioned render-time state adjustment: start the silent allow
+    // exactly once per requestId. The module-level store survives StrictMode's
+    // remount, so the submission is a one-shot even under double mounting.
+    // The autoCompletion guard keeps a failed attempt parked on its error
+    // card until the user presses the explicit retry button.
+    markAutoCompletionStarted(alreadyRequestedId);
+    void completeAlreadyAuthorized(alreadyRequestedId);
+  }
+
+  useEffect(() => {
+    // The decision endpoint returns the client's validated Redirect URI;
+    // completion follows it with a full navigation like the manual flow.
+    if (autoCompletion?.phase === "done") {
+      window.location.assign(autoCompletion.redirectUrl);
+    }
+  }, [autoCompletion]);
 
   async function handleDecision(choice: ConsentDecision) {
     if (resolution.status !== "valid") return;
@@ -120,18 +203,29 @@ export function AuthorizationConsent({ currentUser, resolution }: AuthorizationC
         <ConsentCard
           currentUser={currentUser}
           resolution={resolution}
+          showMockIndicators={USE_MOCK_DATA_SOURCE}
           onAllow={() => handleDecision("allow")}
           onDeny={() => handleDecision("deny")}
         />
-        <DemoLinks currentRequestId={resolution.request.requestId} />
+        {USE_MOCK_DATA_SOURCE && <DemoLinks currentRequestId={resolution.request.requestId} />}
       </>
+    );
+  }
+
+  if (resolution.status === "already_authorized") {
+    return (
+      <AlreadyAuthorizedCard
+        resolution={resolution}
+        autoCompletion={autoCompletion}
+        onRetry={() => void completeAlreadyAuthorized(resolution.requestId)}
+      />
     );
   }
 
   return (
     <>
       <ConsentStateCard resolution={resolution} />
-      <DemoLinks currentRequestId={resolution.requestId} />
+      {USE_MOCK_DATA_SOURCE && <DemoLinks currentRequestId={resolution.requestId} />}
     </>
   );
 }
@@ -139,11 +233,13 @@ export function AuthorizationConsent({ currentUser, resolution }: AuthorizationC
 function ConsentCard({
   currentUser,
   resolution,
+  showMockIndicators,
   onAllow,
   onDeny,
 }: {
   currentUser: CurrentUser;
   resolution: Extract<ConsentResolution, { status: "valid" }>;
+  showMockIndicators: boolean;
   onAllow: () => void;
   onDeny: () => void;
 }) {
@@ -151,7 +247,7 @@ function ConsentCard({
 
   return (
     <div className={styles.card}>
-      <div className={styles.mockBadge}>授权请求 · MOCK</div>
+      {showMockIndicators && <div className={styles.mockBadge}>授权请求 · MOCK</div>}
       <div className={styles.application}>
         <div className={styles.applicationIcon}><IconKey size="extra-large" /></div>
         <div>
@@ -191,7 +287,9 @@ function ConsentCard({
 
       <div className={styles.actions}>
         <Button size="large" theme="outline" onClick={onDeny}>拒绝</Button>
-        <Button size="large" type="primary" theme="solid" onClick={onAllow}>允许并继续（Mock）</Button>
+        <Button size="large" type="primary" theme="solid" onClick={onAllow}>
+          {showMockIndicators ? "允许并继续（Mock）" : "允许并继续"}
+        </Button>
       </div>
     </div>
   );
@@ -280,24 +378,54 @@ function ConsentStateCard({ resolution }: { resolution: ConsentResolution }) {
       );
 
     case "already_authorized":
-      return (
-        <div className={styles.stateCard}>
-          <div className={`${styles.stateIcon} ${styles.stateIconSuccess}`}>
-            <IconTick size="extra-large" />
-          </div>
-          <h1>已经授权过此应用</h1>
-          <p>你此前已授权 <strong>{resolution.applicationName}</strong> 访问相关数据。</p>
-          <p>无需再次确认。点击下方按钮返回应用。</p>
-          <div className={styles.stateActions}>
-            <Link href="/account/applications"><Button theme="solid" type="primary">查看授权应用</Button></Link>
-            <Link href="/account"><Button theme="outline">返回账户中心</Button></Link>
-          </div>
-        </div>
-      );
+      // Handled by AlreadyAuthorizedCard with automatic completion; the union
+      // case is exhaustive only because TypeScript still sees it here.
+      return null;
 
     default:
       return null;
   }
+}
+
+function AlreadyAuthorizedCard({
+  resolution,
+  autoCompletion,
+  onRetry,
+}: {
+  resolution: Extract<ConsentResolution, { status: "already_authorized" }>;
+  autoCompletion: AutoCompletionState | null;
+  onRetry: () => void;
+}) {
+  if (autoCompletion?.phase === "error") {
+    return (
+      <div className={styles.stateCard}>
+        <div className={`${styles.stateIcon} ${styles.stateIconDanger}`}>
+          <IconAlertTriangle size="extra-large" />
+        </div>
+        <h1>返回应用失败</h1>
+        <p>{autoCompletion.message}</p>
+        <p>你已授权 <strong>{resolution.applicationName}</strong>，无需再次确认。</p>
+        <div className={styles.stateActions}>
+          <Button theme="solid" type="primary" onClick={onRetry}>重试并返回应用</Button>
+          <Link href="/account/applications"><Button theme="outline">查看授权应用</Button></Link>
+        </div>
+      </div>
+    );
+  }
+
+  // Initial, submitting and done phases all share the completion view: the
+  // silent allow has been (or is being) submitted and the browser will follow
+  // the validated Redirect URI via window.location.assign().
+  return (
+    <div className={styles.stateCard}>
+      <div className={`${styles.stateIcon} ${styles.stateIconSuccess}`}>
+        <IconTick size="extra-large" />
+      </div>
+      <h1>已经授权过此应用</h1>
+      <p>你此前已授权 <strong>{resolution.applicationName}</strong> 访问相关数据。</p>
+      <p>无需再次确认，正在返回 <strong>{resolution.redirectHost}</strong>…</p>
+    </div>
+  );
 }
 
 function DecisionPending({
@@ -383,6 +511,22 @@ function DecisionError({
       <p>你的{decision === "allow" ? "授权" : "拒绝"}决定尚未提交。</p>
       <div className={styles.stateActions}>
         <Button theme="solid" type="primary" onClick={onRetry}>返回重试</Button>
+      </div>
+    </div>
+  );
+}
+
+export function MissingRequestIdCard() {
+  return (
+    <div className={styles.stateCard}>
+      <div className={`${styles.stateIcon} ${styles.stateIconWarning}`}>
+        <IconAlertTriangle size="extra-large" />
+      </div>
+      <h1>缺少授权请求</h1>
+      <p>此页面需要由应用发起的授权请求才能继续。</p>
+      <p>请从发起授权的应用重新进入，页面不接受自行拼装的请求参数。</p>
+      <div className={styles.stateActions}>
+        <Link href="/account"><Button theme="solid" type="primary">返回账户中心</Button></Link>
       </div>
     </div>
   );
