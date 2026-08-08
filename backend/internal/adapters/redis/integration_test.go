@@ -1237,7 +1237,7 @@ func TestIntegration_ReauthStoreCleanupPopsExpiredChallenge(t *testing.T) {
 	data := reauthChallengeData("client.secret.rotate")
 	data.ProviderSessionID = "ps_cleanup_1"
 
-	if err := store.CreateChallenge(ctx, tokenHash, data, 300*time.Millisecond); err != nil {
+	if err := store.CreateChallenge(ctx, tokenHash, data, 2*time.Second); err != nil {
 		t.Fatalf("create challenge: %v", err)
 	}
 
@@ -1252,7 +1252,7 @@ func TestIntegration_ReauthStoreCleanupPopsExpiredChallenge(t *testing.T) {
 
 	// Abandon the challenge: let its TTL lapse, then the sweep must surface
 	// the cleanup entry with the provider session to revoke.
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(2500 * time.Millisecond)
 	entries, err = store.PopExpiredChallenges(ctx, 10)
 	if err != nil {
 		t.Fatalf("pop after expiry: %v", err)
@@ -1307,7 +1307,7 @@ func TestIntegration_ReauthStoreCleanupAfterConsume(t *testing.T) {
 	data := reauthChallengeData("application.delete")
 	data.ProviderSessionID = "ps_cleanup_3"
 
-	if err := store.CreateChallenge(ctx, tokenHash, data, 300*time.Millisecond); err != nil {
+	if err := store.CreateChallenge(ctx, tokenHash, data, 2*time.Second); err != nil {
 		t.Fatalf("create challenge: %v", err)
 	}
 	if _, err := store.ClaimChallenge(ctx, tokenHash, "claim-1"); err != nil {
@@ -1320,7 +1320,7 @@ func TestIntegration_ReauthStoreCleanupAfterConsume(t *testing.T) {
 	// The record is gone at a terminal state; once the scheduled expiry
 	// passes, the entry surfaces so the worker revokes again (idempotent
 	// double revocation is safe), and it surfaces exactly once.
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(2500 * time.Millisecond)
 	entries, err := store.PopExpiredChallenges(ctx, 10)
 	if err != nil {
 		t.Fatalf("pop after consume: %v", err)
