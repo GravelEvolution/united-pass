@@ -178,7 +178,7 @@ export function MfaChallengePanel({
     return (
       <div className={styles.panel}>
         <div className={styles.heading}>
-          <span className={styles.mockBadge}>MOCK PREVIEW</span>
+          {!isRealMode && <span className={styles.mockBadge}>MOCK PREVIEW</span>}
           <h1>验证已过期</h1>
           <p>多因素验证挑战已超时，请返回登录重新发起。</p>
         </div>
@@ -192,7 +192,9 @@ export function MfaChallengePanel({
         <div className={styles.actions}>
           <Button theme="outline" size="large" onClick={onCancel}>返回登录</Button>
         </div>
-        <p className={styles.notice}>当前为界面 mock，不会执行真实的多因素验证。</p>
+        {!isRealMode && (
+          <p className={styles.notice}>当前为界面 mock，不会执行真实的多因素验证。</p>
+        )}
       </div>
     );
   }
@@ -201,7 +203,7 @@ export function MfaChallengePanel({
     return (
       <div className={styles.panel}>
         <div className={styles.heading}>
-          <span className={styles.mockBadge}>MOCK PREVIEW</span>
+          {!isRealMode && <span className={styles.mockBadge}>MOCK PREVIEW</span>}
           <h1>尝试次数过多</h1>
           <p>为保护账户安全，多因素验证已被暂时锁定。</p>
         </div>
@@ -215,7 +217,9 @@ export function MfaChallengePanel({
         <div className={styles.actions}>
           <Button theme="outline" size="large" onClick={onCancel}>返回登录</Button>
         </div>
-        <p className={styles.notice}>当前为界面 mock，不会执行真实的多因素验证。</p>
+        {!isRealMode && (
+          <p className={styles.notice}>当前为界面 mock，不会执行真实的多因素验证。</p>
+        )}
       </div>
     );
   }

@@ -34,14 +34,14 @@ type CredentialPanelProps = {
 };
 
 /**
- * MFA methods the login seam can actually complete in the browser. The
- * passkey assertion seam is not migrated yet (ADR-0004), so passkey is
- * filtered out before rendering the challenge panel; the backend error
- * surface stays untouched.
+ * MFA methods the login seam can actually complete end-to-end today.
+ * The passkey assertion seam is not migrated yet (ADR-0004), and the P1
+ * backend explicitly rejects recovery codes ("Recovery codes are not
+ * implemented"), so only TOTP is offered in real mode; anything else is
+ * filtered out before rendering the challenge panel.
  */
 const COMPLETABLE_MFA_METHODS: ReadonlySet<MfaMethod> = new Set([
   "totp",
-  "recovery_code",
 ]);
 
 export function CredentialPanel({ mode, resumeRequestId }: CredentialPanelProps) {
