@@ -85,20 +85,18 @@ DISCOVERY="$(curl -sf "${PROBE_ORIGIN}/.well-known/openid-configuration")" \
 endpoint() { echo "${DISCOVERY}" | jq -r --arg k "$1" '.[$k] // "(absent)"'; }
 
 ISSUER="$(endpoint issuer)"
-log "discovery results:"
-log "  issuer:                      ${ISSUER}"
-log "  authorization_endpoint:      $(endpoint authorization_endpoint)"
-log "  token_endpoint:              $(endpoint token_endpoint)"
-log "  jwks_uri:                    $(endpoint jwks_uri)"
-log "  userinfo_endpoint:           $(endpoint userinfo_endpoint)"
-log "  end_session_endpoint:        $(endpoint end_session_endpoint)"
-log "  device_authorization_endpoint: $(endpoint device_authorization_endpoint)"
 
 # --- step 1b: fail-closed discovery checks -----------------------------------
+# UNTRUSTED-INPUT DISCIPLINE: every discovery value below is printed ONLY
+# after it has passed its fail-closed check, never before. A hostile
+# discovery document (e.g. an issuer or endpoint carrying user:password@)
+# must not be able to smuggle anything into the probe's own output.
+#
 # The issuer is the probed origin itself; behind the reverse proxy it must
-# equal UP_OAUTH_PUBLIC_ORIGIN. Any deviation fails the probe.
+# equal UP_OAUTH_PUBLIC_ORIGIN. Any deviation fails the probe — and the
+# offending (untrusted) issuer value is never echoed.
 if [[ "${ISSUER}" != "${PROBE_ORIGIN}" ]]; then
-  die "issuer ${ISSUER} does not equal the probed origin ${PROBE_ORIGIN} (behind the reverse proxy the issuer must equal UP_OAUTH_PUBLIC_ORIGIN)"
+  die "discovery issuer does not equal the probed origin ${PROBE_ORIGIN} (behind the reverse proxy the issuer must equal UP_OAUTH_PUBLIC_ORIGIN)"
 fi
 
 # url_origin prints the normalized scheme://host[:port] of an absolute URL.
@@ -138,6 +136,15 @@ for key in "${REQUIRED_ENDPOINTS[@]}"; do
     || die "endpoint ${key} origin ${origin} differs from the probed origin ${PROBE_ORIGIN}"
 done
 log "discovery checks: issuer and ${#REQUIRED_ENDPOINTS[@]} endpoints all served from ${PROBE_ORIGIN}"
+
+# Discovery results are logged only now that every value has been proven
+# safe to print: the issuer equals PROBE_ORIGIN and each endpoint passed
+# the userinfo, host and origin checks above.
+log "discovery results (validated):"
+log "  issuer:                      ${ISSUER}"
+for key in "${REQUIRED_ENDPOINTS[@]}"; do
+  log "  ${key}: $(endpoint "${key}")"
+done
 
 # --- step 2: authorize redirect probe -----------------------------------------
 log "issuing authorization request (one pending auth request will be left unused)"
