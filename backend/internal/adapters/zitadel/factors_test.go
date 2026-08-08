@@ -328,6 +328,22 @@ func TestFactor_SAPermissionFaultFailsClosed(t *testing.T) {
 	}
 }
 
+func TestFactor_SummarySAPermissionForbidden(t *testing.T) {
+	// The read-only summary path must preserve the distinct provider.forbidden
+	// class for SA authorization failures, never collapsing it into
+	// provider.unavailable (ADR-0006 §10).
+	u := &fakeUserService{
+		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+			return nil, grpcErr(codes.NotFound, "AUTHZ-404 permission denied")
+		},
+	}
+	a := factorAuth(t, u, "rp.example.com")
+
+	if _, err := a.FactorSummary(context.Background(), "user-1"); !errors.Is(err, auth.ErrProviderForbidden) {
+		t.Fatalf("err = %v, want ErrProviderForbidden", err)
+	}
+}
+
 func TestFactor_TransportFailureIsProviderUnavailable(t *testing.T) {
 	u := &fakeUserService{
 		listPasskeysFn: func(*userv2.ListPasskeysRequest) (*userv2.ListPasskeysResponse, error) {

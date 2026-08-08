@@ -169,7 +169,9 @@ func (a *Authenticator) FactorSummary(ctx context.Context, userID identity.UserI
 	methods, err := a.userAuthMethods(ctx, subject)
 	if err != nil {
 		if errors.Is(err, errProviderPermission) {
-			return auth.FactorSummary{}, auth.ErrProviderUnavailable
+			// SA authorization failure: the distinct provider.forbidden class,
+			// never collapsed into provider.unavailable (ADR-0006 §10).
+			return auth.FactorSummary{}, auth.ErrProviderForbidden
 		}
 		return auth.FactorSummary{}, err
 	}
