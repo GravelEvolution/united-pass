@@ -41,7 +41,12 @@ services:
     # SDK target the v2 API, and the v2 default instance supports the
     # resource-owner password grant used by zitadel-init.sh. v3 removed the
     # password grant by default.
-    image: ghcr.io/zitadel/zitadel:v2.71.0
+    #
+    # Security baseline: >= v2.71.18 is mandatory. v2.71.0..v2.71.17 are
+    # affected by GHSA-cfjq-28r2-4jv5 / CVE-2025-64103 (CVSS 8.7 High):
+    # the Session API may treat single-factor sessions as fully
+    # authenticated on accounts that have a second factor enrolled.
+    image: ghcr.io/zitadel/zitadel:v2.71.18
     command: start-from-init --masterkeyFromEnv
     depends_on:
       zitadel-db:
