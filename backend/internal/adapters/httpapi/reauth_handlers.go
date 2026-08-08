@@ -135,7 +135,10 @@ type reauthRequest struct {
 	Action        string `json:"action"`
 	ApplicationID string `json:"applicationId"`
 	ClientID      string `json:"clientId"`
-	Password      string `json:"password"`
+	// Target is the generic action-specific binding (ADR-0006 §4): required
+	// for account.passkey.remove (the passkeyId), forbidden everywhere else.
+	Target   string `json:"target"`
+	Password string `json:"password"`
 }
 
 // reauthMfaRequest is the JSON body for POST /api/v1/auth/reauthentication/mfa.
@@ -163,11 +166,18 @@ type reauthChallengeResponse struct {
 }
 
 // isValidReauthAction reports whether the declared action is recognized.
+// account.sessions.revoke_others is intentionally absent: it is reserved but
+// never accepted, so no grant can ever be minted for it (ADR-0006 §4).
 func isValidReauthAction(action string) bool {
 	switch action {
 	case auth.ReauthActionApplicationDelete,
 		auth.ReauthActionClientDelete,
-		auth.ReauthActionClientSecretRotate:
+		auth.ReauthActionClientSecretRotate,
+		auth.ReauthActionPasswordChange,
+		auth.ReauthActionTOTPEnroll,
+		auth.ReauthActionTOTPRemove,
+		auth.ReauthActionPasskeyEnroll,
+		auth.ReauthActionPasskeyRemove:
 		return true
 	default:
 		return false
@@ -202,13 +212,37 @@ func (h *ReauthHandlers) Request(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "密码不能为空。", nil)
 		return
 	}
-	if req.ApplicationID == "" || !applications.HasApplicationIDPrefix(req.ApplicationID) {
-		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "目标应用不能为空或格式不正确。", nil)
-		return
-	}
-	if reauthNeedsClient(req.Action) && (req.ClientID == "" || !applications.HasOAuthClientIDPrefix(req.ClientID)) {
-		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "目标客户端不能为空或格式不正确。", nil)
-		return
+	if auth.IsAccountReauthAction(req.Action) {
+		// Account actions bind user + session + action only: application and
+		// client bindings are forbidden (a fake applicationId must never be
+		// accepted), and Target carries the passkeyId exclusively for
+		// account.passkey.remove (ADR-0006 §4).
+		if req.ApplicationID != "" || req.ClientID != "" {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "账户安全操作不支持应用或客户端绑定。", nil)
+			return
+		}
+		if req.Action == auth.ReauthActionPasskeyRemove {
+			if req.Target == "" {
+				writeError(w, r, http.StatusBadRequest, CodeBadRequest, "删除通行密钥需要指定目标。", nil)
+				return
+			}
+		} else if req.Target != "" {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "该操作不支持目标绑定。", nil)
+			return
+		}
+	} else {
+		if req.ApplicationID == "" || !applications.HasApplicationIDPrefix(req.ApplicationID) {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "目标应用不能为空或格式不正确。", nil)
+			return
+		}
+		if reauthNeedsClient(req.Action) && (req.ClientID == "" || !applications.HasOAuthClientIDPrefix(req.ClientID)) {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "目标客户端不能为空或格式不正确。", nil)
+			return
+		}
+		if req.Target != "" {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "该操作不支持目标绑定。", nil)
+			return
+		}
 	}
 
 	// Rate limit keyed on IP + hashed session user. Fail closed.
@@ -238,7 +272,7 @@ func (h *ReauthHandlers) Request(w http.ResponseWriter, r *http.Request) {
 		// at this terminal state regardless of whether the grant issuance
 		// below succeeds (fail closed either way).
 		h.revokeProviderSession(r, result.ProviderSessionReference, principal.UserID, appID, clientID, req.Action)
-		h.issueGrant(w, r, principal, req.Action, req.ApplicationID, req.ClientID)
+		h.issueGrant(w, r, principal, req.Action, req.ApplicationID, req.ClientID, req.Target)
 
 	case auth.StatusMFARequired:
 		h.createChallenge(w, r, principal, req, result)
@@ -378,7 +412,7 @@ func (h *ReauthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 		h.revokeProviderSession(r, result.ProviderSessionReference, principal.UserID,
 			applications.ApplicationID(challenge.ApplicationID),
 			applications.OAuthClientID(challenge.ClientID), challenge.Action)
-		h.issueGrant(w, r, principal, challenge.Action, challenge.ApplicationID, challenge.ClientID)
+		h.issueGrant(w, r, principal, challenge.Action, challenge.ApplicationID, challenge.ClientID, challenge.Target)
 
 	case auth.StatusInvalidCredentials:
 		attempts, incErr := h.challenges.IncrementChallengeAttempts(r.Context(), tokenHash, h.maxAttempts)
@@ -458,7 +492,7 @@ func (h *ReauthHandlers) checkRateLimit(w http.ResponseWriter, r *http.Request, 
 
 // issueGrant creates the single-use grant and returns it exactly once. The
 // grant token is random and opaque; only its hash reaches Redis.
-func (h *ReauthHandlers) issueGrant(w http.ResponseWriter, r *http.Request, principal session.Principal, action, applicationID, clientID string) {
+func (h *ReauthHandlers) issueGrant(w http.ResponseWriter, r *http.Request, principal session.Principal, action, applicationID, clientID, target string) {
 	token, err := session.GenerateToken()
 	if err != nil {
 		h.logger.Error("reauth grant token generation failed",
@@ -476,6 +510,7 @@ func (h *ReauthHandlers) issueGrant(w http.ResponseWriter, r *http.Request, prin
 		Action:        action,
 		ApplicationID: applicationID,
 		ClientID:      clientID,
+		Target:        target,
 		CreatedAt:     now,
 	}
 	if err := h.grants.CreateGrant(r.Context(), session.HashToken(token), data, h.grantTTL); err != nil {
@@ -539,6 +574,7 @@ func (h *ReauthHandlers) createChallenge(w http.ResponseWriter, r *http.Request,
 		Action:                req.Action,
 		ApplicationID:         req.ApplicationID,
 		ClientID:              req.ClientID,
+		Target:                req.Target,
 		ProviderSessionID:     result.ProviderSessionID,
 		AvailableMethods:      result.AvailableMethods,
 		PasskeyRequestOptions: result.PasskeyRequestOptions,
@@ -635,8 +671,11 @@ func NewReauthGrants(grants ReauthGrantStore) *ReauthGrants {
 
 // VerifyAndConsume atomically consumes the grant token and checks every
 // binding against the requested operation. A consumed grant can never be
-// reused, even if the token is intercepted.
-func (g *ReauthGrants) VerifyAndConsume(ctx context.Context, token, action, sessionID string, appID applications.ApplicationID, clientID applications.OAuthClientID) error {
+// reused, even if the token is intercepted. target carries the
+// action-specific binding (ADR-0006 §4): the passkeyId for
+// account.passkey.remove, empty everywhere else; any mismatch — including a
+// grant minted for a different passkey — fails closed.
+func (g *ReauthGrants) VerifyAndConsume(ctx context.Context, token, action, sessionID, target string, appID applications.ApplicationID, clientID applications.OAuthClientID) error {
 	if token == "" || action == "" || sessionID == "" {
 		return errors.New("httpapi: reauthentication grant unavailable")
 	}
@@ -646,6 +685,7 @@ func (g *ReauthGrants) VerifyAndConsume(ctx context.Context, token, action, sess
 	}
 	if data.Action != action ||
 		data.SessionID != sessionID ||
+		data.Target != target ||
 		data.ApplicationID != string(appID) ||
 		data.ClientID != string(clientID) {
 		return errors.New("httpapi: reauthentication grant binding mismatch")

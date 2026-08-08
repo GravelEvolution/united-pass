@@ -344,10 +344,10 @@ func TestReauthRequest_GrantedImmediately(t *testing.T) {
 
 	// The grant is consumable exactly once with the matching binding.
 	grants := NewReauthGrants(env.grants)
-	if err := grants.VerifyAndConsume(context.Background(), token, "client.secret.rotate", "sess-1", "app_test1", "clt_test1"); err != nil {
+	if err := grants.VerifyAndConsume(context.Background(), token, "client.secret.rotate", "sess-1", "", "app_test1", "clt_test1"); err != nil {
 		t.Fatalf("verify grant: %v", err)
 	}
-	if err := grants.VerifyAndConsume(context.Background(), token, "client.secret.rotate", "sess-1", "app_test1", "clt_test1"); !errors.Is(err, auth.ErrReauthGrantNotFound) {
+	if err := grants.VerifyAndConsume(context.Background(), token, "client.secret.rotate", "sess-1", "", "app_test1", "clt_test1"); !errors.Is(err, auth.ErrReauthGrantNotFound) {
 		t.Fatalf("reuse err = %v, want ErrReauthGrantNotFound", err)
 	}
 	if !env.auditor.has(applications.EventReauthenticationRequested, applications.SecurityEventSuccess) ||
@@ -697,7 +697,7 @@ func TestReauthCompleteMFA_SuccessIssuesGrant(t *testing.T) {
 
 	// The grant inherits the challenge binding.
 	grants := NewReauthGrants(env.grants)
-	if err := grants.VerifyAndConsume(context.Background(), grantToken, "client.secret.rotate", "sess-1", "app_test1", "clt_test1"); err != nil {
+	if err := grants.VerifyAndConsume(context.Background(), grantToken, "client.secret.rotate", "sess-1", "", "app_test1", "clt_test1"); err != nil {
 		t.Fatalf("verify grant: %v", err)
 	}
 	// The challenge is single-use.
@@ -845,10 +845,10 @@ func TestReauthGrants_BindingChecks(t *testing.T) {
 	}
 
 	// Wrong action fails closed (grant is consumed either way).
-	if err := verifier.VerifyAndConsume(ctx, "tok-1", "client.delete", "sess-1", "app_test1", "clt_test1"); err == nil {
+	if err := verifier.VerifyAndConsume(ctx, "tok-1", "client.delete", "sess-1", "", "app_test1", "clt_test1"); err == nil {
 		t.Fatal("action mismatch must fail")
 	}
-	if err := verifier.VerifyAndConsume(ctx, "tok-1", "client.secret.rotate", "sess-1", "app_test1", "clt_test1"); !errors.Is(err, auth.ErrReauthGrantNotFound) {
+	if err := verifier.VerifyAndConsume(ctx, "tok-1", "client.secret.rotate", "sess-1", "", "app_test1", "clt_test1"); !errors.Is(err, auth.ErrReauthGrantNotFound) {
 		t.Fatalf("reuse err = %v, want ErrReauthGrantNotFound", err)
 	}
 
@@ -867,14 +867,162 @@ func TestReauthGrants_BindingChecks(t *testing.T) {
 			if err := grants.CreateGrant(ctx, session.HashToken("tok-2"), data, time.Minute); err != nil {
 				t.Fatalf("create grant: %v", err)
 			}
-			if err := verifier.VerifyAndConsume(ctx, "tok-2", "client.secret.rotate", tc.sessionID, tc.appID, tc.clientID); err == nil {
+			if err := verifier.VerifyAndConsume(ctx, "tok-2", "client.secret.rotate", tc.sessionID, "", tc.appID, tc.clientID); err == nil {
 				t.Fatal("binding mismatch must fail")
 			}
 		})
 	}
 
 	// Empty token fails closed without touching the store.
-	if err := verifier.VerifyAndConsume(ctx, "", "client.secret.rotate", "sess-1", "app_test1", "clt_test1"); err == nil {
+	if err := verifier.VerifyAndConsume(ctx, "", "client.secret.rotate", "sess-1", "", "app_test1", "clt_test1"); err == nil {
 		t.Fatal("empty token must fail")
+	}
+}
+
+// --- Account action seam (ADR-0006 §4) ---
+
+// TestReauthRequest_AccountActionValidation locks the §4 request validation
+// split: account actions bind user + session + action only (application and
+// client bindings are forbidden), Target is exclusive to
+// account.passkey.remove, management actions never accept a Target, and the
+// reserved account.sessions.revoke_others action is never accepted.
+func TestReauthRequest_AccountActionValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"account action with application binding", `{"action":"account.totp.enroll","applicationId":"app_test1","password":"pw"}`},
+		{"account action with client binding", `{"action":"account.totp.enroll","clientId":"clt_test1","password":"pw"}`},
+		{"account action with unexpected target", `{"action":"account.totp.enroll","target":"pk-1","password":"pw"}`},
+		{"passkey remove without target", `{"action":"account.passkey.remove","password":"pw"}`},
+		{"management action with target", `{"action":"application.delete","applicationId":"app_test1","target":"pk-1","password":"pw"}`},
+		{"reserved revoke_others refused", `{"action":"account.sessions.revoke_others","password":"pw"}`},
+		{"unknown account action refused", `{"action":"account.recovery_codes.rotate","password":"pw"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReauthEnv()
+			env.authz.verifyResult = auth.AuthenticationResult{Status: auth.StatusAuthenticated}
+			router := reauthRouter(env.handlers, reauthPrincipal)
+			w := doReauthJSON(t, router, "/auth/reauthentication", tc.body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestReauthRequest_AccountActionGrantedWithoutApplication verifies that an
+// account action mints a grant with empty application/client bindings and no
+// target, consumable only with exactly that binding.
+func TestReauthRequest_AccountActionGrantedWithoutApplication(t *testing.T) {
+	env := newReauthEnv()
+	env.authz.verifyResult = auth.AuthenticationResult{Status: auth.StatusAuthenticated}
+	router := reauthRouter(env.handlers, reauthPrincipal)
+
+	w := doReauthJSON(t, router, "/auth/reauthentication", `{"action":"account.totp.enroll","password":"pw"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	token := decodeReauthToken(t, w)
+
+	grants := NewReauthGrants(env.grants)
+	if err := grants.VerifyAndConsume(context.Background(), token, "account.totp.enroll", "sess-1", "", "", ""); err != nil {
+		t.Fatalf("verify grant: %v", err)
+	}
+	// Consuming the same grant against a leaked applicationId must be
+	// impossible (the grant stores empty bindings).
+	if err := env.grants.CreateGrant(context.Background(), session.HashToken("tok-app"), auth.ReauthGrantData{
+		UserID: "user_actor", SessionID: "sess-1", Action: "account.totp.enroll", CreatedAt: time.Now().UTC(),
+	}, time.Minute); err != nil {
+		t.Fatalf("create grant: %v", err)
+	}
+	if err := grants.VerifyAndConsume(context.Background(), "tok-app", "account.totp.enroll", "sess-1", "", "app_fake", ""); err == nil {
+		t.Fatal("account grant must not consume with an application binding")
+	}
+}
+
+// TestReauthRequest_PasskeyRemoveTargetBoundToGrant locks B4: the passkey
+// removal grant carries the passkeyId as Target, and consuming it for any
+// other passkey fails closed.
+func TestReauthRequest_PasskeyRemoveTargetBoundToGrant(t *testing.T) {
+	env := newReauthEnv()
+	env.authz.verifyResult = auth.AuthenticationResult{Status: auth.StatusAuthenticated}
+	router := reauthRouter(env.handlers, reauthPrincipal)
+
+	w := doReauthJSON(t, router, "/auth/reauthentication", `{"action":"account.passkey.remove","target":"pk-A","password":"pw"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	token := decodeReauthToken(t, w)
+
+	grants := NewReauthGrants(env.grants)
+	// A grant minted for passkey A can never remove passkey B.
+	if err := grants.VerifyAndConsume(context.Background(), token, "account.passkey.remove", "sess-1", "pk-B", "", ""); err == nil {
+		t.Fatal("target mismatch must fail closed")
+	}
+	// The mismatch consumed the grant: even the correct target now fails.
+	if err := grants.VerifyAndConsume(context.Background(), token, "account.passkey.remove", "sess-1", "pk-A", "", ""); !errors.Is(err, auth.ErrReauthGrantNotFound) {
+		t.Fatalf("post-mismatch consume err = %v, want ErrReauthGrantNotFound", err)
+	}
+}
+
+// TestReauthGrants_TargetBinding verifies the grant verifier's target binding
+// directly: matching target succeeds exactly once, any mismatch fails closed.
+func TestReauthGrants_TargetBinding(t *testing.T) {
+	grants := newMemReauthGrants()
+	verifier := NewReauthGrants(grants)
+	ctx := context.Background()
+
+	data := auth.ReauthGrantData{
+		UserID:    "user_actor",
+		SessionID: "sess-1",
+		Action:    "account.passkey.remove",
+		Target:    "pk-A",
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := grants.CreateGrant(ctx, session.HashToken("tok-pk"), data, time.Minute); err != nil {
+		t.Fatalf("create grant: %v", err)
+	}
+	if err := verifier.VerifyAndConsume(ctx, "tok-pk", "account.passkey.remove", "sess-1", "pk-A", "", ""); err != nil {
+		t.Fatalf("matching target must succeed: %v", err)
+	}
+	// Single-use: the same grant is gone.
+	if err := verifier.VerifyAndConsume(ctx, "tok-pk", "account.passkey.remove", "sess-1", "pk-A", "", ""); !errors.Is(err, auth.ErrReauthGrantNotFound) {
+		t.Fatalf("reuse err = %v, want ErrReauthGrantNotFound", err)
+	}
+}
+
+// TestReauthMFA_AccountActionTargetCarriesThrough locks the §4 invariant for
+// password+TOTP accounts: the target binding travels request → challenge →
+// grant across the MFA continuation, so a passkey-remove grant minted after
+// MFA is still bound to exactly one passkeyId.
+func TestReauthMFA_AccountActionTargetCarriesThrough(t *testing.T) {
+	env := newReauthEnv()
+	env.authz.verifyResult = auth.AuthenticationResult{
+		Status:            auth.StatusMFARequired,
+		ProviderSessionID: "ps-reauth-target",
+		AvailableMethods:  []auth.MFAMethod{auth.MFAMethodTOTP},
+	}
+	env.authz.mfaResult = auth.AuthenticationResult{Status: auth.StatusAuthenticated}
+	router := reauthRouter(env.handlers, reauthPrincipal)
+
+	w := doReauthJSON(t, router, "/auth/reauthentication",
+		`{"action":"account.passkey.remove","target":"pk-A","password":"pw"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", w.Code, w.Body.String())
+	}
+	challengeToken := decodeReauthToken(t, w)
+
+	w = doReauthJSON(t, router, "/auth/reauthentication/mfa",
+		`{"reauthToken":"`+challengeToken+`","method":"totp","code":"123456"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("mfa status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	grantToken := decodeReauthToken(t, w)
+
+	grants := NewReauthGrants(env.grants)
+	if err := grants.VerifyAndConsume(context.Background(), grantToken, "account.passkey.remove", "sess-1", "pk-B", "", ""); err == nil {
+		t.Fatal("grant minted for pk-A must not authorize pk-B")
 	}
 }

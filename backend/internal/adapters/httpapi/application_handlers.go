@@ -29,9 +29,11 @@ import (
 // high-risk operations (ADR-0004 §6.7). A nil verifier fails closed: the
 // operation is denied until the reauthentication contract is implemented.
 type ReauthVerifier interface {
-	// VerifyAndConsume checks the token for the given action, session and
-	// resource. A consumed token can never be reused.
-	VerifyAndConsume(ctx context.Context, token, action, sessionID string, appID applications.ApplicationID, clientID applications.OAuthClientID) error
+	// VerifyAndConsume checks the token for the given action, session,
+	// target and resource. target carries the action-specific binding
+	// (ADR-0006 §4): empty for management-plane actions. A consumed token
+	// can never be reused.
+	VerifyAndConsume(ctx context.Context, token, action, sessionID, target string, appID applications.ApplicationID, clientID applications.OAuthClientID) error
 }
 
 // RotationRateChecker abstracts the secret rotation rate limiter (ADR-0004
@@ -530,7 +532,8 @@ func (h *ApplicationHandlers) verifyReauthentication(w http.ResponseWriter, r *h
 	if h.reauth == nil || token == "" || !hasPrincipal {
 		err = errors.New("reauthentication unavailable")
 	} else {
-		err = h.reauth.VerifyAndConsume(r.Context(), token, action, string(principal.SessionID), appID, clientID)
+		// Management-plane actions carry no generic target binding.
+		err = h.reauth.VerifyAndConsume(r.Context(), token, action, string(principal.SessionID), "", appID, clientID)
 	}
 	if err != nil {
 		h.svc.RecordEvent(r.Context(), eventType, actor, appID, clientID,

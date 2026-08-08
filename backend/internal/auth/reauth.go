@@ -28,7 +28,37 @@ const (
 	ReauthActionApplicationDelete  = "application.delete"
 	ReauthActionClientDelete       = "client.delete"
 	ReauthActionClientSecretRotate = "client.secret.rotate"
+
+	// Account security-factor actions (ADR-0006 §4). Account actions bind
+	// user + session + action only; ApplicationID/ClientID must stay empty.
+	ReauthActionPasswordChange = "account.password.change"
+	ReauthActionTOTPEnroll     = "account.totp.enroll"
+	ReauthActionTOTPRemove     = "account.totp.remove"
+	ReauthActionPasskeyEnroll  = "account.passkey.enroll"
+	ReauthActionPasskeyRemove  = "account.passkey.remove"
 )
+
+// ReauthActionSessionsRevokeOthers is reserved but never accepted: session
+// revocation needs no step-up (ADR-0006 §2/§4), so the reauth endpoint must
+// refuse to mint a grant for it and no code path may consume it.
+const ReauthActionSessionsRevokeOthers = "account.sessions.revoke_others"
+
+// IsAccountReauthAction reports whether the action targets the caller's own
+// account security factors (ADR-0006 §4) rather than an OAuth application or
+// client. Account actions forbid application/client bindings and use the
+// generic Target field instead.
+func IsAccountReauthAction(action string) bool {
+	switch action {
+	case ReauthActionPasswordChange,
+		ReauthActionTOTPEnroll,
+		ReauthActionTOTPRemove,
+		ReauthActionPasskeyEnroll,
+		ReauthActionPasskeyRemove:
+		return true
+	default:
+		return false
+	}
+}
 
 // ReauthChallengeData is the reauthentication challenge record stored in
 // Redis while a second factor is pending. It binds the in-progress
@@ -56,6 +86,10 @@ type ReauthChallengeData struct {
 	// PasskeyRequestOptions carries the WebAuthn PublicKeyCredentialRequestOptions
 	// (JSON object) when passkey is among the available methods.
 	PasskeyRequestOptions json.RawMessage `json:"passkeyRequestOptions,omitempty"`
+	// Target is the generic action-specific binding (ADR-0006 §4). Empty for
+	// every action except account.passkey.remove, where it is the passkeyId
+	// the eventual grant may authorize.
+	Target string `json:"target,omitempty"`
 	// Attempts is the initial attempt count (always 0 at creation).
 	Attempts int `json:"attempts"`
 	// CreatedAt is when the challenge was issued.
@@ -98,6 +132,11 @@ type ReauthGrantData struct {
 	ApplicationID string `json:"applicationId"`
 	// ClientID is the target client the grant is bound to (client actions).
 	ClientID string `json:"clientId,omitempty"`
+	// Target is the generic action-specific binding (ADR-0006 §4). Empty for
+	// every action except account.passkey.remove, where it is the passkeyId
+	// the grant authorizes; a grant minted for one passkey can never remove
+	// another.
+	Target string `json:"target,omitempty"`
 	// CreatedAt is when the grant was issued.
 	CreatedAt time.Time `json:"createdAt"`
 }

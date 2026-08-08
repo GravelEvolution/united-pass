@@ -435,7 +435,7 @@ type fakeReauthVerifier struct {
 	consumed   bool
 }
 
-func (f *fakeReauthVerifier) VerifyAndConsume(_ context.Context, token, _, _ string, _ applications.ApplicationID, _ applications.OAuthClientID) error {
+func (f *fakeReauthVerifier) VerifyAndConsume(_ context.Context, token, _, _, _ string, _ applications.ApplicationID, _ applications.OAuthClientID) error {
 	if f.consumed || token != f.validToken {
 		return errors.New("invalid reauthentication token")
 	}
