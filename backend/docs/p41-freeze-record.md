@@ -105,3 +105,37 @@ Wire shape：`sessionId / deviceName / clientName / approximateLocation(恒 null
 | P4.1 Session Inventory & Lifecycle | 修复 head = `e73a60f`（fix(session): close phase 4.1 review findings），待复审重新判 gate |
 | R1–R4 / Rotate | 已在 `e73a60f` 关闭并回归锁定 |
 
+---
+
+# 更正记录（append-only，2026-08-09 第二轮）
+
+> 依据第二轮复审结论追加：`e73a60f` 关闭了主链路，但 R1 与 R4 各剩一处窄缺口；本记录描述第三轮 closure（`fix(session): complete session revocation audit and partial cleanup`）。
+
+## C5. 第三轮 closure：partial cleanup + durable audit 契约
+
+| Finding | 缺陷 | 修复 |
+| --- | --- | --- |
+| R1 partial bulk failure | store 中途 infra error 时正确返回 `victims, count, err`，但 Service 先判 `err != nil` 就 return → 已成功删除的 victims 的 provider cleanup 被整体跳过 | Service 先循环 victims 执行 `revokeProviderSession`（聚合首个非空 failure class），再按 err 返回包装错误。回归：`TestRevokeAllOtherSessionsPartialFailureStillCleansVictims` |
+| R4 事件名契约 | targeted revoke 复用了 `session.revoked`（self/current 专用） | 新增 `EventSessionRevokedOther = "session.revoked_other"`，targeted route 专用；三事件冻结为 `session.revoked` / `session.revoked_other` / `session.revoked_others` |
+| R4 payload 契约 | canonical SecurityEvent 无 generic target 接缝，session ID 不进 durable JSONB payload | `applications.SecurityEvent` 新增 `TargetKey`/`TargetID` 安全接缝（两者均非空才序列化）；bootstrap `toCanonicalSecurityEvent` 携带 `session_id`；postgres `eventPayload` 写入 `{TargetKey: TargetID}`，无需新列。回归：`TestToCanonicalSecurityEventMapsSessionTarget`、`TestEventPayload*`、`TestIntegration_SecurityEventStoreSessionRevocationPayload` |
+| R4 failure class 契约 | provider revoke/decrypt 失败仅 Warn，durable audit 仍写无 FailureClass 的 success | `revokeProviderSession` 返回稳定 failure class（`observability.ClassifyError`：context/timeout/network/internal，绝不裸错误）并贯穿 `recordAudit`；targeted/bulk 事件都携带。回归：`TestRevokeAuditRecordsProviderFailureClass`、`TestBulkRevokeAuditRecordsProviderFailureClass` |
+
+### C5.1 门禁证据（本机实跑）
+
+| 检查 | 结果 |
+| --- | --- |
+| gofmt / go vet / go build | ✅ clean |
+| go test ./... -race -count=1 | ✅ 全部通过 |
+| Redis 集成测试（-tags integration，SSH 隧道实连，-race） | ✅ 全绿（52.5s） |
+| Postgres 定向集成测试 `TestIntegration_SecurityEventStoreSessionRevocationPayload` | ✅ PASS（5.7s） |
+
+> 注：此前 postgres 集成套件 600s hang 的根因是测试 schema 残留脏状态（`goose_db_version` 记录 version 6 而表已丢失，后续 migration 空跑导致 `security_events` 不存在）。清理残留版本表后 migration 重放成功、定向测试通过；全套 hang 不阻塞本轮，属环境残留问题。
+
+### C5.2 更正后的正式状态
+
+| 项 | 状态 |
+| --- | --- |
+| P4.1 Session Inventory & Lifecycle | closure head = 本记录随同提交 `fix(session): complete session revocation audit and partial cleanup`，待复审重新判 gate |
+| R1 partial / R4 契约 | 已在本 closure 关闭并回归锁定 |
+| 遗留 non-blocking | provider-success 后 Redis consume 自身失败仅 Warn（distributed-settlement ambiguity），留 P4.8 hardening 专门 pin |
+

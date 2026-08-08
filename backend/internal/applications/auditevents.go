@@ -79,5 +79,12 @@ type SecurityEvent struct {
 	// FailureClass is a safe, stable failure category (e.g. "validation",
 	// "authorization", "provider"). Never a raw provider error.
 	FailureClass string
-	OccurredAt   time.Time
+	// TargetKey/TargetID form a generic, safe target seam for events whose
+	// subject is neither an application nor an OAuth client (e.g. session
+	// revocations carry TargetKey "session_id"). Both must be safe, stable,
+	// non-secret identifiers; the pair is persisted into the JSONB payload
+	// as {TargetKey: TargetID}. Empty pairs are omitted.
+	TargetKey  string
+	TargetID   string
+	OccurredAt time.Time
 }

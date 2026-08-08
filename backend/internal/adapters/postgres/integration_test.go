@@ -36,6 +36,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
+	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 )
@@ -529,5 +530,49 @@ func TestIntegration_ConcurrentFirstLoginSingleConnection(t *testing.T) {
 	}
 	if loaded.UserID != first {
 		t.Errorf("link user = %q, want %q", loaded.UserID, first)
+	}
+}
+
+// TestIntegration_SecurityEventStoreSessionRevocationPayload verifies the
+// durable audit row for a session revocation actually persists the target
+// session ID and the provider-cleanup failure class inside the JSONB payload
+// (ADR-0006 §2). Targeted regression for the payload seam; no user row is
+// required because security_events carries no FK on actor_user_id.
+func TestIntegration_SecurityEventStoreSessionRevocationPayload(t *testing.T) {
+	pool := setupTestPool(t, 4)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	store := NewSecurityEventStore(pool.PgxPool())
+	ev := applications.SecurityEvent{
+		EventID:      applications.NewSecurityEventID(),
+		EventType:    "session.revoked_other",
+		ActorUserID:  identity.UserID("user_audit_it"),
+		RequestID:    "req-it-1",
+		Operation:    "session.revoke",
+		Result:       applications.SecurityEventSuccess,
+		FailureClass: "network",
+		TargetKey:    "session_id",
+		TargetID:     "sess_target_it",
+		OccurredAt:   time.Now().UTC(),
+	}
+	if err := store.Record(ctx, ev); err != nil {
+		t.Fatalf("record security event: %v", err)
+	}
+
+	var payload map[string]string
+	if err := pool.PgxPool().QueryRow(ctx,
+		`SELECT payload FROM security_events WHERE event_id = $1`,
+		string(ev.EventID)).Scan(&payload); err != nil {
+		t.Fatalf("read back security event: %v", err)
+	}
+	if payload["session_id"] != "sess_target_it" {
+		t.Errorf("payload session_id = %q, want sess_target_it (payload=%v)", payload["session_id"], payload)
+	}
+	if payload["failure_class"] != "network" {
+		t.Errorf("payload failure_class = %q, want network (payload=%v)", payload["failure_class"], payload)
+	}
+	if len(payload) != 2 {
+		t.Errorf("payload = %v, want exactly session_id and failure_class", payload)
 	}
 }

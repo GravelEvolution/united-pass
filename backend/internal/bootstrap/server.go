@@ -667,7 +667,17 @@ func (a *sessionSecurityAuditor) RecordSessionEvent(ctx context.Context, ev sess
 	if requestID == "" {
 		requestID = request.ID(ctx)
 	}
-	return a.store.Record(ctx, applications.SecurityEvent{
+	return a.store.Record(ctx, toCanonicalSecurityEvent(ev, requestID))
+}
+
+// toCanonicalSecurityEvent maps the session package's audit event onto the
+// canonical durable security event. Session events carry no
+// application/client references, so those columns stay empty; the target
+// session ID and the provider-cleanup failure class travel through the
+// generic payload seam so they reach the durable JSONB payload (ADR-0006
+// §2).
+func toCanonicalSecurityEvent(ev session.SecurityAuditEvent, requestID string) applications.SecurityEvent {
+	return applications.SecurityEvent{
 		EventID:      applications.NewSecurityEventID(),
 		EventType:    ev.EventType,
 		ActorUserID:  ev.ActorUserID,
@@ -675,8 +685,10 @@ func (a *sessionSecurityAuditor) RecordSessionEvent(ctx context.Context, ev sess
 		Operation:    ev.Operation,
 		Result:       applications.SecurityEventResult(ev.Result),
 		FailureClass: ev.FailureClass,
+		TargetKey:    "session_id",
+		TargetID:     string(ev.SessionID),
 		OccurredAt:   ev.OccurredAt,
-	})
+	}
 }
 
 // userStatusChecker adapts postgres.UserRepository to the UserStatusChecker

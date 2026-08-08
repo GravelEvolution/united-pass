@@ -26,7 +26,10 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi"
+	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
+	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
 func newTestServer(t *testing.T, cfg config.Config) *Server {
@@ -466,5 +469,53 @@ func TestFakeProviderWithDatabaseServesCurrentUser(t *testing.T) {
 	}
 	if !strings.Contains(meRec.Body.String(), `"userId":"user_01JZDEVTEST001"`) {
 		t.Errorf("/api/v1/me body missing expected userId: %s", meRec.Body.String())
+	}
+}
+
+// TestToCanonicalSecurityEventMapsSessionTarget verifies that the session
+// adapter carries the target session ID and the provider-cleanup failure
+// class through the generic payload seam into the canonical durable event,
+// and keeps the application/client columns empty (ADR-0006 §2).
+func TestToCanonicalSecurityEventMapsSessionTarget(t *testing.T) {
+	occurredAt := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	ev := toCanonicalSecurityEvent(session.SecurityAuditEvent{
+		EventType:    session.EventSessionRevokedOther,
+		ActorUserID:  identity.UserID("user_audit"),
+		SessionID:    session.SessionID("sess_target"),
+		Operation:    "session.revoke",
+		Result:       session.AuditOutcomeSuccess,
+		FailureClass: "network",
+		OccurredAt:   occurredAt,
+	}, "req-1")
+
+	if ev.EventType != session.EventSessionRevokedOther {
+		t.Errorf("EventType = %q, want %q", ev.EventType, session.EventSessionRevokedOther)
+	}
+	if ev.ActorUserID != identity.UserID("user_audit") {
+		t.Errorf("ActorUserID = %q, want user_audit", ev.ActorUserID)
+	}
+	if ev.RequestID != "req-1" {
+		t.Errorf("RequestID = %q, want req-1", ev.RequestID)
+	}
+	if ev.Operation != "session.revoke" {
+		t.Errorf("Operation = %q, want session.revoke", ev.Operation)
+	}
+	if ev.Result != applications.SecurityEventSuccess {
+		t.Errorf("Result = %q, want success", ev.Result)
+	}
+	if ev.FailureClass != "network" {
+		t.Errorf("FailureClass = %q, want network", ev.FailureClass)
+	}
+	if ev.TargetKey != "session_id" || ev.TargetID != "sess_target" {
+		t.Errorf("target seam = %q/%q, want session_id/sess_target", ev.TargetKey, ev.TargetID)
+	}
+	if ev.ApplicationID != "" || ev.ClientID != "" {
+		t.Errorf("session events must not reference application/client, got %q/%q", ev.ApplicationID, ev.ClientID)
+	}
+	if ev.EventID == "" {
+		t.Error("EventID must be generated")
+	}
+	if !ev.OccurredAt.Equal(occurredAt) {
+		t.Errorf("OccurredAt = %v, want %v", ev.OccurredAt, occurredAt)
 	}
 }

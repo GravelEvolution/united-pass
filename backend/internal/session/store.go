@@ -83,8 +83,12 @@ var ErrSessionIsCurrent = errors.New("session is the current session")
 // through SecurityAuditor in addition to the structured log event. Payloads
 // never contain tokens, provider references or raw IPs.
 const (
-	// EventSessionRevoked audits one targeted session revocation.
+	// EventSessionRevoked audits the revocation of the caller's own session
+	// (self/current, ADR-0006 §2).
 	EventSessionRevoked = "session.revoked"
+	// EventSessionRevokedOther audits one targeted revocation of another
+	// session owned by the caller (ADR-0006 §2).
+	EventSessionRevokedOther = "session.revoked_other"
 	// EventSessionsRevokedOthers audits a bulk revocation of the caller's
 	// other sessions.
 	EventSessionsRevokedOthers = "session.revoked_others"
@@ -458,35 +462,46 @@ func (s *Service) RevokeSession(ctx context.Context, userID identity.UserID, cur
 		return fmt.Errorf("session: revoke session: %w", err)
 	}
 
-	s.revokeProviderSession(ctx, record)
-	s.logSecurityEvent(EventSessionRevoked, userID, targetSessionID, nil)
-	s.recordAudit(ctx, EventSessionRevoked, userID, targetSessionID, "session.revoke")
+	failureClass := s.revokeProviderSession(ctx, record)
+	s.logSecurityEvent(EventSessionRevokedOther, userID, targetSessionID, nil)
+	s.recordAudit(ctx, EventSessionRevokedOther, userID, targetSessionID, "session.revoke", failureClass)
 	return nil
 }
 
 // RevokeAllOtherSessions revokes every session of the caller except the
 // current one and returns the number of sessions revoked. Provider sessions
 // are revoked best-effort per victim; a provider failure never fails the
-// operation. The aggregate outcome is emitted as a structured security event.
+// operation but its stable failure class is recorded in the durable audit
+// payload (ADR-0006 §2). When the store walk fails part-way, the provider
+// cleanup of every already-removed victim still runs before the error is
+// returned: a later victim's infrastructure failure must never erase an
+// earlier victim's cleanup.
 func (s *Service) RevokeAllOtherSessions(ctx context.Context, userID identity.UserID, currentSessionID SessionID) (int, error) {
 	victims, count, err := s.store.RevokeAllOtherSessions(ctx, userID, currentSessionID, s.clock.Now(), s.idleTTL)
+	var failureClass string
+	for i := range victims {
+		if fc := s.revokeProviderSession(ctx, victims[i]); fc != "" && failureClass == "" {
+			failureClass = fc
+		}
+	}
 	if err != nil {
+		s.logSecurityEvent(EventSessionsRevokedOthers, userID, currentSessionID, err)
 		return 0, fmt.Errorf("session: revoke all other sessions: %w", err)
 	}
-	for i := range victims {
-		s.revokeProviderSession(ctx, victims[i])
-	}
 	s.logSecurityEvent(EventSessionsRevokedOthers, userID, currentSessionID, nil)
-	s.recordAudit(ctx, EventSessionsRevokedOthers, userID, currentSessionID, "session.revoke_all_others")
+	s.recordAudit(ctx, EventSessionsRevokedOthers, userID, currentSessionID, "session.revoke_all_others", failureClass)
 	return count, nil
 }
 
 // revokeProviderSession terminates the provider-side session referenced by a
-// revoked record. Best-effort: decrypt or provider failures are logged and
-// swallowed — the local session is already gone.
-func (s *Service) revokeProviderSession(ctx context.Context, record SessionRecord) {
+// revoked record. Best-effort: decrypt or provider failures never fail the
+// local revocation — but they are surfaced as a stable failure class
+// (never a raw error) so the durable audit row records the degraded
+// provider outcome (ADR-0006 §2). An empty result means the cleanup either
+// succeeded or had nothing to do.
+func (s *Service) revokeProviderSession(ctx context.Context, record SessionRecord) string {
 	if record.ProviderSessionReference == "" || s.revoker == nil {
-		return
+		return ""
 	}
 	ref, err := s.DecryptProviderSessionReference(ctx, record.ProviderSessionReference)
 	if err != nil {
@@ -495,10 +510,10 @@ func (s *Service) revokeProviderSession(ctx context.Context, record SessionRecor
 			"errorClass", observability.ClassifyError(err),
 			"errorDetail", observability.RedactedError(err, 256),
 		)
-		return
+		return string(observability.ClassifyError(err))
 	}
 	if ref == "" {
-		return
+		return ""
 	}
 	if err := s.revoker.RevokeProviderSession(ctx, ref); err != nil {
 		s.lg().Warn("provider session revocation failed during session revocation",
@@ -506,24 +521,30 @@ func (s *Service) revokeProviderSession(ctx context.Context, record SessionRecor
 			"errorClass", observability.ClassifyError(err),
 			"errorDetail", observability.RedactedError(err, 256),
 		)
+		return string(observability.ClassifyError(err))
 	}
+	return ""
 }
 
-// recordAudit persists one durable session security audit row. Audit is
-// best-effort at the call site: the local revocation already succeeded, so a
-// recorder failure is logged as an operational/security defect (making the
-// audit gap visible) but never masks the revocation outcome.
-func (s *Service) recordAudit(ctx context.Context, eventType string, userID identity.UserID, sessionID SessionID, operation string) {
+// recordAudit persists one durable session security audit row. failureClass
+// carries the stable provider-cleanup failure class when the local
+// revocation succeeded but the provider-side cleanup degraded (ADR-0006
+// §2); it is empty on a fully clean outcome. Audit is best-effort at the
+// call site: the local revocation already succeeded, so a recorder failure
+// is logged as an operational/security defect (making the audit gap visible)
+// but never masks the revocation outcome.
+func (s *Service) recordAudit(ctx context.Context, eventType string, userID identity.UserID, sessionID SessionID, operation, failureClass string) {
 	if s.auditor == nil {
 		return
 	}
 	err := s.auditor.RecordSessionEvent(ctx, SecurityAuditEvent{
-		EventType:   eventType,
-		ActorUserID: userID,
-		SessionID:   sessionID,
-		Operation:   operation,
-		Result:      AuditOutcomeSuccess,
-		OccurredAt:  s.clock.Now(),
+		EventType:    eventType,
+		ActorUserID:  userID,
+		SessionID:    sessionID,
+		Operation:    operation,
+		Result:       AuditOutcomeSuccess,
+		FailureClass: failureClass,
+		OccurredAt:   s.clock.Now(),
 	})
 	if err != nil {
 		s.lg().Warn("session security audit record failed",
