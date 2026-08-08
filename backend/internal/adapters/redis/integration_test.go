@@ -1277,6 +1277,112 @@ func TestIntegration_ReauthStoreCleanupPopsExpiredChallenge(t *testing.T) {
 	}
 }
 
+// --- Enrollment Store Tests (ADR-0006 §7/§8) ---
+
+func enrollmentData(kind auth.EnrollmentKind, target string) auth.EnrollmentData {
+	return auth.EnrollmentData{
+		UserID:    identity.UserID("user_enroll_1"),
+		SessionID: "sess_enroll_1",
+		Kind:      kind,
+		Target:    target,
+	}
+}
+
+func TestIntegration_EnrollmentStoreCreateAndConsume(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewEnrollmentStore(client)
+	ctx := context.Background()
+
+	tokenHash := session.HashToken("enrollment-totp-token")
+	if err := store.CreateEnrollment(ctx, tokenHash, enrollmentData(auth.EnrollmentTOTP, ""), 5*time.Minute); err != nil {
+		t.Fatalf("create enrollment: %v", err)
+	}
+
+	data, err := store.ConsumeEnrollment(ctx, tokenHash)
+	if err != nil {
+		t.Fatalf("consume enrollment: %v", err)
+	}
+	if data.UserID != "user_enroll_1" || data.SessionID != "sess_enroll_1" || data.Kind != auth.EnrollmentTOTP || data.Target != "" {
+		t.Errorf("enrollment data = %+v, want stored binding", data)
+	}
+
+	// Single-use: the record is gone after consumption.
+	if _, err := store.ConsumeEnrollment(ctx, tokenHash); !errors.Is(err, auth.ErrEnrollmentNotFound) {
+		t.Fatalf("reuse err = %v, want ErrEnrollmentNotFound", err)
+	}
+
+	// Passkey enrollments round-trip the target binding.
+	pkHash := session.HashToken("enrollment-passkey-token")
+	if err := store.CreateEnrollment(ctx, pkHash, enrollmentData(auth.EnrollmentPasskey, "pk-42"), 5*time.Minute); err != nil {
+		t.Fatalf("create passkey enrollment: %v", err)
+	}
+	pkData, err := store.ConsumeEnrollment(ctx, pkHash)
+	if err != nil {
+		t.Fatalf("consume passkey enrollment: %v", err)
+	}
+	if pkData.Kind != auth.EnrollmentPasskey || pkData.Target != "pk-42" {
+		t.Errorf("passkey enrollment = %+v, want (passkey, pk-42)", pkData)
+	}
+}
+
+func TestIntegration_EnrollmentStoreUnknownToken(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewEnrollmentStore(client)
+
+	if _, err := store.ConsumeEnrollment(context.Background(), session.HashToken("never-issued")); !errors.Is(err, auth.ErrEnrollmentNotFound) {
+		t.Fatalf("unknown token err = %v, want ErrEnrollmentNotFound", err)
+	}
+}
+
+func TestIntegration_EnrollmentStoreExpiry(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewEnrollmentStore(client)
+	ctx := context.Background()
+
+	tokenHash := session.HashToken("enrollment-expiring-token")
+	if err := store.CreateEnrollment(ctx, tokenHash, enrollmentData(auth.EnrollmentTOTP, ""), 1*time.Second); err != nil {
+		t.Fatalf("create enrollment: %v", err)
+	}
+
+	// Once the TTL lapses the challenge fails closed.
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := store.ConsumeEnrollment(ctx, tokenHash); !errors.Is(err, auth.ErrEnrollmentNotFound) {
+		t.Fatalf("expired consume err = %v, want ErrEnrollmentNotFound", err)
+	}
+}
+
+func TestIntegration_EnrollmentStoreConcurrentReplay(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewEnrollmentStore(client)
+	ctx := context.Background()
+
+	tokenHash := session.HashToken("enrollment-race-token")
+	if err := store.CreateEnrollment(ctx, tokenHash, enrollmentData(auth.EnrollmentPasskey, "pk-race"), 5*time.Minute); err != nil {
+		t.Fatalf("create enrollment: %v", err)
+	}
+
+	// GETDEL guarantees a single winner across concurrent confirmations.
+	const workers = 8
+	var mu sync.Mutex
+	winners := 0
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := store.ConsumeEnrollment(ctx, tokenHash); err == nil {
+				mu.Lock()
+				winners++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if winners != 1 {
+		t.Fatalf("concurrent winners = %d, want exactly 1", winners)
+	}
+}
+
 func TestIntegration_ReauthStoreCleanupSkipsLiveChallenge(t *testing.T) {
 	client := setupTestRedis(t)
 	store := NewReauthStore(client)

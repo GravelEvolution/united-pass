@@ -207,6 +207,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var appRepo *postgres.ApplicationRepository
 	var appHandlers *httpapi.ApplicationHandlers
 	var reauthHandlers *httpapi.ReauthHandlers
+	var securityHandlers *httpapi.SecurityHandlers
 	var workerStops []func()
 	if pool != nil && provisioner != nil && userReader != nil && sessionSvc != nil && cfg.Session.EncryptionKey != "" {
 		var err error
@@ -239,6 +240,16 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 					reauthAuth, reauthStore, appSvc, cfg.Reauth.CleanupInterval, logger)
 				cleanupWorker.Start()
 				workerStops = append(workerStops, cleanupWorker.Stop)
+			}
+
+			// Account security factor endpoints (ADR-0006 §7/§8): the
+			// authenticator doubles as the factor manager (ZITADEL adapter or
+			// dev fake). Enrollments follow the grant TTL; both stores share
+			// the fail-closed Redis semantics of the reauth infrastructure.
+			if factorManager, ok := authenticator.(auth.FactorManager); ok && reauthVerifier != nil {
+				securityHandlers = httpapi.NewSecurityHandlers(
+					factorManager, reauthVerifier, redis.NewEnrollmentStore(redisClient),
+					cfg.Reauth.GrantTTL, logger)
 			}
 		}
 
@@ -426,6 +437,26 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				r.Get("/me/sessions", sessionHandlers.ListSessions)
 				r.Delete("/me/sessions", sessionHandlers.RevokeAllOthers)
 				r.Delete("/me/sessions/{sessionId}", sessionHandlers.RevokeSession)
+			}
+		})
+
+		// Account security factors (ADR-0006 §7/§8): factor summary plus the
+		// TOTP and passkey lifecycle. Mutations consume a step-up reauth
+		// grant; enrollment confirmations consume the single-use
+		// enrollmentToken minted at the begin step.
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireCSRF())
+			}
+			if securityHandlers != nil {
+				r.Get("/me/security", securityHandlers.GetSecurityFactors)
+				r.Post("/me/security/totp/enrollment", securityHandlers.BeginTOTPEnrollment)
+				r.Post("/me/security/totp/enrollment/confirm", securityHandlers.ConfirmTOTPEnrollment)
+				r.Delete("/me/security/totp", securityHandlers.RemoveTOTP)
+				r.Post("/me/security/passkeys/enrollment", securityHandlers.BeginPasskeyEnrollment)
+				r.Post("/me/security/passkeys/enrollment/confirm", securityHandlers.ConfirmPasskeyEnrollment)
+				r.Delete("/me/security/passkeys/{passkeyId}", securityHandlers.RemovePasskey)
 			}
 		})
 
