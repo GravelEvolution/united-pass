@@ -51,6 +51,11 @@ type MFAChallengeData struct {
 	PasskeyRequestOptions json.RawMessage `json:"passkeyRequestOptions,omitempty"`
 	// Attempts is the initial attempt count (always 0 at creation).
 	Attempts int `json:"attempts"`
+	// Remember carries the login-time "remember this device" choice across
+	// the MFA step so the final session is created with the same TTL choice
+	// (ADR-0006 §1 remember repair). Without it every MFA completion would
+	// silently downgrade to the short session TTL.
+	Remember bool `json:"remember,omitempty"`
 	// CreatedAt is when the challenge was issued.
 	CreatedAt time.Time `json:"createdAt"`
 }

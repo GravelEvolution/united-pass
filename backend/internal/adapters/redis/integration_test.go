@@ -130,7 +130,7 @@ func TestIntegration_SessionStoreCreateAndGet(t *testing.T) {
 		CSRFTokenHash:      session.HashToken("csrf-token-1"),
 	}
 
-	if err := store.Create(ctx, tokenHash, record, 1*time.Hour); err != nil {
+	if err := store.Create(ctx, tokenHash, record, 1*time.Hour, 30*time.Minute); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
 
@@ -143,6 +143,16 @@ func TestIntegration_SessionStoreCreateAndGet(t *testing.T) {
 	}
 	if loaded.SessionID != record.SessionID {
 		t.Errorf("SessionID: got %q, want %q", loaded.SessionID, record.SessionID)
+	}
+
+	// The locator written atomically with the record resolves the same
+	// session for its owner.
+	byID, err := store.GetBySessionID(ctx, record.UserID, record.SessionID, time.Now(), 30*time.Minute)
+	if err != nil {
+		t.Fatalf("get by session id: %v", err)
+	}
+	if byID.SessionID != record.SessionID {
+		t.Errorf("GetBySessionID returned %q, want %q", byID.SessionID, record.SessionID)
 	}
 }
 
@@ -164,7 +174,7 @@ func TestIntegration_SessionStoreDelete(t *testing.T) {
 		CSRFTokenHash:      session.HashToken("csrf-delete"),
 	}
 
-	if err := store.Create(ctx, tokenHash, record, 1*time.Hour); err != nil {
+	if err := store.Create(ctx, tokenHash, record, 1*time.Hour, 30*time.Minute); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
@@ -175,6 +185,11 @@ func TestIntegration_SessionStoreDelete(t *testing.T) {
 	_, err := store.Get(ctx, tokenHash)
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound, got %v", err)
+	}
+
+	// The atomic delete also removed locator and index entry.
+	if _, err := store.GetBySessionID(ctx, record.UserID, record.SessionID, time.Now(), 30*time.Minute); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("locator should be gone after delete, got %v", err)
 	}
 
 	// Delete is idempotent.
@@ -202,11 +217,11 @@ func TestIntegration_SessionStoreRotate(t *testing.T) {
 		CSRFTokenHash:      session.HashToken("csrf-rotated"),
 	}
 
-	if err := store.Create(ctx, oldHash, record, 1*time.Hour); err != nil {
+	if err := store.Create(ctx, oldHash, record, 1*time.Hour, 30*time.Minute); err != nil {
 		t.Fatalf("create old: %v", err)
 	}
 
-	if err := store.Rotate(ctx, oldHash, newHash, record, 1*time.Hour); err != nil {
+	if err := store.Rotate(ctx, oldHash, newHash, record, 1*time.Hour, 30*time.Minute); err != nil {
 		t.Fatalf("rotate: %v", err)
 	}
 
@@ -223,6 +238,16 @@ func TestIntegration_SessionStoreRotate(t *testing.T) {
 	}
 	if loaded.UserID != record.UserID {
 		t.Errorf("new session UserID: got %q, want %q", loaded.UserID, record.UserID)
+	}
+
+	// The locator re-points to the new token hash: the same SessionID still
+	// resolves after rotation.
+	byID, err := store.GetBySessionID(ctx, record.UserID, record.SessionID, time.Now(), 30*time.Minute)
+	if err != nil {
+		t.Fatalf("get by session id after rotate: %v", err)
+	}
+	if byID.SessionID != record.SessionID {
+		t.Errorf("rotated locator returned %q, want %q", byID.SessionID, record.SessionID)
 	}
 }
 
@@ -245,12 +270,13 @@ func TestIntegration_SessionStoreTouch(t *testing.T) {
 		CSRFTokenHash:      session.HashToken("csrf-touch"),
 	}
 
-	if err := store.Create(ctx, tokenHash, record, 1*time.Hour); err != nil {
+	if err := store.Create(ctx, tokenHash, record, 1*time.Hour, 30*time.Minute); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
 	newTime := time.Now().UTC()
-	if err := store.Touch(ctx, tokenHash, newTime, 1*time.Hour); err != nil {
+	record.LastSeenAt = newTime
+	if err := store.Touch(ctx, tokenHash, record, 1*time.Hour, 30*time.Minute); err != nil {
 		t.Fatalf("touch: %v", err)
 	}
 
@@ -260,6 +286,194 @@ func TestIntegration_SessionStoreTouch(t *testing.T) {
 	}
 	if !loaded.LastSeenAt.After(oldTime) {
 		t.Errorf("LastSeenAt not updated: got %v, want after %v", loaded.LastSeenAt, oldTime)
+	}
+}
+
+// sessionInventoryRecord builds a live record for inventory tests.
+func sessionInventoryRecord(sessionID, userID string, createdAt time.Time, ttl time.Duration) session.SessionRecord {
+	return session.SessionRecord{
+		Version:            1,
+		SessionID:          session.SessionID(sessionID),
+		UserID:             identity.UserID(userID),
+		Provider:           "fake",
+		CreatedAt:          createdAt,
+		LastSeenAt:         createdAt,
+		ExpiresAt:          createdAt.Add(ttl),
+		AuthenticationTime: createdAt,
+		CSRFTokenHash:      session.HashToken("csrf-" + sessionID),
+	}
+}
+
+func TestIntegration_SessionStoreGetBySessionIDNonEnumeration(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewSessionStore(client)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	idleTTL := 30 * time.Minute
+	record := sessionInventoryRecord("sess_inv_own", "user_inv_a", now, time.Hour)
+	if err := store.Create(ctx, session.HashToken("inv-own-token"), record, time.Hour, idleTTL); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Foreign lookups are indistinguishable from unknown ones.
+	if _, err := store.GetBySessionID(ctx, "user_inv_b", record.SessionID, now, idleTTL); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("foreign lookup must yield ErrSessionNotFound, got %v", err)
+	}
+	if _, err := store.GetBySessionID(ctx, record.UserID, "sess_does_not_exist", now, idleTTL); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("unknown lookup must yield ErrSessionNotFound, got %v", err)
+	}
+
+	// An idle-expired record is also reported not found.
+	if _, err := store.GetBySessionID(ctx, record.UserID, record.SessionID, now.Add(2*idleTTL), idleTTL); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("idle-expired lookup must yield ErrSessionNotFound, got %v", err)
+	}
+}
+
+func TestIntegration_SessionStoreDeleteBySessionID(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewSessionStore(client)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	idleTTL := 30 * time.Minute
+	record := sessionInventoryRecord("sess_inv_del", "user_inv_del", now, time.Hour)
+	tokenHash := session.HashToken("inv-del-token")
+	if err := store.Create(ctx, tokenHash, record, time.Hour, idleTTL); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Foreign deletes are refused without side effects.
+	if err := store.DeleteBySessionID(ctx, "user_inv_other", record.SessionID); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("foreign delete must yield ErrSessionNotFound, got %v", err)
+	}
+	if _, err := store.Get(ctx, tokenHash); err != nil {
+		t.Fatalf("record must survive a foreign delete attempt: %v", err)
+	}
+
+	if err := store.DeleteBySessionID(ctx, record.UserID, record.SessionID); err != nil {
+		t.Fatalf("delete by session id: %v", err)
+	}
+	if _, err := store.Get(ctx, tokenHash); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("record must be gone after delete, got %v", err)
+	}
+	if _, err := store.GetBySessionID(ctx, record.UserID, record.SessionID, now, idleTTL); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("locator must be gone after delete, got %v", err)
+	}
+}
+
+func TestIntegration_SessionStoreListUserSessions(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewSessionStore(client)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	idleTTL := 30 * time.Minute
+
+	// Two live sessions for the user, one idle-expired, one belonging to
+	// another user.
+	live1 := sessionInventoryRecord("sess_list_1", "user_list", now, time.Hour)
+	live2 := sessionInventoryRecord("sess_list_2", "user_list", now.Add(time.Minute), time.Hour)
+	idleExpired := sessionInventoryRecord("sess_list_idle", "user_list", now.Add(-2*time.Hour), time.Hour)
+	foreign := sessionInventoryRecord("sess_list_foreign", "user_list_other", now, time.Hour)
+	for token, rec := range map[string]session.SessionRecord{
+		"list-token-1": live1,
+		"list-token-2": live2,
+		"list-token-3": idleExpired,
+		"list-token-4": foreign,
+	} {
+		if err := store.Create(ctx, session.HashToken(token), rec, time.Hour, idleTTL); err != nil {
+			t.Fatalf("create %q: %v", rec.SessionID, err)
+		}
+	}
+
+	records, err := store.ListUserSessions(ctx, "user_list", now.Add(5*time.Minute), idleTTL)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("list returned %d records, want 2", len(records))
+	}
+	// Ordered by creation time.
+	if records[0].SessionID != "sess_list_1" || records[1].SessionID != "sess_list_2" {
+		t.Errorf("unexpected order: %q, %q", records[0].SessionID, records[1].SessionID)
+	}
+
+	// The idle-expired member was self-healed out of the index.
+	indexKey := store.indexKey("user_list")
+	members, err := client.RDB().ZRange(ctx, indexKey, 0, -1).Result()
+	if err != nil {
+		t.Fatalf("zrange: %v", err)
+	}
+	for _, m := range members {
+		if m == "sess_list_idle" {
+			t.Fatal("idle-expired member not removed from the index")
+		}
+	}
+
+	// Listing a user with no sessions yields an empty slice, not an error.
+	empty, err := store.ListUserSessions(ctx, "user_list_nobody", now, idleTTL)
+	if err != nil {
+		t.Fatalf("empty list: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("empty list returned %d records", len(empty))
+	}
+}
+
+func TestIntegration_SessionStoreRevokeAllOtherSessions(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewSessionStore(client)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	idleTTL := 30 * time.Minute
+	current := sessionInventoryRecord("sess_revoke_current", "user_revoke", now, time.Hour)
+	other1 := sessionInventoryRecord("sess_revoke_a", "user_revoke", now, time.Hour)
+	other2 := sessionInventoryRecord("sess_revoke_b", "user_revoke", now, time.Hour)
+	foreign := sessionInventoryRecord("sess_revoke_foreign", "user_revoke_other", now, time.Hour)
+	for token, rec := range map[string]session.SessionRecord{
+		"revoke-token-current": current,
+		"revoke-token-a":       other1,
+		"revoke-token-b":       other2,
+		"revoke-token-foreign": foreign,
+	} {
+		if err := store.Create(ctx, session.HashToken(token), rec, time.Hour, idleTTL); err != nil {
+			t.Fatalf("create %q: %v", rec.SessionID, err)
+		}
+	}
+
+	victims, count, err := store.RevokeAllOtherSessions(ctx, "user_revoke", current.SessionID)
+	if err != nil {
+		t.Fatalf("revoke all others: %v", err)
+	}
+	if count != 2 || len(victims) != 2 {
+		t.Fatalf("revoked %d (victims %d), want 2", count, len(victims))
+	}
+	for _, v := range victims {
+		if v.SessionID == current.SessionID {
+			t.Fatal("current session was revoked")
+		}
+		if v.UserID != "user_revoke" {
+			t.Fatalf("foreign session %q was revoked", v.SessionID)
+		}
+	}
+
+	// The current session survives with its locator intact.
+	if _, err := store.GetBySessionID(ctx, "user_revoke", current.SessionID, now, idleTTL); err != nil {
+		t.Fatalf("current session must survive: %v", err)
+	}
+	// The foreign user's session is untouched.
+	if _, err := store.GetBySessionID(ctx, "user_revoke_other", foreign.SessionID, now, idleTTL); err != nil {
+		t.Fatalf("foreign user's session must survive: %v", err)
+	}
+	// Revoking again finds nothing.
+	_, count, err = store.RevokeAllOtherSessions(ctx, "user_revoke", current.SessionID)
+	if err != nil {
+		t.Fatalf("second revoke: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("second revoke removed %d sessions, want 0", count)
 	}
 }
 
@@ -746,7 +960,7 @@ func TestIntegration_PrefixIsolation(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := testStore.Create(ctx, tokenHash, record, 1*time.Hour); err != nil {
+	if err := testStore.Create(ctx, tokenHash, record, 1*time.Hour, 30*time.Minute); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
@@ -783,7 +997,7 @@ func TestIntegration_KeysDoNotContainRawTokens(t *testing.T) {
 		CSRFTokenHash:      session.HashToken("csrf-safety"),
 	}
 
-	if err := store.Create(ctx, tokenHash, record, 1*time.Hour); err != nil {
+	if err := store.Create(ctx, tokenHash, record, 1*time.Hour, 30*time.Minute); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 

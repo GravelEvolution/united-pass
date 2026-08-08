@@ -1,0 +1,357 @@
+//
+// Copyright (c) 2026 Chen Jiajie(Ariakage)
+//
+// Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
+// Date: 2026-08-08
+// Description: Unit tests for the session inventory domain and service
+//
+
+package session
+
+import (
+	"context"
+	"encoding/hex"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/GravelEvolution/united-pass/backend/internal/auth"
+	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+)
+
+func TestEffectiveExpiry(t *testing.T) {
+	now := time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)
+	record := SessionRecord{
+		LastSeenAt: now,
+		ExpiresAt:  now.Add(12 * time.Hour),
+	}
+
+	// Idle TTL dominates when tighter than the absolute deadline.
+	if got, want := record.EffectiveExpiry(2*time.Hour), now.Add(2*time.Hour); !got.Equal(want) {
+		t.Errorf("idle-bound effective expiry = %v, want %v", got, want)
+	}
+
+	// Absolute TTL dominates when tighter than the idle deadline.
+	if got, want := record.EffectiveExpiry(24*time.Hour), record.ExpiresAt; !got.Equal(want) {
+		t.Errorf("absolute-bound effective expiry = %v, want %v", got, want)
+	}
+
+	// No idle TTL configured: the absolute deadline is the effective expiry.
+	if got, want := record.EffectiveExpiry(0), record.ExpiresAt; !got.Equal(want) {
+		t.Errorf("no-idle effective expiry = %v, want %v", got, want)
+	}
+
+	// Effective expiry tracks LastSeenAt, never ExpiresAt movement.
+	seen := record
+	seen.LastSeenAt = now.Add(1 * time.Hour)
+	if got, want := seen.EffectiveExpiry(2*time.Hour), now.Add(3*time.Hour); !got.Equal(want) {
+		t.Errorf("refreshed effective expiry = %v, want %v", got, want)
+	}
+}
+
+func TestEffectiveExpiryAgreesWithIsExpired(t *testing.T) {
+	now := time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)
+	idleTTL := 2 * time.Hour
+	record := SessionRecord{
+		LastSeenAt: now,
+		ExpiresAt:  now.Add(12 * time.Hour),
+	}
+
+	// Just past the effective expiry the record is expired; just before it is
+	// live. The index score and the authoritative replay must never disagree.
+	past := record.EffectiveExpiry(idleTTL).Add(time.Second)
+	if !record.IsExpired(past, idleTTL) {
+		t.Error("record must be expired one second past its effective expiry")
+	}
+	before := record.EffectiveExpiry(idleTTL).Add(-time.Second)
+	if record.IsExpired(before, idleTTL) {
+		t.Error("record must be live one second before its effective expiry")
+	}
+}
+
+func TestNormalizeUserAgent(t *testing.T) {
+	cases := []struct {
+		name   string
+		ua     string
+		device string
+		client string
+	}{
+		{"chrome on macos", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36", "macOS", "Chrome"},
+		{"safari on iphone", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1", "iOS", "Safari"},
+		{"edge on windows", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 Edg/126.0", "Windows", "Edge"},
+		{"firefox on android", "Mozilla/5.0 (Android 14; Mobile; rv:127.0) Gecko/127.0 Firefox/127.0", "Android", "Firefox"},
+		{"chrome on linux", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36", "Linux", "Chrome"},
+		{"unknown", "custom-agent/1.0", "", ""},
+		{"empty", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			device, client := NormalizeUserAgent(tc.ua)
+			if device != tc.device || client != tc.client {
+				t.Errorf("NormalizeUserAgent = (%q, %q), want (%q, %q)", device, client, tc.device, tc.client)
+			}
+		})
+	}
+}
+
+func TestMaskIP(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"203.0.113.42", "203.0.113.*"},
+		{"203.0.113.42:51234", "203.0.113.*"},
+		{"127.0.0.1", "127.0.0.*"},
+		{"2001:db8:1:2:3:4:5:6", "2001:db8:1:2:*"},
+		{"[2001:db8:1:2:3:4:5:6]:443", "2001:db8:1:2:*"},
+		{"::1", "0:0:0:0:*"},
+		{"", ""},
+		{"not-an-ip", ""},
+	}
+	for _, tc := range cases {
+		if got := MaskIP(tc.in); got != tc.want {
+			t.Errorf("MaskIP(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestGenerateSessionIDRandomAndFailClosed(t *testing.T) {
+	first, err := generateSessionID()
+	if err != nil {
+		t.Fatalf("generateSessionID: %v", err)
+	}
+	if len(first) != 32 {
+		t.Fatalf("session id length = %d, want 32 hex chars", len(first))
+	}
+	if _, err := hex.DecodeString(string(first)); err != nil {
+		t.Fatalf("session id is not hex: %v", err)
+	}
+
+	// Two consecutive IDs must differ (probability of collision ~2^-128).
+	second, err := generateSessionID()
+	if err != nil {
+		t.Fatalf("generateSessionID: %v", err)
+	}
+	if first == second {
+		t.Fatal("consecutive session ids must not repeat")
+	}
+}
+
+// fakeRevoker records provider revocation calls for inventory tests.
+type fakeRevoker struct {
+	refs    []string
+	failRef string
+}
+
+func (f *fakeRevoker) RevokeProviderSession(_ context.Context, ref string) error {
+	if f.failRef != "" && ref == f.failRef {
+		return errors.New("provider unavailable")
+	}
+	f.refs = append(f.refs, ref)
+	return nil
+}
+
+// inventoryService builds a Service over a fakeStore with fixed clocks.
+func inventoryService(t *testing.T) (*Service, *fakeStore, *fakeRevoker) {
+	t.Helper()
+	store := newFakeStore()
+	revoker := &fakeRevoker{}
+	svc := NewService(store, SystemClock{},
+		12*time.Hour, 720*time.Hour, 15*time.Minute, 5*time.Minute,
+		testEncryptor(),
+		WithProviderRevoker(revoker))
+	return svc, store, revoker
+}
+
+// inventoryInput builds a session creation input for one user.
+func inventoryInput(userID identity.UserID, remember bool) CreateSessionInput {
+	return CreateSessionInput{
+		UserID:                userID,
+		Provider:              "fake",
+		AuthenticationMethods: []auth.AuthenticationMethod{auth.MethodPassword},
+		Remember:              remember,
+		UserAgent:             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0 Safari/537.36",
+		ClientIP:              "203.0.113.42",
+	}
+}
+
+func TestCreateSessionPopulatesDisplayMetadata(t *testing.T) {
+	svc, store, _ := inventoryService(t)
+
+	result, err := svc.CreateSession(context.Background(), inventoryInput("user_display", false))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	stored := store.sessions[result.TokenHash]
+
+	if stored.DeviceDisplay != "macOS" {
+		t.Errorf("DeviceDisplay = %q, want macOS", stored.DeviceDisplay)
+	}
+	if stored.ClientDisplay != "Chrome" {
+		t.Errorf("ClientDisplay = %q, want Chrome", stored.ClientDisplay)
+	}
+	if stored.IPAddressMasked != "203.0.113.*" {
+		t.Errorf("IPAddressMasked = %q, want 203.0.113.*", stored.IPAddressMasked)
+	}
+	if result.Record.SessionID == "" {
+		t.Error("session id must be populated")
+	}
+}
+
+func TestListUserSessionsIsolatesUsersAndExpiry(t *testing.T) {
+	svc, _, _ := inventoryService(t)
+	ctx := context.Background()
+
+	for i := 0; i < 2; i++ {
+		if _, err := svc.CreateSession(ctx, inventoryInput("user_list_a", false)); err != nil {
+			t.Fatalf("create a%d: %v", i, err)
+		}
+	}
+	if _, err := svc.CreateSession(ctx, inventoryInput("user_list_b", false)); err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+
+	records, err := svc.ListUserSessions(ctx, "user_list_a")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("list returned %d sessions, want 2", len(records))
+	}
+	for _, r := range records {
+		if r.UserID != "user_list_a" {
+			t.Fatalf("listed foreign session of %q", r.UserID)
+		}
+	}
+}
+
+func TestRevokeSessionContracts(t *testing.T) {
+	svc, store, _ := inventoryService(t)
+	ctx := context.Background()
+
+	current, err := svc.CreateSession(ctx, inventoryInput("user_revoke", false))
+	if err != nil {
+		t.Fatalf("create current: %v", err)
+	}
+	other, err := svc.CreateSession(ctx, inventoryInput("user_revoke", false))
+	if err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+
+	// Revoking the current session is refused with the stable conflict error.
+	if err := svc.RevokeSession(ctx, "user_revoke", current.Record.SessionID, current.Record.SessionID); !errors.Is(err, ErrSessionIsCurrent) {
+		t.Fatalf("current revoke must yield ErrSessionIsCurrent, got %v", err)
+	}
+
+	// Unknown and foreign targets are indistinguishable.
+	if err := svc.RevokeSession(ctx, "user_revoke", current.Record.SessionID, "deadbeef"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("unknown revoke must yield ErrSessionNotFound, got %v", err)
+	}
+	if err := svc.RevokeSession(ctx, "user_revoke", current.Record.SessionID, other.Record.SessionID); err != nil {
+		t.Fatalf("revoke other: %v", err)
+	}
+	if len(store.sessions) != 1 {
+		t.Fatalf("%d sessions remain, want 1", len(store.sessions))
+	}
+
+	// A second revoke reports not found (idempotent non-enumeration).
+	if err := svc.RevokeSession(ctx, "user_revoke", current.Record.SessionID, other.Record.SessionID); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("repeat revoke must yield ErrSessionNotFound, got %v", err)
+	}
+}
+
+func TestRevokeSessionRevokesProviderSession(t *testing.T) {
+	svc, _, revoker := inventoryService(t)
+	ctx := context.Background()
+
+	current, err := svc.CreateSession(ctx, inventoryInput("user_prov", false))
+	if err != nil {
+		t.Fatalf("create current: %v", err)
+	}
+	input := inventoryInput("user_prov", false)
+	input.ProviderSessionReference = "provider-ref-victim"
+	victim, err := svc.CreateSession(ctx, input)
+	if err != nil {
+		t.Fatalf("create victim: %v", err)
+	}
+
+	if err := svc.RevokeSession(ctx, "user_prov", current.Record.SessionID, victim.Record.SessionID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if len(revoker.refs) != 1 || revoker.refs[0] != "provider-ref-victim" {
+		t.Fatalf("provider refs revoked = %v, want [provider-ref-victim]", revoker.refs)
+	}
+}
+
+func TestRevokeAllOtherSessionsPreservesCurrent(t *testing.T) {
+	svc, store, _ := inventoryService(t)
+	ctx := context.Background()
+
+	current, err := svc.CreateSession(ctx, inventoryInput("user_bulk", false))
+	if err != nil {
+		t.Fatalf("create current: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := svc.CreateSession(ctx, inventoryInput("user_bulk", false)); err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+	}
+	if _, err := svc.CreateSession(ctx, inventoryInput("user_bulk_other", false)); err != nil {
+		t.Fatalf("create foreign: %v", err)
+	}
+
+	count, err := svc.RevokeAllOtherSessions(ctx, "user_bulk", current.Record.SessionID)
+	if err != nil {
+		t.Fatalf("revoke all others: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("revoked %d sessions, want 3", count)
+	}
+
+	// The current session and the foreign user's session survive.
+	if len(store.sessions) != 2 {
+		t.Fatalf("%d sessions remain, want 2", len(store.sessions))
+	}
+	if _, err := svc.ListUserSessions(ctx, "user_bulk"); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	remaining, err := svc.ListUserSessions(ctx, "user_bulk")
+	if err != nil || len(remaining) != 1 || remaining[0].SessionID != current.Record.SessionID {
+		t.Fatalf("remaining = %v (err %v), want only the current session", remaining, err)
+	}
+}
+
+func TestTouchSessionKeepsAbsoluteExpiryFixed(t *testing.T) {
+	clock := &mutableClock{now: time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)}
+	store := newFakeStore()
+	svc := NewService(store, clock,
+		12*time.Hour, 720*time.Hour, 2*time.Hour, 5*time.Minute, testEncryptor())
+	ctx := context.Background()
+
+	result, err := svc.CreateSession(ctx, inventoryInput("user_touch", false))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	originalExpiry := store.sessions[result.TokenHash].ExpiresAt
+
+	// Advance past the touch interval and touch.
+	clock.now = clock.now.Add(10 * time.Minute)
+	if err := svc.TouchSession(ctx, result.SessionToken); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	touched := store.sessions[result.TokenHash]
+	if !touched.LastSeenAt.Equal(clock.now) {
+		t.Errorf("LastSeenAt = %v, want %v", touched.LastSeenAt, clock.now)
+	}
+	// ADR-0006 §1 rule 6 / P1 semantics: the absolute deadline never slides.
+	if !touched.ExpiresAt.Equal(originalExpiry) {
+		t.Errorf("ExpiresAt moved from %v to %v", originalExpiry, touched.ExpiresAt)
+	}
+}
+
+// mutableClock is a controllable Clock for service tests.
+type mutableClock struct {
+	now time.Time
+}
+
+func (c *mutableClock) Now() time.Time { return c.now }

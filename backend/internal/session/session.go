@@ -59,7 +59,15 @@ type SessionRecord struct {
 	ReauthenticatedUntil      *time.Time                         `json:"reauthenticatedUntil,omitempty"`
 	CSRFTokenHash             string                             `json:"csrfTokenHash"`
 	UserAgentHash             string                             `json:"userAgentHash,omitempty"`
-	Remember                  bool                               `json:"remember"`
+	// DeviceDisplay / ClientDisplay / IPAddressMasked are display-only,
+	// non-secret strings for the account-security session inventory
+	// (ADR-0006 §3). No location or device fact is fabricated: unrecognized
+	// values stay empty and render as “未知” on the frontend. The raw IP is
+	// never persisted — only the masked form below.
+	DeviceDisplay   string `json:"deviceDisplay,omitempty"`
+	ClientDisplay   string `json:"clientDisplay,omitempty"`
+	IPAddressMasked string `json:"ipAddressMasked,omitempty"`
+	Remember        bool   `json:"remember"`
 }
 
 // Principal is the minimal authenticated identity placed into the request
@@ -138,6 +146,21 @@ func (r SessionRecord) IsExpired(now time.Time, idleTTL time.Duration) bool {
 		return true
 	}
 	return false
+}
+
+// EffectiveExpiry returns the session's effective expiry per ADR-0006 §1:
+// min(ExpiresAt, LastSeenAt + idleTTL) when an idle TTL is configured, else
+// ExpiresAt. This is the single authoritative definition used by Create,
+// Rotate and Touch to compute the session-index ZSET score, and by List to
+// agree with IsExpired. Callers must never re-derive the formula locally.
+func (r SessionRecord) EffectiveExpiry(idleTTL time.Duration) time.Time {
+	if idleTTL <= 0 {
+		return r.ExpiresAt
+	}
+	if idle := r.LastSeenAt.Add(idleTTL); idle.Before(r.ExpiresAt) {
+		return idle
+	}
+	return r.ExpiresAt
 }
 
 // NeedsTouch reports whether the session's LastSeenAt should be refreshed,

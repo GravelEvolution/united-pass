@@ -29,7 +29,7 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{sessions: make(map[string]SessionRecord)}
 }
 
-func (s *fakeStore) Create(_ context.Context, tokenHash string, record SessionRecord, _ time.Duration) error {
+func (s *fakeStore) Create(_ context.Context, tokenHash string, record SessionRecord, _, _ time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessions[tokenHash] = record
@@ -53,24 +53,87 @@ func (s *fakeStore) Delete(_ context.Context, tokenHash string) error {
 	return nil
 }
 
-func (s *fakeStore) Touch(_ context.Context, tokenHash string, lastSeenAt time.Time, _ time.Duration) error {
+func (s *fakeStore) Touch(_ context.Context, tokenHash string, record SessionRecord, _, _ time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, ok := s.sessions[tokenHash]
-	if !ok {
+	if _, ok := s.sessions[tokenHash]; !ok {
 		return ErrSessionNotFound
 	}
-	r.LastSeenAt = lastSeenAt
-	s.sessions[tokenHash] = r
+	s.sessions[tokenHash] = record
 	return nil
 }
 
-func (s *fakeStore) Rotate(_ context.Context, oldHash, newHash string, newRecord SessionRecord, _ time.Duration) error {
+func (s *fakeStore) Rotate(_ context.Context, oldHash, newHash string, newRecord SessionRecord, _, _ time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessions[newHash] = newRecord
 	delete(s.sessions, oldHash)
 	return nil
+}
+
+// resolveLocked mirrors the Redis adapter's locator resolution: ownership
+// and SessionID binding are enforced, every miss yields ErrSessionNotFound.
+func (s *fakeStore) resolveLocked(userID identity.UserID, sessionID SessionID) (string, SessionRecord, error) {
+	for hash, r := range s.sessions {
+		if r.SessionID == sessionID {
+			if r.UserID != userID {
+				return "", SessionRecord{}, ErrSessionNotFound
+			}
+			return hash, r, nil
+		}
+	}
+	return "", SessionRecord{}, ErrSessionNotFound
+}
+
+func (s *fakeStore) GetBySessionID(_ context.Context, userID identity.UserID, sessionID SessionID, now time.Time, idleTTL time.Duration) (SessionRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, record, err := s.resolveLocked(userID, sessionID)
+	if err != nil {
+		return SessionRecord{}, err
+	}
+	if record.IsExpired(now, idleTTL) {
+		return SessionRecord{}, ErrSessionNotFound
+	}
+	return record, nil
+}
+
+func (s *fakeStore) DeleteBySessionID(_ context.Context, userID identity.UserID, sessionID SessionID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hash, _, err := s.resolveLocked(userID, sessionID)
+	if err != nil {
+		return err
+	}
+	delete(s.sessions, hash)
+	return nil
+}
+
+func (s *fakeStore) ListUserSessions(_ context.Context, userID identity.UserID, now time.Time, idleTTL time.Duration) ([]SessionRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var records []SessionRecord
+	for _, r := range s.sessions {
+		if r.UserID != userID || r.IsExpired(now, idleTTL) {
+			continue
+		}
+		records = append(records, r)
+	}
+	return records, nil
+}
+
+func (s *fakeStore) RevokeAllOtherSessions(_ context.Context, userID identity.UserID, currentSessionID SessionID) ([]SessionRecord, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var victims []SessionRecord
+	for hash, r := range s.sessions {
+		if r.UserID != userID || r.SessionID == currentSessionID {
+			continue
+		}
+		delete(s.sessions, hash)
+		victims = append(victims, r)
+	}
+	return victims, len(victims), nil
 }
 
 func newTestService(encryptor Encryptor) *Service {

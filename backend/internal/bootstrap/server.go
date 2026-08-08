@@ -109,20 +109,10 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var userLinker identity.UserLinker
 	var permResolver permissions.Resolver
 	var authenticator auth.Authenticator
+	var sdkClient *zitadelsdk.Client
 	var providerCloser interface{ Close() error }
 	var mfaStore httpapi.MFAChallengeStore
 	var rateChecker httpapi.RateChecker
-
-	if redisClient != nil {
-		sessionStore := redis.NewSessionStore(redisClient)
-		sessionSvc = session.NewService(sessionStore, session.SystemClock{},
-			cfg.Session.TTL, cfg.Session.RememberTTL,
-			cfg.Session.IdleTTL, cfg.Session.TouchInterval,
-			encryptor)
-
-		mfaStore = redis.NewMFAStore(redisClient)
-		rateChecker = redis.NewRateLimiter(redisClient)
-	}
 
 	if pool != nil {
 		userRepo := postgres.NewUserRepository(pool.PgxPool())
@@ -131,16 +121,31 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		userLinker = userRepo
 	}
 
-	// Permission resolver: fail-closed by default, with optional dev override.
-	permResolver = permissions.NewResolver(cfg)
-
 	// Authenticator selection: the production safety boundary from Phase 1
 	// hardening is preserved, and the ZITADEL adapter (Phase 1.2) is now
-	// wired for the "zitadel" provider in all environments.
-	authenticator, sdkClient, providerCloser, err := buildAuthenticator(cfg, userLinker, logger)
+	// wired for the "zitadel" provider in all environments. It is built
+	// before the session service so the session inventory can wire its
+	// best-effort provider revocation seam (ADR-0006 §1).
+	authenticator, sdkClient, providerCloser, err = buildAuthenticator(cfg, userLinker, logger)
 	if err != nil {
 		return nil, err
 	}
+
+	if redisClient != nil {
+		sessionStore := redis.NewSessionStore(redisClient)
+		sessionSvc = session.NewService(sessionStore, session.SystemClock{},
+			cfg.Session.TTL, cfg.Session.RememberTTL,
+			cfg.Session.IdleTTL, cfg.Session.TouchInterval,
+			encryptor,
+			session.WithProviderRevoker(authenticator),
+			session.WithLogger(logger))
+
+		mfaStore = redis.NewMFAStore(redisClient)
+		rateChecker = redis.NewRateLimiter(redisClient)
+	}
+
+	// Permission resolver: fail-closed by default, with optional dev override.
+	permResolver = permissions.NewResolver(cfg)
 
 	// When using the fake development authenticator, skip database-backed
 	// user existence checks: fake users have hardcoded IDs that do not exist
@@ -407,6 +412,20 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				accountHandlers := httpapi.NewAccountHandlers(userReader, permResolver)
 				r.Get("/me", accountHandlers.GetCurrentUser)
 				r.Get("/me/permissions", accountHandlers.GetPermissions)
+			}
+		})
+
+		// Session inventory (ADR-0006 §2): list and revoke the caller's own
+		// sessions. GET is a safe method and passes the CSRF middleware; the
+		// DELETE mutations additionally require the CSRF token.
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireCSRF())
+				sessionHandlers := httpapi.NewSessionHandlers(sessionSvc, logger)
+				r.Get("/me/sessions", sessionHandlers.ListSessions)
+				r.Delete("/me/sessions", sessionHandlers.RevokeAllOthers)
+				r.Delete("/me/sessions/{sessionId}", sessionHandlers.RevokeSession)
 			}
 		})
 

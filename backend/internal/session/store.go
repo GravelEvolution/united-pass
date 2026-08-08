@@ -18,20 +18,66 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/platform/observability"
 )
 
 // Store abstracts session persistence. The Redis adapter satisfies this
 // interface; tests can use an in-memory fake.
+//
+// Multi-key operations (Create, Delete, Rotate, Touch) must be atomic per
+// ADR-0006 §1: record, user index entry and locator are written together in
+// one MULTI/EXEC transaction or one Lua script. Implementations must never
+// use a bare pipeline for them. Every implementation computes the session
+// index score with SessionRecord.EffectiveExpiry — the single frozen
+// definition; implementations must not re-derive the formula.
 type Store interface {
-	Create(ctx context.Context, tokenHash string, record SessionRecord, ttl time.Duration) error
+	// Create writes the record, the user-index entry (score = the record's
+	// effective expiry) and the SessionID→tokenHash locator atomically.
+	Create(ctx context.Context, tokenHash string, record SessionRecord, ttl, idleTTL time.Duration) error
 	Get(ctx context.Context, tokenHash string) (SessionRecord, error)
+	// Delete removes record, index entry and locator atomically (idempotent).
 	Delete(ctx context.Context, tokenHash string) error
-	Touch(ctx context.Context, tokenHash string, lastSeenAt time.Time, ttl time.Duration) error
-	Rotate(ctx context.Context, oldTokenHash, newTokenHash string, newRecord SessionRecord, newTTL time.Duration) error
+	// Touch persists the updated record (new LastSeenAt), re-expires the
+	// locator and refreshes the index member score atomically.
+	Touch(ctx context.Context, tokenHash string, record SessionRecord, ttl, idleTTL time.Duration) error
+	// Rotate replaces the record under oldTokenHash with newRecord under
+	// newTokenHash, re-points the locator and refreshes the index score
+	// atomically. The SessionID stays stable across rotation.
+	Rotate(ctx context.Context, oldTokenHash, newTokenHash string, newRecord SessionRecord, newTTL, idleTTL time.Duration) error
+
+	// GetBySessionID resolves a browser-supplied SessionID through the
+	// locator and returns the record only when it belongs to userID.
+	// Unknown, foreign, idle/absolute-expired or vanished sessions all yield
+	// ErrSessionNotFound (non-enumerating, ADR-0006 §1.4/§2).
+	GetBySessionID(ctx context.Context, userID identity.UserID, sessionID SessionID, now time.Time, idleTTL time.Duration) (SessionRecord, error)
+	// DeleteBySessionID resolves like GetBySessionID and removes the session
+	// atomically. Same non-enumerating error contract.
+	DeleteBySessionID(ctx context.Context, userID identity.UserID, sessionID SessionID) error
+	// ListUserSessions returns the caller's active sessions (never expired
+	// ones) with stale index entries self-healed (ADR-0006 §1 rule 7).
+	ListUserSessions(ctx context.Context, userID identity.UserID, now time.Time, idleTTL time.Duration) ([]SessionRecord, error)
+	// RevokeAllOtherSessions removes every session of userID except
+	// currentSessionID and returns the removed records (for best-effort
+	// provider revocation) plus the revoked count.
+	RevokeAllOtherSessions(ctx context.Context, userID identity.UserID, currentSessionID SessionID) ([]SessionRecord, int, error)
+}
+
+// ErrSessionIsCurrent is returned when a targeted revoke references the
+// caller's current session. Handlers map it to the stable 409
+// session.current conflict (ADR-0006 §2).
+var ErrSessionIsCurrent = errors.New("session is the current session")
+
+// ProviderSessionRevoker terminates a provider-side session. It is a narrow
+// view of auth.Authenticator so the session inventory never depends on the
+// full authentication seam. Revocation is best-effort: local session
+// invalidation must never depend on it succeeding.
+type ProviderSessionRevoker interface {
+	RevokeProviderSession(ctx context.Context, sessionReference string) error
 }
 
 // Clock abstracts time so tests can control it.
@@ -57,17 +103,34 @@ type Service struct {
 	rememberTTL   time.Duration
 	idleTTL       time.Duration
 	touchInterval time.Duration
+	revoker       ProviderSessionRevoker
+	logger        *slog.Logger
+}
+
+// ServiceOption customizes optional Service collaborators without changing
+// the frozen NewService signature (ADR-0006 §1 session inventory).
+type ServiceOption func(*Service)
+
+// WithProviderRevoker wires the best-effort provider session revocation used
+// by the session inventory revoke paths.
+func WithProviderRevoker(r ProviderSessionRevoker) ServiceOption {
+	return func(s *Service) { s.revoker = r }
+}
+
+// WithLogger wires the structured logger used for session security events.
+func WithLogger(l *slog.Logger) ServiceOption {
+	return func(s *Service) { s.logger = l }
 }
 
 // NewService creates a session Service from the given store and configuration.
 // encryptor is used to encrypt provider session references at rest (ADR-0002
 // section 13); it may be nil only when the caller guarantees no provider
 // session references will be stored (e.g. tests without provider references).
-func NewService(store Store, clock Clock, ttl, rememberTTL, idleTTL, touchInterval time.Duration, encryptor Encryptor) *Service {
+func NewService(store Store, clock Clock, ttl, rememberTTL, idleTTL, touchInterval time.Duration, encryptor Encryptor, opts ...ServiceOption) *Service {
 	if clock == nil {
 		clock = SystemClock{}
 	}
-	return &Service{
+	s := &Service{
 		store:         store,
 		clock:         clock,
 		encryptor:     encryptor,
@@ -76,6 +139,10 @@ func NewService(store Store, clock Clock, ttl, rememberTTL, idleTTL, touchInterv
 		idleTTL:       idleTTL,
 		touchInterval: touchInterval,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // CreateSessionInput carries the data needed to create a new session.
@@ -93,6 +160,9 @@ type CreateSessionInput struct {
 	AuthenticationMethods []auth.AuthenticationMethod
 	Remember              bool
 	UserAgent             string
+	// ClientIP is the caller's remote address; only its masked form is
+	// persisted (ADR-0006 §3).
+	ClientIP string
 }
 
 // CreateSessionResult contains the newly created session's raw tokens and
@@ -116,6 +186,13 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	csrfToken, err := GenerateCSRFToken()
 	if err != nil {
 		return CreateSessionResult{}, fmt.Errorf("session: generate CSRF token: %w", err)
+	}
+
+	// SessionID randomness is mandatory: a crypto/rand failure fails session
+	// creation closed — no timestamp fallback exists (ADR-0006 §1.4).
+	sessionID, err := generateSessionID()
+	if err != nil {
+		return CreateSessionResult{}, fmt.Errorf("session: generate session id: %w", err)
 	}
 
 	now := s.clock.Now()
@@ -156,9 +233,11 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		sealedCredential = sealed
 	}
 
+	deviceDisplay, clientDisplay := NormalizeUserAgent(input.UserAgent)
+
 	record := SessionRecord{
 		Version:                   1,
-		SessionID:                 generateSessionID(),
+		SessionID:                 sessionID,
 		UserID:                    input.UserID,
 		Provider:                  input.Provider,
 		ProviderSessionReference:  providerRef,
@@ -170,11 +249,14 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		AuthenticationMethods:     input.AuthenticationMethods,
 		CSRFTokenHash:             HashToken(csrfToken),
 		UserAgentHash:             HashUserAgent(input.UserAgent),
+		DeviceDisplay:             clampDisplay(deviceDisplay),
+		ClientDisplay:             clampDisplay(clientDisplay),
+		IPAddressMasked:           MaskIP(input.ClientIP),
 		Remember:                  input.Remember,
 	}
 
 	tokenHash := HashToken(token)
-	if err := s.store.Create(ctx, tokenHash, record, ttl); err != nil {
+	if err := s.store.Create(ctx, tokenHash, record, ttl, s.idleTTL); err != nil {
 		return CreateSessionResult{}, fmt.Errorf("session: store create: %w", err)
 	}
 
@@ -271,11 +353,19 @@ func (s *Service) TouchSession(ctx context.Context, token string) error {
 		return nil
 	}
 
-	ttl := s.ttl
-	if record.Remember {
-		ttl = s.rememberTTL
+	// ADR-0006 §1 rule 6: Touch refreshes LastSeenAt and re-expires the
+	// record/locator keys. The absolute deadline ExpiresAt is fixed at
+	// creation (P1 semantics, unchanged): the key TTL is the remaining
+	// absolute lifetime, and the index score becomes the record's new
+	// effective expiry min(ExpiresAt, now + idleTTL).
+	ttl := record.ExpiresAt.Sub(now)
+	if ttl <= 0 {
+		// Past its absolute deadline: treat as expired, clean up.
+		_ = s.store.Delete(ctx, tokenHash)
+		return ErrSessionExpired
 	}
-	return s.store.Touch(ctx, tokenHash, now, ttl)
+	record.LastSeenAt = now
+	return s.store.Touch(ctx, tokenHash, record, ttl, s.idleTTL)
 }
 
 // DeleteSession removes a session from Redis by its raw token. It is idempotent.
@@ -285,6 +375,117 @@ func (s *Service) DeleteSession(ctx context.Context, token string) error {
 	}
 	tokenHash := HashToken(token)
 	return s.store.Delete(ctx, tokenHash)
+}
+
+// ListUserSessions returns the caller's live sessions (the current session
+// included; handlers mark it via the Principal). Expired entries are
+// filtered by the authoritative IsExpired replay inside the store, with the
+// index self-healed (ADR-0006 §1 rule 7).
+func (s *Service) ListUserSessions(ctx context.Context, userID identity.UserID) ([]SessionRecord, error) {
+	records, err := s.store.ListUserSessions(ctx, userID, s.clock.Now(), s.idleTTL)
+	if err != nil {
+		return nil, fmt.Errorf("session: list sessions: %w", err)
+	}
+	return records, nil
+}
+
+// RevokeSession revokes one of the caller's sessions by its browser-visible
+// SessionID. Revoking the current session is refused with ErrSessionIsCurrent
+// (handlers map it to the stable 409 session.current conflict); unknown,
+// foreign or already-expired targets yield ErrSessionNotFound (404) without
+// distinguishing the cases (non-enumeration, ADR-0006 §2). The provider
+// session is revoked best-effort afterwards, and the outcome is emitted as a
+// structured security event.
+func (s *Service) RevokeSession(ctx context.Context, userID identity.UserID, currentSessionID, targetSessionID SessionID) error {
+	if targetSessionID == currentSessionID {
+		return ErrSessionIsCurrent
+	}
+
+	record, err := s.store.GetBySessionID(ctx, userID, targetSessionID, s.clock.Now(), s.idleTTL)
+	if err != nil {
+		return err
+	}
+	if err := s.store.DeleteBySessionID(ctx, userID, targetSessionID); err != nil {
+		return fmt.Errorf("session: revoke session: %w", err)
+	}
+
+	s.revokeProviderSession(ctx, record)
+	s.logSecurityEvent("session.revoked", userID, targetSessionID, nil)
+	return nil
+}
+
+// RevokeAllOtherSessions revokes every session of the caller except the
+// current one and returns the number of sessions revoked. Provider sessions
+// are revoked best-effort per victim; a provider failure never fails the
+// operation. The aggregate outcome is emitted as a structured security event.
+func (s *Service) RevokeAllOtherSessions(ctx context.Context, userID identity.UserID, currentSessionID SessionID) (int, error) {
+	victims, count, err := s.store.RevokeAllOtherSessions(ctx, userID, currentSessionID)
+	if err != nil {
+		return 0, fmt.Errorf("session: revoke all other sessions: %w", err)
+	}
+	for i := range victims {
+		s.revokeProviderSession(ctx, victims[i])
+	}
+	s.logSecurityEvent("session.revoked_others", userID, currentSessionID, nil)
+	return count, nil
+}
+
+// revokeProviderSession terminates the provider-side session referenced by a
+// revoked record. Best-effort: decrypt or provider failures are logged and
+// swallowed — the local session is already gone.
+func (s *Service) revokeProviderSession(ctx context.Context, record SessionRecord) {
+	if record.ProviderSessionReference == "" || s.revoker == nil {
+		return
+	}
+	ref, err := s.DecryptProviderSessionReference(ctx, record.ProviderSessionReference)
+	if err != nil {
+		s.lg().Warn("provider session reference decrypt failed during session revocation",
+			"sessionId", string(record.SessionID),
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
+		)
+		return
+	}
+	if ref == "" {
+		return
+	}
+	if err := s.revoker.RevokeProviderSession(ctx, ref); err != nil {
+		s.lg().Warn("provider session revocation failed during session revocation",
+			"sessionId", string(record.SessionID),
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
+		)
+	}
+}
+
+// logSecurityEvent emits a structured session security event. Payloads stay
+// minimal: user and session identifiers plus the outcome — never tokens,
+// provider references or raw IPs.
+func (s *Service) logSecurityEvent(event string, userID identity.UserID, sessionID SessionID, err error) {
+	logger := s.lg()
+	if err != nil {
+		logger.Warn(event,
+			"userId", string(userID),
+			"sessionId", string(sessionID),
+			"outcome", "failed",
+			"errorClass", observability.ClassifyError(err),
+		)
+		return
+	}
+	logger.Info(event,
+		"userId", string(userID),
+		"sessionId", string(sessionID),
+		"outcome", "success",
+	)
+}
+
+// lg returns the configured logger or the slog default so nil-wired
+// services (tests) never panic.
+func (s *Service) lg() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
 }
 
 // ValidateCSRF checks that the CSRF cookie value and header value match each
@@ -301,12 +502,15 @@ func ValidateCSRF(cookieValue, headerValue string, record SessionRecord) bool {
 	return ConstantTimeEqual(expectedHash, record.CSRFTokenHash)
 }
 
-// generateSessionID creates a random session ID for internal tracking.
-func generateSessionID() SessionID {
+// generateSessionID creates a random session ID for the browser-visible
+// inventory (ADR-0006 §1.4): 128 bits from crypto/rand, hex-encoded. A
+// random-read failure fails session creation closed — the previous
+// timestamp-based fallback is removed because a predictable SessionID would
+// weaken the revoke path's non-enumeration guarantees.
+func generateSessionID() (SessionID, error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
-		// Fallback to timestamp-based ID if crypto/rand fails.
-		return SessionID(hex.EncodeToString([]byte(time.Now().UTC().Format("20060102150405"))))
+		return "", errors.New("session: crypto/rand unavailable")
 	}
-	return SessionID(hex.EncodeToString(buf))
+	return SessionID(hex.EncodeToString(buf)), nil
 }

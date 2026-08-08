@@ -234,6 +234,7 @@ func (h *AuthHandlers) handleAuthenticated(w http.ResponseWriter, r *http.Reques
 		AuthenticationMethods:    result.AuthenticationMethods,
 		Remember:                 remember,
 		UserAgent:                r.UserAgent(),
+		ClientIP:                 clientIP(r),
 	})
 	if err != nil {
 		h.logger.Error("session creation failed",
@@ -282,6 +283,7 @@ func (h *AuthHandlers) handleMFARequired(w http.ResponseWriter, r *http.Request,
 		ProviderSessionID:     result.ProviderSessionID,
 		PasskeyRequestOptions: result.PasskeyRequestOptions,
 		Attempts:              0,
+		Remember:              remember,
 		CreatedAt:             time.Now().UTC(),
 	}
 
@@ -457,8 +459,9 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Create session.
-		h.handleAuthenticated(w, r, result, false)
+		// Create session. The remember choice made at login time travels with
+		// the challenge (ADR-0006 §1): MFA completion must not downgrade it.
+		h.handleAuthenticated(w, r, result, challenge.Remember)
 
 	case auth.StatusInvalidCredentials:
 		// Increment the attempt counter. The claim lock is still held by this

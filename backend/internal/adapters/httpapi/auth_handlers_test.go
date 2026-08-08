@@ -40,7 +40,7 @@ func newFakeSessionStore() *fakeSessionStore {
 	return &fakeSessionStore{sessions: make(map[string]session.SessionRecord)}
 }
 
-func (s *fakeSessionStore) Create(_ context.Context, tokenHash string, record session.SessionRecord, _ time.Duration) error {
+func (s *fakeSessionStore) Create(_ context.Context, tokenHash string, record session.SessionRecord, _, _ time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessions[tokenHash] = record
@@ -64,24 +64,85 @@ func (s *fakeSessionStore) Delete(_ context.Context, tokenHash string) error {
 	return nil
 }
 
-func (s *fakeSessionStore) Touch(_ context.Context, tokenHash string, lastSeenAt time.Time, _ time.Duration) error {
+func (s *fakeSessionStore) Touch(_ context.Context, tokenHash string, record session.SessionRecord, _, _ time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, ok := s.sessions[tokenHash]
-	if !ok {
+	if _, ok := s.sessions[tokenHash]; !ok {
 		return session.ErrSessionNotFound
 	}
-	r.LastSeenAt = lastSeenAt
-	s.sessions[tokenHash] = r
+	s.sessions[tokenHash] = record
 	return nil
 }
 
-func (s *fakeSessionStore) Rotate(_ context.Context, oldHash, newHash string, newRecord session.SessionRecord, _ time.Duration) error {
+func (s *fakeSessionStore) Rotate(_ context.Context, oldHash, newHash string, newRecord session.SessionRecord, _, _ time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessions[newHash] = newRecord
 	delete(s.sessions, oldHash)
 	return nil
+}
+
+func (s *fakeSessionStore) resolveLocked(userID identity.UserID, sessionID session.SessionID) (string, session.SessionRecord, error) {
+	for hash, r := range s.sessions {
+		if r.SessionID == sessionID {
+			if r.UserID != userID {
+				return "", session.SessionRecord{}, session.ErrSessionNotFound
+			}
+			return hash, r, nil
+		}
+	}
+	return "", session.SessionRecord{}, session.ErrSessionNotFound
+}
+
+func (s *fakeSessionStore) GetBySessionID(_ context.Context, userID identity.UserID, sessionID session.SessionID, now time.Time, idleTTL time.Duration) (session.SessionRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, record, err := s.resolveLocked(userID, sessionID)
+	if err != nil {
+		return session.SessionRecord{}, err
+	}
+	if record.IsExpired(now, idleTTL) {
+		return session.SessionRecord{}, session.ErrSessionNotFound
+	}
+	return record, nil
+}
+
+func (s *fakeSessionStore) DeleteBySessionID(_ context.Context, userID identity.UserID, sessionID session.SessionID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hash, _, err := s.resolveLocked(userID, sessionID)
+	if err != nil {
+		return err
+	}
+	delete(s.sessions, hash)
+	return nil
+}
+
+func (s *fakeSessionStore) ListUserSessions(_ context.Context, userID identity.UserID, now time.Time, idleTTL time.Duration) ([]session.SessionRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var records []session.SessionRecord
+	for _, r := range s.sessions {
+		if r.UserID != userID || r.IsExpired(now, idleTTL) {
+			continue
+		}
+		records = append(records, r)
+	}
+	return records, nil
+}
+
+func (s *fakeSessionStore) RevokeAllOtherSessions(_ context.Context, userID identity.UserID, currentSessionID session.SessionID) ([]session.SessionRecord, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var victims []session.SessionRecord
+	for hash, r := range s.sessions {
+		if r.UserID != userID || r.SessionID == currentSessionID {
+			continue
+		}
+		delete(s.sessions, hash)
+		victims = append(victims, r)
+	}
+	return victims, len(victims), nil
 }
 
 // fakeMFAStore is an in-memory MFAChallengeStore for testing. It models the
@@ -566,6 +627,92 @@ func TestMFASuccess(t *testing.T) {
 	mfaTokenHash := session.HashToken(mfaResp.MFAToken)
 	if _, err := mfaStore.Get(context.Background(), mfaTokenHash); !errors.Is(err, auth.ErrMFAChallengeNotFound) {
 		t.Errorf("MFA challenge should be consumed after success, got err: %v", err)
+	}
+}
+
+// TestMFACompletionHonorsRemember locks the ADR-0006 §1 remember repair: the
+// remember choice made at login time travels with the MFA challenge and must
+// reach the final session (TTL and flag), never silently downgraded.
+func TestMFACompletionHonorsRemember(t *testing.T) {
+	h, _, store, mfaStore, cfg := setupAuthHandlers(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+	mux.HandleFunc("POST /api/v1/auth/sessions/mfa", h.CompleteMFA)
+
+	body := `{"identifier":"mfauser","password":"TestPassword123!","remember":true}`
+	rr := doRequest(mux, "POST", "/api/v1/auth/sessions", body)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("login status: got %d, want %d", rr.Code, http.StatusAccepted)
+	}
+
+	var mfaResp mfaRequiredResponse
+	json.Unmarshal(rr.Body.Bytes(), &mfaResp)
+
+	// The challenge itself carries the remember choice across the MFA step.
+	challenge, err := mfaStore.Get(context.Background(), session.HashToken(mfaResp.MFAToken))
+	if err != nil {
+		t.Fatalf("challenge not stored: %v", err)
+	}
+	if !challenge.Remember {
+		t.Fatal("MFA challenge must carry remember=true from login")
+	}
+
+	mfaBody := fmt.Sprintf(`{"mfaToken":"%s","method":"totp","code":"123456"}`, mfaResp.MFAToken)
+	rr = doRequest(mux, "POST", "/api/v1/auth/sessions/mfa", mfaBody)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("MFA status: got %d, want %d. Body: %s", rr.Code, http.StatusNoContent, rr.Body.String())
+	}
+
+	sessionToken, _ := extractCookies(rr)
+	record, err := store.Get(context.Background(), session.HashToken(sessionToken))
+	if err != nil {
+		t.Fatalf("session not found: %v", err)
+	}
+	if !record.Remember {
+		t.Error("session created after MFA must keep remember=true")
+	}
+	// The expiry follows the remember TTL, not the short default.
+	wantTTL := cfg.Session.RememberTTL
+	gotTTL := time.Until(record.ExpiresAt)
+	if gotTTL < wantTTL-time.Minute {
+		t.Errorf("session TTL %v must follow remember TTL %v", gotTTL, wantTTL)
+	}
+}
+
+// TestMFACompletionDefaultShortTTL is the negative half of the remember
+// repair: without remember the MFA-completed session keeps the short TTL.
+func TestMFACompletionDefaultShortTTL(t *testing.T) {
+	h, _, store, _, cfg := setupAuthHandlers(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+	mux.HandleFunc("POST /api/v1/auth/sessions/mfa", h.CompleteMFA)
+
+	body := `{"identifier":"mfauser","password":"TestPassword123!"}`
+	rr := doRequest(mux, "POST", "/api/v1/auth/sessions", body)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("login status: got %d, want %d", rr.Code, http.StatusAccepted)
+	}
+
+	var mfaResp mfaRequiredResponse
+	json.Unmarshal(rr.Body.Bytes(), &mfaResp)
+
+	mfaBody := fmt.Sprintf(`{"mfaToken":"%s","method":"totp","code":"123456"}`, mfaResp.MFAToken)
+	rr = doRequest(mux, "POST", "/api/v1/auth/sessions/mfa", mfaBody)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("MFA status: got %d, want %d", rr.Code, http.StatusNoContent)
+	}
+
+	sessionToken, _ := extractCookies(rr)
+	record, err := store.Get(context.Background(), session.HashToken(sessionToken))
+	if err != nil {
+		t.Fatalf("session not found: %v", err)
+	}
+	if record.Remember {
+		t.Error("session must not be remembered without remember=true")
+	}
+	gotTTL := time.Until(record.ExpiresAt)
+	if gotTTL > cfg.Session.TTL+time.Minute {
+		t.Errorf("session TTL %v must follow the short TTL %v without remember", gotTTL, cfg.Session.TTL)
 	}
 }
 
