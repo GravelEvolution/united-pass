@@ -110,10 +110,15 @@ return 1
 
 // sessionRotateScript writes the new record, re-points the locator to the
 // new token hash, deletes the old record and refreshes the index score, all
-// atomically. The SessionID (index member) is unchanged.
+// atomically. The SessionID (index member) is unchanged. It refuses to run
+// when the old record is gone: rotating a vanished session must never
+// resurrect it as a fresh, re-written record (returns 0).
 // KEYS: oldRecord, newRecord, locator, index.
 // ARGV: payload, ttlMs, newTokenHash, sessionId, scoreMs, nowMs.
 var sessionRotateScript = goredis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 0
+end
 redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[2])
 redis.call('DEL', KEYS[1])
 redis.call('SET', KEYS[3], ARGV[3], 'PX', ARGV[2])
@@ -277,7 +282,7 @@ func (s *SessionStore) Rotate(
 	}
 
 	now := time.Now()
-	_, err = sessionRotateScript.Run(ctx, s.client.rdb,
+	res, err := sessionRotateScript.Run(ctx, s.client.rdb,
 		[]string{
 			s.recordKey(oldTokenHash),
 			s.recordKey(newTokenHash),
@@ -290,9 +295,15 @@ func (s *SessionStore) Rotate(
 		string(newRecord.SessionID),
 		newRecord.EffectiveExpiry(idleTTL).UnixMilli(),
 		now.UnixMilli(),
-	).Result()
+	).Int()
 	if err != nil {
 		return fmt.Errorf("redis: rotate session: %w", err)
+	}
+	if res == 0 {
+		// The old record vanished before the rotation ran (revocation, TTL
+		// lapse or corruption): fail closed instead of re-writing a fresh
+		// session under the rotated token.
+		return session.ErrSessionNotFound
 	}
 	return nil
 }
@@ -327,11 +338,15 @@ func (s *SessionStore) GetBySessionID(
 // DeleteBySessionID resolves like GetBySessionID and removes the session
 // atomically (record + locator + index entry). Same non-enumerating error
 // contract: unknown, foreign or already-expired sessions yield
-// session.ErrSessionNotFound.
+// session.ErrSessionNotFound. The expiry replay uses the same frozen idle
+// semantics as the rest of the inventory (now + idleTTL); infrastructure
+// failures propagate instead of masquerading as not-found.
 func (s *SessionStore) DeleteBySessionID(
 	ctx context.Context,
 	userID identity.UserID,
 	sessionID session.SessionID,
+	now time.Time,
+	idleTTL time.Duration,
 ) error {
 	tokenHash, record, err := s.resolve(ctx, userID, sessionID)
 	if err != nil {
@@ -339,7 +354,7 @@ func (s *SessionStore) DeleteBySessionID(
 	}
 	// An expired target is indistinguishable from an unknown one; clean it up
 	// and report not found rather than revoking a dead session.
-	if record.IsExpired(time.Now(), 0) {
+	if record.IsExpired(now, idleTTL) {
 		_ = s.deleteByTokenHash(ctx, tokenHash)
 		return session.ErrSessionNotFound
 	}
@@ -347,8 +362,10 @@ func (s *SessionStore) DeleteBySessionID(
 }
 
 // resolve maps a SessionID through the locator to the record and enforces the
-// ownership check. Every miss (no locator, no record, corrupt record, foreign
-// owner) yields session.ErrSessionNotFound.
+// ownership check. Logical misses (no locator, no record, corrupt record,
+// foreign owner) yield session.ErrSessionNotFound; Redis infrastructure
+// failures propagate as wrapped errors so revoke paths fail closed instead
+// of mistaking an outage for a not-found outcome.
 func (s *SessionStore) resolve(
 	ctx context.Context,
 	userID identity.UserID,
@@ -372,8 +389,10 @@ func (s *SessionStore) resolve(
 			// Locator points at a vanished record: heal the stale locator.
 			_ = s.client.rdb.Del(ctx, s.locatorKey(sessionID)).Err()
 			_ = s.client.rdb.ZRem(ctx, s.indexKey(userID), string(sessionID)).Err()
+			return "", session.SessionRecord{}, session.ErrSessionNotFound
 		}
-		return "", session.SessionRecord{}, session.ErrSessionNotFound
+		// Infrastructure failure: never collapse into not-found.
+		return "", session.SessionRecord{}, fmt.Errorf("redis: resolve session: %w", err)
 	}
 
 	// Ownership is fail-closed and non-enumerating: foreign sessions look
@@ -466,10 +485,16 @@ func (s *SessionStore) ListUserSessions(
 // currentSessionID. It walks only the caller's own ZSET (never KEYS/SCAN)
 // and never touches the current session's keys. It returns the removed
 // records (for best-effort provider revocation) and the revoked count.
+// Infrastructure failures abort the walk and propagate: reporting success
+// while a revocation may have been skipped is the false-success defect this
+// inventory must never exhibit. The expiry replay honours the frozen idle
+// semantics (now + idleTTL).
 func (s *SessionStore) RevokeAllOtherSessions(
 	ctx context.Context,
 	userID identity.UserID,
 	currentSessionID session.SessionID,
+	now time.Time,
+	idleTTL time.Duration,
 ) ([]session.SessionRecord, int, error) {
 	indexKey := s.indexKey(userID)
 
@@ -494,11 +519,14 @@ func (s *SessionStore) RevokeAllOtherSessions(
 			if errors.Is(err, session.ErrSessionNotFound) {
 				// Already gone or foreign-corrupted: heal the index entry.
 				_ = s.client.rdb.ZRem(ctx, indexKey, m).Err()
+				continue
 			}
-			continue
+			// Infrastructure failure: abort fail closed; some sessions may
+			// not have been revoked yet.
+			return victims, len(victims), err
 		}
-		if record.IsExpired(time.Now(), 0) {
-			// Past its absolute deadline: cleanup only, not a revocation.
+		if record.IsExpired(now, idleTTL) {
+			// Past its effective expiry: cleanup only, not a revocation.
 			_ = s.deleteByTokenHash(ctx, tokenHash)
 			continue
 		}

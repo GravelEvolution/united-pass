@@ -107,12 +107,16 @@ func (s *fakeSessionStore) GetBySessionID(_ context.Context, userID identity.Use
 	return record, nil
 }
 
-func (s *fakeSessionStore) DeleteBySessionID(_ context.Context, userID identity.UserID, sessionID session.SessionID) error {
+func (s *fakeSessionStore) DeleteBySessionID(_ context.Context, userID identity.UserID, sessionID session.SessionID, now time.Time, idleTTL time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	hash, _, err := s.resolveLocked(userID, sessionID)
+	hash, record, err := s.resolveLocked(userID, sessionID)
 	if err != nil {
 		return err
+	}
+	if record.IsExpired(now, idleTTL) {
+		delete(s.sessions, hash)
+		return session.ErrSessionNotFound
 	}
 	delete(s.sessions, hash)
 	return nil
@@ -131,12 +135,16 @@ func (s *fakeSessionStore) ListUserSessions(_ context.Context, userID identity.U
 	return records, nil
 }
 
-func (s *fakeSessionStore) RevokeAllOtherSessions(_ context.Context, userID identity.UserID, currentSessionID session.SessionID) ([]session.SessionRecord, int, error) {
+func (s *fakeSessionStore) RevokeAllOtherSessions(_ context.Context, userID identity.UserID, currentSessionID session.SessionID, now time.Time, idleTTL time.Duration) ([]session.SessionRecord, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var victims []session.SessionRecord
 	for hash, r := range s.sessions {
 		if r.UserID != userID || r.SessionID == currentSessionID {
+			continue
+		}
+		if r.IsExpired(now, idleTTL) {
+			delete(s.sessions, hash)
 			continue
 		}
 		delete(s.sessions, hash)
@@ -454,6 +462,48 @@ func TestLoginSuccess(t *testing.T) {
 	}
 	if record.CSRFTokenHash != session.HashToken(csrfToken) {
 		t.Error("CSRF token hash mismatch")
+	}
+}
+
+func TestLoginPersistsPeerIPNotForwardedHeader(t *testing.T) {
+	h, _, store, _, _ := setupAuthHandlers(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+
+	body := `{"identifier":"testuser","password":"TestPassword123!"}`
+	req := httptest.NewRequest("POST", "/api/v1/auth/sessions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// Untrusted proxy header: it must never reach persisted session
+	// metadata (P4.0 freeze: no new proxy-header trust).
+	req.Header.Set("X-Forwarded-For", "203.0.113.66")
+	req.RemoteAddr = "198.51.100.9:43210"
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status: got %d, want %d. Body: %s", rr.Code, http.StatusNoContent, rr.Body.String())
+	}
+	sessionToken, _ := extractCookies(rr)
+	record, err := store.Get(context.Background(), session.HashToken(sessionToken))
+	if err != nil {
+		t.Fatalf("session not found in store: %v", err)
+	}
+	if record.IPAddressMasked != "198.51.100.*" {
+		t.Errorf("persisted IPAddressMasked = %q, want the transport peer 198.51.100.*", record.IPAddressMasked)
+	}
+}
+
+func TestPeerIPIgnoresProxyHeaders(t *testing.T) {
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "192.0.2.7:55123"
+	req.Header.Set("X-Forwarded-For", "203.0.113.66, 10.0.0.1")
+	if got := peerIP(req); got != "192.0.2.7" {
+		t.Errorf("peerIP = %q, want 192.0.2.7", got)
+	}
+	// Addresses without a host:port shape pass through unchanged.
+	req.RemoteAddr = "/tmp/unix.sock"
+	if got := peerIP(req); got != "/tmp/unix.sock" {
+		t.Errorf("peerIP unix addr = %q, want /tmp/unix.sock", got)
 	}
 }
 

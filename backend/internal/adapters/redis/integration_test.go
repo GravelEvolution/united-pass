@@ -249,6 +249,18 @@ func TestIntegration_SessionStoreRotate(t *testing.T) {
 	if byID.SessionID != record.SessionID {
 		t.Errorf("rotated locator returned %q, want %q", byID.SessionID, record.SessionID)
 	}
+
+	// Rotating a vanished old record must fail closed: no fresh session may
+	// be re-written under the rotated token (a revoked session must never be
+	// resurrected by an in-flight rotation).
+	vanishedOld := session.HashToken("vanished-rotation-token")
+	vanishedNew := session.HashToken("vanished-rotation-new-token")
+	if err := store.Rotate(ctx, vanishedOld, vanishedNew, record, 1*time.Hour, 30*time.Minute); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("rotate of vanished session must yield ErrSessionNotFound, got %v", err)
+	}
+	if _, err := store.Get(ctx, vanishedNew); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("no new record may be written for a vanished rotation, got %v", err)
+	}
 }
 
 func TestIntegration_SessionStoreTouch(t *testing.T) {
@@ -344,14 +356,14 @@ func TestIntegration_SessionStoreDeleteBySessionID(t *testing.T) {
 	}
 
 	// Foreign deletes are refused without side effects.
-	if err := store.DeleteBySessionID(ctx, "user_inv_other", record.SessionID); !errors.Is(err, session.ErrSessionNotFound) {
+	if err := store.DeleteBySessionID(ctx, "user_inv_other", record.SessionID, now, idleTTL); !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("foreign delete must yield ErrSessionNotFound, got %v", err)
 	}
 	if _, err := store.Get(ctx, tokenHash); err != nil {
 		t.Fatalf("record must survive a foreign delete attempt: %v", err)
 	}
 
-	if err := store.DeleteBySessionID(ctx, record.UserID, record.SessionID); err != nil {
+	if err := store.DeleteBySessionID(ctx, record.UserID, record.SessionID, now, idleTTL); err != nil {
 		t.Fatalf("delete by session id: %v", err)
 	}
 	if _, err := store.Get(ctx, tokenHash); !errors.Is(err, session.ErrSessionNotFound) {
@@ -359,6 +371,20 @@ func TestIntegration_SessionStoreDeleteBySessionID(t *testing.T) {
 	}
 	if _, err := store.GetBySessionID(ctx, record.UserID, record.SessionID, now, idleTTL); !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("locator must be gone after delete, got %v", err)
+	}
+
+	// An idle-expired session must not be revokable as a live one: the
+	// expiry replay honours the frozen idle semantics (R2).
+	idle := sessionInventoryRecord("sess_inv_del_idle", "user_inv_del", now.Add(-2*time.Hour), time.Hour)
+	idleHash := session.HashToken("inv-del-idle-token")
+	if err := store.Create(ctx, idleHash, idle, time.Hour, idleTTL); err != nil {
+		t.Fatalf("create idle record: %v", err)
+	}
+	if err := store.DeleteBySessionID(ctx, idle.UserID, idle.SessionID, now, idleTTL); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("idle-expired delete must yield ErrSessionNotFound, got %v", err)
+	}
+	if _, err := store.Get(ctx, idleHash); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("idle-expired record must be cleaned up, got %v", err)
 	}
 }
 
@@ -431,11 +457,13 @@ func TestIntegration_SessionStoreRevokeAllOtherSessions(t *testing.T) {
 	current := sessionInventoryRecord("sess_revoke_current", "user_revoke", now, time.Hour)
 	other1 := sessionInventoryRecord("sess_revoke_a", "user_revoke", now, time.Hour)
 	other2 := sessionInventoryRecord("sess_revoke_b", "user_revoke", now, time.Hour)
+	idleOther := sessionInventoryRecord("sess_revoke_idle", "user_revoke", now.Add(-2*time.Hour), time.Hour)
 	foreign := sessionInventoryRecord("sess_revoke_foreign", "user_revoke_other", now, time.Hour)
 	for token, rec := range map[string]session.SessionRecord{
 		"revoke-token-current": current,
 		"revoke-token-a":       other1,
 		"revoke-token-b":       other2,
+		"revoke-token-idle":    idleOther,
 		"revoke-token-foreign": foreign,
 	} {
 		if err := store.Create(ctx, session.HashToken(token), rec, time.Hour, idleTTL); err != nil {
@@ -443,7 +471,7 @@ func TestIntegration_SessionStoreRevokeAllOtherSessions(t *testing.T) {
 		}
 	}
 
-	victims, count, err := store.RevokeAllOtherSessions(ctx, "user_revoke", current.SessionID)
+	victims, count, err := store.RevokeAllOtherSessions(ctx, "user_revoke", current.SessionID, now, idleTTL)
 	if err != nil {
 		t.Fatalf("revoke all others: %v", err)
 	}
@@ -453,6 +481,9 @@ func TestIntegration_SessionStoreRevokeAllOtherSessions(t *testing.T) {
 	for _, v := range victims {
 		if v.SessionID == current.SessionID {
 			t.Fatal("current session was revoked")
+		}
+		if v.SessionID == idleOther.SessionID {
+			t.Fatal("idle-expired session must not be counted as a victim (R2)")
 		}
 		if v.UserID != "user_revoke" {
 			t.Fatalf("foreign session %q was revoked", v.SessionID)
@@ -468,7 +499,7 @@ func TestIntegration_SessionStoreRevokeAllOtherSessions(t *testing.T) {
 		t.Fatalf("foreign user's session must survive: %v", err)
 	}
 	// Revoking again finds nothing.
-	_, count, err = store.RevokeAllOtherSessions(ctx, "user_revoke", current.SessionID)
+	_, count, err = store.RevokeAllOtherSessions(ctx, "user_revoke", current.SessionID, now, idleTTL)
 	if err != nil {
 		t.Fatalf("second revoke: %v", err)
 	}

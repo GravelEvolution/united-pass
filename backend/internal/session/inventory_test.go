@@ -355,3 +355,175 @@ type mutableClock struct {
 }
 
 func (c *mutableClock) Now() time.Time { return c.now }
+
+// infraFailingStore wraps a fakeStore and simulates a Redis infrastructure
+// outage on the inventory revoke paths (R1): infrastructure errors must
+// propagate instead of being collapsed into ErrSessionNotFound.
+type infraFailingStore struct {
+	*fakeStore
+	resolveErr error
+	revokeErr  error
+}
+
+func (s *infraFailingStore) GetBySessionID(_ context.Context, _ identity.UserID, _ SessionID, _ time.Time, _ time.Duration) (SessionRecord, error) {
+	return SessionRecord{}, s.resolveErr
+}
+
+func (s *infraFailingStore) RevokeAllOtherSessions(_ context.Context, _ identity.UserID, _ SessionID, _ time.Time, _ time.Duration) ([]SessionRecord, int, error) {
+	return nil, 0, s.revokeErr
+}
+
+func TestRevokeSessionPropagatesInfrastructureFailure(t *testing.T) {
+	store := &infraFailingStore{
+		fakeStore:  newFakeStore(),
+		resolveErr: errors.New("redis: resolve session: connection refused"),
+	}
+	svc := NewService(store, SystemClock{},
+		12*time.Hour, 720*time.Hour, 15*time.Minute, 5*time.Minute, testEncryptor())
+
+	err := svc.RevokeSession(context.Background(), "user_infra", "sess_current", "sess_target")
+	if err == nil {
+		t.Fatal("revoke must fail closed on an infrastructure failure")
+	}
+	if errors.Is(err, ErrSessionNotFound) {
+		t.Fatal("infrastructure failure must not be collapsed into ErrSessionNotFound (false success)")
+	}
+}
+
+func TestRevokeAllOtherSessionsPropagatesInfrastructureFailure(t *testing.T) {
+	store := &infraFailingStore{
+		fakeStore: newFakeStore(),
+		revokeErr: errors.New("redis: range session index: connection refused"),
+	}
+	svc := NewService(store, SystemClock{},
+		12*time.Hour, 720*time.Hour, 15*time.Minute, 5*time.Minute, testEncryptor())
+
+	_, err := svc.RevokeAllOtherSessions(context.Background(), "user_infra", "sess_current")
+	if err == nil {
+		t.Fatal("bulk revoke must fail closed on an infrastructure failure")
+	}
+	if errors.Is(err, ErrSessionNotFound) {
+		t.Fatal("infrastructure failure must not be collapsed into ErrSessionNotFound")
+	}
+}
+
+func TestBulkRevokeHonoursIdleExpiry(t *testing.T) {
+	clock := &mutableClock{now: time.Date(2026, 8, 6, 10, 0, 0, 0, time.UTC)}
+	store := newFakeStore()
+	svc := NewService(store, clock,
+		12*time.Hour, 720*time.Hour, 30*time.Minute, 5*time.Minute, testEncryptor())
+	ctx := context.Background()
+
+	current, err := svc.CreateSession(ctx, inventoryInput("user_idle_bulk", false))
+	if err != nil {
+		t.Fatalf("create current: %v", err)
+	}
+	other, err := svc.CreateSession(ctx, inventoryInput("user_idle_bulk", false))
+	if err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+
+	// Advance past the idle TTL: the other session is dead and must neither
+	// be counted as a bulk victim nor be revokable as a live target (R2).
+	clock.now = clock.now.Add(time.Hour)
+
+	count, err := svc.RevokeAllOtherSessions(ctx, "user_idle_bulk", current.Record.SessionID)
+	if err != nil {
+		t.Fatalf("bulk revoke: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("bulk revoke reported %d victims, want 0 for idle-expired sessions", count)
+	}
+	if err := svc.RevokeSession(ctx, "user_idle_bulk", current.Record.SessionID, other.Record.SessionID); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("targeted revoke of idle-expired session must yield ErrSessionNotFound, got %v", err)
+	}
+}
+
+// fakeAuditor captures durable session audit events for service tests.
+type fakeAuditor struct {
+	events []SecurityAuditEvent
+	err    error
+}
+
+func (f *fakeAuditor) RecordSessionEvent(_ context.Context, ev SecurityAuditEvent) error {
+	f.events = append(f.events, ev)
+	return f.err
+}
+
+func TestRevokeRecordsDurableSecurityAudit(t *testing.T) {
+	auditor := &fakeAuditor{}
+	svc := NewService(newFakeStore(), SystemClock{},
+		12*time.Hour, 720*time.Hour, 15*time.Minute, 5*time.Minute, testEncryptor(),
+		WithSecurityAuditor(auditor))
+	ctx := context.Background()
+
+	current, err := svc.CreateSession(ctx, inventoryInput("user_audit", false))
+	if err != nil {
+		t.Fatalf("create current: %v", err)
+	}
+	other, err := svc.CreateSession(ctx, inventoryInput("user_audit", false))
+	if err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	if _, err := svc.CreateSession(ctx, inventoryInput("user_audit", false)); err != nil {
+		t.Fatalf("create third: %v", err)
+	}
+
+	if err := svc.RevokeSession(ctx, "user_audit", current.Record.SessionID, other.Record.SessionID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if _, err := svc.RevokeAllOtherSessions(ctx, "user_audit", current.Record.SessionID); err != nil {
+		t.Fatalf("bulk revoke: %v", err)
+	}
+
+	if len(auditor.events) != 2 {
+		t.Fatalf("recorded %d audit events, want 2", len(auditor.events))
+	}
+	targeted := auditor.events[0]
+	if targeted.EventType != EventSessionRevoked {
+		t.Errorf("targeted event type = %q, want %q", targeted.EventType, EventSessionRevoked)
+	}
+	if targeted.ActorUserID != "user_audit" || targeted.SessionID != other.Record.SessionID {
+		t.Errorf("targeted audit actor/session = %q/%q, want user_audit/%q", targeted.ActorUserID, targeted.SessionID, other.Record.SessionID)
+	}
+	if targeted.Operation != "session.revoke" || targeted.Result != AuditOutcomeSuccess {
+		t.Errorf("targeted audit operation/result = %q/%q", targeted.Operation, targeted.Result)
+	}
+	if targeted.OccurredAt.IsZero() {
+		t.Error("targeted audit OccurredAt must be set")
+	}
+	bulk := auditor.events[1]
+	if bulk.EventType != EventSessionsRevokedOthers || bulk.Operation != "session.revoke_all_others" {
+		t.Errorf("bulk audit event/operation = %q/%q", bulk.EventType, bulk.Operation)
+	}
+	if bulk.SessionID != current.Record.SessionID {
+		t.Errorf("bulk audit session = %q, want the current session", bulk.SessionID)
+	}
+}
+
+func TestRevokeSucceedsWhenAuditRecorderFails(t *testing.T) {
+	auditor := &fakeAuditor{err: errors.New("postgres: insert security event: connection refused")}
+	store := newFakeStore()
+	svc := NewService(store, SystemClock{},
+		12*time.Hour, 720*time.Hour, 15*time.Minute, 5*time.Minute, testEncryptor(),
+		WithSecurityAuditor(auditor))
+	ctx := context.Background()
+
+	current, err := svc.CreateSession(ctx, inventoryInput("user_audit_fail", false))
+	if err != nil {
+		t.Fatalf("create current: %v", err)
+	}
+	other, err := svc.CreateSession(ctx, inventoryInput("user_audit_fail", false))
+	if err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+
+	// Audit is best-effort at the call site: the revocation already
+	// succeeded, so a recorder outage must never mask its outcome.
+	if err := svc.RevokeSession(ctx, "user_audit_fail", current.Record.SessionID, other.Record.SessionID); err != nil {
+		t.Fatalf("revoke must succeed despite audit failure, got %v", err)
+	}
+	if len(store.sessions) != 1 {
+		t.Fatalf("%d sessions remain, want 1", len(store.sessions))
+	}
+}

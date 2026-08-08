@@ -23,6 +23,7 @@ import (
 	zitadelsdk "github.com/zitadel/zitadel-go/v3/pkg/client"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi"
+	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/postgres"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/redis"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/zitadel"
@@ -133,12 +134,22 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 
 	if redisClient != nil {
 		sessionStore := redis.NewSessionStore(redisClient)
+		sessionOpts := []session.ServiceOption{
+			session.WithProviderRevoker(authenticator),
+			session.WithLogger(logger),
+		}
+		if pool != nil {
+			// Durable session security audit (ADR-0004 §8): session revocations
+			// are persisted through the canonical security event store —
+			// log-based audit alone is not a substitute.
+			sessionOpts = append(sessionOpts,
+				session.WithSecurityAuditor(newSessionSecurityAuditor(postgres.NewSecurityEventStore(pool.PgxPool()))))
+		}
 		sessionSvc = session.NewService(sessionStore, session.SystemClock{},
 			cfg.Session.TTL, cfg.Session.RememberTTL,
 			cfg.Session.IdleTTL, cfg.Session.TouchInterval,
 			encryptor,
-			session.WithProviderRevoker(authenticator),
-			session.WithLogger(logger))
+			sessionOpts...)
 
 		mfaStore = redis.NewMFAStore(redisClient)
 		rateChecker = redis.NewRateLimiter(redisClient)
@@ -638,8 +649,38 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // Config returns the loaded configuration.
 func (s *Server) Config() config.Config { return s.config }
 
+// sessionSecurityAuditor adapts the canonical durable security event store
+// to the session package's narrow SecurityAuditor seam (ADR-0004 §8 /
+// ADR-0006 §2). It keeps the session package free of application-plane
+// dependencies; the composition root owns the mapping. Session events carry
+// no application/client references, so those columns stay empty.
+type sessionSecurityAuditor struct {
+	store *postgres.SecurityEventStore
+}
+
+func newSessionSecurityAuditor(store *postgres.SecurityEventStore) *sessionSecurityAuditor {
+	return &sessionSecurityAuditor{store: store}
+}
+
+func (a *sessionSecurityAuditor) RecordSessionEvent(ctx context.Context, ev session.SecurityAuditEvent) error {
+	requestID := ev.RequestID
+	if requestID == "" {
+		requestID = request.ID(ctx)
+	}
+	return a.store.Record(ctx, applications.SecurityEvent{
+		EventID:      applications.NewSecurityEventID(),
+		EventType:    ev.EventType,
+		ActorUserID:  ev.ActorUserID,
+		RequestID:    requestID,
+		Operation:    ev.Operation,
+		Result:       applications.SecurityEventResult(ev.Result),
+		FailureClass: ev.FailureClass,
+		OccurredAt:   ev.OccurredAt,
+	})
+}
+
 // userStatusChecker adapts postgres.UserRepository to the UserStatusChecker
-// interface. It checks whether a user exists and is still active.
+// interface. It checks whether the user exists and is still active.
 type userStatusChecker struct {
 	repo userGetter
 }

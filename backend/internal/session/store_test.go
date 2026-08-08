@@ -66,6 +66,11 @@ func (s *fakeStore) Touch(_ context.Context, tokenHash string, record SessionRec
 func (s *fakeStore) Rotate(_ context.Context, oldHash, newHash string, newRecord SessionRecord, _, _ time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, ok := s.sessions[oldHash]; !ok {
+		// Mirrors the frozen Redis semantics: rotating a vanished session
+		// must never resurrect it.
+		return ErrSessionNotFound
+	}
 	s.sessions[newHash] = newRecord
 	delete(s.sessions, oldHash)
 	return nil
@@ -98,12 +103,16 @@ func (s *fakeStore) GetBySessionID(_ context.Context, userID identity.UserID, se
 	return record, nil
 }
 
-func (s *fakeStore) DeleteBySessionID(_ context.Context, userID identity.UserID, sessionID SessionID) error {
+func (s *fakeStore) DeleteBySessionID(_ context.Context, userID identity.UserID, sessionID SessionID, now time.Time, idleTTL time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	hash, _, err := s.resolveLocked(userID, sessionID)
+	hash, record, err := s.resolveLocked(userID, sessionID)
 	if err != nil {
 		return err
+	}
+	if record.IsExpired(now, idleTTL) {
+		delete(s.sessions, hash)
+		return ErrSessionNotFound
 	}
 	delete(s.sessions, hash)
 	return nil
@@ -122,12 +131,16 @@ func (s *fakeStore) ListUserSessions(_ context.Context, userID identity.UserID, 
 	return records, nil
 }
 
-func (s *fakeStore) RevokeAllOtherSessions(_ context.Context, userID identity.UserID, currentSessionID SessionID) ([]SessionRecord, int, error) {
+func (s *fakeStore) RevokeAllOtherSessions(_ context.Context, userID identity.UserID, currentSessionID SessionID, now time.Time, idleTTL time.Duration) ([]SessionRecord, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var victims []SessionRecord
 	for hash, r := range s.sessions {
 		if r.UserID != userID || r.SessionID == currentSessionID {
+			continue
+		}
+		if r.IsExpired(now, idleTTL) {
+			delete(s.sessions, hash)
 			continue
 		}
 		delete(s.sessions, hash)

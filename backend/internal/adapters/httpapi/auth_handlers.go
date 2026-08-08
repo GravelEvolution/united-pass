@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -234,7 +235,7 @@ func (h *AuthHandlers) handleAuthenticated(w http.ResponseWriter, r *http.Reques
 		AuthenticationMethods:    result.AuthenticationMethods,
 		Remember:                 remember,
 		UserAgent:                r.UserAgent(),
-		ClientIP:                 clientIP(r),
+		ClientIP:                 peerIP(r),
 	})
 	if err != nil {
 		h.logger.Error("session creation failed",
@@ -623,10 +624,11 @@ func generateClaimID() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-// clientIP extracts the client IP address from the request. It prefers the
+// clientIP extracts a caller address for rate limiting only. It prefers the
 // X-Forwarded-For header (first value) when present, falling back to
-// RemoteAddr. This is sufficient for rate limiting; precise client IP
-// determination is the reverse proxy's responsibility.
+// RemoteAddr. It must never feed persisted session metadata: proxy headers
+// are untrusted caller-controlled input (P4.0 freeze: no new proxy-header
+// trust), so persisted records use peerIP instead.
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if idx := strings.Index(xff, ","); idx > 0 {
@@ -634,10 +636,18 @@ func clientIP(r *http.Request) string {
 		}
 		return strings.TrimSpace(xff)
 	}
-	// Strip the port from RemoteAddr.
+	return peerIP(r)
+}
+
+// peerIP returns the transport-layer peer host of the request (RemoteAddr
+// only). It never consults X-Forwarded-For or any other proxy-supplied
+// header, so a caller cannot spoof the address persisted in session
+// metadata (P4.0 freeze: no new proxy-header trust; precise client IP
+// determination belongs to a future trusted-proxy design).
+func peerIP(r *http.Request) string {
 	addr := r.RemoteAddr
-	if idx := strings.LastIndex(addr, ":"); idx > 0 {
-		return addr[:idx]
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
 	}
 	return addr
 }

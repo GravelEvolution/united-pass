@@ -53,24 +53,66 @@ type Store interface {
 	// GetBySessionID resolves a browser-supplied SessionID through the
 	// locator and returns the record only when it belongs to userID.
 	// Unknown, foreign, idle/absolute-expired or vanished sessions all yield
-	// ErrSessionNotFound (non-enumerating, ADR-0006 §1.4/§2).
+	// ErrSessionNotFound (non-enumerating, ADR-0006 §1.4/§2). Infrastructure
+	// failures are propagated as-is: they must never be mistaken for a
+	// not-found outcome (fail closed).
 	GetBySessionID(ctx context.Context, userID identity.UserID, sessionID SessionID, now time.Time, idleTTL time.Duration) (SessionRecord, error)
 	// DeleteBySessionID resolves like GetBySessionID and removes the session
-	// atomically. Same non-enumerating error contract.
-	DeleteBySessionID(ctx context.Context, userID identity.UserID, sessionID SessionID) error
+	// atomically. Same non-enumerating error contract; the expiry replay
+	// honours the frozen idle semantics (now + idleTTL).
+	DeleteBySessionID(ctx context.Context, userID identity.UserID, sessionID SessionID, now time.Time, idleTTL time.Duration) error
 	// ListUserSessions returns the caller's active sessions (never expired
 	// ones) with stale index entries self-healed (ADR-0006 §1 rule 7).
 	ListUserSessions(ctx context.Context, userID identity.UserID, now time.Time, idleTTL time.Duration) ([]SessionRecord, error)
 	// RevokeAllOtherSessions removes every session of userID except
 	// currentSessionID and returns the removed records (for best-effort
-	// provider revocation) plus the revoked count.
-	RevokeAllOtherSessions(ctx context.Context, userID identity.UserID, currentSessionID SessionID) ([]SessionRecord, int, error)
+	// provider revocation) plus the revoked count. The expiry replay honours
+	// the frozen idle semantics; infrastructure failures abort the walk and
+	// are propagated so the caller never reports success while a revocation
+	// may have been skipped (fail closed).
+	RevokeAllOtherSessions(ctx context.Context, userID identity.UserID, currentSessionID SessionID, now time.Time, idleTTL time.Duration) ([]SessionRecord, int, error)
 }
 
 // ErrSessionIsCurrent is returned when a targeted revoke references the
 // caller's current session. Handlers map it to the stable 409
 // session.current conflict (ADR-0006 §2).
 var ErrSessionIsCurrent = errors.New("session is the current session")
+
+// Durable session security audit (ADR-0004 §8 / ADR-0006 §2): log-based
+// audit is not a substitute, so successful session revocations are recorded
+// through SecurityAuditor in addition to the structured log event. Payloads
+// never contain tokens, provider references or raw IPs.
+const (
+	// EventSessionRevoked audits one targeted session revocation.
+	EventSessionRevoked = "session.revoked"
+	// EventSessionsRevokedOthers audits a bulk revocation of the caller's
+	// other sessions.
+	EventSessionsRevokedOthers = "session.revoked_others"
+
+	// AuditOutcomeSuccess / AuditOutcomeDenied are the stable audit result
+	// values persisted for session events.
+	AuditOutcomeSuccess = "success"
+	AuditOutcomeDenied  = "denied"
+)
+
+// SecurityAuditEvent is one durable session security audit row.
+type SecurityAuditEvent struct {
+	EventType    string
+	ActorUserID  identity.UserID
+	SessionID    SessionID
+	RequestID    string
+	Operation    string
+	Result       string
+	FailureClass string
+	OccurredAt   time.Time
+}
+
+// SecurityAuditor persists durable session security audit rows. The
+// composition root satisfies it with the canonical security event store;
+// tests can use an in-memory fake.
+type SecurityAuditor interface {
+	RecordSessionEvent(ctx context.Context, ev SecurityAuditEvent) error
+}
 
 // ProviderSessionRevoker terminates a provider-side session. It is a narrow
 // view of auth.Authenticator so the session inventory never depends on the
@@ -104,6 +146,7 @@ type Service struct {
 	idleTTL       time.Duration
 	touchInterval time.Duration
 	revoker       ProviderSessionRevoker
+	auditor       SecurityAuditor
 	logger        *slog.Logger
 }
 
@@ -120,6 +163,12 @@ func WithProviderRevoker(r ProviderSessionRevoker) ServiceOption {
 // WithLogger wires the structured logger used for session security events.
 func WithLogger(l *slog.Logger) ServiceOption {
 	return func(s *Service) { s.logger = l }
+}
+
+// WithSecurityAuditor wires the durable audit recorder used for session
+// revocation events (ADR-0004 §8). A nil auditor keeps log-only audit.
+func WithSecurityAuditor(a SecurityAuditor) ServiceOption {
+	return func(s *Service) { s.auditor = a }
 }
 
 // NewService creates a session Service from the given store and configuration.
@@ -405,12 +454,13 @@ func (s *Service) RevokeSession(ctx context.Context, userID identity.UserID, cur
 	if err != nil {
 		return err
 	}
-	if err := s.store.DeleteBySessionID(ctx, userID, targetSessionID); err != nil {
+	if err := s.store.DeleteBySessionID(ctx, userID, targetSessionID, s.clock.Now(), s.idleTTL); err != nil {
 		return fmt.Errorf("session: revoke session: %w", err)
 	}
 
 	s.revokeProviderSession(ctx, record)
-	s.logSecurityEvent("session.revoked", userID, targetSessionID, nil)
+	s.logSecurityEvent(EventSessionRevoked, userID, targetSessionID, nil)
+	s.recordAudit(ctx, EventSessionRevoked, userID, targetSessionID, "session.revoke")
 	return nil
 }
 
@@ -419,14 +469,15 @@ func (s *Service) RevokeSession(ctx context.Context, userID identity.UserID, cur
 // are revoked best-effort per victim; a provider failure never fails the
 // operation. The aggregate outcome is emitted as a structured security event.
 func (s *Service) RevokeAllOtherSessions(ctx context.Context, userID identity.UserID, currentSessionID SessionID) (int, error) {
-	victims, count, err := s.store.RevokeAllOtherSessions(ctx, userID, currentSessionID)
+	victims, count, err := s.store.RevokeAllOtherSessions(ctx, userID, currentSessionID, s.clock.Now(), s.idleTTL)
 	if err != nil {
 		return 0, fmt.Errorf("session: revoke all other sessions: %w", err)
 	}
 	for i := range victims {
 		s.revokeProviderSession(ctx, victims[i])
 	}
-	s.logSecurityEvent("session.revoked_others", userID, currentSessionID, nil)
+	s.logSecurityEvent(EventSessionsRevokedOthers, userID, currentSessionID, nil)
+	s.recordAudit(ctx, EventSessionsRevokedOthers, userID, currentSessionID, "session.revoke_all_others")
 	return count, nil
 }
 
@@ -454,6 +505,32 @@ func (s *Service) revokeProviderSession(ctx context.Context, record SessionRecor
 			"sessionId", string(record.SessionID),
 			"errorClass", observability.ClassifyError(err),
 			"errorDetail", observability.RedactedError(err, 256),
+		)
+	}
+}
+
+// recordAudit persists one durable session security audit row. Audit is
+// best-effort at the call site: the local revocation already succeeded, so a
+// recorder failure is logged as an operational/security defect (making the
+// audit gap visible) but never masks the revocation outcome.
+func (s *Service) recordAudit(ctx context.Context, eventType string, userID identity.UserID, sessionID SessionID, operation string) {
+	if s.auditor == nil {
+		return
+	}
+	err := s.auditor.RecordSessionEvent(ctx, SecurityAuditEvent{
+		EventType:   eventType,
+		ActorUserID: userID,
+		SessionID:   sessionID,
+		Operation:   operation,
+		Result:      AuditOutcomeSuccess,
+		OccurredAt:  s.clock.Now(),
+	})
+	if err != nil {
+		s.lg().Warn("session security audit record failed",
+			"event", eventType,
+			"userId", string(userID),
+			"sessionId", string(sessionID),
+			"errorClass", observability.ClassifyError(err),
 		)
 	}
 }
