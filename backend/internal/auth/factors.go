@@ -31,10 +31,18 @@ var (
 	// input: a wrong TOTP code or an invalid WebAuthn attestation. Maps to
 	// 400.
 	ErrInvalidFactorCode = errors.New("auth: invalid factor confirmation")
-	// ErrProviderUnavailable means the provider could not be reached or the
-	// service account lacks permission (provider.forbidden, §10). Maps to
-	// 502. No local side effects may have occurred.
+	// ErrProviderUnavailable means the provider could not be reached:
+	// network failure, timeout or provider-side unavailability. Maps to 502
+	// provider.unavailable. No local side effects may have occurred.
 	ErrProviderUnavailable = errors.New("auth: factor provider unavailable")
+	// ErrProviderForbidden means the provider refused the operation for an
+	// authorization reason: the service account lacks the required
+	// permission (AUTHZ-* / PermissionDenied, provider.forbidden, §10). It
+	// must stay distinct from ErrProviderUnavailable — an outage and a
+	// misconfiguration demand different operator responses. Maps to a
+	// server-side 5xx provider.forbidden (never a user-permission 403).
+	// Fail closed: no local side effects may have occurred.
+	ErrProviderForbidden = errors.New("auth: factor provider forbidden")
 )
 
 // PasskeyState is the lifecycle state of a registered passkey as reported by

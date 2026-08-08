@@ -323,8 +323,8 @@ func TestFactor_SAPermissionFaultFailsClosed(t *testing.T) {
 	}
 	a := factorAuth(t, u, "rp.example.com")
 
-	if _, err := a.BeginTOTPEnrollment(context.Background(), "user-1"); !errors.Is(err, auth.ErrProviderUnavailable) {
-		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	if _, err := a.BeginTOTPEnrollment(context.Background(), "user-1"); !errors.Is(err, auth.ErrProviderForbidden) {
+		t.Fatalf("err = %v, want ErrProviderForbidden", err)
 	}
 }
 
@@ -351,12 +351,12 @@ func TestMapFactorError_Classification(t *testing.T) {
 		{"nil", nil, false, nil},
 		{"already exists", grpcErr(codes.AlreadyExists, "COMMAND-x"), false, auth.ErrFactorAlreadySet},
 		{"not found", grpcErr(codes.NotFound, "COMMAND-x"), false, auth.ErrFactorNotSet},
-		{"authz permission", grpcErr(codes.NotFound, "AUTHZ-403"), false, auth.ErrProviderUnavailable},
+		{"authz permission", grpcErr(codes.NotFound, "AUTHZ-403"), false, auth.ErrProviderForbidden},
 		{"write invalid argument", grpcErr(codes.InvalidArgument, "COMMAND-x"), false, auth.ErrProviderUnavailable},
 		{"confirm invalid argument", grpcErr(codes.InvalidArgument, "EVENT-x"), true, auth.ErrInvalidFactorCode},
 		{"confirm failed precondition", grpcErr(codes.FailedPrecondition, "COMMAND-x"), true, auth.ErrInvalidFactorCode},
 		{"unavailable", grpcErr(codes.Unavailable, "down"), false, auth.ErrProviderUnavailable},
-		{"permission denied", grpcErr(codes.PermissionDenied, "no"), false, auth.ErrProviderUnavailable},
+		{"permission denied", grpcErr(codes.PermissionDenied, "no"), false, auth.ErrProviderForbidden},
 		{"internal", grpcErr(codes.Internal, "boom"), true, auth.ErrProviderUnavailable},
 		{"non-grpc", errors.New("network reset"), false, auth.ErrProviderUnavailable},
 	}
@@ -370,7 +370,7 @@ func TestMapFactorError_Classification(t *testing.T) {
 func TestFactorSecretNeverInErrorText(t *testing.T) {
 	// Guard: sentinel errors must not carry provider detail or secret
 	// material into logs or responses.
-	for _, sentinel := range []error{auth.ErrFactorAlreadySet, auth.ErrFactorNotSet, auth.ErrInvalidFactorCode, auth.ErrProviderUnavailable} {
+	for _, sentinel := range []error{auth.ErrFactorAlreadySet, auth.ErrFactorNotSet, auth.ErrInvalidFactorCode, auth.ErrProviderUnavailable, auth.ErrProviderForbidden} {
 		if strings.Contains(sentinel.Error(), "secret") || strings.Contains(sentinel.Error(), "otpauth") {
 			t.Errorf("sentinel %q leaks secret-bearing wording", sentinel.Error())
 		}

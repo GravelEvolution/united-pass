@@ -1319,7 +1319,7 @@ func enrollmentData(kind auth.EnrollmentKind, target string) auth.EnrollmentData
 	}
 }
 
-func TestIntegration_EnrollmentStoreCreateAndConsume(t *testing.T) {
+func TestIntegration_EnrollmentStoreClaimAndConsume(t *testing.T) {
 	client := setupTestRedis(t)
 	store := NewEnrollmentStore(client)
 	ctx := context.Background()
@@ -1329,16 +1329,19 @@ func TestIntegration_EnrollmentStoreCreateAndConsume(t *testing.T) {
 		t.Fatalf("create enrollment: %v", err)
 	}
 
-	data, err := store.ConsumeEnrollment(ctx, tokenHash)
+	data, err := store.ClaimEnrollment(ctx, tokenHash, "claim-a")
 	if err != nil {
-		t.Fatalf("consume enrollment: %v", err)
+		t.Fatalf("claim enrollment: %v", err)
 	}
 	if data.UserID != "user_enroll_1" || data.SessionID != "sess_enroll_1" || data.Kind != auth.EnrollmentTOTP || data.Target != "" {
 		t.Errorf("enrollment data = %+v, want stored binding", data)
 	}
+	if err := store.ConsumeEnrollment(ctx, tokenHash, "claim-a"); err != nil {
+		t.Fatalf("consume enrollment: %v", err)
+	}
 
 	// Single-use: the record is gone after consumption.
-	if _, err := store.ConsumeEnrollment(ctx, tokenHash); !errors.Is(err, auth.ErrEnrollmentNotFound) {
+	if _, err := store.ClaimEnrollment(ctx, tokenHash, "claim-b"); !errors.Is(err, auth.ErrEnrollmentNotFound) {
 		t.Fatalf("reuse err = %v, want ErrEnrollmentNotFound", err)
 	}
 
@@ -1347,12 +1350,15 @@ func TestIntegration_EnrollmentStoreCreateAndConsume(t *testing.T) {
 	if err := store.CreateEnrollment(ctx, pkHash, enrollmentData(auth.EnrollmentPasskey, "pk-42"), 5*time.Minute); err != nil {
 		t.Fatalf("create passkey enrollment: %v", err)
 	}
-	pkData, err := store.ConsumeEnrollment(ctx, pkHash)
+	pkData, err := store.ClaimEnrollment(ctx, pkHash, "claim-c")
 	if err != nil {
-		t.Fatalf("consume passkey enrollment: %v", err)
+		t.Fatalf("claim passkey enrollment: %v", err)
 	}
 	if pkData.Kind != auth.EnrollmentPasskey || pkData.Target != "pk-42" {
 		t.Errorf("passkey enrollment = %+v, want (passkey, pk-42)", pkData)
+	}
+	if err := store.ConsumeEnrollment(ctx, pkHash, "claim-c"); err != nil {
+		t.Fatalf("consume passkey enrollment: %v", err)
 	}
 }
 
@@ -1360,7 +1366,7 @@ func TestIntegration_EnrollmentStoreUnknownToken(t *testing.T) {
 	client := setupTestRedis(t)
 	store := NewEnrollmentStore(client)
 
-	if _, err := store.ConsumeEnrollment(context.Background(), session.HashToken("never-issued")); !errors.Is(err, auth.ErrEnrollmentNotFound) {
+	if _, err := store.ClaimEnrollment(context.Background(), session.HashToken("never-issued"), "claim-1"); !errors.Is(err, auth.ErrEnrollmentNotFound) {
 		t.Fatalf("unknown token err = %v, want ErrEnrollmentNotFound", err)
 	}
 }
@@ -1377,12 +1383,54 @@ func TestIntegration_EnrollmentStoreExpiry(t *testing.T) {
 
 	// Once the TTL lapses the challenge fails closed.
 	time.Sleep(1500 * time.Millisecond)
-	if _, err := store.ConsumeEnrollment(ctx, tokenHash); !errors.Is(err, auth.ErrEnrollmentNotFound) {
-		t.Fatalf("expired consume err = %v, want ErrEnrollmentNotFound", err)
+	if _, err := store.ClaimEnrollment(ctx, tokenHash, "claim-1"); !errors.Is(err, auth.ErrEnrollmentNotFound) {
+		t.Fatalf("expired claim err = %v, want ErrEnrollmentNotFound", err)
 	}
 }
 
-func TestIntegration_EnrollmentStoreConcurrentReplay(t *testing.T) {
+func TestIntegration_EnrollmentStoreReleaseAllowsRetry(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewEnrollmentStore(client)
+	ctx := context.Background()
+
+	tokenHash := session.HashToken("enrollment-release-token")
+	if err := store.CreateEnrollment(ctx, tokenHash, enrollmentData(auth.EnrollmentTOTP, ""), 5*time.Minute); err != nil {
+		t.Fatalf("create enrollment: %v", err)
+	}
+
+	if _, err := store.ClaimEnrollment(ctx, tokenHash, "claim-1"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	// A concurrent claimer while the lock is held loses (single winner).
+	if _, err := store.ClaimEnrollment(ctx, tokenHash, "claim-2"); !errors.Is(err, auth.ErrEnrollmentClaimed) {
+		t.Fatalf("second claim err = %v, want ErrEnrollmentClaimed", err)
+	}
+
+	// A transient provider failure releases the claim; the challenge itself
+	// survives untouched and stays confirmable.
+	if err := store.ReleaseEnrollment(ctx, tokenHash, "claim-1"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	// A stale owner can no longer act on the released lock.
+	if err := store.ReleaseEnrollment(ctx, tokenHash, "claim-1"); !errors.Is(err, auth.ErrEnrollmentNotHeld) {
+		t.Fatalf("stale release err = %v, want ErrEnrollmentNotHeld", err)
+	}
+
+	// The retry claims the same enrollment and consumes it.
+	if _, err := store.ClaimEnrollment(ctx, tokenHash, "claim-3"); err != nil {
+		t.Fatalf("retry claim: %v", err)
+	}
+	// A foreign claim ID can never consume someone else's lock.
+	if err := store.ConsumeEnrollment(ctx, tokenHash, "claim-2"); !errors.Is(err, auth.ErrEnrollmentNotHeld) {
+		t.Fatalf("foreign consume err = %v, want ErrEnrollmentNotHeld", err)
+	}
+	if err := store.ConsumeEnrollment(ctx, tokenHash, "claim-3"); err != nil {
+		t.Fatalf("retry consume: %v", err)
+	}
+}
+
+func TestIntegration_EnrollmentStoreConcurrentClaim(t *testing.T) {
 	client := setupTestRedis(t)
 	store := NewEnrollmentStore(client)
 	ctx := context.Background()
@@ -1392,16 +1440,18 @@ func TestIntegration_EnrollmentStoreConcurrentReplay(t *testing.T) {
 		t.Fatalf("create enrollment: %v", err)
 	}
 
-	// GETDEL guarantees a single winner across concurrent confirmations.
+	// The SET NX PX claim lock guarantees a single confirmation winner
+	// across concurrent requests; losers receive ErrEnrollmentClaimed.
 	const workers = 8
 	var mu sync.Mutex
 	winners := 0
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
+		claimID := fmt.Sprintf("claim-%d", i)
 		go func() {
 			defer wg.Done()
-			if _, err := store.ConsumeEnrollment(ctx, tokenHash); err == nil {
+			if _, err := store.ClaimEnrollment(ctx, tokenHash, claimID); err == nil {
 				mu.Lock()
 				winners++
 				mu.Unlock()

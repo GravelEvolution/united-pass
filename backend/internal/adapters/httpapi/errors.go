@@ -52,6 +52,7 @@ const (
 	CodeReauthenticationReq = "session.reauthentication_required"
 	CodeRequestBodyTooLarge = "request.body_too_large"
 	CodeProviderUnavailable = "provider.unavailable"
+	CodeProviderForbidden   = "provider.forbidden"
 )
 
 // writeError writes a standard error envelope with the given status and code.
@@ -108,4 +109,13 @@ func WriteRequestBodyTooLarge(w http.ResponseWriter, r *http.Request) {
 // never raw provider detail.
 func WriteProviderUnavailable(w http.ResponseWriter, r *http.Request) {
 	writeError(w, r, http.StatusBadGateway, CodeProviderUnavailable, "身份提供方暂不可用，请稍后重试。", nil)
+}
+
+// WriteProviderForbidden writes a server-side 503 when the identity provider
+// refuses an operation for a service-account authorization reason
+// (provider.forbidden, ADR-0006 §10). It deliberately uses a 5xx status: a
+// 403 would mislead clients into treating a provider misconfiguration as a
+// user permission denial. Only the stable error class is conveyed.
+func WriteProviderForbidden(w http.ResponseWriter, r *http.Request) {
+	writeError(w, r, http.StatusServiceUnavailable, CodeProviderForbidden, "身份提供方拒绝了该操作，请联系管理员。", nil)
 }

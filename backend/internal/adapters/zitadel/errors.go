@@ -80,8 +80,10 @@ func mapFactorError(err error, confirm bool) error {
 	}
 	if isAuthZFailure(err) {
 		// Insufficient service-account permission: provider.forbidden
-		// (ADR-0006 §10), never a user-facing factor error.
-		return auth.ErrProviderUnavailable
+		// (ADR-0006 §10), never a user-facing factor error and never
+		// collapsed into provider.unavailable — an outage and an SA
+		// misconfiguration demand different operator responses.
+		return auth.ErrProviderForbidden
 	}
 
 	st, ok := status.FromError(err)
@@ -95,6 +97,9 @@ func mapFactorError(err error, confirm bool) error {
 		// Factor already set up (e.g. RegisterTOTP on an enrolled user):
 		// stable 409, idempotency-safe.
 		return auth.ErrFactorAlreadySet
+	case codes.PermissionDenied:
+		// Explicit authorization refusal: provider.forbidden (ADR-0006 §10).
+		return auth.ErrProviderForbidden
 	case codes.NotFound:
 		// Unknown factor/passkey (or no pending enrollment): stable
 		// non-enumeration 404.

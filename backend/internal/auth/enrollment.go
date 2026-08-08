@@ -19,6 +19,14 @@ import (
 // reused, so retries must start a fresh enrollment (and reauthentication).
 var ErrEnrollmentNotFound = errors.New("auth: enrollment not found")
 
+// ErrEnrollmentClaimed is returned when another request already holds the
+// claim lock of an enrollment challenge (concurrent confirmation race).
+var ErrEnrollmentClaimed = errors.New("auth: enrollment already claimed")
+
+// ErrEnrollmentNotHeld is returned when a release/consume call no longer
+// holds the claim lock (expired or taken over); nothing is created.
+var ErrEnrollmentNotHeld = errors.New("auth: enrollment claim not held")
+
 // EnrollmentKind identifies which factor an enrollment challenge belongs to.
 type EnrollmentKind string
 

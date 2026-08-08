@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,15 +101,22 @@ func (f *fakeFactorManager) FactorSummary(_ context.Context, _ identity.UserID) 
 }
 
 // memEnrollments is an in-memory EnrollmentTokenStore mirroring the Redis
-// GETDEL single-winner semantics.
+// claim/release/consume lifecycle (ADR-0006 §7): ClaimEnrollment grants a
+// single-winner lock, ReleaseEnrollment drops it (transient provider
+// failure), ConsumeEnrollment permanently deletes the challenge.
 type memEnrollments struct {
 	mu        sync.Mutex
 	data      map[string]auth.EnrollmentData
+	claims    map[string]string
 	createErr error
+	claimErr  error
 }
 
 func newMemEnrollments() *memEnrollments {
-	return &memEnrollments{data: make(map[string]auth.EnrollmentData)}
+	return &memEnrollments{
+		data:   make(map[string]auth.EnrollmentData),
+		claims: make(map[string]string),
+	}
 }
 
 func (m *memEnrollments) CreateEnrollment(_ context.Context, tokenHash string, data auth.EnrollmentData, _ time.Duration) error {
@@ -121,15 +129,51 @@ func (m *memEnrollments) CreateEnrollment(_ context.Context, tokenHash string, d
 	return nil
 }
 
-func (m *memEnrollments) ConsumeEnrollment(_ context.Context, tokenHash string) (auth.EnrollmentData, error) {
+func (m *memEnrollments) ClaimEnrollment(_ context.Context, tokenHash, claimID string) (auth.EnrollmentData, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.claimErr != nil {
+		return auth.EnrollmentData{}, m.claimErr
+	}
+	if _, held := m.claims[tokenHash]; held {
+		return auth.EnrollmentData{}, auth.ErrEnrollmentClaimed
+	}
 	data, ok := m.data[tokenHash]
 	if !ok {
 		return auth.EnrollmentData{}, auth.ErrEnrollmentNotFound
 	}
-	delete(m.data, tokenHash)
+	m.claims[tokenHash] = claimID
 	return data, nil
+}
+
+func (m *memEnrollments) ReleaseEnrollment(_ context.Context, tokenHash, claimID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.claims[tokenHash] != claimID {
+		return auth.ErrEnrollmentNotHeld
+	}
+	delete(m.claims, tokenHash)
+	return nil
+}
+
+func (m *memEnrollments) ConsumeEnrollment(_ context.Context, tokenHash, claimID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.claims[tokenHash] != claimID {
+		return auth.ErrEnrollmentNotHeld
+	}
+	delete(m.claims, tokenHash)
+	delete(m.data, tokenHash)
+	return nil
+}
+
+// peek returns the stored enrollment without claiming or consuming it
+// (test-only readback for binding assertions).
+func (m *memEnrollments) peek(tokenHash string) (auth.EnrollmentData, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	data, ok := m.data[tokenHash]
+	return data, ok
 }
 
 func (m *memEnrollments) size() int {
@@ -394,6 +438,14 @@ func TestBeginTOTPEnrollment_StoreFailureFailsClosed(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)
 	}
+	// A3: the provider already held a pending registration the client could
+	// never receive; the begin step must compensate by removing it.
+	if env.factors.removeTOTPCalls != 1 {
+		t.Errorf("remove calls = %d, want 1 compensation", env.factors.removeTOTPCalls)
+	}
+	if env.enroll.size() != 0 {
+		t.Error("no enrollment may linger after a failed begin")
+	}
 }
 
 func totpBegin(t *testing.T, env *securityEnv) string {
@@ -604,9 +656,9 @@ func TestBeginPasskeyEnrollment_Success(t *testing.T) {
 	}
 
 	// The stored enrollment is bound to the provider-issued passkeyId.
-	data, err := env.enroll.ConsumeEnrollment(t.Context(), session.HashToken(body.EnrollmentToken))
-	if err != nil {
-		t.Fatalf("consume stored enrollment: %v", err)
+	data, ok := env.enroll.peek(session.HashToken(body.EnrollmentToken))
+	if !ok {
+		t.Fatal("stored enrollment missing after begin")
 	}
 	if data.Kind != auth.EnrollmentPasskey || data.Target != "pk-new" {
 		t.Errorf("enrollment binding = (%q, %q), want (passkey, pk-new)", data.Kind, data.Target)
@@ -756,5 +808,144 @@ func TestRemovePasskey_NotFound(t *testing.T) {
 	}
 	if body := decodeErrorBody(t, rec); body.Code != CodeFactorNotFound {
 		t.Errorf("code = %q, want %q", body.Code, CodeFactorNotFound)
+	}
+}
+
+// --- A1: provider.forbidden is a distinct server-side class ---
+
+func TestGetSecurityFactors_ProviderForbidden(t *testing.T) {
+	env := newSecurityEnv()
+	env.factors.summaryErr = auth.ErrProviderForbidden
+	rec := doSecurityJSON(t, env.router(true), http.MethodGet, "/me/security", "", nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+	if body := decodeErrorBody(t, rec); body.Code != CodeProviderForbidden {
+		t.Errorf("code = %q, want %q", body.Code, CodeProviderForbidden)
+	}
+}
+
+func TestConfirmTOTPEnrollment_ProviderForbiddenReleasesClaim(t *testing.T) {
+	env := newSecurityEnv()
+	token := totpBegin(t, env)
+	env.factors.confirmTOTPErr = auth.ErrProviderForbidden
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/totp/enrollment/confirm",
+		`{"enrollmentToken":"`+token+`","code":"123456"}`, nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+	if body := decodeErrorBody(t, rec); body.Code != CodeProviderForbidden {
+		t.Errorf("code = %q, want %q", body.Code, CodeProviderForbidden)
+	}
+	// SA-permission failures release the claim: the enrollment stays
+	// retryable and is never consumed.
+	if env.enroll.size() != 1 {
+		t.Error("a forbidden outcome must release the claim, not consume the enrollment")
+	}
+}
+
+// --- A2: claim/release/consume failure semantics ---
+
+func TestConfirmTOTPEnrollment_ClaimStoreFailureNotMasked(t *testing.T) {
+	env := newSecurityEnv()
+	token := totpBegin(t, env)
+	env.enroll.claimErr = context.DeadlineExceeded
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/totp/enrollment/confirm",
+		`{"enrollmentToken":"`+token+`","code":"123456"}`, nil)
+	// A store infrastructure failure must surface as the generic internal
+	// envelope, never masquerade as enrollment expiry.
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(env.factors.confirmTOTPCodes) != 0 {
+		t.Error("provider must not be touched on a store failure")
+	}
+}
+
+func TestConfirmTOTPEnrollment_ProviderOutageReleasesClaim(t *testing.T) {
+	env := newSecurityEnv()
+	token := totpBegin(t, env)
+	env.factors.confirmTOTPErr = auth.ErrProviderUnavailable
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/totp/enrollment/confirm",
+		`{"enrollmentToken":"`+token+`","code":"123456"}`, nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if env.enroll.size() != 1 {
+		t.Fatal("a transient provider failure must release the claim, not burn the enrollment")
+	}
+
+	// The same enrollment stays confirmable once the provider recovers — no
+	// fresh reauth + begin ceremony is forced by a provider outage.
+	env.factors.confirmTOTPErr = nil
+	rec2 := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/totp/enrollment/confirm",
+		`{"enrollmentToken":"`+token+`","code":"123456"}`, nil)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("retry status = %d, want 200; body=%s", rec2.Code, rec2.Body.String())
+	}
+	if env.enroll.size() != 0 {
+		t.Error("the retry must consume the enrollment")
+	}
+}
+
+// --- A3: begin store failure compensates the provider-side registration ---
+
+func TestBeginPasskeyEnrollment_StoreFailureCompensates(t *testing.T) {
+	env := newSecurityEnv()
+	env.factors.passkeyEnrollment = auth.PasskeyEnrollment{
+		PasskeyID:       "pk-orphan",
+		CreationOptions: json.RawMessage(passkeyCreationOptions),
+	}
+	env.enroll.createErr = context.DeadlineExceeded
+	env.mintGrant(t, "grant-pk-store-fail", auth.ReauthActionPasskeyEnroll, "")
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/passkeys/enrollment",
+		"", reauthHeader("grant-pk-store-fail"))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	// The browser never learned the passkeyId: the pending registration must
+	// be removed by compensation, never left as an undiscoverable orphan.
+	if len(env.factors.removedPasskeys) != 1 || env.factors.removedPasskeys[0] != "pk-orphan" {
+		t.Errorf("compensation removed = %v, want [pk-orphan]", env.factors.removedPasskeys)
+	}
+	if env.enroll.size() != 0 {
+		t.Error("no enrollment may linger after a failed begin")
+	}
+}
+
+func TestBeginTOTPEnrollment_CompensationFailureStillFailsClosed(t *testing.T) {
+	factors := &fakeFactorManager{
+		totpEnrollment: auth.TOTPEnrollment{Secret: "S", OTPAuthURI: "u"},
+		removeTOTPErr:  auth.ErrProviderUnavailable,
+	}
+	grants := newMemReauthGrants()
+	enroll := newMemEnrollments()
+	enroll.createErr = context.DeadlineExceeded
+	var logBuf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	env := &securityEnv{
+		handlers: NewSecurityHandlers(factors, NewReauthGrants(grants), enroll, 5*time.Minute, logger),
+		factors:  factors,
+		grants:   grants,
+		enroll:   enroll,
+	}
+	env.mintGrant(t, "grant-comp-fail", auth.ReauthActionTOTPEnroll, "")
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/totp/enrollment",
+		"", reauthHeader("grant-comp-fail"))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	// Compensation was attempted exactly once; its failure is observable via
+	// an explicit security event and never changes the HTTP outcome.
+	if factors.removeTOTPCalls != 1 {
+		t.Errorf("remove calls = %d, want 1 compensation attempt", factors.removeTOTPCalls)
+	}
+	if !strings.Contains(logBuf.String(), "security.totp_enrollment_compensation_failed") {
+		t.Errorf("log must carry the compensation failure event, got %s", logBuf.String())
 	}
 }
