@@ -68,3 +68,40 @@ Wire shape：`sessionId / deviceName / clientName / approximateLocation(恒 null
 | P4.1 Session Inventory & Lifecycle | PASSED / FROZEN |
 | Implementation head | `c9d2af2` |
 | 下一阶段 | P4.2 Security Factors Backend（TOTP / Passkey lifecycle；Recovery Codes deferred） |
+
+---
+
+# 更正记录（append-only，2026-08-09）
+
+> 本更正依据后续复审证据追加，原始记录正文保持不动；历史提交不改写。
+
+## C1. 原 freeze 结论被复审证据否定
+
+本记录第 1–7 节（`2ddaea8`，docs-only）将 P4.1 记为 PASSED / FROZEN、Blocking defects = 0，该结论**无效**：复审在 `8b13bd8899de3a0a437f7c37609bb3b5987883a6`（P4.2 lifecycle head）上确认 R1–R4 四个 blocking defect 仍然存在。`2ddaea8` 不是有效的 P4.1 frozen head。
+
+## C2. 复审确认的 blocking defects（R1–R4 + Rotate）
+
+| Finding | 缺陷 | 修复（`e73a60f` fix(session): close phase 4.1 review findings） |
+| --- | --- | --- |
+| R1 Redis revoke false-success | `resolve()` 把 record `Get()` 的基础设施错误压成 `ErrSessionNotFound`；bulk revoke 对 resolve 错误 continue → Redis 故障下漏撤销仍返回成功 | `resolve()` 仅对逻辑 miss（无 locator / 无 record / 损坏 / foreign owner）返回 `ErrSessionNotFound`，基础设施错误包装后传播；`RevokeAllOtherSessions` 遇非 NotFound 错误即 abort 并返回 err（fail closed）。回归：`TestRevokeSessionPropagatesInfrastructureFailure`、`TestRevokeAllOtherSessionsPropagatesInfrastructureFailure` |
+| R2 bulk revoke 忽略 idle expiry | `DeleteBySessionID` / `RevokeAllOtherSessions` 用 `IsExpired(time.Now(), 0)` 重放，关闭了冻结的 idle-expiry 语义 | 两个方法签名显式携带 `now time.Time, idleTTL time.Duration`，与 `GetBySessionID` / `ListUserSessions` / `EffectiveExpiry` 同源重放；idle-expired 目标只清理不计入撤销。回归：`TestBulkRevokeHonoursIdleExpiry` + Redis 集成（DeleteBySessionID / RevokeAllOtherSessions idle 用例） |
+| R3 持久化 untrusted XFF | session 创建用 `clientIP(r)`（优先信任 X-Forwarded-For）写入 `IPAddressMasked`，违反 P4.0「不新增 proxy-header trust」 | 新增 `peerIP(r)`（仅 RemoteAddr）用于持久化；`clientIP` 保留但限定 rate limiting only。回归：`TestLoginPersistsPeerIPNotForwardedHeader`、`TestPeerIPIgnoresProxyHeaders` |
+| R4 durable audit 缺失 | targeted/bulk revoke 仅 `slog.Info/Warn`，无 durable audit recorder（ADR-0004 §8：log-based audit is not a substitute） | session 包新增 `SecurityAuditor` 接缝（`RecordSessionEvent`）与事件常量 `session.revoked` / `session.revoked_others`；bootstrap 以 `sessionSecurityAuditor` 适配到既有 `postgres.SecurityEventStore`（空 app/client 列）。audit best-effort：recorder 失败仅 Warn，不掩盖已成功的撤销。回归：`TestRevokeRecordsDurableSecurityAudit`、`TestRevokeSucceedsWhenAuditRecorderFails` |
+| Rotate 复活缺陷（复审顺手项） | old record 不存在时 Rotate 仍会重写出新 record，被撤销的 session 可被在途 rotation 复活 | Rotate Lua 脚本先 `EXISTS KEYS[1]`，不存在即 return 0 → Go 侧 `session.ErrSessionNotFound`。回归：`TestIntegration_SessionStoreRotate`（vanished rotation 用例）+ `store_test.go` fake 同语义 |
+
+## C3. 更正后的门禁证据（本机实跑）
+
+| 检查 | 结果 |
+| --- | --- |
+| gofmt / go vet / go build | ✅ clean |
+| go test ./... -race -count=1 | ✅ 全部通过 |
+| Redis 集成测试（-tags integration，SSH 隧道实连，-race） | ✅ 全绿（65.8s，含 R2 / Rotate 新用例） |
+
+## C4. 更正后的正式状态
+
+| 项 | 状态 |
+| --- | --- |
+| `2ddaea8` freeze record | **INVALIDATED BY REVIEW EVIDENCE**（仅保留作历史记录） |
+| P4.1 Session Inventory & Lifecycle | 修复 head = `e73a60f`（fix(session): close phase 4.1 review findings），待复审重新判 gate |
+| R1–R4 / Rotate | 已在 `e73a60f` 关闭并回归锁定 |
+
