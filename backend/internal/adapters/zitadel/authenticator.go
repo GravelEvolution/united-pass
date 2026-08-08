@@ -59,9 +59,19 @@ type sessionService interface {
 }
 
 // userService is the subset of the ZITADEL user service the adapter uses.
+// The factor methods (TOTP and passkey lifecycle) serve the account
+// security-factor endpoints (ADR-0006 §7/§8); every write runs under the
+// backend service account, never under a user token.
 type userService interface {
 	GetUserByID(ctx context.Context, in *userv2.GetUserByIDRequest, opts ...grpc.CallOption) (*userv2.GetUserByIDResponse, error)
 	ListAuthenticationMethodTypes(ctx context.Context, in *userv2.ListAuthenticationMethodTypesRequest, opts ...grpc.CallOption) (*userv2.ListAuthenticationMethodTypesResponse, error)
+	RegisterTOTP(ctx context.Context, in *userv2.RegisterTOTPRequest, opts ...grpc.CallOption) (*userv2.RegisterTOTPResponse, error)
+	VerifyTOTPRegistration(ctx context.Context, in *userv2.VerifyTOTPRegistrationRequest, opts ...grpc.CallOption) (*userv2.VerifyTOTPRegistrationResponse, error)
+	RemoveTOTP(ctx context.Context, in *userv2.RemoveTOTPRequest, opts ...grpc.CallOption) (*userv2.RemoveTOTPResponse, error)
+	RegisterPasskey(ctx context.Context, in *userv2.RegisterPasskeyRequest, opts ...grpc.CallOption) (*userv2.RegisterPasskeyResponse, error)
+	VerifyPasskeyRegistration(ctx context.Context, in *userv2.VerifyPasskeyRegistrationRequest, opts ...grpc.CallOption) (*userv2.VerifyPasskeyRegistrationResponse, error)
+	ListPasskeys(ctx context.Context, in *userv2.ListPasskeysRequest, opts ...grpc.CallOption) (*userv2.ListPasskeysResponse, error)
+	RemovePasskey(ctx context.Context, in *userv2.RemovePasskeyRequest, opts ...grpc.CallOption) (*userv2.RemovePasskeyResponse, error)
 }
 
 // Authenticator implements auth.Authenticator against ZITADEL's LoginV2 API.

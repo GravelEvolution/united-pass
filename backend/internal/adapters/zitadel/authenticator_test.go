@@ -50,8 +50,15 @@ func (f *fakeSessionService) DeleteSession(_ context.Context, in *sessionv2.Dele
 }
 
 type fakeUserService struct {
-	getFn     func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error)
-	methodsFn func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error)
+	getFn             func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error)
+	methodsFn         func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error)
+	registerTOTPFn    func(*userv2.RegisterTOTPRequest) (*userv2.RegisterTOTPResponse, error)
+	verifyTOTPFn      func(*userv2.VerifyTOTPRegistrationRequest) (*userv2.VerifyTOTPRegistrationResponse, error)
+	removeTOTPFn      func(*userv2.RemoveTOTPRequest) (*userv2.RemoveTOTPResponse, error)
+	registerPasskeyFn func(*userv2.RegisterPasskeyRequest) (*userv2.RegisterPasskeyResponse, error)
+	verifyPasskeyFn   func(*userv2.VerifyPasskeyRegistrationRequest) (*userv2.VerifyPasskeyRegistrationResponse, error)
+	listPasskeysFn    func(*userv2.ListPasskeysRequest) (*userv2.ListPasskeysResponse, error)
+	removePasskeyFn   func(*userv2.RemovePasskeyRequest) (*userv2.RemovePasskeyResponse, error)
 }
 
 func (f *fakeUserService) GetUserByID(_ context.Context, in *userv2.GetUserByIDRequest, _ ...grpc.CallOption) (*userv2.GetUserByIDResponse, error) {
@@ -59,6 +66,27 @@ func (f *fakeUserService) GetUserByID(_ context.Context, in *userv2.GetUserByIDR
 }
 func (f *fakeUserService) ListAuthenticationMethodTypes(_ context.Context, in *userv2.ListAuthenticationMethodTypesRequest, _ ...grpc.CallOption) (*userv2.ListAuthenticationMethodTypesResponse, error) {
 	return f.methodsFn(in)
+}
+func (f *fakeUserService) RegisterTOTP(_ context.Context, in *userv2.RegisterTOTPRequest, _ ...grpc.CallOption) (*userv2.RegisterTOTPResponse, error) {
+	return f.registerTOTPFn(in)
+}
+func (f *fakeUserService) VerifyTOTPRegistration(_ context.Context, in *userv2.VerifyTOTPRegistrationRequest, _ ...grpc.CallOption) (*userv2.VerifyTOTPRegistrationResponse, error) {
+	return f.verifyTOTPFn(in)
+}
+func (f *fakeUserService) RemoveTOTP(_ context.Context, in *userv2.RemoveTOTPRequest, _ ...grpc.CallOption) (*userv2.RemoveTOTPResponse, error) {
+	return f.removeTOTPFn(in)
+}
+func (f *fakeUserService) RegisterPasskey(_ context.Context, in *userv2.RegisterPasskeyRequest, _ ...grpc.CallOption) (*userv2.RegisterPasskeyResponse, error) {
+	return f.registerPasskeyFn(in)
+}
+func (f *fakeUserService) VerifyPasskeyRegistration(_ context.Context, in *userv2.VerifyPasskeyRegistrationRequest, _ ...grpc.CallOption) (*userv2.VerifyPasskeyRegistrationResponse, error) {
+	return f.verifyPasskeyFn(in)
+}
+func (f *fakeUserService) ListPasskeys(_ context.Context, in *userv2.ListPasskeysRequest, _ ...grpc.CallOption) (*userv2.ListPasskeysResponse, error) {
+	return f.listPasskeysFn(in)
+}
+func (f *fakeUserService) RemovePasskey(_ context.Context, in *userv2.RemovePasskeyRequest, _ ...grpc.CallOption) (*userv2.RemovePasskeyResponse, error) {
+	return f.removePasskeyFn(in)
 }
 
 type fakeLinker struct {

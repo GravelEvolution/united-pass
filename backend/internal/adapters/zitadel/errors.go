@@ -53,6 +53,63 @@ func isAuthZFailure(err error) bool {
 	return strings.Contains(st.Message(), "AUTHZ-")
 }
 
+// mapFactorError converts a ZITADEL gRPC error from a security-factor write
+// (TOTP/passkey begin, remove, list, summary) into one of the auth factor
+// sentinel errors (ADR-0006 §7/§8). Confirmation inputs are not involved on
+// these paths, so an InvalidArgument rejection is a server-side or state
+// fault and fails closed to provider unavailable instead of masquerading as
+// a user input error.
+func mapFactorWriteError(err error) error {
+	return mapFactorError(err, false)
+}
+
+// mapFactorConfirmError converts a ZITADEL gRPC error from a factor
+// confirmation call (VerifyTOTPRegistration, VerifyPasskeyRegistration).
+// InvalidArgument covers the provider rejecting the user-supplied code or
+// attestation (calibration: wrong TOTP code -> InvalidArgument EVENT-8isk2).
+func mapFactorConfirmError(err error) error {
+	return mapFactorError(err, true)
+}
+
+func mapFactorError(err error, confirm bool) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return auth.ErrProviderUnavailable
+	}
+	if isAuthZFailure(err) {
+		// Insufficient service-account permission: provider.forbidden
+		// (ADR-0006 §10), never a user-facing factor error.
+		return auth.ErrProviderUnavailable
+	}
+
+	st, ok := status.FromError(err)
+	if !ok {
+		// Non-gRPC error (network layer): provider outage.
+		return auth.ErrProviderUnavailable
+	}
+
+	switch st.Code() {
+	case codes.AlreadyExists:
+		// Factor already set up (e.g. RegisterTOTP on an enrolled user):
+		// stable 409, idempotency-safe.
+		return auth.ErrFactorAlreadySet
+	case codes.NotFound:
+		// Unknown factor/passkey (or no pending enrollment): stable
+		// non-enumeration 404.
+		return auth.ErrFactorNotSet
+	case codes.InvalidArgument, codes.FailedPrecondition, codes.Aborted, codes.OutOfRange:
+		if confirm {
+			return auth.ErrInvalidFactorCode
+		}
+		return auth.ErrProviderUnavailable
+	default:
+		// Transport, auth, quota and unknown failures are server-side.
+		return auth.ErrProviderUnavailable
+	}
+}
+
 // mapAuthError converts a ZITADEL gRPC error into an auth status.
 //
 // Credentials failures must be generic: ZITADEL surfaces "user not found",

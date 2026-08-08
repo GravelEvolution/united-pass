@@ -45,6 +45,10 @@ type FakeUser struct {
 type FakeAuthenticator struct {
 	mu    sync.RWMutex
 	users map[string]FakeUser // keyed by identifier
+	// factorStates holds the mutable security-factor state (TOTP/passkey
+	// lifecycle) per stable user ID; lazily initialized by the factor
+	// methods (fake_factors.go).
+	factorStates map[identity.UserID]*fakeFactorState
 }
 
 // NewFakeAuthenticator creates an empty FakeAuthenticator.
