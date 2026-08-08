@@ -25,7 +25,9 @@ set -euo pipefail
 #      and every endpoint must be a parseable absolute URL whose origin
 #      (scheme://host[:port] — the port is part of the public origin)
 #      equals the probed origin. A malformed endpoint URL fails the probe
-#      as a parse failure, never as a plain mismatch.
+#      as a parse failure, never as a plain mismatch; a URL carrying a
+#      userinfo section (user:password@) is rejected outright — never
+#      stripped and accepted, never echoed into the probe's own output.
 #
 #   3. Path-prefix preservation: an authorization request for an app
 #      configured with LoginVersion = LoginV2 and BaseURI =
@@ -100,23 +102,29 @@ if [[ "${ISSUER}" != "${PROBE_ORIGIN}" ]]; then
 fi
 
 # url_origin prints the normalized scheme://host[:port] of an absolute URL.
-# Any parse failure (missing scheme, missing host) exits non-zero: a
-# malformed endpoint is never treated as a plain origin mismatch.
+# Any parse failure (missing scheme, missing host, userinfo section) exits
+# non-zero: a malformed or credential-bearing endpoint is never treated as
+# a plain origin mismatch. The raw URL is deliberately kept out of every
+# diagnostic — a hostile discovery document must not be able to smuggle
+# user:password@ material into the probe's own output.
 url_origin() {
-  local u="$1" prefix host
+  local u="$1" prefix authority
   case "${u}" in
     http://*)  prefix="http://" ;;
     https://*) prefix="https://" ;;
-    *) die "endpoint URL ${u} has no http(s) scheme" ;;
+    *) die "endpoint URL has no http(s) scheme" ;;
   esac
-  host="${u#"${prefix}"}"
-  host="${host%%/*}"
-  host="${host%%\?*}"
-  host="${host%%#*}"
-  # Strip any userinfo section; credentials have no place in an endpoint.
-  host="${host##*@}"
-  [[ -n "${host}" ]] || die "endpoint URL ${u} has no host"
-  echo "${prefix}${host}"
+  authority="${u#"${prefix}"}"
+  authority="${authority%%/*}"
+  authority="${authority%%\?*}"
+  authority="${authority%%#*}"
+  # userinfo is forbidden on an endpoint: fail closed on it instead of
+  # stripping it — stripped credentials would silently normalize a
+  # credential-bearing discovery value.
+  [[ "${authority}" != *"@"* ]] \
+    || die "endpoint URL contains forbidden userinfo"
+  [[ -n "${authority}" ]] || die "endpoint URL has no host"
+  echo "${prefix}${authority}"
 }
 
 # Every protocol endpoint the reverse proxy must expose: absent, malformed
