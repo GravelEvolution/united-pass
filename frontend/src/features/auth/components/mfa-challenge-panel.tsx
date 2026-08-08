@@ -20,6 +20,7 @@ import {
   IconShield,
 } from "@douyinfe/semi-icons";
 import type { MfaMethod } from "@/features/auth/types";
+import { isApiError } from "@/lib/api/api-error";
 import styles from "./credential-panel.module.css";
 
 type MfaChallengePanelProps = {
@@ -27,6 +28,13 @@ type MfaChallengePanelProps = {
   availableMethods: MfaMethod[];
   onSuccess: (redirectUrl: string) => void;
   onCancel: () => void;
+  /**
+   * Real-mode seam (P3.9): submits the code against the P1 Session API.
+   * When provided, verification performs a real network round-trip and the
+   * mock artifacts (demo state buttons, MOCK PREVIEW badge) are hidden;
+   * when absent, the frozen mock behavior is kept.
+   */
+  onVerify?: (method: MfaMethod, code: string) => Promise<void>;
 };
 
 type MfaPhase =
@@ -60,7 +68,9 @@ export function MfaChallengePanel({
   availableMethods,
   onSuccess,
   onCancel,
+  onVerify,
 }: MfaChallengePanelProps) {
+  const isRealMode = onVerify !== undefined;
   const [selectedMethod, setSelectedMethod] = useState<MfaMethod>(() =>
     pickDefaultMethod(availableMethods),
   );
@@ -77,12 +87,57 @@ export function MfaChallengePanel({
     }, 600);
   }
 
+  function verifyErrorMessage(error: unknown): string {
+    if (isApiError(error)) {
+      if (error.kind === "rate_limited") {
+        setPhase({ phase: "too_many_attempts" });
+      }
+      return error.message;
+    }
+    return "验证失败，请重试。";
+  }
+
+  async function handleRealTotpSubmit(code: string) {
+    if (!onVerify) return;
+    setPhase({ phase: "submitting" });
+    try {
+      await onVerify("totp", code);
+      onSuccess(MOCK_REDIRECT_URL);
+    } catch (error) {
+      setPhase({ phase: "active" });
+      setFieldError(verifyErrorMessage(error));
+    }
+  }
+
+  async function handleRealRecoverySubmit(code: string) {
+    if (!onVerify) return;
+    setPhase({ phase: "submitting" });
+    try {
+      await onVerify("recovery_code", code);
+      onSuccess(MOCK_REDIRECT_URL);
+    } catch (error) {
+      setPhase({ phase: "active" });
+      const nextAttempts = attempts + 1;
+      setAttempts(nextAttempts);
+      if (nextAttempts >= MAX_ATTEMPTS) {
+        setPhase({ phase: "too_many_attempts" });
+        return;
+      }
+      setFieldError(verifyErrorMessage(error));
+    }
+  }
+
   function handleTotpSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const code = codeValue.trim();
 
     if (!/^\d{6}$/.test(code)) {
       setFieldError("请输入 6 位数字验证码。");
+      return;
+    }
+
+    if (onVerify) {
+      void handleRealTotpSubmit(code);
       return;
     }
 
@@ -102,6 +157,11 @@ export function MfaChallengePanel({
         return;
       }
       setFieldError(`恢复代码无效。剩余尝试次数 ${MAX_ATTEMPTS - nextAttempts} 次。`);
+      return;
+    }
+
+    if (onVerify) {
+      void handleRealRecoverySubmit(code);
       return;
     }
 
@@ -165,9 +225,9 @@ export function MfaChallengePanel({
   return (
     <div className={styles.panel}>
       <div className={styles.heading}>
-        <span className={styles.mockBadge}>MOCK PREVIEW</span>
+        {!isRealMode && <span className={styles.mockBadge}>MOCK PREVIEW</span>}
         <h1>二次验证</h1>
-        <p>请完成多因素验证以继续登录。验证令牌：<code>{mfaToken}</code></p>
+        <p>请完成多因素验证以继续登录。{!isRealMode && <>验证令牌：<code>{mfaToken}</code></>}</p>
       </div>
 
       {availableMethods.length > 1 && (
@@ -230,7 +290,7 @@ export function MfaChallengePanel({
               loading={isSubmitting}
               disabled={isSubmitting}
             >
-              {isSubmitting ? "正在验证…" : "验证（Mock）"}
+              {isSubmitting ? "正在验证…" : isRealMode ? "验证" : "验证（Mock）"}
             </Button>
           </div>
         </form>
@@ -308,14 +368,17 @@ export function MfaChallengePanel({
               loading={isSubmitting}
               disabled={isSubmitting}
             >
-              {isSubmitting ? "正在验证…" : "验证（Mock）"}
+              {isSubmitting ? "正在验证…" : isRealMode ? "验证" : "验证（Mock）"}
             </Button>
           </div>
         </form>
       )}
 
-      <p className={styles.notice}>当前为界面 mock，不会执行真实的多因素验证。</p>
-      <div className={styles.demoLinks}>
+      {!isRealMode && (
+        <p className={styles.notice}>当前为界面 mock，不会执行真实的多因素验证。</p>
+      )}
+      {!isRealMode && (
+        <div className={styles.demoLinks}>
         <p>Mock 状态演示</p>
         <ul>
           <li>
@@ -339,7 +402,8 @@ export function MfaChallengePanel({
             </button>
           </li>
         </ul>
-      </div>
+        </div>
+      )}
     </div>
   );
 }

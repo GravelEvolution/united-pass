@@ -15,6 +15,11 @@ import { useRouter } from "next/navigation";
 import { Button, Checkbox, Input } from "@douyinfe/semi-ui";
 import { IconKey, IconMail, IconUser } from "@douyinfe/semi-icons";
 import { authenticateMockAccount, MOCK_LOGIN_ACCOUNTS } from "@/lib/mock/mock-auth";
+import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
+import { isApiError } from "@/lib/api/api-error";
+import { completeLoginMfa, submitLogin } from "@/lib/api/browser/auth-commands";
+import type { MfaMethod } from "@/features/auth/types";
+import { MfaChallengePanel } from "@/features/auth/components/mfa-challenge-panel";
 import styles from "./credential-panel.module.css";
 
 type CredentialPanelProps = {
@@ -28,6 +33,17 @@ type CredentialPanelProps = {
   resumeRequestId?: string;
 };
 
+/**
+ * MFA methods the login seam can actually complete in the browser. The
+ * passkey assertion seam is not migrated yet (ADR-0004), so passkey is
+ * filtered out before rendering the challenge panel; the backend error
+ * surface stays untouched.
+ */
+const COMPLETABLE_MFA_METHODS: ReadonlySet<MfaMethod> = new Set([
+  "totp",
+  "recovery_code",
+]);
+
 export function CredentialPanel({ mode, resumeRequestId }: CredentialPanelProps) {
   const router = useRouter();
   const isLogin = mode === "login";
@@ -35,6 +51,67 @@ export function CredentialPanel({ mode, resumeRequestId }: CredentialPanelProps)
   const [loginError, setLoginError] = useState<string>();
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [termsError, setTermsError] = useState<string>();
+  const [remember, setRemember] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [mfaChallenge, setMfaChallenge] = useState<{
+    mfaToken: string;
+    availableMethods: MfaMethod[];
+  }>();
+
+  function loginDestination(): string {
+    if (resumeRequestId) {
+      return `/authorize?requestId=${encodeURIComponent(resumeRequestId)}`;
+    }
+    return "/account";
+  }
+
+  function loginFailureMessage(error: unknown): string {
+    if (isApiError(error)) {
+      if (error.kind === "rate_limited") {
+        const wait = error.retryAfter !== undefined ? `请在 ${error.retryAfter} 秒后再试。` : "请稍后再试。";
+        return `尝试次数过多，${wait}`;
+      }
+      if (error.kind === "network") {
+        return "网络异常，请检查连接后重试。";
+      }
+      return error.message;
+    }
+    return "登录失败，请稍后重试。";
+  }
+
+  async function handleRealLogin(identifier: string, password: string) {
+    setIsSubmitting(true);
+    setLoginError(undefined);
+    try {
+      const outcome = await submitLogin({
+        identifier,
+        password,
+        remember,
+        resumeRequestId,
+      });
+      if (outcome.status === "mfa_required") {
+        const completable = outcome.availableMethods.filter((method) =>
+          COMPLETABLE_MFA_METHODS.has(method),
+        );
+        if (completable.length === 0) {
+          setLoginError("当前账户要求二次验证，但可用的验证方式暂不支持在此完成。请联系管理员。");
+          return;
+        }
+        setMfaChallenge({ mfaToken: outcome.mfaToken, availableMethods: completable });
+        return;
+      }
+      router.push(loginDestination());
+    } catch (error) {
+      setLoginError(loginFailureMessage(error));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function handleRealMfaVerify(method: MfaMethod, code: string) {
+    if (!mfaChallenge) return;
+    await completeLoginMfa({ mfaToken: mfaChallenge.mfaToken, method, code });
+  }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -44,10 +121,16 @@ export function CredentialPanel({ mode, resumeRequestId }: CredentialPanelProps)
     if (isLogin) {
       const identifier = formData.get("identifier");
       const password = formData.get("password");
-      const destination =
-        typeof identifier === "string" && typeof password === "string"
-          ? authenticateMockAccount(identifier, password)
-          : undefined;
+      if (typeof identifier !== "string" || typeof password !== "string") {
+        return;
+      }
+
+      if (!USE_MOCK_DATA_SOURCE) {
+        void handleRealLogin(identifier, password);
+        return;
+      }
+
+      const destination = authenticateMockAccount(identifier, password);
 
       if (!destination) {
         setLoginError("账户名、邮箱或密码错误，请使用页面提供的 Mock 凭据。");
@@ -84,10 +167,25 @@ export function CredentialPanel({ mode, resumeRequestId }: CredentialPanelProps)
     router.push("/account");
   }
 
+  if (isLogin && mfaChallenge) {
+    return (
+      <MfaChallengePanel
+        mfaToken={mfaChallenge.mfaToken}
+        availableMethods={mfaChallenge.availableMethods}
+        onVerify={handleRealMfaVerify}
+        onSuccess={() => router.push(loginDestination())}
+        onCancel={() => {
+          setMfaChallenge(undefined);
+          setLoginError(undefined);
+        }}
+      />
+    );
+  }
+
   return (
     <div className={styles.panel}>
       <div className={styles.heading}>
-        <span className={styles.mockBadge}>MOCK PREVIEW</span>
+        {USE_MOCK_DATA_SOURCE && <span className={styles.mockBadge}>MOCK PREVIEW</span>}
         <h1>{isLogin ? "欢迎回来" : "创建你的统一门户账号"}</h1>
         <p>{isLogin ? "使用你的统一账户继续访问。" : "一站式登陆砾石进化服务"}</p>
       </div>
@@ -192,7 +290,12 @@ export function CredentialPanel({ mode, resumeRequestId }: CredentialPanelProps)
         <div className={styles.formMetaBlock}>
           <div className={styles.formMeta}>
             {isLogin ? (
-              <Checkbox defaultChecked>保持登录</Checkbox>
+              <Checkbox
+                checked={remember}
+                onChange={(event) => setRemember(Boolean(event.target.checked))}
+              >
+                保持登录
+              </Checkbox>
             ) : (
               <Checkbox
                 checked={termsAccepted}
@@ -217,12 +320,26 @@ export function CredentialPanel({ mode, resumeRequestId }: CredentialPanelProps)
           )}
         </div>
 
-        <Button htmlType="submit" type="primary" theme="solid" size="large" block>
-          {isLogin ? "登录（Mock）" : "创建演示账户（Mock）"}
+        <Button
+          htmlType="submit"
+          type="primary"
+          theme="solid"
+          size="large"
+          block
+          loading={isLogin && !USE_MOCK_DATA_SOURCE && isSubmitting}
+          disabled={isLogin && !USE_MOCK_DATA_SOURCE && isSubmitting}
+        >
+          {isLogin
+            ? USE_MOCK_DATA_SOURCE
+              ? "登录（Mock）"
+              : isSubmitting
+                ? "正在登录…"
+                : "登录"
+            : "创建演示账户（Mock）"}
         </Button>
       </form>
 
-      {isLogin && (
+      {isLogin && USE_MOCK_DATA_SOURCE && (
         <div className={styles.demoCredential}>
           <strong>普通用户演示凭据</strong>
           <span>账户名</span>
@@ -234,7 +351,14 @@ export function CredentialPanel({ mode, resumeRequestId }: CredentialPanelProps)
         </div>
       )}
 
-      <p className={styles.notice}>当前为界面 mock，不会提交密码或创建真实账户。</p>
+      {USE_MOCK_DATA_SOURCE && (
+        <p className={styles.notice}>当前为界面 mock，不会提交密码或创建真实账户。</p>
+      )}
+      {!USE_MOCK_DATA_SOURCE && (
+        <p className={styles.notice}>
+          登录即表示你已阅读并同意<Link href="/terms">服务条款</Link>与<Link href="/privacy">隐私政策</Link>。
+        </p>
+      )}
       <p className={styles.switchMode}>
         {isLogin ? "还没有账户？" : "已有账户？"}
         <Link href={isLogin ? "/register" : "/login"}>{isLogin ? "立即注册" : "返回登录"}</Link>

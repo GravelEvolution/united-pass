@@ -13,6 +13,7 @@ import {
   parseConsentResolution,
   parseCurrentUser,
   parseDecisionResponse,
+  parseMfaRequiredResponse,
 } from "./response-validators";
 
 describe("parseConsentResolution", () => {
@@ -237,5 +238,41 @@ describe("parseCurrentUser", () => {
       }),
     ).toThrow(ApiResponseShapeError);
     expect(() => parseCurrentUser({ displayName: "X" })).toThrow(ApiResponseShapeError);
+  });
+});
+
+describe("parseMfaRequiredResponse", () => {
+  it("narrows the 202 login body onto the frozen challenge shape", () => {
+    expect(
+      parseMfaRequiredResponse({
+        status: "mfa_required",
+        mfaToken: "opaque-token",
+        availableMethods: ["totp", "recovery_code"],
+        expiresAt: "2026-08-07T12:05:30Z",
+      }),
+    ).toEqual({ mfaToken: "opaque-token", availableMethods: ["totp", "recovery_code"] });
+  });
+
+  it("rejects unknown verification methods", () => {
+    expect(() =>
+      parseMfaRequiredResponse({
+        status: "mfa_required",
+        mfaToken: "t",
+        availableMethods: ["sms"],
+      }),
+    ).toThrow(ApiResponseShapeError);
+  });
+
+  it("rejects wrong status, missing token and empty method lists", () => {
+    expect(() =>
+      parseMfaRequiredResponse({ status: "ok", mfaToken: "t", availableMethods: ["totp"] }),
+    ).toThrow(ApiResponseShapeError);
+    expect(() =>
+      parseMfaRequiredResponse({ status: "mfa_required", availableMethods: ["totp"] }),
+    ).toThrow(ApiResponseShapeError);
+    expect(() =>
+      parseMfaRequiredResponse({ status: "mfa_required", mfaToken: "t", availableMethods: [] }),
+    ).toThrow(ApiResponseShapeError);
+    expect(() => parseMfaRequiredResponse(null)).toThrow(ApiResponseShapeError);
   });
 });

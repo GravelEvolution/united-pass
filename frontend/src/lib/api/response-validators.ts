@@ -13,6 +13,7 @@ import type {
   ConsentScope,
 } from "@/features/authorization/types";
 import type { AuthorizedApplication } from "@/features/account/types";
+import type { MfaMethod } from "@/features/auth/types";
 import type { CurrentUser, EmployeeProfile, UserPersona } from "@/types/identity";
 
 /**
@@ -151,6 +152,38 @@ export function parseDecisionResponse(value: unknown): { redirectUrl: string } {
     throw new ApiResponseShapeError("ConsentDecisionResponse.redirectUrl");
   }
   return { redirectUrl };
+}
+
+// --- MFARequiredResponse ---
+
+function parseMfaMethod(value: unknown): MfaMethod {
+  if (value !== "totp" && value !== "passkey" && value !== "recovery_code") {
+    throw new ApiResponseShapeError("MfaMethod");
+  }
+  return value;
+}
+
+/**
+ * Narrows the 202 login response onto the frozen MFA challenge shape.
+ * Unknown method values are rejected: the challenge UI must never render a
+ * verification method the contract does not define.
+ */
+export function parseMfaRequiredResponse(value: unknown): {
+  mfaToken: string;
+  availableMethods: MfaMethod[];
+} {
+  if (!isRecord(value)) throw new ApiResponseShapeError("MFARequiredResponse");
+  if (value.status !== "mfa_required") {
+    throw new ApiResponseShapeError("MFARequiredResponse.status");
+  }
+  const methodsValue = value.availableMethods;
+  if (!Array.isArray(methodsValue) || methodsValue.length === 0) {
+    throw new ApiResponseShapeError("MFARequiredResponse.availableMethods");
+  }
+  return {
+    mfaToken: requireString(value, "mfaToken"),
+    availableMethods: methodsValue.map(parseMfaMethod),
+  };
 }
 
 // --- AuthorizedApplication ---
