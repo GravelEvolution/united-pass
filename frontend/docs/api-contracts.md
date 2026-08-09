@@ -1,7 +1,7 @@
 # United Pass 前端 API 接入清单
 
-- 状态：Frozen v1 — Accepted for backend implementation
-- 日期：2026-08-05（v2，与 ADR-0004/0005 对齐）
+- 状态：Frozen v1 + P4.5 Proposed Amendment（ADR-0008；实现需复审授权）
+- 日期：2026-08-09（P4.5 Passkey 浏览器仪式修订）
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect
 
@@ -151,18 +151,42 @@ MFA 挑战请求：
 }
 ```
 
-高危操作重认证请求（action 限定为 `application.delete`、`client.delete`、`client.secret.rotate`）：
+高危操作重认证请求。既有 Application/Client action 与 Account Security
+action 共用同一端点，但绑定字段不同：
 
 ```json
 {
   "action": "client.secret.rotate",
   "applicationId": "app_x",
   "clientId": "clt_x",
+  "target": "",
   "password": "user-entered-password"
 }
 ```
 
-重认证响应：密码验证通过但需要第二因子时返回 `202` `{"status":"mfa_required","reauthToken":"...","availableMethods":["totp"],"expiresAt":"..."}`；完成后的最终授权返回 `200` `{"status":"granted","reauthToken":"...","expiresAt":"..."}`。最终 `reauthToken` 一次性消费，随高危请求以 `X-Reauthentication-Token` 请求头提交；复用或未携带时后端返回错误码 `session.reauthentication_required`。授权与声明的 action 及目标资源绑定，不能跨操作重放。
+P4 Account Security action：
+
+```text
+account.password.change
+account.totp.enroll
+account.totp.remove
+account.passkey.enroll
+account.passkey.remove
+```
+
+Account action 的 `applicationId` / `clientId` 必须为空；只有
+`account.passkey.remove` 要求 `target=passkeyId`，其他 Account action 禁止
+`target`。前端不得填写假的 Application/Client ID。
+
+重认证响应：密码验证通过但需要第二因子时返回 `202`
+`{"status":"mfa_required","reauthToken":"...","availableMethods":["totp","passkey"],"passkeyRequestOptions":{},"expiresAt":"..."}`；
+完成后的最终授权返回 `200`
+`{"status":"granted","reauthToken":"...","expiresAt":"..."}`。最终
+`reauthToken` 一次性消费，随高危请求以 `X-Reauthentication-Token` 请求头
+提交；复用或未携带时后端返回错误码
+`session.reauthentication_required`。授权与声明的 action 及目标资源绑定，
+不能跨操作重放。`passkeyRequestOptions` 仅在 provider 提供 Passkey challenge
+时出现。
 
 注册请求至少包含账户名、邮箱和密码：
 
@@ -199,21 +223,94 @@ MFA 挑战请求：
 | `/account` | `POST /api/v1/me/email-change-requests/{requestId}/verify` | 校验验证码并原子更新邮箱 | 当前会话用户；一次性、限时验证码 |
 | `/account` | `POST /api/v1/me/phone-change-requests` | 为新手机号创建验证请求并发送验证码 | 当前会话用户；限速；可要求重认证 |
 | `/account` | `POST /api/v1/me/phone-change-requests/{requestId}/verify` | 校验验证码并原子更新手机号 | 当前会话用户；一次性、限时验证码 |
-| `/account/security` | `GET /api/v1/me/security/factors` | 密码、TOTP、Passkey 状态 | 当前会话用户 |
-| `/account/security` | `POST /api/v1/me/security/totp/enrollments` | 开始 TOTP 绑定 | 重认证；密钥只在绑定阶段返回 |
-| `/account/security` | `POST /api/v1/me/security/totp` | 确认 TOTP 绑定 | 验证首次 TOTP 码 |
+| `/account/security` | `GET /api/v1/me/security` | 密码、TOTP、Passkey 列表与 Recovery Codes capability | 当前会话用户；provider readback |
+| `/account/security` | `POST /api/v1/me/security/totp/enrollment` | 开始 TOTP 绑定 | `account.totp.enroll` 重认证；密钥只在绑定阶段返回 |
+| `/account/security` | `POST /api/v1/me/security/totp/enrollment/confirm` | 确认 TOTP 绑定 | enrollmentToken + 首次 TOTP 码 |
 | `/account/security` | `DELETE /api/v1/me/security/totp` | 删除 TOTP 因子 | 重认证；审计 |
-| `/account/security` | `POST /api/v1/me/security/passkeys/options` | 获取 WebAuthn 注册选项 | 重认证；服务端 challenge |
-| `/account/security` | `POST /api/v1/me/security/passkeys` | 完成 Passkey 注册 | 服务端验证 origin、RP ID、challenge |
-| `/account/security` | `DELETE /api/v1/me/security/passkeys/{credentialId}` | 删除指定 Passkey | 重认证；审计 |
-| `/account/security` | `POST /api/v1/me/security/recovery-codes` | 生成新的恢复码 | 重认证；旧码失效；只显示一次 |
+| `/account/security` | `POST /api/v1/me/security/passkeys/enrollment` | 开始 WebAuthn 注册并返回 creation options | `account.passkey.enroll` 重认证；no-store |
+| `/account/security` | `POST /api/v1/me/security/passkeys/enrollment/confirm` | 完成 Passkey 注册 | enrollmentToken + 浏览器 credential JSON |
+| `/account/security` | `POST /api/v1/me/security/passkeys/enrollment/cancel` | 取消/结算已放弃的 pending registration（P4.5 Proposed） | enrollmentToken capability；Session + CSRF；ADR-0008 |
+| `/account/security` | `DELETE /api/v1/me/security/passkeys/{passkeyId}` | 删除指定 Passkey | `account.passkey.remove` 重认证且 target 必须匹配；审计 |
 | `/account/sessions` | `GET /api/v1/me/sessions` | 设备、客户端、脱敏 IP、大致位置、最近活动和当前会话标记 | 当前会话用户 |
 | `/account/sessions` | `DELETE /api/v1/me/sessions/{sessionId}` | 撤销指定会话 | 明确确认；不能误撤当前事务 |
-| `/account/security` | `POST /api/v1/me/sessions/revoke-others` | 撤销除当前会话外的全部会话 | 重认证与明确确认 |
+| `/account/security` | `DELETE /api/v1/me/sessions` | 撤销除当前会话外的全部会话 | 明确确认；当前会话保留 |
 | `/account/applications` | `GET /api/v1/me/authorized-applications` | 已授权应用列表 | 当前会话用户 |
 | `/account/applications` | `DELETE /api/v1/me/authorized-applications/{grantId}` | 撤销指定应用授权 | 当前会话用户 |
 
 `GET /me` 必须以稳定 `userId` 作为身份主键。`employeeProfile` 可为空；外部用户关联员工档案后仍使用原 `userId`，且保留普通用户能力。
+
+### P4.5 Security Summary 与 Passkey browser ceremony
+
+真实 Security Summary 的固定形状：
+
+```json
+{
+  "password": { "set": true },
+  "totp": { "enabled": true },
+  "passkeys": [
+    { "passkeyId": "pk_opaque", "createdAt": null, "state": "active" }
+  ],
+  "recoveryCodes": {
+    "available": false,
+    "deferredReason": "provider_unsupported"
+  }
+}
+```
+
+`passkeys` 可以有零个、一个或多个元素；前端逐凭据显示并以
+`passkeyId` 作为删除 target。禁止退化回 Mock 时代“一种 factor 一行”的
+`SecurityFactor[]`。`createdAt:null` 表示 provider 未提供时间，前端不得用
+本机当前时间伪造。
+
+Passkey begin 响应：
+
+```json
+{
+  "enrollmentToken": "opaque",
+  "passkeyId": "provider-passkey-id",
+  "publicKeyCredentialCreationOptions": {
+    "challenge": "base64url",
+    "rp": {},
+    "user": { "id": "base64url" },
+    "pubKeyCredParams": []
+  }
+}
+```
+
+`publicKeyCredentialCreationOptions` 是 JSON wire shape，不可直接 type-cast
+为 DOM `PublicKeyCredentialCreationOptions`。浏览器适配层必须把 challenge、
+`user.id` 与 credential descriptor IDs 从 base64url 转为 ArrayBuffer，调用
+`navigator.credentials.create()`，再把 attestation 二进制字段编码回无 padding
+base64url JSON。WebAuthn credential 只在函数栈中存在并立即提交：
+
+```json
+{
+  "enrollmentToken": "opaque",
+  "publicKeyCredential": {
+    "id": "credential-id",
+    "rawId": "base64url",
+    "type": "public-key",
+    "response": {
+      "clientDataJSON": "base64url",
+      "attestationObject": "base64url"
+    }
+  },
+  "passkeyName": ""
+}
+```
+
+成功响应为
+`{"status":"confirmed","passkeyId":"provider-passkey-id"}`。前端随后
+`router.refresh()` 并以 provider-derived summary 为权威；不得在请求完成前
+乐观插入 passkey。
+
+如果 begin 之后浏览器取消、WebAuthn 失败或本地转换失败，前端使用 body 中
+的 enrollmentToken 调用 P4.5 cancel seam。页面/进程直接消失时，由
+ADR-0008 定义的 claim-aware expiry cleanup 结算 provider pending state；worker
+在删除前必须做 provider readback，active credential 永不删除。
+
+Recovery Codes 在当前 provider baseline 下为架构性 Deferred：真实模式隐藏，
+不存在 generate/rotate API；Mock mode 可继续展示原型。
 
 `PATCH /me` 当前页面需要支持以下公开资料字段，未提供的字段保持不变：
 
@@ -339,7 +436,7 @@ Client Profile（`web_server`、`spa_mobile`、`server_to_server`）决定 Grant
 | --- | --- | --- |
 | `getCurrentUser()` | `GET /api/v1/me` | `CurrentUser` |
 | `getCurrentPermissions()` | `GET /api/v1/me/permissions` | `PermissionCapabilities` |
-| `getSecurityFactors()` | `GET /api/v1/me/security/factors` | `SecurityFactor[]` |
+| `getSecuritySummary()` | `GET /api/v1/me/security` | `SecuritySummary` |
 | `getSessions()` | `GET /api/v1/me/sessions` | `UserSession[]` |
 | `getAuthorizedApplications()` | `GET /api/v1/me/authorized-applications` | `AuthorizedApplication[]` |
 | `getConsentResolution(requestId)` | `GET /api/v1/authorization/requests/{requestId}` | `ConsentResolution` |
@@ -367,6 +464,12 @@ Client Profile（`web_server`、`spa_mobile`、`server_to_server`）决定 Grant
 | `rotateClientSecret(applicationId, clientId)` | `POST /api/v1/admin/applications/{applicationId}/clients/{clientId}/secret-rotations` |
 | `decideConsent(requestId, decision)` | `POST /api/v1/authorization/requests/{requestId}/decision` |
 | `revokeGrant(grantId)` | `DELETE /api/v1/me/authorized-applications/{grantId}` |
+| `requestReauthentication(input)` | `POST /api/v1/auth/reauthentication` |
+| `completeReauthenticationMfa(input)` | `POST /api/v1/auth/reauthentication/mfa` |
+| `startPasskeyEnrollment(reauthToken)` | `POST /api/v1/me/security/passkeys/enrollment` + `X-Reauthentication-Token` |
+| `completePasskeyEnrollment(input)` | `POST /api/v1/me/security/passkeys/enrollment/confirm` |
+| `cancelPasskeyEnrollment(enrollmentToken)` | `POST /api/v1/me/security/passkeys/enrollment/cancel`（P4.5 Proposed） |
+| `removePasskey(passkeyId, reauthToken)` | `DELETE /api/v1/me/security/passkeys/{passkeyId}` + target-bound reauth header |
 
 ### 已移除的 Mock 专用接口
 

@@ -74,6 +74,11 @@
 | ADR-0005 | Application 与 OAuth Client 分离 | Accepted |
 | ADR-0006 | 前端、API、OAuth endpoints 与 Cookie 部署拓扑 | Accepted |
 
+> **P4.5 Proposed Amendment（2026-08-09）**：Passkey 的真实 browser
+> ceremony、多凭据 summary、action/target-bound reauthentication 与 abandoned
+> enrollment settlement 由 `backend/docs/adr-0008.md` 统一定义。该修订通过复审
+> 前不视为已实现；P4.5 不顺带开启密码/TOTP/Session mutation 的 P4.7 迁移。
+
 ## 3. 后端必须实现的 API 合同
 
 完整且唯一的 API 路径清单见 `docs/api-contracts.md`（状态：Frozen v1 — Accepted for backend implementation）。本文不再重复定义全部路径，以避免两份文档漂移。
