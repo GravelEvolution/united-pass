@@ -97,7 +97,7 @@ export async function runPasskeyEnrollmentCeremony({
       enrollmentToken: enrollment.enrollmentToken,
       passkeyId: enrollment.passkeyId,
       publicKeyCredential: credential,
-      passkeyName: "",
+      passkeyName: "当前设备",
     }, requestOptions);
     throwIfAborted(signal);
     return enrollment.passkeyId;

@@ -14,7 +14,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -448,6 +450,11 @@ func (h *SecurityHandlers) ConfirmPasskeyEnrollment(w http.ResponseWriter, r *ht
 		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "缺少凭据数据。", nil)
 		return
 	}
+	passkeyName := strings.TrimSpace(req.PasskeyName)
+	if passkeyName == "" || utf8.RuneCountInString(passkeyName) > 200 {
+		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "通行密钥名称必须为 1 至 200 个字符。", nil)
+		return
+	}
 
 	data, tokenHash, claimID, ok := h.claimEnrollmentData(w, r, principal, req.EnrollmentToken, auth.EnrollmentPasskey)
 	if !ok {
@@ -455,7 +462,7 @@ func (h *SecurityHandlers) ConfirmPasskeyEnrollment(w http.ResponseWriter, r *ht
 	}
 
 	providerCtx, cancel := context.WithTimeout(r.Context(), passkeyProviderTimeout)
-	err := h.factors.ConfirmPasskeyEnrollment(providerCtx, principal.UserID, data.Target, req.PasskeyName, req.PublicKeyCredential)
+	err := h.factors.ConfirmPasskeyEnrollment(providerCtx, principal.UserID, data.Target, passkeyName, req.PublicKeyCredential)
 	cancel()
 	h.settleEnrollment(r.Context(), principal.UserID, tokenHash, claimID, auth.EnrollmentPasskey, err)
 	if err != nil {

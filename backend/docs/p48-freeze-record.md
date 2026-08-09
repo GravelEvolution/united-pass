@@ -104,3 +104,11 @@ context 尝试。客户端取消不能抹掉取证尝试；PostgreSQL 故障仍�
 | Blocking defects | 0 |
 | Scope leakage | 0 |
 | 下一阶段 | P4.9 pinned ZITADEL v2.71.18 live acceptance；完成前 Phase 4 不得标记 complete |
+
+## P4.9 closure amendment — 2026-08-09
+
+The live cross-invariant matrix is Passed. Enrollment settlement converged for
+real TOTP and browser passkey flows; active-preservation held until explicit
+target-bound removal; targeted/bulk revoke, logout and provider readbacks all
+matched the frozen contracts. Phase 4 is complete/frozen, with P4.6 Recovery
+Codes still architecture-deferred and non-blocking.

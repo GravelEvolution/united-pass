@@ -275,3 +275,13 @@ pnpm build       # Next.js 生产构建
 | 真实 API 逐个切换 | 后端完成一个接口，前端对应方法从 Mock 切换为 HTTP |
 | OpenAPI 生成类型 | 后端合同稳定后，使用 OpenAPI 生成 TypeScript 类型和客户端 |
 | CI/CD | GitHub Actions 需要 `workflow` scope 权限推送 `.github/workflows/` |
+
+## 10. P4.9 live-closure amendment — 2026-08-09
+
+Frontend real-mode live acceptance is Passed against pinned ZITADEL v2.71.18.
+The browser WebAuthn adapter now strictly accepts the provider's single
+`{publicKey: ...}` envelope, submits a valid non-empty passkey name, completes
+registration/provider readback, and performs passkey step-up target-bound
+removal. Password/TOTP/session/logout and `prompt=none` live matrices also
+passed. Historical future-work descriptions above are freeze-v1 context, not
+the current Phase 4 status.

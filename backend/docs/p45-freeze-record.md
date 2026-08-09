@@ -90,3 +90,10 @@
 | P4.5 Passkey Browser Ceremony & Settlement | PASSED / FROZEN 🔒（本 commit 生效；architecture `d868ce8`，acceptance `194b6d2`，A14 Pending） |
 | P4.6 Recovery Codes | DEFERRED BY ARCHITECTURE（不阻塞 Phase 4） |
 | 下一实施阶段 | P4.7 remaining Account Security frontend real-seam migration |
+
+## P4.9 closure amendment — 2026-08-09
+
+A14 is Passed: production Chrome registration → ZITADEL confirm 200 → provider
+active readback → passkey step-up → target-bound DELETE 200 → provider readback
+zero. Historical Pending rows above describe the P4.5 freeze-time state; this
+amendment is the final authority for live status.

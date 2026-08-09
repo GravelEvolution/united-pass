@@ -1,6 +1,6 @@
 # United Pass 前端 API 接入清单
 
-- 状态：Frozen v1 + P4.5 Frozen Amendment + P4.7 Frozen Amendment（ADR-0009；implementation `e0dcc47`；live A15 Pending）
+- 状态：Frozen v1 + P4.5/P4.7/P4.9 Frozen Amendments（live A14/A15 Passed）
 - 日期：2026-08-09（P4.7 Account Security real-seam 接入修订）
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect
@@ -295,9 +295,14 @@ base64url JSON。WebAuthn credential 只在函数栈中存在并立即提交：
       "attestationObject": "base64url"
     }
   },
-  "passkeyName": ""
+  "passkeyName": "当前设备"
 }
 ```
+
+ZITADEL v2.71.18 的 creation/request options 以单层
+`{"publicKey": {...}}` envelope 返回；浏览器适配层严格解包该 envelope，且拒绝
+同时存在 envelope 与顶层 option 字段。`passkeyName` trim 后必须为 1–200 个
+Unicode 字符，后端在 claim enrollment capability 前校验。
 
 成功响应为
 `{"status":"confirmed","passkeyId":"provider-passkey-id"}`。前端随后

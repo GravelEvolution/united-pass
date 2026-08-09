@@ -27,6 +27,15 @@ function requireRecord(value: unknown, field: string): Record<string, unknown> {
   return value;
 }
 
+function unwrapPublicKeyOptions(value: unknown, field: string): Record<string, unknown> {
+  const record = requireRecord(value, field);
+  if (record.publicKey === undefined) return record;
+  if (Object.keys(record).some((key) => key !== "publicKey")) {
+    throw new WebAuthnContractError(field);
+  }
+  return requireRecord(record.publicKey, `${field}.publicKey`);
+}
+
 function requireString(record: Record<string, unknown>, field: string): string {
   const value = record[field];
   if (typeof value !== "string" || value.length === 0) {
@@ -146,7 +155,7 @@ function parseRequestExtensions(value: unknown): AuthenticationExtensionsClientI
 }
 
 export function parseCreationOptions(value: unknown): PublicKeyCredentialCreationOptions {
-  const record = requireRecord(value, "creationOptions");
+  const record = unwrapPublicKeyOptions(value, "creationOptions");
   const rp = requireRecord(record.rp, "creationOptions.rp");
   const user = requireRecord(record.user, "creationOptions.user");
   if (!Array.isArray(record.pubKeyCredParams) || record.pubKeyCredParams.length === 0) {
@@ -213,7 +222,7 @@ export function parseCreationOptions(value: unknown): PublicKeyCredentialCreatio
 }
 
 export function parseRequestOptions(value: unknown): PublicKeyCredentialRequestOptions {
-  const record = requireRecord(value, "requestOptions");
+  const record = unwrapPublicKeyOptions(value, "requestOptions");
   const timeout = optionalNumber(record, "timeout");
   const rpId = optionalString(record, "rpId");
   const allowCredentials = parseCredentialDescriptors(record.allowCredentials, "requestOptions.allowCredentials");

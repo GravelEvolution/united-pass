@@ -98,6 +98,7 @@ describe("passkey enrollment ceremony", () => {
       expect.objectContaining({
         enrollmentToken: "enrollment-token",
         passkeyId: "pk-new",
+        passkeyName: "当前设备",
       }),
       { signal: controller.signal },
     );

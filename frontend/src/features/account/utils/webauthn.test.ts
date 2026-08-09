@@ -70,6 +70,26 @@ describe("WebAuthn option parsing", () => {
     expect(bufferSourceBytes(options.allowCredentials?.[0].id ?? bytes())).toEqual([3, 4]);
   });
 
+  it("unwraps provider publicKey envelopes for creation and assertion options", () => {
+    const creation = parseCreationOptions({
+      publicKey: {
+        challenge: "AQI",
+        rp: { id: "login.example.com", name: "统一登录门户" },
+        user: { id: "AwQ", name: "usr_1", displayName: "用户" },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+      },
+    });
+    const assertion = parseRequestOptions({
+      publicKey: {
+        challenge: "BQY",
+        rpId: "login.example.com",
+      },
+    });
+
+    expect(bufferSourceBytes(creation.challenge)).toEqual([1, 2]);
+    expect(bufferSourceBytes(assertion.challenge)).toEqual([5, 6]);
+  });
+
   it("fails closed on missing required creation fields or unknown extensions", () => {
     expect(() => parseCreationOptions({ challenge: "AQI" })).toThrow(WebAuthnContractError);
     expect(() => parseCreationOptions({
@@ -78,6 +98,15 @@ describe("WebAuthn option parsing", () => {
       user: { id: "AwQ", name: "u", displayName: "U" },
       pubKeyCredParams: [{ type: "public-key", alg: -7 }],
       extensions: { unknown: true },
+    })).toThrow(WebAuthnContractError);
+    expect(() => parseCreationOptions({
+      publicKey: {
+        challenge: "AQI",
+        rp: { name: "RP" },
+        user: { id: "AwQ", name: "u", displayName: "U" },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+      },
+      challenge: "mixed",
     })).toThrow(WebAuthnContractError);
   });
 });

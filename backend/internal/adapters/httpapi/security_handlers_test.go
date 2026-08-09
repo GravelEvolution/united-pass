@@ -955,7 +955,7 @@ func TestConfirmPasskeyEnrollment_BadAttestation(t *testing.T) {
 	env.factors.confirmPasskeyErr = auth.ErrInvalidFactorCode
 
 	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/passkeys/enrollment/confirm",
-		`{"enrollmentToken":"`+token+`","publicKeyCredential":{"id":"bad"}}`, nil)
+		`{"enrollmentToken":"`+token+`","publicKeyCredential":{"id":"bad"},"passkeyName":"Current device"}`, nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
@@ -964,6 +964,37 @@ func TestConfirmPasskeyEnrollment_BadAttestation(t *testing.T) {
 	}
 	if len(env.enroll.abandoned) != 1 {
 		t.Fatalf("abandoned cleanup entries = %d, want 1", len(env.enroll.abandoned))
+	}
+}
+
+func TestConfirmPasskeyEnrollment_RejectsInvalidNameBeforeClaim(t *testing.T) {
+	tests := map[string]string{
+		"empty":    "",
+		"too-long": strings.Repeat("密", 201),
+	}
+	for name, passkeyName := range tests {
+		t.Run(name, func(t *testing.T) {
+			env := newSecurityEnv()
+			token, _ := passkeyBegin(t, env)
+			body, err := json.Marshal(map[string]any{
+				"enrollmentToken":     token,
+				"publicKeyCredential": map[string]any{"id": "cred-1"},
+				"passkeyName":         passkeyName,
+			})
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/passkeys/enrollment/confirm", string(body), nil)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if len(env.factors.confirmPasskeyCalls) != 0 {
+				t.Fatalf("provider confirm calls = %d, want 0", len(env.factors.confirmPasskeyCalls))
+			}
+			if len(env.enroll.claims) != 0 {
+				t.Fatalf("claimed enrollments = %d, want 0", len(env.enroll.claims))
+			}
+		})
 	}
 }
 
@@ -1052,7 +1083,7 @@ func TestConfirmPasskeyEnrollment_TOTPTokenRejected(t *testing.T) {
 	totpToken := totpBegin(t, env)
 
 	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/passkeys/enrollment/confirm",
-		`{"enrollmentToken":"`+totpToken+`","publicKeyCredential":{"id":"cred-1"}}`, nil)
+		`{"enrollmentToken":"`+totpToken+`","publicKeyCredential":{"id":"cred-1"},"passkeyName":"Current device"}`, nil)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}

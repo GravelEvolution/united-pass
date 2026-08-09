@@ -104,3 +104,10 @@ P4.8 不改写 P4.1/P4.2/P4.3/P4.5/P4.7 的业务结果。
 
 P4.9 必须以 pinned ZITADEL v2.71.18 完成 A15、P4.5 A14 与跨不变量 live matrix，
 并保留真实证据；未实演前不得标记 Phase 4 complete。
+
+## P4.9 closure amendment — 2026-08-09
+
+A15 and the carried P4.5 A14 are Passed. Password/TOTP/session/logout,
+`prompt=none`, browser passkey registration, provider active readback and
+target-bound removal all passed. Historical Pending rows above remain as the
+P4.7 freeze-time record and are superseded by this amendment.
