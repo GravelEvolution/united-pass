@@ -22,6 +22,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/platform/observability"
+	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
@@ -70,16 +71,20 @@ type SecurityHandlers struct {
 	factors       auth.FactorManager
 	reauth        ReauthVerifier
 	enrollments   EnrollmentTokenStore
+	security      SensitiveConsumptionGate
 	enrollmentTTL time.Duration
 	logger        *slog.Logger
 }
 
 // NewSecurityHandlers builds the security factor handlers. enrollmentTTL
-// bounds how long a begin→confirm enrollment stays valid.
+// bounds how long a begin→confirm enrollment stays valid. security is the
+// authoritative sensitive-consumption gate (ADR-0007 Decision 5); nil only
+// in tests that never exercise the barrier.
 func NewSecurityHandlers(
 	factors auth.FactorManager,
 	reauth ReauthVerifier,
 	enrollments EnrollmentTokenStore,
+	security SensitiveConsumptionGate,
 	enrollmentTTL time.Duration,
 	logger *slog.Logger,
 ) *SecurityHandlers {
@@ -87,6 +92,7 @@ func NewSecurityHandlers(
 		factors:       factors,
 		reauth:        reauth,
 		enrollments:   enrollments,
+		security:      security,
 		enrollmentTTL: enrollmentTTL,
 		logger:        logger,
 	}
@@ -450,16 +456,26 @@ func (h *SecurityHandlers) consumeReauthGrant(w http.ResponseWriter, r *http.Req
 // issueEnrollment mints a single-use enrollment token bound to the caller's
 // user + session (+ factor kind and optional target) and stores its hash.
 // Token generation is fail-closed: a crypto/rand failure aborts the flow.
+// The enrollment is stamped with the issuing session's security epoch
+// (ADR-0007 Decision 1); confirmation re-validates the stamp against the
+// authoritative state.
 func (h *SecurityHandlers) issueEnrollment(ctx context.Context, principal session.Principal, kind auth.EnrollmentKind, target string) (string, error) {
+	record, ok := SessionRecordFromContext(ctx)
+	if !ok {
+		// Unreachable under RequireSession; fail closed rather than mint an
+		// unstamped enrollment.
+		return "", errors.New("httpapi: enrollment mint without session record")
+	}
 	token, err := session.GenerateToken()
 	if err != nil {
 		return "", err
 	}
 	data := auth.EnrollmentData{
-		UserID:    principal.UserID,
-		SessionID: string(principal.SessionID),
-		Kind:      kind,
-		Target:    target,
+		UserID:        principal.UserID,
+		SessionID:     string(principal.SessionID),
+		Kind:          kind,
+		Target:        target,
+		SecurityEpoch: record.SecurityEpoch,
 	}
 	if err := h.enrollments.CreateEnrollment(ctx, session.HashToken(token), data, h.enrollmentTTL); err != nil {
 		return "", err
@@ -520,6 +536,22 @@ func (h *SecurityHandlers) claimEnrollmentData(w http.ResponseWriter, r *http.Re
 		}
 		writeError(w, r, http.StatusForbidden, CodeEnrollmentInvalid, "绑定流程已失效，请重新开始。", nil)
 		return auth.EnrollmentData{}, "", "", false
+	}
+	// Authoritative security-state gate (ADR-0007 Decision 5): a stale epoch
+	// stamp burns the enrollment (authoritative permanent death); a
+	// non-terminal mutation intent releases the claim so the confirmation
+	// stays retryable once the intent settles.
+	if h.security != nil {
+		if err := h.security.AllowSensitiveConsumption(r.Context(), data.UserID, data.SecurityEpoch); err != nil {
+			if errors.Is(err, securitystate.ErrEpochStale) {
+				_ = h.enrollments.ConsumeEnrollment(r.Context(), tokenHash, claimID)
+			} else {
+				_ = h.enrollments.ReleaseEnrollment(r.Context(), tokenHash, claimID)
+			}
+			h.logSecurityEvent("security.enrollment_gate_denied", principal.UserID, string(kind), err)
+			writeError(w, r, http.StatusForbidden, CodeEnrollmentInvalid, "账户安全状态变更中，请重新开始绑定流程。", nil)
+			return auth.EnrollmentData{}, "", "", false
+		}
 	}
 	return data, tokenHash, claimID, true
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/platform/observability"
+	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
@@ -80,6 +81,16 @@ type ReauthRateChecker interface {
 // Service satisfies this interface; audit payloads never contain secrets.
 type ReauthEventRecorder interface {
 	RecordEvent(ctx context.Context, eventType string, actor identity.UserID, appID applications.ApplicationID, clientID applications.OAuthClientID, requestID, operation string, result applications.SecurityEventResult, failureClass string)
+}
+
+// SensitiveConsumptionGate validates the consumption of a sensitive
+// capability (reauth grant, enrollment token) against the user's
+// authoritative security state (ADR-0007 Decision 5): a stamp behind the
+// current epoch or any non-terminal mutation intent denies the consumption
+// until settled. Satisfied by the security-state service; the interface
+// lives here (close to the consumer) per AGENTS.md §8.
+type SensitiveConsumptionGate interface {
+	AllowSensitiveConsumption(ctx context.Context, userID identity.UserID, stampedEpoch securitystate.Epoch) error
 }
 
 // ReauthHandlers serves POST /api/v1/auth/reauthentication and
@@ -491,8 +502,18 @@ func (h *ReauthHandlers) checkRateLimit(w http.ResponseWriter, r *http.Request, 
 }
 
 // issueGrant creates the single-use grant and returns it exactly once. The
-// grant token is random and opaque; only its hash reaches Redis.
+// grant token is random and opaque; only its hash reaches Redis. The grant
+// is stamped with the issuing session's security epoch (ADR-0007 Decision
+// 1); the middleware gate guarantees that stamp is current at mint time.
 func (h *ReauthHandlers) issueGrant(w http.ResponseWriter, r *http.Request, principal session.Principal, action, applicationID, clientID, target string) {
+	record, ok := SessionRecordFromContext(r.Context())
+	if !ok {
+		// Unreachable under RequireSession; fail closed rather than mint an
+		// unstamped grant.
+		h.logger.Error("reauth grant mint without session record", "requestId", requestID(r))
+		WriteInternalError(w, r)
+		return
+	}
 	token, err := session.GenerateToken()
 	if err != nil {
 		h.logger.Error("reauth grant token generation failed",
@@ -512,6 +533,7 @@ func (h *ReauthHandlers) issueGrant(w http.ResponseWriter, r *http.Request, prin
 		ClientID:      clientID,
 		Target:        target,
 		CreatedAt:     now,
+		SecurityEpoch: record.SecurityEpoch,
 	}
 	if err := h.grants.CreateGrant(r.Context(), session.HashToken(token), data, h.grantTTL); err != nil {
 		h.logger.Error("reauth grant creation failed",
@@ -567,6 +589,16 @@ func (h *ReauthHandlers) createChallenge(w http.ResponseWriter, r *http.Request,
 		WriteInternalError(w, r)
 		return
 	}
+	record, ok := SessionRecordFromContext(r.Context())
+	if !ok {
+		// Unreachable under RequireSession; fail closed and revoke the
+		// temporary provider session (cleanup guard).
+		h.revokeProviderSession(r, result.ProviderSessionID, principal.UserID,
+			applications.ApplicationID(req.ApplicationID), applications.OAuthClientID(req.ClientID), req.Action)
+		h.logger.Error("reauth challenge mint without session record", "requestId", requestID(r))
+		WriteInternalError(w, r)
+		return
+	}
 	now := time.Now().UTC()
 	data := auth.ReauthChallengeData{
 		UserID:                principal.UserID,
@@ -579,6 +611,7 @@ func (h *ReauthHandlers) createChallenge(w http.ResponseWriter, r *http.Request,
 		AvailableMethods:      result.AvailableMethods,
 		PasskeyRequestOptions: result.PasskeyRequestOptions,
 		CreatedAt:             now,
+		SecurityEpoch:         record.SecurityEpoch,
 	}
 	if err := h.challenges.CreateChallenge(r.Context(), session.HashToken(token), data, h.challengeTTL); err != nil {
 		h.revokeProviderSession(r, result.ProviderSessionID, principal.UserID,
@@ -659,14 +692,19 @@ func (h *ReauthHandlers) recordReauthFailure(r *http.Request, actor identity.Use
 // ReauthGrants verifies and atomically consumes single-use reauthentication
 // grants on behalf of high-risk operations. It satisfies the ReauthVerifier
 // interface consumed by ApplicationHandlers. Any binding mismatch (action,
-// session, application, client) or reuse fails closed.
+// session, application, client) or reuse fails closed. Consumption is
+// additionally gated by the authoritative security state (ADR-0007 Decision
+// 5): a stale stamp or a non-terminal mutation intent denies it.
 type ReauthGrants struct {
-	grants ReauthGrantStore
+	grants   ReauthGrantStore
+	security SensitiveConsumptionGate
 }
 
-// NewReauthGrants builds the grant verifier from the grant store.
-func NewReauthGrants(grants ReauthGrantStore) *ReauthGrants {
-	return &ReauthGrants{grants: grants}
+// NewReauthGrants builds the grant verifier from the grant store and the
+// sensitive-consumption gate (the security-state service in production;
+// nil only in tests that never exercise the barrier).
+func NewReauthGrants(grants ReauthGrantStore, security SensitiveConsumptionGate) *ReauthGrants {
+	return &ReauthGrants{grants: grants, security: security}
 }
 
 // VerifyAndConsume atomically consumes the grant token and checks every
@@ -689,6 +727,15 @@ func (g *ReauthGrants) VerifyAndConsume(ctx context.Context, token, action, sess
 		data.ApplicationID != string(appID) ||
 		data.ClientID != string(clientID) {
 		return errors.New("httpapi: reauthentication grant binding mismatch")
+	}
+	// Authoritative security-state gate (ADR-0007 Decision 5): the grant is
+	// already consumed (single-use, no replay even on denial). A stale epoch
+	// stamp or a non-terminal mutation intent denies the sensitive
+	// consumption fail closed.
+	if g.security != nil {
+		if err := g.security.AllowSensitiveConsumption(ctx, data.UserID, data.SecurityEpoch); err != nil {
+			return fmt.Errorf("httpapi: reauthentication grant security gate: %w", err)
+		}
 	}
 	return nil
 }

@@ -200,7 +200,7 @@ func newSecurityEnv() *securityEnv {
 	factors := &fakeFactorManager{}
 	grants := newMemReauthGrants()
 	enroll := newMemEnrollments()
-	handlers := NewSecurityHandlers(factors, NewReauthGrants(grants), enroll, 5*time.Minute, discardLogger())
+	handlers := NewSecurityHandlers(factors, NewReauthGrants(grants, nil), enroll, nil, 5*time.Minute, discardLogger())
 	return &securityEnv{handlers: handlers, factors: factors, grants: grants, enroll: enroll}
 }
 
@@ -211,6 +211,13 @@ func (e *securityEnv) router(injectPrincipal bool) http.Handler {
 			ctx := req.Context()
 			if injectPrincipal {
 				ctx = WithPrincipal(ctx, securityPrincipal)
+				// Mirrors RequireSession: enrollment mints stamp the issuing
+				// session's security epoch (ADR-0007 Decision 1).
+				ctx = WithSessionRecord(ctx, session.SessionRecord{
+					SessionID:     securityPrincipal.SessionID,
+					UserID:        securityPrincipal.UserID,
+					SecurityEpoch: 1,
+				})
 			}
 			next.ServeHTTP(w, req.WithContext(ctx))
 		})
@@ -367,7 +374,7 @@ func TestBeginTOTPEnrollment_Success(t *testing.T) {
 	}
 
 	// The grant is single-use and the enrollment challenge is stored.
-	if err := NewReauthGrants(env.grants).VerifyAndConsume(t.Context(), "grant-totp-begin",
+	if err := NewReauthGrants(env.grants, nil).VerifyAndConsume(t.Context(), "grant-totp-begin",
 		auth.ReauthActionTOTPEnroll, "sess-sec", "", "", ""); !errors.Is(err, auth.ErrReauthGrantNotFound) {
 		t.Fatalf("grant reuse err = %v, want ErrReauthGrantNotFound", err)
 	}
@@ -928,7 +935,7 @@ func TestBeginTOTPEnrollment_CompensationFailureStillFailsClosed(t *testing.T) {
 	var logBuf strings.Builder
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 	env := &securityEnv{
-		handlers: NewSecurityHandlers(factors, NewReauthGrants(grants), enroll, 5*time.Minute, logger),
+		handlers: NewSecurityHandlers(factors, NewReauthGrants(grants, nil), enroll, nil, 5*time.Minute, logger),
 		factors:  factors,
 		grants:   grants,
 		enroll:   enroll,

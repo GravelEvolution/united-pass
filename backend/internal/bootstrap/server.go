@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -33,6 +34,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/consent"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
+	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
@@ -133,6 +135,28 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 
+	// Security-state authority (ADR-0007): the PostgreSQL epoch + durable
+	// mutation intent ledger behind the shared promotion validator, the
+	// sensitive-consumption gate and the takeover/recovery trigger.
+	// PostgreSQL is the single authority — Redis never decides. The dev
+	// fake authenticator operates users that never exist in PostgreSQL, so
+	// the gate stays unwired there and the promotion paths keep the
+	// gate-less test semantics.
+	var securitySvc *securitystate.Service
+	var securityGate httpapi.SecurityStateGate
+	var sensitiveGate httpapi.SensitiveConsumptionGate
+	if _, isFake := authenticator.(*auth.FakeAuthenticator); !isFake && pool != nil {
+		securitySvc = securitystate.NewService(
+			postgres.NewSecurityStateStore(pool.PgxPool()), nil,
+			cfg.SecurityState.LeaseTTL,
+			securitystate.WithLogger(logger),
+			securitystate.WithMaxSettlementAttempts(cfg.SecurityState.MaxSettlementAttempts),
+			securitystate.WithRecoveryTimeout(cfg.SecurityState.RecoveryTimeout),
+		)
+		securityGate = securitySvc
+		sensitiveGate = securitySvc
+	}
+
 	if redisClient != nil {
 		sessionStore := redis.NewSessionStore(redisClient)
 		sessionOpts := []session.ServiceOption{
@@ -146,11 +170,22 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			sessionAuditor = newSessionSecurityAuditor(postgres.NewSecurityEventStore(pool.PgxPool()))
 			sessionOpts = append(sessionOpts, session.WithSecurityAuditor(sessionAuditor))
 		}
+		if securitySvc != nil {
+			// Epoch stamping (ADR-0007 Decision 1/F2): every new session is
+			// stamped with the user's authoritative epoch, fail closed.
+			sessionOpts = append(sessionOpts, session.WithEpochStamper(securitySvc))
+		}
 		sessionSvc = session.NewService(sessionStore, session.SystemClock{},
 			cfg.Session.TTL, cfg.Session.RememberTTL,
 			cfg.Session.IdleTTL, cfg.Session.TouchInterval,
 			encryptor,
 			sessionOpts...)
+		if securitySvc != nil {
+			// Resolve the session <-> security-state construction cycle:
+			// generation-scoped settlement cleanup runs through the session
+			// service (ADR-0007 F4).
+			securitySvc.SetCleaner(sessionSvc)
+		}
 
 		mfaStore = redis.NewMFAStore(redisClient)
 		rateChecker = redis.NewRateLimiter(redisClient)
@@ -240,7 +275,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			limiter := redis.NewRateLimiter(redisClient)
 			rotationRates = limiter
 			reauthStore := redis.NewReauthStore(redisClient)
-			reauthVerifier = httpapi.NewReauthGrants(reauthStore)
+			reauthVerifier = httpapi.NewReauthGrants(reauthStore, sensitiveGate)
 			if reauthAuth, ok := authenticator.(httpapi.ReauthAuthenticator); ok {
 				reauthHandlers = httpapi.NewReauthHandlers(
 					reauthAuth, reauthStore, reauthStore, limiter, appSvc,
@@ -262,17 +297,24 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			if factorManager, ok := authenticator.(auth.FactorManager); ok && reauthVerifier != nil {
 				securityHandlers = httpapi.NewSecurityHandlers(
 					factorManager, reauthVerifier, redis.NewEnrollmentStore(redisClient),
-					cfg.Reauth.GrantTTL, logger)
+					sensitiveGate, cfg.Reauth.GrantTTL, logger)
 			}
 
-			// Password management (ADR-0006 §6): the authenticator doubles as
-			// the password authority (ZITADEL adapter or dev fake). The
-			// mutation consumes an account.password.change reauth grant,
-			// rotates the current session and revokes all others; the durable
-			// audit shares the canonical session security auditor.
-			if passwordManager, ok := authenticator.(auth.PasswordManager); ok && reauthVerifier != nil && sessionSvc != nil {
+			// Password management (ADR-0006 §6 amended by ADR-0007): the
+			// authenticator doubles as the password authority (ZITADEL
+			// adapter or dev fake). The mutation consumes an
+			// account.password.change reauth grant, acquires the durable
+			// single-winner intent before the provider call, advances the
+			// epoch atomically with the outcome record, rotates the current
+			// session and performs the generation-scoped cleanup; the
+			// durable audit shares the canonical session security auditor.
+			// Without the PostgreSQL security-state authority the route stays
+			// unregistered (fail closed).
+			if passwordManager, ok := authenticator.(auth.PasswordManager); ok && reauthVerifier != nil && sessionSvc != nil && securitySvc != nil {
 				passwordHandlers = httpapi.NewPasswordHandlers(
-					passwordManager, reauthVerifier, sessionSvc, sessionAuditor, cfg, logger)
+					passwordManager, reauthVerifier, sessionSvc, securitySvc, sessionAuditor,
+					cfg.SecurityState.ProviderDeadline, cfg.SecurityState.SettlementTimeout,
+					cfg, logger)
 			}
 		}
 
@@ -348,6 +390,12 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	router.Get("/healthz", health.Healthz)
 	router.Get("/readyz", health.Readyz)
 
+	// Session promotion middleware parameters (ADR-0007 F1): every
+	// promotion path shares the same authoritative security-state
+	// validator and the same cookie attributes; the gate is nil only in
+	// gate-less wiring (fake development mode).
+	cookieAttrs := httpapi.CookieAttributesFromConfig(cfg.Session)
+
 	// Authorization Interaction Gateway (ADR-0005 §1, §12): the sole entry
 	// point ZITADEL generates for LoginV2 clients, served on the public
 	// origin under the /_interaction prefix the reverse proxy routes to
@@ -355,7 +403,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	// GET-only, every outcome is a 302 or the fixed local failure page.
 	router.Group(func(r chi.Router) {
 		if sessionSvc != nil {
-			r.Use(httpapi.OptionalSession(sessionSvc, userChecker, logger))
+			r.Use(httpapi.OptionalSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
 		}
 		if interactionHandlers != nil {
 			r.Get("/_interaction/login", interactionHandlers.InteractionLogin)
@@ -376,7 +424,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		// Logout requires session and CSRF.
 		r.Group(func(r chi.Router) {
 			if sessionSvc != nil {
-				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
 				r.Use(httpapi.RequireCSRF())
 			}
 			r.Delete("/auth/session", authHandlers.Logout)
@@ -386,7 +434,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		// challenges and grants are bound to the session, ADR-0004 §7).
 		r.Group(func(r chi.Router) {
 			if sessionSvc != nil {
-				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
 				r.Use(httpapi.RequireCSRF())
 			}
 			if reauthHandlers != nil {
@@ -401,7 +449,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		// ADR-0005 §12).
 		r.Group(func(r chi.Router) {
 			if sessionSvc != nil {
-				r.Use(httpapi.OptionalSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.OptionalSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
 			}
 			if authorizationHandlers != nil {
 				r.Get("/authorization/requests/{requestId}", authorizationHandlers.ResolveRequest)
@@ -414,7 +462,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		// global no-store / no-referrer header policy.
 		r.Group(func(r chi.Router) {
 			if sessionSvc != nil {
-				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
 				r.Use(httpapi.RequireCSRF())
 			}
 			if decisionHandlers != nil {
@@ -428,7 +476,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		// the token requirement).
 		r.Group(func(r chi.Router) {
 			if sessionSvc != nil {
-				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
 				r.Use(httpapi.RequireCSRF())
 			}
 			if authorizedAppHandlers != nil {
@@ -440,7 +488,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		// Account endpoints (require session).
 		r.Group(func(r chi.Router) {
 			if sessionSvc != nil {
-				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
 			}
 			if userReader != nil && permResolver != nil {
 				accountHandlers := httpapi.NewAccountHandlers(userReader, permResolver)
@@ -454,7 +502,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		// DELETE mutations additionally require the CSRF token.
 		r.Group(func(r chi.Router) {
 			if sessionSvc != nil {
-				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
 				r.Use(httpapi.RequireCSRF())
 				sessionHandlers := httpapi.NewSessionHandlers(sessionSvc, logger)
 				r.Get("/me/sessions", sessionHandlers.ListSessions)
@@ -469,7 +517,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		// enrollmentToken minted at the begin step.
 		r.Group(func(r chi.Router) {
 			if sessionSvc != nil {
-				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
 				r.Use(httpapi.RequireCSRF())
 			}
 			if securityHandlers != nil {
@@ -490,7 +538,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		// capability checks happen inside the handlers).
 		r.Group(func(r chi.Router) {
 			if sessionSvc != nil {
-				r.Use(httpapi.RequireSession(sessionSvc, userChecker, logger))
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
 				r.Use(httpapi.RequireCSRF())
 			}
 			if appHandlers != nil {
@@ -702,8 +750,36 @@ func toCanonicalSecurityEvent(ev session.SecurityAuditEvent, requestID string) a
 		FailureClass: ev.FailureClass,
 		TargetKey:    "session_id",
 		TargetID:     string(ev.SessionID),
+		Extra:        settlementAuditExtra(ev),
 		OccurredAt:   ev.OccurredAt,
 	}
+}
+
+// settlementAuditExtra carries the ADR-0007 Decision 5 additive settlement
+// facts (providerOutcome, settlementOutcome and their forensic context)
+// into the durable JSONB payload without touching the frozen result model.
+// Zero values are omitted.
+func settlementAuditExtra(ev session.SecurityAuditEvent) map[string]string {
+	extra := map[string]string{}
+	if ev.ProviderOutcome != "" {
+		extra["provider_outcome"] = ev.ProviderOutcome
+	}
+	if ev.SettlementOutcome != "" {
+		extra["settlement_outcome"] = ev.SettlementOutcome
+	}
+	if ev.IntentID != 0 {
+		extra["intent_id"] = strconv.FormatInt(ev.IntentID, 10)
+	}
+	if ev.FromEpoch != 0 {
+		extra["from_epoch"] = strconv.FormatInt(ev.FromEpoch, 10)
+	}
+	if ev.ToEpoch != 0 {
+		extra["to_epoch"] = strconv.FormatInt(ev.ToEpoch, 10)
+	}
+	if len(extra) == 0 {
+		return nil
+	}
+	return extra
 }
 
 // userStatusChecker adapts postgres.UserRepository to the UserStatusChecker

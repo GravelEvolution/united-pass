@@ -62,7 +62,7 @@ func TestRotateSession_PreservesIdentityAndRetiresOldToken(t *testing.T) {
 
 	created, oldRecord := createRotateTestSession(t, svc, user)
 
-	rotated, err := svc.RotateSession(t.Context(), created.SessionToken)
+	rotated, err := svc.RotateSession(t.Context(), created.SessionToken, 1)
 	if err != nil {
 		t.Fatalf("rotate: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestRotateSession_VanishedRaceFailsClosed(t *testing.T) {
 	svc := rotateTestService(store, rotateTestClock())
 	created, _ := createRotateTestSession(t, svc, identity.UserID("user_race"))
 
-	if _, err := svc.RotateSession(t.Context(), created.SessionToken); !errors.Is(err, ErrSessionNotFound) {
+	if _, err := svc.RotateSession(t.Context(), created.SessionToken, 1); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("err = %v, want ErrSessionNotFound", err)
 	}
 	// The vanished session must stay gone — no resurrection under any hash.
@@ -165,7 +165,7 @@ func TestRotateSession_ExpiredFailsClosedAndCleansUp(t *testing.T) {
 	created, _ := createRotateTestSession(t, svc, identity.UserID("user_abs"))
 	clock.now = clock.now.Add(31 * time.Hour)
 
-	if _, err := svc.RotateSession(t.Context(), created.SessionToken); !errors.Is(err, ErrSessionExpired) {
+	if _, err := svc.RotateSession(t.Context(), created.SessionToken, 1); !errors.Is(err, ErrSessionExpired) {
 		t.Fatalf("absolute: err = %v, want ErrSessionExpired", err)
 	}
 	if _, err := store.Get(t.Context(), HashToken(created.SessionToken)); !errors.Is(err, ErrSessionNotFound) {
@@ -179,7 +179,7 @@ func TestRotateSession_ExpiredFailsClosedAndCleansUp(t *testing.T) {
 	created2, _ := createRotateTestSession(t, svc2, identity.UserID("user_idle"))
 	clock2.now = clock2.now.Add(45 * time.Minute)
 
-	if _, err := svc2.RotateSession(t.Context(), created2.SessionToken); !errors.Is(err, ErrSessionExpired) {
+	if _, err := svc2.RotateSession(t.Context(), created2.SessionToken, 1); !errors.Is(err, ErrSessionExpired) {
 		t.Fatalf("idle: err = %v, want ErrSessionExpired", err)
 	}
 }
@@ -189,10 +189,10 @@ func TestRotateSession_ExpiredFailsClosedAndCleansUp(t *testing.T) {
 func TestRotateSession_UnknownToken(t *testing.T) {
 	svc := rotateTestService(newFakeStore(), rotateTestClock())
 
-	if _, err := svc.RotateSession(t.Context(), ""); !errors.Is(err, ErrSessionNotFound) {
+	if _, err := svc.RotateSession(t.Context(), "", 1); !errors.Is(err, ErrSessionNotFound) {
 		t.Errorf("empty token: err = %v, want ErrSessionNotFound", err)
 	}
-	if _, err := svc.RotateSession(t.Context(), "no-such-token"); !errors.Is(err, ErrSessionNotFound) {
+	if _, err := svc.RotateSession(t.Context(), "no-such-token", 1); !errors.Is(err, ErrSessionNotFound) {
 		t.Errorf("foreign token: err = %v, want ErrSessionNotFound", err)
 	}
 }
@@ -211,7 +211,7 @@ func TestRotateSession_NeverExtendsAbsoluteDeadline(t *testing.T) {
 	if err := svc.TouchSession(t.Context(), created.SessionToken); err != nil {
 		t.Fatalf("touch: %v", err)
 	}
-	rotated, err := svc.RotateSession(t.Context(), created.SessionToken)
+	rotated, err := svc.RotateSession(t.Context(), created.SessionToken, 1)
 	if err != nil {
 		t.Fatalf("rotate: %v", err)
 	}

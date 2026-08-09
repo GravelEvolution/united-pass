@@ -19,6 +19,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
@@ -143,6 +144,9 @@ func (s *SessionStore) Create(
 	if tokenHash == "" {
 		return errors.New("redis: session token hash must not be empty")
 	}
+	if err := requireStamped(record); err != nil {
+		return err
+	}
 
 	payload, err := json.Marshal(record)
 	if err != nil {
@@ -190,6 +194,7 @@ func (s *SessionStore) Get(ctx context.Context, tokenHash string) (session.Sessi
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return session.SessionRecord{}, fmt.Errorf("redis: decode session record: %w", err)
 	}
+	normalizeStamp(&record)
 	return record, nil
 }
 
@@ -229,6 +234,9 @@ func (s *SessionStore) Touch(
 ) error {
 	if tokenHash == "" {
 		return errors.New("redis: session token hash must not be empty")
+	}
+	if err := requireStamped(record); err != nil {
+		return err
 	}
 
 	payload, err := json.Marshal(record)
@@ -274,6 +282,9 @@ func (s *SessionStore) Rotate(
 	}
 	if newTokenHash == "" {
 		return errors.New("redis: new session token hash must not be empty")
+	}
+	if err := requireStamped(newRecord); err != nil {
+		return err
 	}
 
 	payload, err := json.Marshal(newRecord)
@@ -538,6 +549,65 @@ func (s *SessionStore) RevokeAllOtherSessions(
 	return victims, len(victims), nil
 }
 
+// RevokeSessionsBeforeEpoch removes every session of userID whose stamped
+// security epoch is lower than newEpoch (ADR-0007 F4). It walks only the
+// caller's own ZSET (never KEYS/SCAN) and never touches a record already
+// stamped with newEpoch — a fresh new-generation login survives. It returns
+// the removed records (for best-effort provider revocation) and the revoked
+// count. Infrastructure failures abort the walk and propagate: reporting
+// success while a revocation may have been skipped is the false-success
+// defect this inventory must never exhibit. The expiry replay honours the
+// frozen idle semantics (now + idleTTL).
+func (s *SessionStore) RevokeSessionsBeforeEpoch(
+	ctx context.Context,
+	userID identity.UserID,
+	newEpoch securitystate.Epoch,
+	now time.Time,
+	idleTTL time.Duration,
+) ([]session.SessionRecord, int, error) {
+	indexKey := s.indexKey(userID)
+
+	members, err := s.client.rdb.ZRange(ctx, indexKey, 0, -1).Result()
+	if err != nil {
+		if errors.Is(err, goredis.Nil) {
+			return nil, 0, nil
+		}
+		return nil, 0, fmt.Errorf("redis: range session index: %w", err)
+	}
+
+	victims := make([]session.SessionRecord, 0, len(members))
+	for _, m := range members {
+		sessionID := session.SessionID(m)
+
+		tokenHash, record, err := s.resolve(ctx, userID, sessionID)
+		if err != nil {
+			if errors.Is(err, session.ErrSessionNotFound) {
+				// Already gone or foreign-corrupted: heal the index entry.
+				_ = s.client.rdb.ZRem(ctx, indexKey, m).Err()
+				continue
+			}
+			// Infrastructure failure: abort fail closed; some sessions may
+			// not have been revoked yet.
+			return victims, len(victims), err
+		}
+		if record.IsExpired(now, idleTTL) {
+			// Past its effective expiry: cleanup only, not a revocation.
+			_ = s.deleteByTokenHash(ctx, tokenHash)
+			continue
+		}
+		if record.SecurityEpoch >= newEpoch {
+			// Generation-scoped fence (F4): current-generation sessions are
+			// never touched by settlement cleanup.
+			continue
+		}
+		if err := s.deleteByTokenHash(ctx, tokenHash); err != nil {
+			return victims, len(victims), err
+		}
+		victims = append(victims, record)
+	}
+	return victims, len(victims), nil
+}
+
 // decodePayload decodes one MGET slot into a SessionRecord. Missing (nil)
 // or corrupt payloads report ok=false.
 func decodePayload(v any) (session.SessionRecord, bool) {
@@ -549,7 +619,26 @@ func decodePayload(v any) (session.SessionRecord, bool) {
 	if err := json.Unmarshal([]byte(raw), &record); err != nil {
 		return session.SessionRecord{}, false
 	}
+	normalizeStamp(&record)
 	return record, true
+}
+
+// normalizeStamp maps legacy pre-ADR-0007 records (no securityEpoch field,
+// decoded as 0) to generation 1 — the single executable legacy decode rule
+// (ADR-0007 F2). New records are always stamped >= 1 at mint time.
+func normalizeStamp(record *session.SessionRecord) {
+	if record.SecurityEpoch < 1 {
+		record.SecurityEpoch = 1
+	}
+}
+
+// requireStamped fails closed on an unstamped record (ADR-0007 F2):
+// post-migration writes must always carry a security epoch >= 1.
+func requireStamped(record session.SessionRecord) error {
+	if record.SecurityEpoch < 1 {
+		return errors.New("redis: session record missing security epoch stamp")
+	}
+	return nil
 }
 
 // recordKey builds the session record key: {prefix}session:{tokenHash}.

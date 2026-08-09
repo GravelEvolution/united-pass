@@ -25,6 +25,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
+	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
@@ -34,10 +35,12 @@ import (
 type fakeSessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]session.SessionRecord
-	// rotateErr / revokeOthersErr inject infrastructure failures into the
-	// rotation and bulk-revocation paths (nil = healthy).
+	// rotateErr / revokeOthersErr / revokeEpochErr inject infrastructure
+	// failures into the rotation, bulk-revocation and generation-scoped
+	// settlement-cleanup paths (nil = healthy).
 	rotateErr       error
 	revokeOthersErr error
+	revokeEpochErr  error
 }
 
 func newFakeSessionStore() *fakeSessionStore {
@@ -160,6 +163,30 @@ func (s *fakeSessionStore) RevokeAllOtherSessions(_ context.Context, userID iden
 		}
 		if r.IsExpired(now, idleTTL) {
 			delete(s.sessions, hash)
+			continue
+		}
+		delete(s.sessions, hash)
+		victims = append(victims, r)
+	}
+	return victims, len(victims), nil
+}
+
+func (s *fakeSessionStore) RevokeSessionsBeforeEpoch(_ context.Context, userID identity.UserID, newEpoch securitystate.Epoch, now time.Time, idleTTL time.Duration) ([]session.SessionRecord, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.revokeEpochErr != nil {
+		return nil, 0, s.revokeEpochErr
+	}
+	var victims []session.SessionRecord
+	for hash, r := range s.sessions {
+		if r.UserID != userID {
+			continue
+		}
+		if r.IsExpired(now, idleTTL) {
+			delete(s.sessions, hash)
+			continue
+		}
+		if r.SecurityEpoch >= newEpoch {
 			continue
 		}
 		delete(s.sessions, hash)

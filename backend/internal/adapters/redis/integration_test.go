@@ -128,6 +128,7 @@ func TestIntegration_SessionStoreCreateAndGet(t *testing.T) {
 		ExpiresAt:          time.Now().Add(1 * time.Hour).UTC(),
 		AuthenticationTime: time.Now().UTC(),
 		CSRFTokenHash:      session.HashToken("csrf-token-1"),
+		SecurityEpoch:      1,
 	}
 
 	if err := store.Create(ctx, tokenHash, record, 1*time.Hour, 30*time.Minute); err != nil {
@@ -172,6 +173,7 @@ func TestIntegration_SessionStoreDelete(t *testing.T) {
 		ExpiresAt:          time.Now().Add(1 * time.Hour).UTC(),
 		AuthenticationTime: time.Now().UTC(),
 		CSRFTokenHash:      session.HashToken("csrf-delete"),
+		SecurityEpoch:      1,
 	}
 
 	if err := store.Create(ctx, tokenHash, record, 1*time.Hour, 30*time.Minute); err != nil {
@@ -215,6 +217,7 @@ func TestIntegration_SessionStoreRotate(t *testing.T) {
 		ExpiresAt:          time.Now().Add(1 * time.Hour).UTC(),
 		AuthenticationTime: time.Now().UTC(),
 		CSRFTokenHash:      session.HashToken("csrf-rotated"),
+		SecurityEpoch:      1,
 	}
 
 	if err := store.Create(ctx, oldHash, record, 1*time.Hour, 30*time.Minute); err != nil {
@@ -280,6 +283,7 @@ func TestIntegration_SessionStoreTouch(t *testing.T) {
 		ExpiresAt:          time.Now().Add(1 * time.Hour).UTC(),
 		AuthenticationTime: oldTime,
 		CSRFTokenHash:      session.HashToken("csrf-touch"),
+		SecurityEpoch:      1,
 	}
 
 	if err := store.Create(ctx, tokenHash, record, 1*time.Hour, 30*time.Minute); err != nil {
@@ -313,6 +317,7 @@ func sessionInventoryRecord(sessionID, userID string, createdAt time.Time, ttl t
 		ExpiresAt:          createdAt.Add(ttl),
 		AuthenticationTime: createdAt,
 		CSRFTokenHash:      session.HashToken("csrf-" + sessionID),
+		SecurityEpoch:      1,
 	}
 }
 
@@ -988,6 +993,7 @@ func TestIntegration_PrefixIsolation(t *testing.T) {
 		ExpiresAt:          time.Now().Add(1 * time.Hour).UTC(),
 		AuthenticationTime: time.Now().UTC(),
 		CSRFTokenHash:      session.HashToken("csrf-prefix"),
+		SecurityEpoch:      1,
 	}
 
 	ctx := context.Background()
@@ -1026,6 +1032,7 @@ func TestIntegration_KeysDoNotContainRawTokens(t *testing.T) {
 		ExpiresAt:          time.Now().Add(1 * time.Hour).UTC(),
 		AuthenticationTime: time.Now().UTC(),
 		CSRFTokenHash:      session.HashToken("csrf-safety"),
+		SecurityEpoch:      1,
 	}
 
 	if err := store.Create(ctx, tokenHash, record, 1*time.Hour, 30*time.Minute); err != nil {
@@ -1070,6 +1077,7 @@ func reauthChallengeData(action string) auth.ReauthChallengeData {
 		Action:        action,
 		ApplicationID: "app_reauth_1",
 		ClientID:      "clt_reauth_1",
+		SecurityEpoch: 1,
 	}
 }
 
@@ -1163,6 +1171,7 @@ func TestIntegration_ReauthStoreGrantSingleUse(t *testing.T) {
 		Action:        "client.secret.rotate",
 		ApplicationID: "app_reauth_1",
 		ClientID:      "clt_reauth_1",
+		SecurityEpoch: 1,
 	}
 
 	if err := store.CreateGrant(ctx, tokenHash, data, 5*time.Minute); err != nil {
@@ -1194,6 +1203,7 @@ func TestIntegration_ReauthStoreGrantConcurrentConsume(t *testing.T) {
 		SessionID:     "sess_reauth_1",
 		Action:        "application.delete",
 		ApplicationID: "app_reauth_1",
+		SecurityEpoch: 1,
 	}
 	if err := store.CreateGrant(ctx, tokenHash, data, 5*time.Minute); err != nil {
 		t.Fatalf("create grant: %v", err)
@@ -1312,10 +1322,11 @@ func TestIntegration_ReauthStoreCleanupPopsExpiredChallenge(t *testing.T) {
 
 func enrollmentData(kind auth.EnrollmentKind, target string) auth.EnrollmentData {
 	return auth.EnrollmentData{
-		UserID:    identity.UserID("user_enroll_1"),
-		SessionID: "sess_enroll_1",
-		Kind:      kind,
-		Target:    target,
+		UserID:        identity.UserID("user_enroll_1"),
+		SessionID:     "sess_enroll_1",
+		Kind:          kind,
+		Target:        target,
+		SecurityEpoch: 1,
 	}
 }
 

@@ -123,6 +123,11 @@ func (s *SecurityEventStore) ListByApplication(ctx context.Context, appID applic
 // (e.g. {"session_id": "…"} for session revocation events, ADR-0006 §2).
 func eventPayload(ev applications.SecurityEvent) ([]byte, error) {
 	payload := map[string]string{}
+	for key, value := range ev.Extra {
+		if key != "" && value != "" {
+			payload[key] = value
+		}
+	}
 	if ev.FailureClass != "" {
 		payload["failure_class"] = ev.FailureClass
 	}

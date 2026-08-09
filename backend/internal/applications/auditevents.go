@@ -84,7 +84,12 @@ type SecurityEvent struct {
 	// revocations carry TargetKey "session_id"). Both must be safe, stable,
 	// non-secret identifiers; the pair is persisted into the JSONB payload
 	// as {TargetKey: TargetID}. Empty pairs are omitted.
-	TargetKey  string
-	TargetID   string
+	TargetKey string
+	TargetID  string
+	// Extra carries additive, safe, stable, non-secret forensic facts into
+	// the durable JSONB payload (ADR-0007 Decision 5). Keys and values must
+	// be fixed vocabulary — never raw provider errors, never secrets. Empty
+	// entries are omitted at the persistence boundary.
+	Extra      map[string]string
 	OccurredAt time.Time
 }

@@ -22,6 +22,7 @@ import (
 
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 )
 
 // SessionID is an internal identifier for a session record.
@@ -68,6 +69,13 @@ type SessionRecord struct {
 	ClientDisplay   string `json:"clientDisplay,omitempty"`
 	IPAddressMasked string `json:"ipAddressMasked,omitempty"`
 	Remember        bool   `json:"remember"`
+	// SecurityEpoch stamps the record with the user's authoritative
+	// security generation at mint time (ADR-0007 Decision 1). Records
+	// stamped with an epoch lower than the user's current epoch are
+	// treated exactly as if they did not exist. Legacy pre-ADR-0007
+	// records decode as 0 and are normalized to 1 at the adapter decode
+	// boundary (F2); post-migration writes of 0 fail closed.
+	SecurityEpoch securitystate.Epoch `json:"securityEpoch,omitempty"`
 }
 
 // Principal is the minimal authenticated identity placed into the request

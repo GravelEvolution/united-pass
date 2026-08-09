@@ -57,19 +57,29 @@ func TestSetPassword_NewPasswordOnly(t *testing.T) {
 	}
 }
 
-// TestSetPassword_ProviderErrorMapsToStableSentinel pins fail-closed error
-// classification: every provider rejection collapses into the single stable
-// sentinel — never provider detail, never a user-class error.
+// TestSetPassword_ProviderErrorMapsToStableSentinel pins the ADR-0007
+// Decision 4 three-way classification: every definitive business rejection
+// maps to ErrPasswordChangeFailed (the change did not commit), while
+// transport-level and ambiguous outcomes map to ErrPasswordChangeUnknown
+// (the commit state cannot be known). Never provider detail, never a
+// user-class error.
 func TestSetPassword_ProviderErrorMapsToStableSentinel(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
+		want error
 	}{
-		{"policy rejection", grpcErr(codes.InvalidArgument, "COMMAND-x password policy violated")},
-		{"sa permission fault", grpcErr(codes.NotFound, "AUTHZ-123 permission denied")},
-		{"explicit forbidden", grpcErr(codes.PermissionDenied, "AUTHZ-456 forbidden")},
-		{"unknown user", grpcErr(codes.NotFound, "USER-x not found")},
-		{"transport failure", grpcErr(codes.Unavailable, "connection refused")},
+		{"policy rejection", grpcErr(codes.InvalidArgument, "COMMAND-x password policy violated"), auth.ErrPasswordChangeFailed},
+		{"sa permission fault", grpcErr(codes.NotFound, "AUTHZ-123 permission denied"), auth.ErrPasswordChangeFailed},
+		{"explicit forbidden", grpcErr(codes.PermissionDenied, "AUTHZ-456 forbidden"), auth.ErrPasswordChangeFailed},
+		{"unknown user", grpcErr(codes.NotFound, "USER-x not found"), auth.ErrPasswordChangeFailed},
+		{"precondition", grpcErr(codes.FailedPrecondition, "user state invalid"), auth.ErrPasswordChangeFailed},
+		{"transport failure", grpcErr(codes.Unavailable, "connection refused"), auth.ErrPasswordChangeUnknown},
+		{"deadline exceeded", grpcErr(codes.DeadlineExceeded, "rpc timed out"), auth.ErrPasswordChangeUnknown},
+		{"internal failure", grpcErr(codes.Internal, "internal error"), auth.ErrPasswordChangeUnknown},
+		{"context deadline", context.DeadlineExceeded, auth.ErrPasswordChangeUnknown},
+		{"context canceled", context.Canceled, auth.ErrPasswordChangeUnknown},
+		{"non-grpc error", errors.New("connection reset"), auth.ErrPasswordChangeUnknown},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -79,8 +89,8 @@ func TestSetPassword_ProviderErrorMapsToStableSentinel(t *testing.T) {
 				},
 			}
 			a := factorAuth(t, u, "")
-			if err := a.SetPassword(context.Background(), "user-1", auth.NewSecretPassword("brand-new-secret")); !errors.Is(err, auth.ErrPasswordChangeFailed) {
-				t.Fatalf("err = %v, want ErrPasswordChangeFailed", err)
+			if err := a.SetPassword(context.Background(), "user-1", auth.NewSecretPassword("brand-new-secret")); !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
 		})
 	}

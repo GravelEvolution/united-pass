@@ -17,6 +17,7 @@ import (
 
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 )
 
 // fakeStore is an in-memory session Store for unit tests.
@@ -141,6 +142,27 @@ func (s *fakeStore) RevokeAllOtherSessions(_ context.Context, userID identity.Us
 		}
 		if r.IsExpired(now, idleTTL) {
 			delete(s.sessions, hash)
+			continue
+		}
+		delete(s.sessions, hash)
+		victims = append(victims, r)
+	}
+	return victims, len(victims), nil
+}
+
+func (s *fakeStore) RevokeSessionsBeforeEpoch(_ context.Context, userID identity.UserID, newEpoch securitystate.Epoch, now time.Time, idleTTL time.Duration) ([]SessionRecord, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var victims []SessionRecord
+	for hash, r := range s.sessions {
+		if r.UserID != userID {
+			continue
+		}
+		if r.IsExpired(now, idleTTL) {
+			delete(s.sessions, hash)
+			continue
+		}
+		if r.SecurityEpoch >= newEpoch {
 			continue
 		}
 		delete(s.sessions, hash)

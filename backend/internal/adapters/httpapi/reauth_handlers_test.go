@@ -293,6 +293,13 @@ func reauthRouter(h *ReauthHandlers, principal session.Principal) http.Handler {
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			ctx := WithPrincipal(req.Context(), principal)
+			// Mirrors RequireSession: grant/challenge mints stamp the issuing
+			// session's security epoch (ADR-0007 Decision 1).
+			ctx = WithSessionRecord(ctx, session.SessionRecord{
+				SessionID:     principal.SessionID,
+				UserID:        principal.UserID,
+				SecurityEpoch: 1,
+			})
 			next.ServeHTTP(w, req.WithContext(ctx))
 		})
 	})
@@ -343,7 +350,7 @@ func TestReauthRequest_GrantedImmediately(t *testing.T) {
 	token := decodeReauthToken(t, w)
 
 	// The grant is consumable exactly once with the matching binding.
-	grants := NewReauthGrants(env.grants)
+	grants := NewReauthGrants(env.grants, nil)
 	if err := grants.VerifyAndConsume(context.Background(), token, "client.secret.rotate", "sess-1", "", "app_test1", "clt_test1"); err != nil {
 		t.Fatalf("verify grant: %v", err)
 	}
@@ -696,7 +703,7 @@ func TestReauthCompleteMFA_SuccessIssuesGrant(t *testing.T) {
 	grantToken := decodeReauthToken(t, w)
 
 	// The grant inherits the challenge binding.
-	grants := NewReauthGrants(env.grants)
+	grants := NewReauthGrants(env.grants, nil)
 	if err := grants.VerifyAndConsume(context.Background(), grantToken, "client.secret.rotate", "sess-1", "", "app_test1", "clt_test1"); err != nil {
 		t.Fatalf("verify grant: %v", err)
 	}
@@ -829,7 +836,7 @@ func TestReauthCompleteMFA_Validation(t *testing.T) {
 
 func TestReauthGrants_BindingChecks(t *testing.T) {
 	grants := newMemReauthGrants()
-	verifier := NewReauthGrants(grants)
+	verifier := NewReauthGrants(grants, nil)
 	ctx := context.Background()
 
 	data := auth.ReauthGrantData{
@@ -926,7 +933,7 @@ func TestReauthRequest_AccountActionGrantedWithoutApplication(t *testing.T) {
 	}
 	token := decodeReauthToken(t, w)
 
-	grants := NewReauthGrants(env.grants)
+	grants := NewReauthGrants(env.grants, nil)
 	if err := grants.VerifyAndConsume(context.Background(), token, "account.totp.enroll", "sess-1", "", "", ""); err != nil {
 		t.Fatalf("verify grant: %v", err)
 	}
@@ -956,7 +963,7 @@ func TestReauthRequest_PasskeyRemoveTargetBoundToGrant(t *testing.T) {
 	}
 	token := decodeReauthToken(t, w)
 
-	grants := NewReauthGrants(env.grants)
+	grants := NewReauthGrants(env.grants, nil)
 	// A grant minted for passkey A can never remove passkey B.
 	if err := grants.VerifyAndConsume(context.Background(), token, "account.passkey.remove", "sess-1", "pk-B", "", ""); err == nil {
 		t.Fatal("target mismatch must fail closed")
@@ -971,7 +978,7 @@ func TestReauthRequest_PasskeyRemoveTargetBoundToGrant(t *testing.T) {
 // directly: matching target succeeds exactly once, any mismatch fails closed.
 func TestReauthGrants_TargetBinding(t *testing.T) {
 	grants := newMemReauthGrants()
-	verifier := NewReauthGrants(grants)
+	verifier := NewReauthGrants(grants, nil)
 	ctx := context.Background()
 
 	data := auth.ReauthGrantData{
@@ -1021,7 +1028,7 @@ func TestReauthMFA_AccountActionTargetCarriesThrough(t *testing.T) {
 	}
 	grantToken := decodeReauthToken(t, w)
 
-	grants := NewReauthGrants(env.grants)
+	grants := NewReauthGrants(env.grants, nil)
 	if err := grants.VerifyAndConsume(context.Background(), grantToken, "account.passkey.remove", "sess-1", "pk-B", "", ""); err == nil {
 		t.Fatal("grant minted for pk-A must not authorize pk-B")
 	}

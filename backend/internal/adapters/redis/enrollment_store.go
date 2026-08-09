@@ -69,6 +69,9 @@ func (s *EnrollmentStore) CreateEnrollment(
 	if tokenHash == "" {
 		return errors.New("redis: enrollment token hash must not be empty")
 	}
+	if data.SecurityEpoch < 1 {
+		return errors.New("redis: enrollment missing security epoch stamp")
+	}
 
 	payload, err := json.Marshal(data)
 	if err != nil {
@@ -144,6 +147,11 @@ return data
 	var data auth.EnrollmentData
 	if err := json.Unmarshal([]byte(result.(string)), &data); err != nil {
 		return auth.EnrollmentData{}, fmt.Errorf("redis: decode claimed enrollment: %w", err)
+	}
+	if data.SecurityEpoch < 1 {
+		// Legacy pre-ADR-0007 decode normalization (F2): absent stamp
+		// means generation 1.
+		data.SecurityEpoch = 1
 	}
 	return data, nil
 }

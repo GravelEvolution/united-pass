@@ -24,6 +24,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/platform/observability"
+	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 )
 
 // Store abstracts session persistence. The Redis adapter satisfies this
@@ -71,6 +72,15 @@ type Store interface {
 	// are propagated so the caller never reports success while a revocation
 	// may have been skipped (fail closed).
 	RevokeAllOtherSessions(ctx context.Context, userID identity.UserID, currentSessionID SessionID, now time.Time, idleTTL time.Duration) ([]SessionRecord, int, error)
+	// RevokeSessionsBeforeEpoch removes every session of userID whose
+	// stamped security epoch is lower than newEpoch (ADR-0007 F4, the only
+	// permitted post-password-change bulk revocation: generation-scoped,
+	// never the generation-unaware RevokeAllOtherSessions). It returns the
+	// removed records (for best-effort provider revocation) plus the revoked
+	// count. Sessions already stamped with newEpoch (e.g. the freshly
+	// rotated current session) are never touched. Same fail-closed error
+	// contract as RevokeAllOtherSessions.
+	RevokeSessionsBeforeEpoch(ctx context.Context, userID identity.UserID, newEpoch securitystate.Epoch, now time.Time, idleTTL time.Duration) ([]SessionRecord, int, error)
 }
 
 // ErrSessionIsCurrent is returned when a targeted revoke references the
@@ -92,6 +102,12 @@ const (
 	// EventSessionsRevokedOthers audits a bulk revocation of the caller's
 	// other sessions.
 	EventSessionsRevokedOthers = "session.revoked_others"
+	// EventSessionsRevokedEpoch audits the generation-scoped settlement
+	// cleanup after a password mutation advanced the security epoch
+	// (ADR-0007 F4). Unlike the user-initiated events above it is emitted
+	// as a structured log only; the durable settlement audit row (with
+	// provider/settlement outcomes) is written by the mutation handler.
+	EventSessionsRevokedEpoch = "session.revoked_epoch"
 
 	// AuditOutcomeSuccess / AuditOutcomeDenied are the stable audit result
 	// values persisted for session events.
@@ -109,6 +125,17 @@ type SecurityAuditEvent struct {
 	Result       string
 	FailureClass string
 	OccurredAt   time.Time
+
+	// ADR-0007 Decision 5 additive settlement fields (closes B5, F5): the
+	// two orthogonal outcome facts of a provider-committed password change
+	// and their forensic context. They never overload Result or
+	// FailureClass — the frozen P4.1 result model stays untouched. Zero
+	// values are omitted at the persistence boundary.
+	ProviderOutcome   string
+	SettlementOutcome string
+	IntentID          int64
+	FromEpoch         int64
+	ToEpoch           int64
 }
 
 // SecurityAuditor persists durable session security audit rows. The
@@ -124,6 +151,14 @@ type SecurityAuditor interface {
 // invalidation must never depend on it succeeding.
 type ProviderSessionRevoker interface {
 	RevokeProviderSession(ctx context.Context, sessionReference string) error
+}
+
+// EpochStamper returns a user's authoritative security epoch from the
+// durable store (ADR-0007 Decision 1). It is satisfied by the
+// security-state service; session creation stamps every new record with it
+// and fails closed when the lookup fails.
+type EpochStamper interface {
+	CurrentEpoch(ctx context.Context, userID identity.UserID) (securitystate.Epoch, error)
 }
 
 // Clock abstracts time so tests can control it.
@@ -151,6 +186,7 @@ type Service struct {
 	touchInterval time.Duration
 	revoker       ProviderSessionRevoker
 	auditor       SecurityAuditor
+	epochStamper  EpochStamper
 	logger        *slog.Logger
 }
 
@@ -173,6 +209,13 @@ func WithLogger(l *slog.Logger) ServiceOption {
 // revocation events (ADR-0004 §8). A nil auditor keeps log-only audit.
 func WithSecurityAuditor(a SecurityAuditor) ServiceOption {
 	return func(s *Service) { s.auditor = a }
+}
+
+// WithEpochStamper wires the authoritative epoch lookup used to stamp newly
+// created sessions (ADR-0007 Decision 1). Production wiring always provides
+// it; a nil stamper stamps generation 1 and exists for tests only.
+func WithEpochStamper(e EpochStamper) ServiceOption {
+	return func(s *Service) { s.epochStamper = e }
 }
 
 // NewService creates a session Service from the given store and configuration.
@@ -288,6 +331,19 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 
 	deviceDisplay, clientDisplay := NormalizeUserAgent(input.UserAgent)
 
+	// Stamp the authoritative security epoch (ADR-0007 Decision 1): every
+	// new session belongs to the user's current generation; the lookup
+	// fails closed so no session is ever minted unstamped against a live
+	// durable store.
+	epoch := securitystate.Epoch(1)
+	if s.epochStamper != nil {
+		stamped, err := s.epochStamper.CurrentEpoch(ctx, input.UserID)
+		if err != nil {
+			return CreateSessionResult{}, fmt.Errorf("session: stamp security epoch: %w", err)
+		}
+		epoch = stamped
+	}
+
 	record := SessionRecord{
 		Version:                   1,
 		SessionID:                 sessionID,
@@ -306,6 +362,7 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		ClientDisplay:             clampDisplay(clientDisplay),
 		IPAddressMasked:           MaskIP(input.ClientIP),
 		Remember:                  input.Remember,
+		SecurityEpoch:             epoch,
 	}
 
 	tokenHash := HashToken(token)
@@ -452,14 +509,22 @@ type RotateSessionResult struct {
 // fresh CSRF token hash is bound. Rotation never extends the absolute
 // expiry — the key TTL becomes the remaining lifetime.
 //
+// newEpoch re-stamps the record (ADR-0007 Decision 1): password-mutation
+// settlement rotates the current session under the advanced epoch so it
+// survives the generation-scoped cleanup; the stamp must be the epoch
+// returned by the outcome-record transaction (>= 1, fail closed).
+//
 // The vanished-session guard is a production invariant here: if the record
 // disappears between validation and the atomic store rotation (a concurrent
 // logout or revocation won the race), rotation fails closed with
 // ErrSessionNotFound and never resurrects the session. An expired record is
 // cleaned up and reported as ErrSessionExpired.
-func (s *Service) RotateSession(ctx context.Context, oldToken string) (RotateSessionResult, error) {
+func (s *Service) RotateSession(ctx context.Context, oldToken string, newEpoch securitystate.Epoch) (RotateSessionResult, error) {
 	if oldToken == "" {
 		return RotateSessionResult{}, ErrSessionNotFound
+	}
+	if newEpoch < 1 {
+		return RotateSessionResult{}, errors.New("session: rotation requires a security epoch stamp")
 	}
 	oldHash := HashToken(oldToken)
 	record, err := s.store.Get(ctx, oldHash)
@@ -493,6 +558,7 @@ func (s *Service) RotateSession(ctx context.Context, oldToken string) (RotateSes
 
 	record.LastSeenAt = now
 	record.CSRFTokenHash = HashToken(csrfToken)
+	record.SecurityEpoch = newEpoch
 
 	newHash := HashToken(token)
 	if err := s.store.Rotate(ctx, oldHash, newHash, record, remaining, s.idleTTL); err != nil {
@@ -568,6 +634,41 @@ func (s *Service) RevokeAllOtherSessions(ctx context.Context, userID identity.Us
 	}
 	s.logSecurityEvent(EventSessionsRevokedOthers, userID, currentSessionID, nil)
 	s.recordAudit(ctx, EventSessionsRevokedOthers, userID, currentSessionID, "session.revoke_all_others", failureClass)
+	return count, nil
+}
+
+// RevokeSessionsBeforeEpoch is the generation-scoped settlement cleanup
+// (ADR-0007 F4): it physically removes only sessions stamped before
+// newEpoch and never touches one already stamped with it. It satisfies
+// securitystate.SettlementCleaner. Provider sessions of the victims are
+// revoked best-effort afterwards (stable failure classes logged); a store
+// walk failure propagates so settlement degrades instead of reporting a
+// false success.
+func (s *Service) RevokeSessionsBeforeEpoch(ctx context.Context, userID identity.UserID, newEpoch securitystate.Epoch) (int, error) {
+	victims, count, err := s.store.RevokeSessionsBeforeEpoch(ctx, userID, newEpoch, s.clock.Now(), s.idleTTL)
+	var failureClass string
+	for i := range victims {
+		if fc := s.revokeProviderSession(ctx, victims[i]); fc != "" && failureClass == "" {
+			failureClass = fc
+		}
+	}
+	if err != nil {
+		s.lg().Warn(EventSessionsRevokedEpoch,
+			"userId", string(userID),
+			"newEpoch", int64(newEpoch),
+			"revoked", count,
+			"outcome", "failed",
+			"errorClass", observability.ClassifyError(err),
+		)
+		return count, fmt.Errorf("session: revoke sessions before epoch: %w", err)
+	}
+	s.lg().Info(EventSessionsRevokedEpoch,
+		"userId", string(userID),
+		"newEpoch", int64(newEpoch),
+		"revoked", count,
+		"providerFailureClass", failureClass,
+		"outcome", "success",
+	)
 	return count, nil
 }
 

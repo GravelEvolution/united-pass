@@ -449,6 +449,14 @@ func validDevelopmentConfig() Config {
 			RateLimit:  3,
 			RateWindow: 15 * time.Minute,
 		},
+
+		SecurityState: SecurityStateConfig{
+			ProviderDeadline:      10 * time.Second,
+			LeaseTTL:              60 * time.Second,
+			SettlementTimeout:     15 * time.Second,
+			RecoveryTimeout:       15 * time.Second,
+			MaxSettlementAttempts: 3,
+		},
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 )
 
 // Reauthentication actions recognized by the management plane. The grant is
@@ -94,6 +95,10 @@ type ReauthChallengeData struct {
 	Attempts int `json:"attempts"`
 	// CreatedAt is when the challenge was issued.
 	CreatedAt time.Time `json:"createdAt"`
+	// SecurityEpoch stamps the challenge with the issuing session's
+	// security generation (ADR-0007 Decision 1). Legacy records decode
+	// as 0 and are normalized to 1 at the adapter decode boundary (F2).
+	SecurityEpoch securitystate.Epoch `json:"securityEpoch,omitempty"`
 }
 
 // ExpiredReauthChallenge identifies an abandoned or expired reauthentication
@@ -139,6 +144,11 @@ type ReauthGrantData struct {
 	Target string `json:"target,omitempty"`
 	// CreatedAt is when the grant was issued.
 	CreatedAt time.Time `json:"createdAt"`
+	// SecurityEpoch stamps the grant with the issuing session's security
+	// generation (ADR-0007 Decision 1). Consumption must additionally
+	// verify the user's authoritative state against this stamp. Legacy
+	// records decode as 0 and are normalized to 1 (F2).
+	SecurityEpoch securitystate.Epoch `json:"securityEpoch,omitempty"`
 }
 
 // ErrReauthChallengeNotFound is returned when a reauthentication challenge

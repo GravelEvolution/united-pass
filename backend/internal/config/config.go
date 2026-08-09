@@ -77,6 +77,12 @@ const (
 	defaultRotationGracePeriod = time.Duration(0)
 	defaultRotationRateLimit   = 3
 	defaultRotationRateWindow  = 15 * time.Minute
+
+	defaultSecurityProviderDeadline      = 10 * time.Second
+	defaultSecurityLeaseTTL              = 60 * time.Second
+	defaultSecuritySettlementTimeout     = 15 * time.Second
+	defaultSecurityRecoveryTimeout       = 15 * time.Second
+	defaultSecurityMaxSettlementAttempts = 3
 )
 
 // Config holds all process-level configuration. Values are loaded once at
@@ -111,6 +117,9 @@ type Config struct {
 	// Phase 2 — Reauthentication and secret rotation
 	Reauth   ReauthConfig
 	Rotation RotationConfig
+
+	// Phase 4 — Security generation and password mutation intents (ADR-0007)
+	SecurityState SecurityStateConfig
 
 	// Phase 3 — OAuth endpoint topology
 	OAuth OAuthConfig
@@ -186,6 +195,28 @@ type RotationConfig struct {
 	GracePeriod time.Duration
 	RateLimit   int
 	RateWindow  time.Duration
+}
+
+// SecurityStateConfig holds the ADR-0007 security generation (epoch) and
+// durable password mutation intent parameters. PostgreSQL is the single
+// authority for the epoch and the intent ledger; Redis may mirror hot-path
+// state at most and never decides.
+type SecurityStateConfig struct {
+	// ProviderDeadline bounds the provider SetPassword call.
+	ProviderDeadline time.Duration
+	// LeaseTTL bounds the active intent lease before a takeover may
+	// proceed. It must strictly outlive the provider deadline plus the
+	// settlement timeout (the frozen safety margin) so a live, legitimate
+	// mutation always owns its fence.
+	LeaseTTL time.Duration
+	// SettlementTimeout bounds the detached settlement run after the
+	// provider outcome is known.
+	SettlementTimeout time.Duration
+	// RecoveryTimeout bounds each detached opportunistic recovery run.
+	RecoveryTimeout time.Duration
+	// MaxSettlementAttempts bounds takeover settlement retries before the
+	// intent is force-settled degraded (bounded terminalization, F6).
+	MaxSettlementAttempts int
 }
 
 // AuthProviderConfig holds authentication provider parameters.
@@ -334,6 +365,14 @@ func Load() (Config, error) {
 			RateWindow:  durationOr("UP_SECRET_ROTATION_RATE_WINDOW", defaultRotationRateWindow),
 		},
 
+		SecurityState: SecurityStateConfig{
+			ProviderDeadline:      durationOr("UP_SECURITY_PROVIDER_DEADLINE", defaultSecurityProviderDeadline),
+			LeaseTTL:              durationOr("UP_SECURITY_LEASE_TTL", defaultSecurityLeaseTTL),
+			SettlementTimeout:     durationOr("UP_SECURITY_SETTLEMENT_TIMEOUT", defaultSecuritySettlementTimeout),
+			RecoveryTimeout:       durationOr("UP_SECURITY_RECOVERY_TIMEOUT", defaultSecurityRecoveryTimeout),
+			MaxSettlementAttempts: intOr("UP_SECURITY_MAX_SETTLEMENT_ATTEMPTS", defaultSecurityMaxSettlementAttempts),
+		},
+
 		OAuth: OAuthConfig{
 			PublicOrigin: envOr("UP_OAUTH_PUBLIC_ORIGIN", ""),
 		},
@@ -459,6 +498,27 @@ func (c Config) Validate() error {
 	}
 	if c.Rotation.RateWindow <= 0 {
 		errs = append(errs, errors.New("secret rotation rate window must be positive"))
+	}
+
+	// Security state validation (ADR-0007).
+	if c.SecurityState.ProviderDeadline <= 0 {
+		errs = append(errs, errors.New("security state provider deadline must be positive"))
+	}
+	if c.SecurityState.SettlementTimeout <= 0 {
+		errs = append(errs, errors.New("security state settlement timeout must be positive"))
+	}
+	if c.SecurityState.RecoveryTimeout <= 0 {
+		errs = append(errs, errors.New("security state recovery timeout must be positive"))
+	}
+	if c.SecurityState.MaxSettlementAttempts <= 0 {
+		errs = append(errs, errors.New("security state max settlement attempts must be positive"))
+	}
+	// Lease expiry must strictly outlive the provider deadline plus the
+	// settlement timeout (the frozen safety margin): a live, legitimate
+	// mutation must always own its fence until its authoritative work is
+	// done.
+	if c.SecurityState.LeaseTTL <= c.SecurityState.ProviderDeadline+c.SecurityState.SettlementTimeout {
+		errs = append(errs, errors.New("security state lease TTL must strictly exceed the provider deadline plus the settlement timeout"))
 	}
 
 	// Rate limit validation.

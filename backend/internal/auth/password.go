@@ -16,13 +16,21 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 )
 
-// ErrPasswordChangeFailed is the single stable failure sentinel of the
-// password change path (ADR-0006 §6). Every provider-side failure — an
-// unreachable provider, a service-account permission fault, a rejected
-// policy or an unresolvable identity link — collapses into it: the frozen
-// contract exposes exactly one stable error (provider.password_change_failed),
-// fails closed and never pretends success.
+// ErrPasswordChangeFailed is the confirmed-failure sentinel of the password
+// change path (ADR-0006 §6, amended by ADR-0007 Decision 4): the provider
+// definitively rejected the change (rejected policy, invalid arguments,
+// unresolvable identity link before the provider call). Zero local side
+// effects, epoch unchanged, the old generation resumes validity; the frozen
+// contract exposes the stable error provider.password_change_failed.
 var ErrPasswordChangeFailed = errors.New("auth: password change failed")
+
+// ErrPasswordChangeUnknown is the ambiguous-outcome sentinel of the password
+// change path (ADR-0007 Decision 4): the provider call timed out, its
+// transport failed or its response was ambiguous, so the outcome can
+// neither be confirmed nor denied. Unknown is treated as committed for
+// boundary purposes (fail closed): the epoch advances, re-login is forced
+// and the response never reports success.
+var ErrPasswordChangeUnknown = errors.New("auth: password change outcome unknown")
 
 // SecretPassword wraps a plaintext password so it can travel from the HTTP
 // layer to the provider adapter without ever being printable by accident.
@@ -60,12 +68,16 @@ func (SecretPassword) LogValue() slog.Value {
 // provider user resolved from the identity link — never from a
 // caller-supplied provider identifier. Identity proof is the consumed
 // account.password.change reauth grant, so implementations set the new
-// password alone and never accept a current password. Implementations must
-// return only ErrPasswordChangeFailed (plus unexpected internal errors) and
-// must never leak provider detail or the password itself.
+// password alone and never accept a current password. Implementations
+// classify every failure per ADR-0007 Decision 4: a definitive provider
+// rejection maps to ErrPasswordChangeFailed; a timeout, transport failure
+// or ambiguous response maps to ErrPasswordChangeUnknown; the password
+// itself and provider detail are never leaked.
 type PasswordManager interface {
 	// SetPassword sets the user's password on the provider using the
-	// newPassword-only mode (SA privilege; live-proven V-3(a), no fallback).
-	// Any failure maps to ErrPasswordChangeFailed.
+	// newPassword-only mode (SA privilege; live-proven V-3(a), no
+	// fallback). It returns nil on confirmed success,
+	// ErrPasswordChangeFailed on confirmed provider rejection and
+	// ErrPasswordChangeUnknown when the outcome cannot be determined.
 	SetPassword(ctx context.Context, userID identity.UserID, newPassword SecretPassword) error
 }

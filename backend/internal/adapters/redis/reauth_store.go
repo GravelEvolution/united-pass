@@ -91,6 +91,9 @@ func (s *ReauthStore) CreateChallenge(
 	if tokenHash == "" {
 		return errors.New("redis: reauth challenge token hash must not be empty")
 	}
+	if data.SecurityEpoch < 1 {
+		return errors.New("redis: reauth challenge missing security epoch stamp")
+	}
 
 	payload, err := json.Marshal(data)
 	if err != nil {
@@ -168,6 +171,7 @@ return data
 	if err := json.Unmarshal([]byte(result.(string)), &data); err != nil {
 		return auth.ReauthChallengeData{}, fmt.Errorf("redis: decode claimed reauth challenge: %w", err)
 	}
+	normalizeReauthChallengeEpoch(&data)
 	return data, nil
 }
 
@@ -409,6 +413,9 @@ func (s *ReauthStore) CreateGrant(
 	if tokenHash == "" {
 		return errors.New("redis: reauth grant token hash must not be empty")
 	}
+	if data.SecurityEpoch < 1 {
+		return errors.New("redis: reauth grant missing security epoch stamp")
+	}
 
 	payload, err := json.Marshal(data)
 	if err != nil {
@@ -446,6 +453,7 @@ func (s *ReauthStore) ConsumeGrant(ctx context.Context, tokenHash string) (auth.
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return auth.ReauthGrantData{}, fmt.Errorf("redis: decode reauth grant: %w", err)
 	}
+	normalizeReauthGrantEpoch(&data)
 	return data, nil
 }
 
@@ -453,4 +461,20 @@ func (s *ReauthStore) ConsumeGrant(ctx context.Context, tokenHash string) (auth.
 // marker returned when a claim lock is already held.
 func isReauthClaimedError(err error) bool {
 	return strings.Contains(err.Error(), "CLAIMED")
+}
+
+// normalizeReauthChallengeEpoch maps legacy pre-ADR-0007 challenges (no
+// securityEpoch field, decoded as 0) to generation 1 — the single
+// executable legacy decode rule (ADR-0007 F2).
+func normalizeReauthChallengeEpoch(data *auth.ReauthChallengeData) {
+	if data.SecurityEpoch < 1 {
+		data.SecurityEpoch = 1
+	}
+}
+
+// normalizeReauthGrantEpoch applies the same F2 legacy decode rule to grants.
+func normalizeReauthGrantEpoch(data *auth.ReauthGrantData) {
+	if data.SecurityEpoch < 1 {
+		data.SecurityEpoch = 1
+	}
 }

@@ -125,7 +125,11 @@ func setupTestPool(t *testing.T, maxConns int32) *Pool {
 			oauth_authorization_decision_operations,
 			oauth_client_secret_records, oauth_client_scopes, oauth_client_redirect_uris,
 			oauth_clients, oauth_applications,
+			password_mutation_intents,
 			user_personas, identity_links, users CASCADE`)
+		// Migration-owned sequences must be dropped too: CREATE SEQUENCE has
+		// no IF NOT EXISTS guard, so a leftover breaks the rerun.
+		_, _ = db.Exec(`DROP SEQUENCE IF EXISTS password_mutation_intent_seq`)
 		_, _ = db.Exec(`DROP TABLE IF EXISTS goose_db_version`)
 		_ = db.Close()
 	})

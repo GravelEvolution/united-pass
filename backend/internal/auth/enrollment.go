@@ -12,6 +12,7 @@ import (
 	"errors"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 )
 
 // ErrEnrollmentNotFound is returned when an enrollment challenge expired,
@@ -52,4 +53,9 @@ type EnrollmentData struct {
 	// that minted the passkey being verified; an enrollment for passkey A
 	// can never confirm passkey B (ADR-0006 §4 Target semantics).
 	Target string `json:"target,omitempty"`
+	// SecurityEpoch stamps the enrollment with the issuing session's
+	// security generation (ADR-0007 Decision 1). Confirmation must
+	// additionally verify the user's authoritative state against this
+	// stamp. Legacy records decode as 0 and are normalized to 1 (F2).
+	SecurityEpoch securitystate.Epoch `json:"securityEpoch,omitempty"`
 }
