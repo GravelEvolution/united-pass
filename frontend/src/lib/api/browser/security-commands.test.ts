@@ -142,3 +142,105 @@ describe("P4.5 browserCommands", () => {
     expect(headerOf(calls[0], "X-Reauthentication-Token")).toBe("remove-grant");
   });
 });
+
+describe("P4.7 browserCommands", () => {
+  it("keeps the current password in reauthentication and the new password in mutation", async () => {
+    let calls = stubFetch(jsonResponse({
+      status: "granted",
+      reauthToken: "grant",
+      expiresAt: "2026-08-09T12:00:00Z",
+    }));
+    const controller = new AbortController();
+    await browserCommands.requestReauthentication({
+      action: "account.password.change",
+      target: "",
+      password: "current-password",
+    }, { signal: controller.signal });
+    expect(bodyOf(calls[0])).toEqual({
+      action: "account.password.change",
+      applicationId: "",
+      clientId: "",
+      target: "",
+      password: "current-password",
+    });
+    expect(calls[0].init.signal).toBe(controller.signal);
+
+    vi.unstubAllGlobals();
+    calls = stubFetch(new Response(null, { status: 204 }));
+    await browserCommands.changePassword("new-password", "grant", { signal: controller.signal });
+    expect(calls[0].url).toBe("/api/v1/me/security/password");
+    expect(bodyOf(calls[0])).toEqual({ newPassword: "new-password" });
+    expect(bodyOf(calls[0])).not.toHaveProperty("currentPassword");
+    expect(headerOf(calls[0], "X-Reauthentication-Token")).toBe("grant");
+    expect(headerOf(calls[0], "X-CSRF-Token")).toBe("csrf-value");
+    expect(calls[0].init.signal).toBe(controller.signal);
+  });
+
+  it("uses the enrollment grant only for TOTP begin and confirms with the capability body", async () => {
+    let calls = stubFetch(jsonResponse({
+      enrollmentToken: "totp-enrollment",
+      secret: "SECRET",
+      otpauthUri: "otpauth://totp/United?secret=SECRET",
+    }));
+    const controller = new AbortController();
+    await expect(browserCommands.beginTotpEnrollment("totp-grant", { signal: controller.signal })).resolves.toEqual({
+      enrollmentToken: "totp-enrollment",
+      secret: "SECRET",
+      otpauthUri: "otpauth://totp/United?secret=SECRET",
+    });
+    expect(calls[0].url).toBe("/api/v1/me/security/totp/enrollment");
+    expect(headerOf(calls[0], "X-Reauthentication-Token")).toBe("totp-grant");
+    expect(calls[0].init.signal).toBe(controller.signal);
+
+    vi.unstubAllGlobals();
+    calls = stubFetch(jsonResponse({ status: "confirmed" }));
+    await browserCommands.confirmTotpEnrollment({
+      enrollmentToken: "totp-enrollment",
+      code: "123456",
+    });
+    expect(calls[0].url).toBe("/api/v1/me/security/totp/enrollment/confirm");
+    expect(bodyOf(calls[0])).toEqual({ enrollmentToken: "totp-enrollment", code: "123456" });
+    expect(headerOf(calls[0], "X-Reauthentication-Token")).toBeNull();
+
+    vi.unstubAllGlobals();
+    calls = stubFetch(new Response(null, { status: 204 }));
+    await browserCommands.cancelTotpEnrollment("totp-enrollment");
+    expect(calls[0].url).toBe("/api/v1/me/security/totp/enrollment/cancel");
+    expect(bodyOf(calls[0])).toEqual({ enrollmentToken: "totp-enrollment" });
+    expect(headerOf(calls[0], "X-Reauthentication-Token")).toBeNull();
+  });
+
+  it("removes TOTP with the constrained grant and validates provider readback", async () => {
+    const calls = stubFetch(jsonResponse({
+      password: { set: true },
+      totp: { enabled: false },
+      passkeys: [],
+      recoveryCodes: { available: false, deferredReason: "provider_unsupported" },
+    }));
+    await browserCommands.removeTotp("remove-grant");
+    expect(calls[0].url).toBe("/api/v1/me/security/totp");
+    expect(calls[0].init.method).toBe("DELETE");
+    expect(headerOf(calls[0], "X-Reauthentication-Token")).toBe("remove-grant");
+  });
+
+  it("migrates bulk, targeted and current-session revocation without reauthentication", async () => {
+    let calls = stubFetch(jsonResponse({ revoked: 2 }));
+    await expect(browserCommands.revokeOtherSessions()).resolves.toEqual({ revoked: 2 });
+    expect(calls[0].url).toBe("/api/v1/me/sessions");
+    expect(calls[0].init.method).toBe("DELETE");
+    expect(headerOf(calls[0], "X-Reauthentication-Token")).toBeNull();
+
+    vi.unstubAllGlobals();
+    calls = stubFetch(new Response(null, { status: 204 }));
+    await browserCommands.revokeOwnSession("session/other");
+    expect(calls[0].url).toBe("/api/v1/me/sessions/session%2Fother");
+    expect(headerOf(calls[0], "X-Reauthentication-Token")).toBeNull();
+
+    vi.unstubAllGlobals();
+    calls = stubFetch(new Response(null, { status: 204 }));
+    await browserCommands.logout();
+    expect(calls[0].url).toBe("/api/v1/auth/session");
+    expect(calls[0].init.method).toBe("DELETE");
+    expect(headerOf(calls[0], "X-CSRF-Token")).toBe("csrf-value");
+  });
+});

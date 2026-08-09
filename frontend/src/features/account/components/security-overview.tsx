@@ -16,9 +16,11 @@ import { IconDelete, IconKey, IconShield, IconRefresh, IconLock } from "@douyinf
 import { PageHeader } from "@/components/common/page-header";
 import { StatusBadge } from "@/components/common/status-badge";
 import type {
+  AccountReauthenticationAction,
   ReauthenticationChallenge,
   SecurityPasskey,
   SecuritySummary,
+  TotpEnrollment,
 } from "@/features/account/types";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
@@ -63,8 +65,8 @@ export function SecurityOverview({ securitySummary }: SecurityOverviewProps) {
   async function handleRevokeOtherSessions(): Promise<void> {
     setIsRevokingSessions(true);
     try {
-      await browserCommands.revokeOtherSessions();
-      Toast.success({ content: "已撤销其他全部会话。" });
+      const { revoked } = await browserCommands.revokeOtherSessions();
+      Toast.success({ content: revoked === 0 ? "没有需要撤销的其他会话。" : `已撤销 ${revoked} 个其他会话。` });
     } catch {
       Toast.error({ content: "撤销会话失败，请稍后重试。" });
     } finally {
@@ -97,11 +99,11 @@ export function SecurityOverview({ securitySummary }: SecurityOverviewProps) {
             statusLabel={displayedSummary.password.set ? "已设置" : "未设置"}
             active={displayedSummary.password.set}
             description="用于基础凭据验证，建议避免与其他服务复用。"
-            action={USE_MOCK_DATA_SOURCE ? (
+            action={(
               <Button theme="outline" icon={<IconLock />} onClick={() => setActiveModal({ type: "password" })}>
                 修改密码
               </Button>
-            ) : undefined}
+            )}
           />
           <SecurityFactorRow
             icon="验"
@@ -109,7 +111,7 @@ export function SecurityOverview({ securitySummary }: SecurityOverviewProps) {
             statusLabel={displayedSummary.totp.enabled ? "已启用" : "未启用"}
             active={displayedSummary.totp.enabled}
             description="使用身份验证器生成的一次性动态验证码。"
-            action={USE_MOCK_DATA_SOURCE ? (
+            action={(
               displayedSummary.totp.enabled ? (
                 <Button type="danger" theme="outline" icon={<IconDelete />} onClick={() => setActiveModal({ type: "totp_remove" })}>
                   删除
@@ -119,7 +121,7 @@ export function SecurityOverview({ securitySummary }: SecurityOverviewProps) {
                   设置
                 </Button>
               )
-            ) : undefined}
+            )}
           />
           {displayedSummary.passkeys.map((passkey) => (
             <PasskeyRow
@@ -143,7 +145,7 @@ export function SecurityOverview({ securitySummary }: SecurityOverviewProps) {
         </div>
       </section>
 
-      {USE_MOCK_DATA_SOURCE && <section className={`${styles.card} ${styles.dangerCard}`}>
+      <section className={`${styles.card} ${styles.dangerCard}`}>
         <div>
           <h2>安全恢复</h2>
           <p>撤销除当前设备以外的全部会话。此操作需要确认，执行后其他设备将被立即登出。</p>
@@ -165,7 +167,7 @@ export function SecurityOverview({ securitySummary }: SecurityOverviewProps) {
             撤销其他会话
           </Button>
         </Popconfirm>
-      </section>}
+      </section>
 
       {USE_MOCK_DATA_SOURCE && <section className={`${styles.card} ${styles.dangerCard}`}>
         <div>
@@ -186,7 +188,10 @@ export function SecurityOverview({ securitySummary }: SecurityOverviewProps) {
         <PasswordChangeModal
           onCancel={() => setActiveModal(null)}
           onSuccess={() => {
-            setMockSummary((current) => ({ ...current, password: { set: true } }));
+            if (USE_MOCK_DATA_SOURCE) {
+              setMockSummary((current) => ({ ...current, password: { set: true } }));
+            }
+            refreshAuthoritativeState();
             setActiveModal(null);
           }}
         />
@@ -196,7 +201,10 @@ export function SecurityOverview({ securitySummary }: SecurityOverviewProps) {
         <TotpEnrollModal
           onCancel={() => setActiveModal(null)}
           onSuccess={() => {
-            setMockSummary((current) => ({ ...current, totp: { enabled: true } }));
+            if (USE_MOCK_DATA_SOURCE) {
+              setMockSummary((current) => ({ ...current, totp: { enabled: true } }));
+            }
+            refreshAuthoritativeState();
             setActiveModal(null);
           }}
         />
@@ -206,7 +214,10 @@ export function SecurityOverview({ securitySummary }: SecurityOverviewProps) {
         <TotpRemoveModal
           onCancel={() => setActiveModal(null)}
           onSuccess={() => {
-            setMockSummary((current) => ({ ...current, totp: { enabled: false } }));
+            if (USE_MOCK_DATA_SOURCE) {
+              setMockSummary((current) => ({ ...current, totp: { enabled: false } }));
+            }
+            refreshAuthoritativeState();
             setActiveModal(null);
           }}
         />
@@ -316,13 +327,14 @@ type PasswordChangeModalProps = {
 };
 
 function PasswordChangeModal({ onCancel, onSuccess }: PasswordChangeModalProps) {
-  const [currentPassword, setCurrentPassword] = useState("");
+  const router = useRouter();
+  const browserOperation = useRef<AbortController | null>(null);
+  const [phase, setPhase] = useState<"details" | "reauth">("details");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [fieldError, setFieldError] = useState<string>();
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  function handleDetails(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
 
     if (newPassword.length < PASSWORD_MIN_LENGTH) {
@@ -335,22 +347,34 @@ function PasswordChangeModal({ onCancel, onSuccess }: PasswordChangeModalProps) 
       return;
     }
 
-    if (newPassword === currentPassword) {
-      setFieldError("新密码不能与当前密码相同。");
-      return;
-    }
-
     setFieldError(undefined);
-    setIsSubmitting(true);
+    setPhase("reauth");
+  }
+
+  function handleCancel(): void {
+    browserOperation.current?.abort();
+    browserOperation.current = null;
+    onCancel();
+  }
+
+  async function changePassword(reauthToken: string, signal: AbortSignal): Promise<void> {
     try {
-      await browserCommands.changePassword(currentPassword, newPassword);
-      Toast.success({ content: "密码已更新。" });
-      onSuccess();
-    } catch {
-      Toast.error({ content: "密码更新失败，请确认当前密码是否正确。" });
-    } finally {
-      setIsSubmitting(false);
+      await browserCommands.changePassword(newPassword, reauthToken, { signal });
+    } catch (error) {
+      if (isApiError(error) && error.kind === "unauthorized") {
+        setNewPassword("");
+        setConfirmPassword("");
+        Toast.info({ content: "账户安全状态已变更，请重新登录以确认凭据状态。" });
+        router.replace("/login");
+        router.refresh();
+        return;
+      }
+      throw error;
     }
+    setNewPassword("");
+    setConfirmPassword("");
+    Toast.success({ content: "密码已更新，其他登录会话已失效。" });
+    onSuccess();
   }
 
   return (
@@ -360,24 +384,9 @@ function PasswordChangeModal({ onCancel, onSuccess }: PasswordChangeModalProps) 
       footer={null}
       width={480}
       maskClosable={false}
-      onCancel={onCancel}
+      onCancel={handleCancel}
     >
-      <form className={styles.profileForm} onSubmit={handleSubmit}>
-        <label className={styles.profileField} htmlFor="current-password">
-          <span>当前密码</span>
-          <Input
-            id="current-password"
-            mode="password"
-            value={currentPassword}
-            onChange={(value) => {
-              setCurrentPassword(value);
-              setFieldError(undefined);
-            }}
-            autoComplete="current-password"
-            disabled={isSubmitting}
-            required
-          />
-        </label>
+      {phase === "details" ? <form className={styles.profileForm} onSubmit={handleDetails}>
         <label className={styles.profileField} htmlFor="new-password">
           <span>新密码</span>
           <Input
@@ -391,7 +400,6 @@ function PasswordChangeModal({ onCancel, onSuccess }: PasswordChangeModalProps) 
             placeholder={`至少 ${PASSWORD_MIN_LENGTH} 个字符`}
             autoComplete="new-password"
             minLength={PASSWORD_MIN_LENGTH}
-            disabled={isSubmitting}
             required
           />
           <small>至少 {PASSWORD_MIN_LENGTH} 个字符，请勿使用其他服务的密码。</small>
@@ -411,7 +419,6 @@ function PasswordChangeModal({ onCancel, onSuccess }: PasswordChangeModalProps) 
             validateStatus={fieldError ? "error" : "default"}
             aria-invalid={Boolean(fieldError)}
             aria-errormessage={fieldError ? "password-change-error" : undefined}
-            disabled={isSubmitting}
             required
           />
           {fieldError && (
@@ -421,15 +428,25 @@ function PasswordChangeModal({ onCancel, onSuccess }: PasswordChangeModalProps) 
           )}
         </label>
         <p className={styles.profileNotice}>
-          当前为 Mock 流程，不会校验或修改任何真实密码。后端接入后此操作需要重新验证身份。
+          下一步将重新验证当前密码；新密码只会发送到最终密码修改请求。
         </p>
         <div className={styles.profileActions}>
-          <Button theme="outline" onClick={onCancel} disabled={isSubmitting}>取消</Button>
-          <Button htmlType="submit" type="primary" theme="solid" loading={isSubmitting} disabled={isSubmitting}>
-            更新密码
+          <Button theme="outline" onClick={handleCancel}>取消</Button>
+          <Button htmlType="submit" type="primary" theme="solid">
+            下一步
           </Button>
         </div>
-      </form>
+      </form> : (
+        <AccountReauthenticationForm
+          action="account.password.change"
+          target=""
+          submitLabel="验证并更新密码"
+          browserOperationRef={browserOperation}
+          onGranted={changePassword}
+          onCancel={handleCancel}
+          operationError="密码更新失败，请重新开始。此次授权不会被重复使用。"
+        />
+      )}
     </Modal>
   );
 }
@@ -442,25 +459,33 @@ type TotpEnrollModalProps = {
 };
 
 function TotpEnrollModal({ onCancel, onSuccess }: TotpEnrollModalProps) {
-  const [phase, setPhase] = useState<"setup" | "confirm">("setup");
-  const [secret, setSecret] = useState("");
-  const [qrCodeUrl, setQrCodeUrl] = useState("");
+  const browserOperation = useRef<AbortController | null>(null);
+  const [enrollment, setEnrollment] = useState<TotpEnrollment | null>(null);
   const [code, setCode] = useState("");
   const [fieldError, setFieldError] = useState<string>();
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  async function handleSetup() {
-    setIsSubmitting(true);
-    try {
-      const result = await browserCommands.enrollTotp();
-      setSecret(result.secret);
-      setQrCodeUrl(result.qrCodeUrl);
-      setPhase("confirm");
-    } catch {
-      Toast.error({ content: "无法启动身份验证器绑定，请稍后重试。" });
-    } finally {
-      setIsSubmitting(false);
+  async function handleCancel(): Promise<void> {
+    if (isSubmitting) return;
+    browserOperation.current?.abort();
+    browserOperation.current = null;
+    if (enrollment !== null) {
+      setIsSubmitting(true);
+      try {
+        await browserCommands.cancelTotpEnrollment(enrollment.enrollmentToken);
+      } catch {
+        Toast.error({ content: "无法取消当前绑定，请重试后再关闭。" });
+        setIsSubmitting(false);
+        return;
+      }
     }
+    setEnrollment(null);
+    setCode("");
+    onCancel();
+  }
+
+  async function beginEnrollment(reauthToken: string, signal: AbortSignal): Promise<void> {
+    setEnrollment(await browserCommands.beginTotpEnrollment(reauthToken, { signal }));
   }
 
   async function handleConfirm(event: FormEvent<HTMLFormElement>) {
@@ -474,17 +499,29 @@ function TotpEnrollModal({ onCancel, onSuccess }: TotpEnrollModalProps) {
     setFieldError(undefined);
     setIsSubmitting(true);
     try {
-      await browserCommands.confirmTotpEnrollment(code.trim());
+      if (enrollment === null) return;
+      await browserCommands.confirmTotpEnrollment({
+        enrollmentToken: enrollment.enrollmentToken,
+        code: code.trim(),
+      });
+      setEnrollment(null);
+      setCode("");
       Toast.success({ content: "身份验证器已绑定。" });
       onSuccess();
-    } catch {
-      setFieldError("验证码错误，请检查验证器应用中显示的动态码。");
+    } catch (error) {
+      if (isApiError(error) && error.kind === "validation") {
+        setEnrollment(null);
+        setCode("");
+        setFieldError("验证码错误，本次绑定已结束，请重新验证后开始新的绑定。");
+      } else {
+        setFieldError("确认失败，请稍后重试当前验证码。");
+      }
     } finally {
       setIsSubmitting(false);
     }
   }
 
-  if (phase === "setup") {
+  if (enrollment === null) {
     return (
       <Modal
         title="绑定身份验证器"
@@ -492,18 +529,22 @@ function TotpEnrollModal({ onCancel, onSuccess }: TotpEnrollModalProps) {
         footer={null}
         width={480}
         maskClosable={false}
-        onCancel={onCancel}
+        onCancel={() => void handleCancel()}
       >
         <div className={styles.profileForm}>
           <p className={styles.profileNotice}>
             绑定身份验证器后，登录时需要输入验证器应用生成的 6 位动态验证码。
           </p>
-          <div className={styles.profileActions}>
-            <Button theme="outline" onClick={onCancel} disabled={isSubmitting}>取消</Button>
-            <Button type="primary" theme="solid" loading={isSubmitting} disabled={isSubmitting} onClick={handleSetup}>
-              生成密钥
-            </Button>
-          </div>
+          {fieldError && <Banner type="danger" fullMode={false} bordered closeIcon={null} description={fieldError} />}
+          <AccountReauthenticationForm
+            action="account.totp.enroll"
+            target=""
+            submitLabel="验证并生成密钥"
+            browserOperationRef={browserOperation}
+            onGranted={beginEnrollment}
+            onCancel={() => void handleCancel()}
+            operationError="无法启动身份验证器绑定，请重新开始。此次授权不会被重复使用。"
+          />
         </div>
       </Modal>
     );
@@ -516,15 +557,15 @@ function TotpEnrollModal({ onCancel, onSuccess }: TotpEnrollModalProps) {
       footer={null}
       width={480}
       maskClosable={false}
-      onCancel={onCancel}
+      onCancel={() => void handleCancel()}
     >
       <form className={styles.profileForm} onSubmit={handleConfirm}>
         <div className={styles.totpSecret}>
           <p>使用验证器应用扫描以下密钥或手动输入：</p>
-          <code>{secret}</code>
-          {qrCodeUrl && (
-            <a href={qrCodeUrl} target="_blank" rel="noopener noreferrer">
-              打开二维码链接（Mock）
+          <code>{enrollment.secret}</code>
+          {enrollment.otpauthUri && (
+            <a href={enrollment.otpauthUri}>
+              在身份验证器应用中打开
             </a>
           )}
         </div>
@@ -553,9 +594,9 @@ function TotpEnrollModal({ onCancel, onSuccess }: TotpEnrollModalProps) {
             </small>
           )}
         </label>
-        <p className={styles.profileNotice}>当前为 Mock 流程，不会绑定真实 TOTP 密钥。</p>
+        <p className={styles.profileNotice}>密钥仅在此窗口显示；关闭后需要重新开始绑定。</p>
         <div className={styles.profileActions}>
-          <Button theme="outline" onClick={onCancel} disabled={isSubmitting}>取消</Button>
+          <Button theme="outline" onClick={() => void handleCancel()} disabled={isSubmitting}>取消</Button>
           <Button htmlType="submit" type="primary" theme="solid" loading={isSubmitting} disabled={isSubmitting}>
             确认绑定
           </Button>
@@ -573,19 +614,18 @@ type TotpRemoveModalProps = {
 };
 
 function TotpRemoveModal({ onCancel, onSuccess }: TotpRemoveModalProps) {
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const browserOperation = useRef<AbortController | null>(null);
 
-  async function handleRemove() {
-    setIsSubmitting(true);
-    try {
-      await browserCommands.removeTotp();
-      Toast.success({ content: "身份验证器已删除。" });
-      onSuccess();
-    } catch {
-      Toast.error({ content: "删除失败，请稍后重试。" });
-    } finally {
-      setIsSubmitting(false);
-    }
+  function handleCancel(): void {
+    browserOperation.current?.abort();
+    browserOperation.current = null;
+    onCancel();
+  }
+
+  async function handleRemove(reauthToken: string, signal: AbortSignal): Promise<void> {
+    await browserCommands.removeTotp(reauthToken, { signal });
+    Toast.success({ content: "身份验证器已删除。" });
+    onSuccess();
   }
 
   return (
@@ -594,15 +634,8 @@ function TotpRemoveModal({ onCancel, onSuccess }: TotpRemoveModalProps) {
       visible
       width={460}
       maskClosable={false}
-      onCancel={onCancel}
-      footer={
-        <>
-          <Button theme="outline" onClick={onCancel} disabled={isSubmitting}>取消</Button>
-          <Button type="danger" theme="solid" loading={isSubmitting} disabled={isSubmitting} onClick={handleRemove}>
-            确认删除
-          </Button>
-        </>
-      }
+      onCancel={handleCancel}
+      footer={null}
     >
       <Banner
         type="warning"
@@ -611,7 +644,16 @@ function TotpRemoveModal({ onCancel, onSuccess }: TotpRemoveModalProps) {
         closeIcon={null}
         description="删除后，依赖动态验证码的二次验证将不可用。如果你没有其他验证方式，可能无法登录。"
       />
-      <p className={styles.profileNotice}>当前为 Mock 流程，不会修改真实验证配置。</p>
+      <AccountReauthenticationForm
+        action="account.totp.remove"
+        target=""
+        submitLabel="验证并删除"
+        browserOperationRef={browserOperation}
+        onGranted={handleRemove}
+        onCancel={handleCancel}
+        operationError="删除身份验证器失败，请重新开始。此次授权不会被重复使用。"
+        destructive
+      />
     </Modal>
   );
 }
@@ -632,20 +674,15 @@ function PasskeyEnrollModal({ onCancel, onSuccess }: PasskeyEnrollModalProps) {
     onCancel();
   }
 
-  async function enroll(reauthToken: string): Promise<void> {
-    const controller = replaceAbortController(browserOperation);
-    try {
-      const passkeyId = await runPasskeyEnrollmentCeremony({
-        reauthToken,
-        signal: controller.signal,
-        commands: browserCommands,
-        createCredential: passkeyCredentialCreator(USE_MOCK_DATA_SOURCE),
-      });
-      Toast.success({ content: "通行密钥已添加。" });
-      onSuccess(passkeyId);
-    } finally {
-      browserOperation.current = null;
-    }
+  async function enroll(reauthToken: string, signal: AbortSignal): Promise<void> {
+    const passkeyId = await runPasskeyEnrollmentCeremony({
+      reauthToken,
+      signal,
+      commands: browserCommands,
+      createCredential: passkeyCredentialCreator(USE_MOCK_DATA_SOURCE),
+    });
+    Toast.success({ content: "通行密钥已添加。" });
+    onSuccess(passkeyId);
   }
 
   return (
@@ -661,13 +698,14 @@ function PasskeyEnrollModal({ onCancel, onSuccess }: PasskeyEnrollModalProps) {
         <div className={styles.totpSecret}>
           <p>使用设备生物识别或安全密钥注册通行密钥，实现抗钓鱼无密码登录。</p>
         </div>
-        <PasskeyReauthenticationForm
+        <AccountReauthenticationForm
           action="account.passkey.enroll"
           target=""
           submitLabel="验证并开始注册"
           browserOperationRef={browserOperation}
           onGranted={enroll}
           onCancel={handleCancel}
+          operationError="通行密钥操作失败，请重新开始。此次授权不会被重复使用。"
         />
       </div>
     </Modal>
@@ -691,9 +729,9 @@ function PasskeyRemoveModal({ passkeyId, onCancel, onSuccess }: PasskeyRemoveMod
     onCancel();
   }
 
-  async function remove(reauthToken: string): Promise<void> {
+  async function remove(reauthToken: string, signal: AbortSignal): Promise<void> {
     try {
-      await browserCommands.removePasskey(passkeyId, reauthToken);
+      await browserCommands.removePasskey(passkeyId, reauthToken, { signal });
     } catch (error) {
       if (isApiError(error) && error.kind === "not_found") {
         Toast.info({ content: "该通行密钥已不存在，正在刷新安全状态。" });
@@ -722,13 +760,14 @@ function PasskeyRemoveModal({ passkeyId, onCancel, onSuccess }: PasskeyRemoveMod
         closeIcon={null}
         description="删除后，使用该通行密钥的无密码登录将不可用。"
       />
-      <PasskeyReauthenticationForm
+      <AccountReauthenticationForm
         action="account.passkey.remove"
         target={passkeyId}
         submitLabel="验证并删除"
         browserOperationRef={browserOperation}
         onGranted={remove}
         onCancel={handleCancel}
+        operationError="通行密钥操作失败，请重新开始。此次授权不会被重复使用。"
         destructive
       />
     </Modal>
@@ -744,25 +783,27 @@ function replaceAbortController(
   return controller;
 }
 
-type PasskeyReauthenticationFormProps = {
-  action: "account.passkey.enroll" | "account.passkey.remove";
+type AccountReauthenticationFormProps = {
+  action: AccountReauthenticationAction;
   target: string;
   submitLabel: string;
   browserOperationRef: MutableRefObject<AbortController | null>;
-  onGranted: (reauthToken: string) => Promise<void>;
+  onGranted: (reauthToken: string, signal: AbortSignal) => Promise<void>;
   onCancel: () => void;
+  operationError: string;
   destructive?: boolean;
 };
 
-function PasskeyReauthenticationForm({
+function AccountReauthenticationForm({
   action,
   target,
   submitLabel,
   browserOperationRef,
   onGranted,
   onCancel,
+  operationError,
   destructive = false,
-}: PasskeyReauthenticationFormProps) {
+}: AccountReauthenticationFormProps) {
   const [password, setPassword] = useState("");
   const [challenge, setChallenge] = useState<ReauthenticationChallenge | null>(null);
   const [method, setMethod] = useState<"totp" | "passkey">("totp");
@@ -770,17 +811,19 @@ function PasskeyReauthenticationForm({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string>();
 
-  async function finishWithGrant(reauthToken: string): Promise<void> {
+  async function finishWithGrant(reauthToken: string, signal: AbortSignal): Promise<void> {
     setChallenge(null);
     setTotpCode("");
-    await onGranted(reauthToken);
+    await onGranted(reauthToken, signal);
   }
 
-  async function runGrantedOperation(reauthToken: string): Promise<void> {
+  async function runGrantedOperation(reauthToken: string, signal: AbortSignal): Promise<void> {
     try {
-      await finishWithGrant(reauthToken);
+      await finishWithGrant(reauthToken, signal);
     } catch {
-      setError("通行密钥操作失败，请重新开始。此次授权不会被重复使用。");
+      setError(operationError);
+    } finally {
+      browserOperationRef.current = null;
     }
   }
 
@@ -796,11 +839,15 @@ function PasskeyReauthenticationForm({
       return;
     }
     setIsSubmitting(true);
+    const controller = replaceAbortController(browserOperationRef);
     try {
-      const outcome = await browserCommands.requestReauthentication({ action, target, password });
+      const outcome = await browserCommands.requestReauthentication(
+        { action, target, password },
+        { signal: controller.signal },
+      );
       setPassword("");
       if (outcome.status === "granted") {
-        await runGrantedOperation(outcome.reauthToken);
+        await runGrantedOperation(outcome.reauthToken, controller.signal);
         return;
       }
       const defaultMethod = outcome.availableMethods[0];
@@ -818,6 +865,7 @@ function PasskeyReauthenticationForm({
     if (challenge === null) return;
     setError(undefined);
     setIsSubmitting(true);
+    const controller = replaceAbortController(browserOperationRef);
     let grantedToken: string;
     try {
       const grant = method === "totp"
@@ -825,16 +873,15 @@ function PasskeyReauthenticationForm({
             reauthToken: challenge.reauthToken,
             method,
             code: totpCode,
-          })
+          }, { signal: controller.signal })
         : await browserCommands.completeReauthenticationMfa({
             reauthToken: challenge.reauthToken,
             method,
             passkeyAssertion: await getPasskeyAssertion(
               challenge.passkeyRequestOptions,
-              replaceAbortController(browserOperationRef).signal,
+              controller.signal,
             ),
-          });
-      browserOperationRef.current = null;
+          }, { signal: controller.signal });
       grantedToken = grant.reauthToken;
     } catch {
       browserOperationRef.current = null;
@@ -844,7 +891,7 @@ function PasskeyReauthenticationForm({
     }
 
     try {
-      await runGrantedOperation(grantedToken);
+      await runGrantedOperation(grantedToken, controller.signal);
     } finally {
       setIsSubmitting(false);
     }
@@ -871,10 +918,10 @@ function PasskeyReauthenticationForm({
           </div>
         )}
         {method === "totp" && (
-          <label className={styles.profileField} htmlFor={`passkey-reauth-totp-${action}`}>
+          <label className={styles.profileField} htmlFor={`account-reauth-totp-${action}`}>
             <span>动态验证码</span>
             <Input
-              id={`passkey-reauth-totp-${action}`}
+              id={`account-reauth-totp-${action}`}
               value={totpCode}
               onChange={(value) => setTotpCode(value)}
               maxLength={8}
@@ -902,10 +949,10 @@ function PasskeyReauthenticationForm({
 
   return (
     <form className={styles.profileForm} onSubmit={requestGrant}>
-      <label className={styles.profileField} htmlFor={`passkey-reauth-password-${action}`}>
+      <label className={styles.profileField} htmlFor={`account-reauth-password-${action}`}>
         <span>当前密码</span>
         <Input
-          id={`passkey-reauth-password-${action}`}
+          id={`account-reauth-password-${action}`}
           mode="password"
           value={password}
           onChange={(value) => {
@@ -917,7 +964,7 @@ function PasskeyReauthenticationForm({
           required
         />
       </label>
-      <p className={styles.profileNotice}>密码仅用于本次重新验证，不会包含在通行密钥变更请求中。</p>
+      <p className={styles.profileNotice}>密码仅用于本次重新验证，不会包含在后续账户安全变更请求中。</p>
       {error && <Banner type="danger" fullMode={false} bordered closeIcon={null} description={error} />}
       <div className={styles.profileActions}>
         <Button theme="outline" onClick={onCancel} disabled={isSubmitting}>取消</Button>

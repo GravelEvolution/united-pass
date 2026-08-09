@@ -1,7 +1,7 @@
 # United Pass 前端 API 接入清单
 
-- 状态：Frozen v1 + P4.5 Frozen Amendment（ADR-0008；implementation acceptance `194b6d2`；真实 ZITADEL A14 Pending）
-- 日期：2026-08-09（P4.5 Passkey 浏览器仪式修订）
+- 状态：Frozen v1 + P4.5 Frozen Amendment + P4.7 Architecture Amendment（ADR-0009）
+- 日期：2026-08-09（P4.7 Account Security real-seam 接入修订）
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect
 
@@ -470,6 +470,14 @@ Client Profile（`web_server`、`spa_mobile`、`server_to_server`）决定 Grant
 | `completePasskeyEnrollment(input)` | `POST /api/v1/me/security/passkeys/enrollment/confirm` |
 | `cancelPasskeyEnrollment(enrollmentToken)` | `POST /api/v1/me/security/passkeys/enrollment/cancel` |
 | `removePasskey(passkeyId, reauthToken)` | `DELETE /api/v1/me/security/passkeys/{passkeyId}` + target-bound reauth header |
+| `changePassword(newPassword, reauthToken)` | `POST /api/v1/me/security/password`；body 仅 `{newPassword}` |
+| `beginTotpEnrollment(reauthToken)` | `POST /api/v1/me/security/totp/enrollment` |
+| `confirmTotpEnrollment(input)` | `POST /api/v1/me/security/totp/enrollment/confirm`；enrollmentToken + code |
+| `cancelTotpEnrollment(enrollmentToken)` | `POST /api/v1/me/security/totp/enrollment/cancel`；清理 provider pending registration |
+| `removeTotp(reauthToken)` | `DELETE /api/v1/me/security/totp` |
+| `revokeOwnSession(sessionId)` | `DELETE /api/v1/me/sessions/{sessionId}` |
+| `revokeOtherSessions()` | `DELETE /api/v1/me/sessions`；返回 `{revoked}` |
+| `logout()` | `DELETE /api/v1/auth/session`；成功后再跳转登录页 |
 
 ### 已移除的 Mock 专用接口
 

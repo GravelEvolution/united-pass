@@ -17,8 +17,62 @@ import {
   parsePasskeyEnrollment,
   parsePasskeyEnrollmentConfirmation,
   parseReauthenticationOutcome,
+  parseRevokedSessionCount,
   parseSecuritySummary,
+  parseTotpEnrollment,
+  parseTotpEnrollmentConfirmation,
+  parseUserSessions,
 } from "./response-validators";
+
+describe("P4.7 account security validators", () => {
+  const session = {
+    sessionId: "session-1",
+    deviceName: "",
+    clientName: "Chrome",
+    approximateLocation: null,
+    ipAddressMasked: "127.0.0.*",
+    lastActiveAt: "2026-08-09T10:00:00Z",
+    createdAt: "2026-08-09T09:00:00Z",
+    authenticationMethods: ["password", "totp"],
+    isCurrent: true,
+  };
+
+  it("parses the complete nullable session wire shape", () => {
+    expect(parseUserSessions([session])).toEqual([session]);
+  });
+
+  it("rejects malformed session fields", () => {
+    expect(() => parseUserSessions({ sessions: [] })).toThrow(ApiResponseShapeError);
+    expect(() => parseUserSessions([{ ...session, approximateLocation: 1 }])).toThrow(ApiResponseShapeError);
+    expect(() => parseUserSessions([{ ...session, authenticationMethods: "password" }])).toThrow(ApiResponseShapeError);
+    expect(() => parseUserSessions([{ ...session, createdAt: null }])).toThrow(ApiResponseShapeError);
+  });
+
+  it("parses TOTP enrollment only with non-empty secret material and otpauth scheme", () => {
+    expect(parseTotpEnrollment({
+      enrollmentToken: "enrollment",
+      secret: "SECRET",
+      otpauthUri: "otpauth://totp/United?secret=SECRET",
+    })).toEqual({
+      enrollmentToken: "enrollment",
+      secret: "SECRET",
+      otpauthUri: "otpauth://totp/United?secret=SECRET",
+    });
+    expect(() => parseTotpEnrollment({
+      enrollmentToken: "enrollment",
+      secret: "SECRET",
+      otpauthUri: "https://example.com/secret",
+    })).toThrow(ApiResponseShapeError);
+  });
+
+  it("validates TOTP confirmation and non-negative integer revoke counts", () => {
+    expect(parseTotpEnrollmentConfirmation({ status: "confirmed" })).toBeUndefined();
+    expect(() => parseTotpEnrollmentConfirmation({ status: "pending" })).toThrow(ApiResponseShapeError);
+    expect(parseRevokedSessionCount({ revoked: 2 })).toEqual({ revoked: 2 });
+    expect(() => parseRevokedSessionCount({ revoked: -1 })).toThrow(ApiResponseShapeError);
+    expect(() => parseRevokedSessionCount({ revoked: 1.5 })).toThrow(ApiResponseShapeError);
+  });
+});
 
 describe("parseConsentResolution", () => {
   it("parses the valid member with the full request", () => {

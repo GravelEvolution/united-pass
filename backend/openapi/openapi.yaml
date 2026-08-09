@@ -679,6 +679,257 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/me/security/password:
+    post:
+      tags: [Account Security]
+      summary: Change the current user's password after step-up
+      description: |
+        Consumes an `account.password.change` grant. The reauthentication
+        request is the sole current-password proof; this body accepts only
+        `newPassword`. On success the current session cookies are rotated and
+        all older-generation sessions are revoked (ADR-0007).
+      operationId: changeOwnPassword
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordChangeRequest"
+      responses:
+        "204":
+          description: Password changed and the current session was rotated.
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/Set-Session-Cookies"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Session invalid or committed outcome requires re-login; cookies are cleared where applicable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/security/totp/enrollment:
+    post:
+      tags: [Account Security]
+      summary: Begin TOTP enrollment
+      description: Consumes an `account.totp.enroll` grant and returns secret material exactly once.
+      operationId: beginTotpEnrollment
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "200":
+          description: Pending provider registration and single-use enrollment capability. Never cached.
+          headers:
+            Cache-Control:
+              description: Always `no-store` because the response contains a TOTP secret.
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TotpEnrollmentResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "503":
+          $ref: "#/components/responses/ProviderForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/security/totp/enrollment/confirm:
+    post:
+      tags: [Account Security]
+      summary: Confirm TOTP enrollment
+      description: Claims the user/session-bound single-use enrollment capability and verifies the code.
+      operationId: confirmTotpEnrollment
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TotpEnrollmentConfirmRequest"
+      responses:
+        "200":
+          description: TOTP registration confirmed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TotpEnrollmentConfirmation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "503":
+          $ref: "#/components/responses/ProviderForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/security/totp/enrollment/cancel:
+    post:
+      tags: [Account Security]
+      summary: Settle an abandoned TOTP enrollment
+      description: |
+        Claims the user/session-bound enrollment capability and removes the
+        provider-side pending registration. No second reauthentication grant
+        is accepted or required. Stable provider not-found is already settled.
+      operationId: cancelTotpEnrollment
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TotpEnrollmentCancelRequest"
+      responses:
+        "204":
+          description: Pending registration removed or already absent.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "503":
+          $ref: "#/components/responses/ProviderForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/security/totp:
+    delete:
+      tags: [Account Security]
+      summary: Remove the current user's TOTP factor
+      description: Consumes an `account.totp.remove` grant and returns provider-authoritative readback.
+      operationId: removeTotp
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "200":
+          description: Fresh provider-authoritative security summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecuritySummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "503":
+          $ref: "#/components/responses/ProviderForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/sessions:
+    get:
+      tags: [Session]
+      summary: List the current user's live sessions
+      operationId: listOwnSessions
+      security:
+        - SessionCookie: []
+      responses:
+        "200":
+          description: Provider-independent United Pass session inventory.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserSession"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [Session]
+      summary: Revoke all other sessions of the current user
+      description: Preserves the caller's current session. Session + CSRF is the complete gate; no reauthentication grant is accepted.
+      operationId: revokeAllOtherOwnSessions
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      responses:
+        "200":
+          description: Number of other sessions revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokedSessionCount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/sessions/{sessionId}:
+    delete:
+      tags: [Session]
+      summary: Revoke one other session of the current user
+      description: Unknown, foreign and already-removed identifiers share the stable non-enumerating 404 response.
+      operationId: revokeOwnSession
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/SessionIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      responses:
+        "204":
+          description: Session revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/me/security/passkeys/enrollment:
     post:
       tags: [Account Security]
@@ -1594,6 +1845,15 @@ components:
         type: string
         minLength: 1
 
+    SessionIdPath:
+      name: sessionId
+      in: path
+      required: true
+      description: Opaque 128-bit United Pass session identifier owned by the current user.
+      schema:
+        type: string
+        minLength: 1
+
     X-Reauthentication-Token:
       name: X-Reauthentication-Token
       in: header
@@ -2196,6 +2456,128 @@ components:
             deferredReason:
               type: string
               const: provider_unsupported
+
+    PasswordChangeRequest:
+      type: object
+      required: [newPassword]
+      additionalProperties: false
+      properties:
+        newPassword:
+          type: string
+          minLength: 1
+          format: password
+          writeOnly: true
+          description: New password only. The current password is never accepted by this endpoint.
+
+    TotpEnrollmentResponse:
+      type: object
+      required: [enrollmentToken, secret, otpauthUri]
+      additionalProperties: false
+      properties:
+        enrollmentToken:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: Single-use user/session-bound confirmation capability.
+        secret:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: TOTP seed returned exactly once; never logged or persisted by United Pass.
+        otpauthUri:
+          type: string
+          minLength: 1
+          pattern: "^otpauth://"
+          writeOnly: true
+          description: Secret-bearing authenticator URI returned exactly once.
+
+    TotpEnrollmentConfirmRequest:
+      type: object
+      required: [enrollmentToken, code]
+      additionalProperties: false
+      properties:
+        enrollmentToken:
+          type: string
+          minLength: 1
+          writeOnly: true
+        code:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: User-entered TOTP code. Never logged.
+
+    TotpEnrollmentConfirmation:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          const: confirmed
+
+    TotpEnrollmentCancelRequest:
+      type: object
+      required: [enrollmentToken]
+      additionalProperties: false
+      properties:
+        enrollmentToken:
+          type: string
+          minLength: 1
+          writeOnly: true
+
+    UserSession:
+      type: object
+      required:
+        - sessionId
+        - deviceName
+        - clientName
+        - approximateLocation
+        - ipAddressMasked
+        - lastActiveAt
+        - createdAt
+        - authenticationMethods
+        - isCurrent
+      additionalProperties: false
+      properties:
+        sessionId:
+          type: string
+          minLength: 1
+        deviceName:
+          type: string
+          description: Normalized OS/device family; empty means unknown.
+        clientName:
+          type: string
+          description: Normalized browser/client family; empty means unknown.
+        approximateLocation:
+          oneOf:
+            - type: string
+            - type: "null"
+          description: Always null in P4; no GeoIP fact is fabricated.
+        ipAddressMasked:
+          type: string
+          description: Masked address only; empty means unknown.
+        lastActiveAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        authenticationMethods:
+          type: array
+          items:
+            type: string
+        isCurrent:
+          type: boolean
+          description: Computed by the backend from the authenticated principal.
+
+    RevokedSessionCount:
+      type: object
+      required: [revoked]
+      additionalProperties: false
+      properties:
+        revoked:
+          type: integer
+          minimum: 0
 
     PasskeySummary:
       type: object

@@ -81,9 +81,9 @@ const securitySummary = {
 } satisfies Awaited<ReturnType<UnitedPassDataSource["getSecuritySummary"]>>;
 
 const sessions = [
-  { sessionId: "ses_current", deviceName: "MacBook Pro", clientName: "Chrome 138 · macOS", approximateLocation: "上海市", ipAddressMasked: "203.0.113.*", lastActiveAt: "2026-08-04T05:42:00Z", isCurrent: true },
-  { sessionId: "ses_mobile", deviceName: "iPhone 17", clientName: `${SYSTEM_NAME} · iOS`, approximateLocation: "上海市", ipAddressMasked: "198.51.100.*", lastActiveAt: "2026-08-03T13:16:00Z", isCurrent: false },
-  { sessionId: "ses_edge", deviceName: "Windows 设备", clientName: "Edge 138 · Windows", approximateLocation: "杭州市", ipAddressMasked: "192.0.2.*", lastActiveAt: "2026-07-29T01:05:00Z", isCurrent: false },
+  { sessionId: "ses_current", deviceName: "MacBook Pro", clientName: "Chrome 138 · macOS", approximateLocation: "上海市", ipAddressMasked: "203.0.113.*", lastActiveAt: "2026-08-04T05:42:00Z", createdAt: "2026-08-01T05:42:00Z", authenticationMethods: ["password", "totp"], isCurrent: true },
+  { sessionId: "ses_mobile", deviceName: "iPhone 17", clientName: `${SYSTEM_NAME} · iOS`, approximateLocation: "上海市", ipAddressMasked: "198.51.100.*", lastActiveAt: "2026-08-03T13:16:00Z", createdAt: "2026-08-02T13:16:00Z", authenticationMethods: ["password", "totp"], isCurrent: false },
+  { sessionId: "ses_edge", deviceName: "Windows 设备", clientName: "Edge 138 · Windows", approximateLocation: "杭州市", ipAddressMasked: "192.0.2.*", lastActiveAt: "2026-07-29T01:05:00Z", createdAt: "2026-07-20T01:05:00Z", authenticationMethods: ["password"], isCurrent: false },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getSessions"]>>;
 
 const consentRequest = {
@@ -1190,13 +1190,15 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       Promise.resolve({ requestId: `req_phone_${Math.random().toString(36).slice(2, 10)}` }),
     verifyPhoneChange: (): Promise<void> => Promise.resolve(),
     changePassword: (): Promise<void> => Promise.resolve(),
-    enrollTotp: (): Promise<{ secret: string; qrCodeUrl: string }> =>
+    beginTotpEnrollment: () =>
       Promise.resolve({
+        enrollmentToken: "mock-totp-enrollment-token",
         secret: "JBSWY3DPEHPK3PXP MOCKSECRET==",
-        qrCodeUrl: "https://example.com/totp/qr/mock",
+        otpauthUri: "otpauth://totp/United%20Pass:mock?secret=JBSWY3DPEHPK3PXP&issuer=United%20Pass",
       }),
     confirmTotpEnrollment: (): Promise<void> => Promise.resolve(),
-    removeTotp: (): Promise<void> => Promise.resolve(),
+    cancelTotpEnrollment: (): Promise<void> => Promise.resolve(),
+    removeTotp: () => Promise.resolve(securitySummary),
     requestReauthentication: (): Promise<{ status: "granted"; reauthToken: string; expiresAt: string }> =>
       Promise.resolve({ status: "granted", reauthToken: "mock-reauth-token", expiresAt: "2026-08-09T12:00:00Z" }),
     completeReauthenticationMfa: (): Promise<{ status: "granted"; reauthToken: string; expiresAt: string }> =>
@@ -1222,16 +1224,17 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
           "mock-rc-08-b4a8",
         ],
       }),
-    revokeOtherSessions: (): Promise<void> => {
+    revokeOtherSessions: (): Promise<{ revoked: number }> => {
+      const revoked = sessions.filter((session) => !session.isCurrent).length;
       const currentSession = sessions.find((session) => session.isCurrent);
       sessions.length = 0;
       if (currentSession) {
         sessions.push(currentSession);
       }
-      return Promise.resolve();
+      return Promise.resolve({ revoked });
     },
     logout: (): Promise<void> => Promise.resolve(),
-    revokeSession: (sessionId: string): Promise<void> => {
+    revokeOwnSession: (sessionId: string): Promise<void> => {
       const index = sessions.findIndex((session) => session.sessionId === sessionId);
       if (index !== -1) {
         sessions.splice(index, 1);
@@ -1247,6 +1250,13 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       const detail = userDetails[userId];
       if (detail) {
         detail.status = status;
+      }
+      return Promise.resolve();
+    },
+    revokeUserSession: (userId: string, sessionId: string): Promise<void> => {
+      const detail = userDetails[userId];
+      if (detail) {
+        detail.activeSessions = detail.activeSessions.filter((session) => session.sessionId !== sessionId);
       }
       return Promise.resolve();
     },

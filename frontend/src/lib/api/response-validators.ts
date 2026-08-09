@@ -20,6 +20,8 @@ import type {
   ReauthenticationOutcome,
   SecurityPasskey,
   SecuritySummary,
+  TotpEnrollment,
+  UserSession,
 } from "@/features/account/types";
 import type { MfaMethod } from "@/features/auth/types";
 import type { CurrentUser, EmployeeProfile, UserPersona } from "@/types/identity";
@@ -86,6 +88,14 @@ function requireStringArray(record: Record<string, unknown>, field: string): str
     throw new ApiResponseShapeError(field);
   }
   return value as string[];
+}
+
+function requireNonNegativeInteger(record: Record<string, unknown>, field: string): number {
+  const value = record[field];
+  if (!Number.isInteger(value) || (value as number) < 0) {
+    throw new ApiResponseShapeError(field);
+  }
+  return value as number;
 }
 
 // --- ConsentResolution ---
@@ -213,6 +223,54 @@ export function parseSecuritySummary(value: unknown): SecuritySummary {
       deferredReason: "provider_unsupported",
     },
   };
+}
+
+export function parseTotpEnrollment(value: unknown): TotpEnrollment {
+  if (!isRecord(value)) throw new ApiResponseShapeError("TotpEnrollment");
+  const otpauthUri = requireNonEmptyString(value, "otpauthUri");
+  if (!otpauthUri.startsWith("otpauth://")) {
+    throw new ApiResponseShapeError("TotpEnrollment.otpauthUri");
+  }
+  return {
+    enrollmentToken: requireNonEmptyString(value, "enrollmentToken"),
+    secret: requireNonEmptyString(value, "secret"),
+    otpauthUri,
+  };
+}
+
+export function parseTotpEnrollmentConfirmation(value: unknown): void {
+  if (!isRecord(value) || value.status !== "confirmed") {
+    throw new ApiResponseShapeError("TotpEnrollmentConfirmation");
+  }
+}
+
+function parseUserSession(value: unknown): UserSession {
+  if (!isRecord(value)) throw new ApiResponseShapeError("UserSession");
+  const approximateLocation = value.approximateLocation;
+  if (approximateLocation !== null && typeof approximateLocation !== "string") {
+    throw new ApiResponseShapeError("UserSession.approximateLocation");
+  }
+  return {
+    sessionId: requireNonEmptyString(value, "sessionId"),
+    deviceName: requireString(value, "deviceName"),
+    clientName: requireString(value, "clientName"),
+    approximateLocation,
+    ipAddressMasked: requireString(value, "ipAddressMasked"),
+    lastActiveAt: requireNonEmptyString(value, "lastActiveAt"),
+    createdAt: requireNonEmptyString(value, "createdAt"),
+    authenticationMethods: requireStringArray(value, "authenticationMethods"),
+    isCurrent: requireBoolean(value, "isCurrent"),
+  };
+}
+
+export function parseUserSessions(value: unknown): UserSession[] {
+  if (!Array.isArray(value)) throw new ApiResponseShapeError("UserSession[]");
+  return value.map(parseUserSession);
+}
+
+export function parseRevokedSessionCount(value: unknown): { revoked: number } {
+  if (!isRecord(value)) throw new ApiResponseShapeError("RevokedSessionCount");
+  return { revoked: requireNonNegativeInteger(value, "revoked") };
 }
 
 function parseReauthenticationGrantRecord(

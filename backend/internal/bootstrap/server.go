@@ -529,6 +529,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				r.Get("/me/security", securityHandlers.GetSecurityFactors)
 				r.Post("/me/security/totp/enrollment", securityHandlers.BeginTOTPEnrollment)
 				r.Post("/me/security/totp/enrollment/confirm", securityHandlers.ConfirmTOTPEnrollment)
+				r.Post("/me/security/totp/enrollment/cancel", securityHandlers.CancelTOTPEnrollment)
 				r.Delete("/me/security/totp", securityHandlers.RemoveTOTP)
 				r.Post("/me/security/passkeys/enrollment", securityHandlers.BeginPasskeyEnrollment)
 				r.Post("/me/security/passkeys/enrollment/confirm", securityHandlers.ConfirmPasskeyEnrollment)

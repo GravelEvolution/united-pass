@@ -157,7 +157,7 @@ function SessionsTab({ detail }: UserDetailProps) {
   async function handleRevoke(sessionId: string): Promise<void> {
     setRevokingId(sessionId);
     try {
-      await browserCommands.revokeSession(sessionId);
+      await browserCommands.revokeUserSession(detail.userId, sessionId);
       Toast.success({ content: "会话已撤销。" });
       // Note: in real implementation, the page would refresh or update locally
     } catch {

@@ -59,11 +59,54 @@ test.describe("账户中心流程", () => {
     ).__webauthnCalls)).toBe(0);
   });
 
+  test("Mock 密码与 TOTP 复用账户重认证流程", async ({ page }) => {
+    await page.goto("/account/security");
+
+    await page.getByRole("button", { name: "修改密码" }).click();
+    await page.locator("#new-password").fill("new-password-1234");
+    await page.getByLabel("确认新密码").fill("new-password-1234");
+    await page.getByRole("button", { name: "下一步" }).click();
+    await page.getByLabel("当前密码").fill("mock-current-password");
+    await page.getByRole("button", { name: "验证并更新密码" }).click();
+    await expect(page.getByRole("dialog", { name: "修改密码" })).toHaveCount(0);
+
+    const totpRow = page.locator("article").filter({ hasText: "身份验证器" });
+    await totpRow.getByRole("button", { name: "删除" }).click();
+    await page.getByLabel("当前密码").fill("mock-current-password");
+    await page.getByRole("button", { name: "验证并删除" }).click();
+    await expect(totpRow.getByRole("button", { name: "设置" })).toBeVisible();
+
+    await totpRow.getByRole("button", { name: "设置" }).click();
+    await page.getByLabel("当前密码").fill("mock-current-password");
+    await page.getByRole("button", { name: "验证并生成密钥" }).click();
+    await expect(page.getByText("JBSWY3DPEHPK3PXP MOCKSECRET==")).toBeVisible();
+    await page.getByLabel("验证器动态码").fill("123456");
+    await page.getByRole("button", { name: "确认绑定" }).click();
+    await expect(totpRow.getByRole("button", { name: "删除" })).toBeVisible();
+  });
+
   test("会话页面可以正常加载", async ({ page }) => {
     await page.goto("/account/sessions");
 
     // 验证会话页面存在
     await expect(page.locator("h1, h2, h3").first()).toBeVisible();
+  });
+
+  test("Mock 会话撤销保留当前设备并移除目标行", async ({ page }) => {
+    await page.goto("/account/sessions");
+    const currentRow = page.locator("article").filter({ hasText: "当前设备" });
+    const mobileRow = page.locator("article").filter({ hasText: "iPhone 17" });
+
+    await mobileRow.getByRole("button", { name: "撤销会话" }).click();
+    await page.getByRole("button", { name: "确定" }).click();
+
+    await expect(mobileRow).toHaveCount(0);
+    await expect(currentRow).toBeVisible();
+  });
+
+  test("Mock 退出页完成后跳转登录", async ({ page }) => {
+    await page.goto("/logout");
+    await expect(page).toHaveURL(/\/login$/, { timeout: 5_000 });
   });
 
   test("授权应用页面可以正常加载", async ({ page }) => {

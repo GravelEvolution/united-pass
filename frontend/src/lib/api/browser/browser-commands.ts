@@ -18,7 +18,10 @@ import {
   parsePasskeyEnrollmentConfirmation,
   parseReauthenticationGrant,
   parseReauthenticationOutcome,
+  parseRevokedSessionCount,
   parseSecuritySummary,
+  parseTotpEnrollment,
+  parseTotpEnrollmentConfirmation,
 } from "@/lib/api/response-validators";
 
 /**
@@ -32,7 +35,8 @@ import {
  * response onto the frozen contract types; unmigrated seams keep the mock
  * source until their backend contract lands.
  *
- * Migrated seams: decideConsent, revokeGrant.
+ * Migrated seams: decideConsent, revokeGrant, account reauthentication,
+ * password/TOTP/passkey security operations, own-session revocation and logout.
  *
  * See ADR-0004 for the full architecture.
  */
@@ -75,16 +79,58 @@ export const browserCommands: UnitedPassCommands = {
   requestPhoneChange: (phone) => mockUnitedPassDataSource.requestPhoneChange(phone),
   verifyPhoneChange: (requestId, code) =>
     mockUnitedPassDataSource.verifyPhoneChange(requestId, code),
-  changePassword: (currentPassword, newPassword) =>
-    mockUnitedPassDataSource.changePassword(currentPassword, newPassword),
-  enrollTotp: () => mockUnitedPassDataSource.enrollTotp(),
-  confirmTotpEnrollment: (code) => mockUnitedPassDataSource.confirmTotpEnrollment(code),
-  removeTotp: () => mockUnitedPassDataSource.removeTotp(),
+  changePassword: USE_MOCK_DATA_SOURCE
+    ? (newPassword, reauthToken) => mockUnitedPassDataSource.changePassword(newPassword, reauthToken)
+    : async (newPassword, reauthToken, options) => {
+        await browserFetch<unknown>("/me/security/password", {
+          method: "POST",
+          reauthToken,
+          signal: options?.signal,
+          body: { newPassword },
+        });
+      },
+  beginTotpEnrollment: USE_MOCK_DATA_SOURCE
+    ? (reauthToken) => mockUnitedPassDataSource.beginTotpEnrollment(reauthToken)
+    : async (reauthToken, options) => parseTotpEnrollment(
+        await browserFetch<unknown>("/me/security/totp/enrollment", {
+          method: "POST",
+          reauthToken,
+          signal: options?.signal,
+        }),
+      ),
+  confirmTotpEnrollment: USE_MOCK_DATA_SOURCE
+    ? (input) => mockUnitedPassDataSource.confirmTotpEnrollment(input)
+    : async (input) => {
+        parseTotpEnrollmentConfirmation(
+          await browserFetch<unknown>("/me/security/totp/enrollment/confirm", {
+            method: "POST",
+            body: input,
+          }),
+        );
+      },
+  cancelTotpEnrollment: USE_MOCK_DATA_SOURCE
+    ? (enrollmentToken) => mockUnitedPassDataSource.cancelTotpEnrollment(enrollmentToken)
+    : async (enrollmentToken) => {
+        await browserFetch<unknown>("/me/security/totp/enrollment/cancel", {
+          method: "POST",
+          body: { enrollmentToken },
+        });
+      },
+  removeTotp: USE_MOCK_DATA_SOURCE
+    ? (reauthToken) => mockUnitedPassDataSource.removeTotp(reauthToken)
+    : async (reauthToken, options) => parseSecuritySummary(
+        await browserFetch<unknown>("/me/security/totp", {
+          method: "DELETE",
+          reauthToken,
+          signal: options?.signal,
+        }),
+      ),
   requestReauthentication: USE_MOCK_DATA_SOURCE
     ? (input) => mockUnitedPassDataSource.requestReauthentication(input)
-    : async (input) => parseReauthenticationOutcome(
+    : async (input, options) => parseReauthenticationOutcome(
         await browserFetch<unknown>("/auth/reauthentication", {
           method: "POST",
+          signal: options?.signal,
           body: {
             action: input.action,
             applicationId: "",
@@ -96,9 +142,10 @@ export const browserCommands: UnitedPassCommands = {
       ),
   completeReauthenticationMfa: USE_MOCK_DATA_SOURCE
     ? (input) => mockUnitedPassDataSource.completeReauthenticationMfa(input)
-    : async (input) => parseReauthenticationGrant(
+    : async (input, options) => parseReauthenticationGrant(
         await browserFetch<unknown>("/auth/reauthentication/mfa", {
           method: "POST",
+          signal: options?.signal,
           body: {
             reauthToken: input.reauthToken,
             method: input.method,
@@ -142,20 +189,36 @@ export const browserCommands: UnitedPassCommands = {
       },
   removePasskey: USE_MOCK_DATA_SOURCE
     ? (passkeyId, reauthToken) => mockUnitedPassDataSource.removePasskey(passkeyId, reauthToken)
-    : async (passkeyId, reauthToken) => parseSecuritySummary(
+    : async (passkeyId, reauthToken, options) => parseSecuritySummary(
         await browserFetch<unknown>(
           `/me/security/passkeys/${encodeURIComponent(passkeyId)}`,
-          { method: "DELETE", reauthToken },
+          { method: "DELETE", reauthToken, signal: options?.signal },
         ),
       ),
   generateRecoveryCodes: () => mockUnitedPassDataSource.generateRecoveryCodes(),
-  revokeOtherSessions: () => mockUnitedPassDataSource.revokeOtherSessions(),
-  logout: () => mockUnitedPassDataSource.logout(),
-  revokeSession: (sessionId) => mockUnitedPassDataSource.revokeSession(sessionId),
+  revokeOtherSessions: USE_MOCK_DATA_SOURCE
+    ? () => mockUnitedPassDataSource.revokeOtherSessions()
+    : async () => parseRevokedSessionCount(
+        await browserFetch<unknown>("/me/sessions", { method: "DELETE" }),
+      ),
+  logout: USE_MOCK_DATA_SOURCE
+    ? () => mockUnitedPassDataSource.logout()
+    : async () => {
+        await browserFetch<unknown>("/auth/session", { method: "DELETE" });
+      },
+  revokeOwnSession: USE_MOCK_DATA_SOURCE
+    ? (sessionId) => mockUnitedPassDataSource.revokeOwnSession(sessionId)
+    : async (sessionId) => {
+        await browserFetch<unknown>(`/me/sessions/${encodeURIComponent(sessionId)}`, {
+          method: "DELETE",
+        });
+      },
 
   // Admin user management
   updateUserStatus: (userId, status) =>
     mockUnitedPassDataSource.updateUserStatus(userId, status),
+  revokeUserSession: (userId, sessionId) =>
+    mockUnitedPassDataSource.revokeUserSession(userId, sessionId),
   revokeUserSessions: (userId) =>
     mockUnitedPassDataSource.revokeUserSessions(userId),
   linkEmployeeProfile: (input) =>

@@ -30,12 +30,15 @@ export type SecuritySummary = {
   };
 };
 
-export type PasskeyReauthenticationAction =
+export type AccountReauthenticationAction =
+  | "account.password.change"
+  | "account.totp.enroll"
+  | "account.totp.remove"
   | "account.passkey.enroll"
   | "account.passkey.remove";
 
 export type ReauthenticationInput = {
-  action: PasskeyReauthenticationAction;
+  action: AccountReauthenticationAction;
   target: string;
   password: string;
 };
@@ -96,13 +99,21 @@ export type PasskeyEnrollmentConfirmation = {
   passkeyId: string;
 };
 
+export type TotpEnrollment = {
+  enrollmentToken: string;
+  secret: string;
+  otpauthUri: string;
+};
+
 export type UserSession = {
   sessionId: string;
   deviceName: string;
   clientName: string;
-  approximateLocation: string;
+  approximateLocation: string | null;
   ipAddressMasked: string;
   lastActiveAt: string;
+  createdAt: string;
+  authenticationMethods: string[];
   isCurrent: boolean;
 };
 

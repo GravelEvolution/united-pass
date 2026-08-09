@@ -238,6 +238,7 @@ func (e *securityEnv) router(injectPrincipal bool) http.Handler {
 	r.Get("/me/security", e.handlers.GetSecurityFactors)
 	r.Post("/me/security/totp/enrollment", e.handlers.BeginTOTPEnrollment)
 	r.Post("/me/security/totp/enrollment/confirm", e.handlers.ConfirmTOTPEnrollment)
+	r.Post("/me/security/totp/enrollment/cancel", e.handlers.CancelTOTPEnrollment)
 	r.Delete("/me/security/totp", e.handlers.RemoveTOTP)
 	r.Post("/me/security/passkeys/enrollment", e.handlers.BeginPasskeyEnrollment)
 	r.Post("/me/security/passkeys/enrollment/confirm", e.handlers.ConfirmPasskeyEnrollment)
@@ -515,6 +516,9 @@ func TestConfirmTOTPEnrollment_WrongCodeConsumesEnrollment(t *testing.T) {
 	if body := decodeErrorBody(t, rec); body.Code != CodeFactorInvalid {
 		t.Errorf("code = %q, want %q", body.Code, CodeFactorInvalid)
 	}
+	if env.factors.removeTOTPCalls != 1 {
+		t.Fatalf("remove TOTP calls = %d, want 1 provider-pending cleanup before token consumption", env.factors.removeTOTPCalls)
+	}
 
 	// A wrong code consumes the enrollment: retry with the same token fails.
 	rec2 := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/totp/enrollment/confirm",
@@ -524,6 +528,54 @@ func TestConfirmTOTPEnrollment_WrongCodeConsumesEnrollment(t *testing.T) {
 	}
 	if body := decodeErrorBody(t, rec2); body.Code != CodeEnrollmentInvalid {
 		t.Errorf("retry code = %q, want %q", body.Code, CodeEnrollmentInvalid)
+	}
+}
+
+func TestConfirmTOTPEnrollment_WrongCodeCleanupFailureReleasesEnrollment(t *testing.T) {
+	env := newSecurityEnv()
+	token := totpBegin(t, env)
+	env.factors.confirmTOTPErr = auth.ErrInvalidFactorCode
+	env.factors.removeTOTPErr = auth.ErrProviderUnavailable
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/totp/enrollment/confirm",
+		`{"enrollmentToken":"`+token+`","code":"000000"}`, nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if env.enroll.size() != 1 {
+		t.Fatal("cleanup failure must release and preserve the enrollment for retry")
+	}
+}
+
+func TestCancelTOTPEnrollment_SettlesPendingProviderState(t *testing.T) {
+	env := newSecurityEnv()
+	token := totpBegin(t, env)
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/totp/enrollment/cancel",
+		`{"enrollmentToken":"`+token+`"}`, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if env.factors.removeTOTPCalls != 1 {
+		t.Fatalf("remove TOTP calls = %d, want 1", env.factors.removeTOTPCalls)
+	}
+	if env.enroll.size() != 0 {
+		t.Fatal("successful cancellation must consume the enrollment")
+	}
+}
+
+func TestCancelTOTPEnrollment_ProviderFailureReleasesEnrollment(t *testing.T) {
+	env := newSecurityEnv()
+	token := totpBegin(t, env)
+	env.factors.removeTOTPErr = auth.ErrProviderUnavailable
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/totp/enrollment/cancel",
+		`{"enrollmentToken":"`+token+`"}`, nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if env.enroll.size() != 1 {
+		t.Fatal("provider failure must preserve the enrollment for explicit retry")
 	}
 }
 

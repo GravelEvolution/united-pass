@@ -17,6 +17,7 @@ import {
   parseConsentResolution,
   parseCurrentUser,
   parseSecuritySummary,
+  parseUserSessions,
 } from "@/lib/api/response-validators";
 
 /**
@@ -29,8 +30,8 @@ import {
  * untrusted response onto the frozen contract types; unmigrated seams keep
  * the mock source until their backend contract lands.
  *
- * Migrated seams: getCurrentUser, getConsentResolution,
- * getAuthorizedApplications.
+ * Migrated seams: getCurrentUser, getSecuritySummary, getSessions,
+ * getConsentResolution, getAuthorizedApplications.
  *
  * List endpoints accept PageQuery and return CursorPage<T> so the backend
  * can return partial results without the frontend loading all records.
@@ -46,7 +47,9 @@ export const serverQueries: UnitedPassQueries = {
   getSecuritySummary: USE_MOCK_DATA_SOURCE
     ? () => mockUnitedPassDataSource.getSecuritySummary()
     : async () => parseSecuritySummary(await serverFetch<unknown>("/me/security")),
-  getSessions: () => mockUnitedPassDataSource.getSessions(),
+  getSessions: USE_MOCK_DATA_SOURCE
+    ? () => mockUnitedPassDataSource.getSessions()
+    : async () => parseUserSessions(await serverFetch<unknown>("/me/sessions")),
   getConsentResolution: USE_MOCK_DATA_SOURCE
     ? (requestId) => mockUnitedPassDataSource.getConsentResolution(requestId)
     : async (requestId) =>

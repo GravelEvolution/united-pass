@@ -34,6 +34,7 @@ import type {
   SecuritySummary,
   SerializedAssertionCredential,
   SerializedAttestationCredential,
+  TotpEnrollment,
   UserSession,
 } from "@/features/account/types";
 import type {
@@ -134,17 +135,18 @@ export interface UnitedPassCommands {
   verifyPhoneChange(requestId: string, code: string): Promise<void>;
 
   // Security
-  changePassword(currentPassword: string, newPassword: string): Promise<void>;
-  enrollTotp(): Promise<{ secret: string; qrCodeUrl: string }>;
-  confirmTotpEnrollment(code: string): Promise<void>;
-  removeTotp(): Promise<void>;
-  requestReauthentication(input: ReauthenticationInput): Promise<ReauthenticationOutcome>;
+  changePassword(newPassword: string, reauthToken: string, options?: BrowserCommandOptions): Promise<void>;
+  beginTotpEnrollment(reauthToken: string, options?: BrowserCommandOptions): Promise<TotpEnrollment>;
+  confirmTotpEnrollment(input: { enrollmentToken: string; code: string }): Promise<void>;
+  cancelTotpEnrollment(enrollmentToken: string): Promise<void>;
+  removeTotp(reauthToken: string, options?: BrowserCommandOptions): Promise<SecuritySummary>;
+  requestReauthentication(input: ReauthenticationInput, options?: BrowserCommandOptions): Promise<ReauthenticationOutcome>;
   completeReauthenticationMfa(input: {
     reauthToken: string;
     method: "totp" | "passkey";
     code?: string;
     passkeyAssertion?: SerializedAssertionCredential;
-  }): Promise<ReauthenticationGrant>;
+  }, options?: BrowserCommandOptions): Promise<ReauthenticationGrant>;
   startPasskeyEnrollment(
     reauthToken: string,
     options?: BrowserCommandOptions,
@@ -156,16 +158,17 @@ export interface UnitedPassCommands {
     passkeyName: string;
   }, options?: BrowserCommandOptions): Promise<PasskeyEnrollmentConfirmation>;
   cancelPasskeyEnrollment(enrollmentToken: string): Promise<void>;
-  removePasskey(passkeyId: string, reauthToken: string): Promise<SecuritySummary>;
+  removePasskey(passkeyId: string, reauthToken: string, options?: BrowserCommandOptions): Promise<SecuritySummary>;
   generateRecoveryCodes(): Promise<{ codes: string[] }>;
-  revokeOtherSessions(): Promise<void>;
+  revokeOtherSessions(): Promise<{ revoked: number }>;
   logout(): Promise<void>;
 
   // Session management
-  revokeSession(sessionId: string): Promise<void>;
+  revokeOwnSession(sessionId: string): Promise<void>;
 
   // Admin user management
   updateUserStatus(userId: string, status: "active" | "disabled"): Promise<void>;
+  revokeUserSession(userId: string, sessionId: string): Promise<void>;
   revokeUserSessions(userId: string): Promise<void>;
   linkEmployeeProfile(input: EmployeeLinkInput): Promise<void>;
   offboardEmployee(userId: string): Promise<void>;

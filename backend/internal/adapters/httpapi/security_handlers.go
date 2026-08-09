@@ -220,6 +220,10 @@ type totpConfirmRequest struct {
 	Code            string `json:"code"`
 }
 
+type totpCancelRequest struct {
+	EnrollmentToken string `json:"enrollmentToken"`
+}
+
 // ConfirmTOTPEnrollment handles POST /api/v1/me/security/totp/enrollment/confirm.
 // It claims the single-use enrollmentToken (single-winner claim lock),
 // verifies the binding, and activates the factor on the provider. The claim
@@ -250,6 +254,19 @@ func (h *SecurityHandlers) ConfirmTOTPEnrollment(w http.ResponseWriter, r *http.
 	_ = data // TOTP bindings carry no target; passkey confirmations use it.
 
 	err := h.factors.ConfirmTOTPEnrollment(r.Context(), principal.UserID, req.Code)
+	if errors.Is(err, auth.ErrInvalidFactorCode) {
+		// Invalid verification is terminal for this browser capability. Remove
+		// the provider-side pending registration before consuming the token;
+		// otherwise a fresh, reauthenticated begin is permanently rejected as
+		// already-set while the browser no longer owns a usable capability.
+		cleanupErr := h.removePendingTOTP(r.Context(), principal.UserID)
+		if cleanupErr != nil && !errors.Is(cleanupErr, auth.ErrFactorNotSet) {
+			_ = h.enrollments.ReleaseEnrollment(r.Context(), tokenHash, claimID)
+			h.logSecurityEvent("security.totp_enrollment_cleanup_failed", principal.UserID, "totp", cleanupErr)
+			h.writeFactorError(w, r, cleanupErr)
+			return
+		}
+	}
 	h.settleEnrollment(r.Context(), tokenHash, claimID, auth.EnrollmentTOTP, err)
 	if err != nil {
 		h.logSecurityEvent("security.totp_enrollment_confirmed", principal.UserID, "totp", err)
@@ -261,6 +278,54 @@ func (h *SecurityHandlers) ConfirmTOTPEnrollment(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, struct {
 		Status string `json:"status"`
 	}{Status: "confirmed"})
+}
+
+// CancelTOTPEnrollment settles a pending provider registration when the user
+// closes the setup UI after begin. The enrollment capability already carries
+// the completed step-up binding; no second reauthentication grant is accepted.
+func (h *SecurityHandlers) CancelTOTPEnrollment(w http.ResponseWriter, r *http.Request) {
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		WriteUnauthorized(w, r)
+		return
+	}
+
+	var req totpCancelRequest
+	if err := decodeJSONBody(w, r, &req, "totp enrollment cancel"); err != nil {
+		return
+	}
+	_, tokenHash, claimID, ok := h.claimEnrollmentData(w, r, principal, req.EnrollmentToken, auth.EnrollmentTOTP)
+	if !ok {
+		return
+	}
+
+	err := h.removePendingTOTP(r.Context(), principal.UserID)
+	if err == nil || errors.Is(err, auth.ErrFactorNotSet) {
+		if settleErr := h.enrollments.ConsumeEnrollment(r.Context(), tokenHash, claimID); settleErr != nil && !errors.Is(settleErr, auth.ErrEnrollmentNotHeld) {
+			h.lg().Warn("totp cancellation finalization failed",
+				"errorClass", observability.ClassifyError(settleErr))
+		}
+		h.logSecurityEvent("security.totp_enrollment_cancelled", principal.UserID, "totp", nil)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// No durable TOTP cleanup worker exists: preserve the browser capability
+	// for an explicit retry on every unresolved provider outcome. A retry after
+	// an ambiguous provider success observes factor-not-set and consumes safely.
+	_ = h.enrollments.ReleaseEnrollment(r.Context(), tokenHash, claimID)
+	h.logSecurityEvent("security.totp_enrollment_cancelled", principal.UserID, "totp", err)
+	h.writeFactorError(w, r, err)
+}
+
+// removePendingTOTP completes after the request may have been cancelled. Once
+// invalid verification or explicit cancellation owns the enrollment claim,
+// browser disconnect must not strand provider state. The provider call remains
+// bounded so shutdown and error paths cannot hang indefinitely.
+func (h *SecurityHandlers) removePendingTOTP(rctx context.Context, userID identity.UserID) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(rctx), compensationTimeout)
+	defer cancel()
+	return h.factors.RemoveTOTP(ctx, userID)
 }
 
 // RemoveTOTP handles DELETE /api/v1/me/security/totp. It consumes the reauth
