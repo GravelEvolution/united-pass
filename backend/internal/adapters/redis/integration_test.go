@@ -34,6 +34,8 @@ import (
 	"testing"
 	"time"
 
+	goredis "github.com/redis/go-redis/v9"
+
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
@@ -1368,8 +1370,22 @@ func TestIntegration_EnrollmentStoreClaimAndConsume(t *testing.T) {
 	if pkData.Kind != auth.EnrollmentPasskey || pkData.Target != "pk-42" {
 		t.Errorf("passkey enrollment = %+v, want (passkey, pk-42)", pkData)
 	}
+	cleanupKey := client.buildKey(enrollmentCleanupKeySegment, pkHash)
+	indexKey := client.buildKey(enrollmentCleanupIndexKey)
+	if exists, err := client.rdb.Exists(ctx, cleanupKey).Result(); err != nil || exists != 1 {
+		t.Fatalf("passkey cleanup record before consume = %d, %v; want present", exists, err)
+	}
+	if _, err := client.rdb.ZScore(ctx, indexKey, pkHash).Result(); err != nil {
+		t.Fatalf("passkey cleanup index before consume: %v", err)
+	}
 	if err := store.ConsumeEnrollment(ctx, pkHash, "claim-c"); err != nil {
 		t.Fatalf("consume passkey enrollment: %v", err)
+	}
+	if exists, err := client.rdb.Exists(ctx, cleanupKey).Result(); err != nil || exists != 0 {
+		t.Fatalf("passkey cleanup record after consume = %d, %v; want absent", exists, err)
+	}
+	if _, err := client.rdb.ZScore(ctx, indexKey, pkHash).Result(); !errors.Is(err, goredis.Nil) {
+		t.Fatalf("passkey cleanup index after consume err = %v, want redis.Nil", err)
 	}
 }
 

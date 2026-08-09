@@ -8,6 +8,11 @@
 
 import { defineConfig, devices } from "@playwright/test";
 
+const e2ePort = Number(process.env.UP_E2E_PORT ?? "3000");
+if (!Number.isInteger(e2ePort) || e2ePort < 1 || e2ePort > 65535) {
+  throw new Error("UP_E2E_PORT must be a valid TCP port");
+}
+
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
@@ -16,7 +21,7 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   reporter: "html",
   use: {
-    baseURL: "http://localhost:3000",
+    baseURL: `http://localhost:${e2ePort}`,
     trace: "on-first-retry",
   },
   projects: [
@@ -26,8 +31,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm dev",
-    url: "http://localhost:3000",
+    command: `pnpm dev --port ${e2ePort}`,
+    url: `http://localhost:${e2ePort}`,
     reuseExistingServer: true,
     timeout: 60_000,
     env: {

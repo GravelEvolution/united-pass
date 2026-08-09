@@ -72,11 +72,13 @@ describe("P4.5 browserCommands", () => {
       publicKeyCredentialCreationOptions: { challenge: "AQI" },
     }));
 
-    await browserCommands.startPasskeyEnrollment("grant");
+    const controller = new AbortController();
+    await browserCommands.startPasskeyEnrollment("grant", { signal: controller.signal });
 
     expect(calls[0].url).toBe("/api/v1/me/security/passkeys/enrollment");
     expect(headerOf(calls[0], "X-Reauthentication-Token")).toBe("grant");
     expect(headerOf(calls[0], "X-CSRF-Token")).toBe("csrf-value");
+    expect(calls[0].init.signal).toBe(controller.signal);
   });
 
   it("submits attestation without leaking the local expected passkey ID field", async () => {
@@ -89,12 +91,13 @@ describe("P4.5 browserCommands", () => {
       clientExtensionResults: {},
     };
 
+    const controller = new AbortController();
     await browserCommands.completePasskeyEnrollment({
       enrollmentToken: "enrollment",
       passkeyId: "pk-new",
       publicKeyCredential: credential,
       passkeyName: "",
-    });
+    }, { signal: controller.signal });
 
     expect(bodyOf(calls[0])).toEqual({
       enrollmentToken: "enrollment",
@@ -102,6 +105,7 @@ describe("P4.5 browserCommands", () => {
       passkeyName: "",
     });
     expect(bodyOf(calls[0])).not.toHaveProperty("passkeyId");
+    expect(calls[0].init.signal).toBe(controller.signal);
   });
 
   it("rejects confirmation when provider identity does not match begin", async () => {

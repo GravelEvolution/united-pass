@@ -19,17 +19,19 @@ import type {
   ReauthenticationChallenge,
   SecurityPasskey,
   SecuritySummary,
-  SerializedAttestationCredential,
 } from "@/features/account/types";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
 import { isApiError } from "@/lib/api/api-error";
 import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import {
-  createPasskeyCredential,
   getPasskeyAssertion,
   isWebAuthnSupported,
 } from "@/features/account/utils/webauthn";
+import {
+  passkeyCredentialCreator,
+  runPasskeyEnrollmentCeremony,
+} from "@/features/account/utils/passkey-enrollment";
 import styles from "./account-panels.module.css";
 
 type SecurityOverviewProps = {
@@ -631,38 +633,19 @@ function PasskeyEnrollModal({ onCancel, onSuccess }: PasskeyEnrollModalProps) {
   }
 
   async function enroll(reauthToken: string): Promise<void> {
-    const enrollment = await browserCommands.startPasskeyEnrollment(reauthToken);
-    let credential: SerializedAttestationCredential;
+    const controller = replaceAbortController(browserOperation);
     try {
-      if (USE_MOCK_DATA_SOURCE) {
-        credential = mockAttestationCredential;
-      } else {
-        const controller = replaceAbortController(browserOperation);
-        credential = await createPasskeyCredential(
-          enrollment.publicKeyCredentialCreationOptions,
-          controller.signal,
-        );
-      }
-      await browserCommands.completePasskeyEnrollment({
-        enrollmentToken: enrollment.enrollmentToken,
-        passkeyId: enrollment.passkeyId,
-        publicKeyCredential: credential,
-        passkeyName: "",
+      const passkeyId = await runPasskeyEnrollmentCeremony({
+        reauthToken,
+        signal: controller.signal,
+        commands: browserCommands,
+        createCredential: passkeyCredentialCreator(USE_MOCK_DATA_SOURCE),
       });
-    } catch {
-      // Browser/process loss is covered by the worker. While this component
-      // is alive, explicitly settle the provider registration immediately.
-      try {
-        await browserCommands.cancelPasskeyEnrollment(enrollment.enrollmentToken);
-      } catch {
-        throw new Error("passkey enrollment cancellation failed");
-      }
-      throw new Error("passkey enrollment ceremony failed");
+      Toast.success({ content: "通行密钥已添加。" });
+      onSuccess(passkeyId);
     } finally {
       browserOperation.current = null;
     }
-    Toast.success({ content: "通行密钥已添加。" });
-    onSuccess(enrollment.passkeyId);
   }
 
   return (
@@ -751,17 +734,6 @@ function PasskeyRemoveModal({ passkeyId, onCancel, onSuccess }: PasskeyRemoveMod
     </Modal>
   );
 }
-
-const mockAttestationCredential: SerializedAttestationCredential = {
-  id: "mock-credential",
-  rawId: "bW9jay1jcmVkZW50aWFs",
-  type: "public-key",
-  response: {
-    clientDataJSON: "bW9jay1jbGllbnQtZGF0YQ",
-    attestationObject: "bW9jay1hdHRlc3RhdGlvbg",
-  },
-  clientExtensionResults: {},
-};
 
 function replaceAbortController(
   reference: MutableRefObject<AbortController | null>,

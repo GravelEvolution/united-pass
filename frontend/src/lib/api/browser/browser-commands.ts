@@ -111,17 +111,19 @@ export const browserCommands: UnitedPassCommands = {
       ),
   startPasskeyEnrollment: USE_MOCK_DATA_SOURCE
     ? (reauthToken) => mockUnitedPassDataSource.startPasskeyEnrollment(reauthToken)
-    : async (reauthToken) => parsePasskeyEnrollment(
+    : async (reauthToken, options) => parsePasskeyEnrollment(
         await browserFetch<unknown>("/me/security/passkeys/enrollment", {
           method: "POST",
           reauthToken,
+          signal: options?.signal,
         }),
       ),
   completePasskeyEnrollment: USE_MOCK_DATA_SOURCE
     ? (input) => mockUnitedPassDataSource.completePasskeyEnrollment(input)
-    : async (input) => parsePasskeyEnrollmentConfirmation(
+    : async (input, options) => parsePasskeyEnrollmentConfirmation(
         await browserFetch<unknown>("/me/security/passkeys/enrollment/confirm", {
           method: "POST",
+          signal: options?.signal,
           body: {
             enrollmentToken: input.enrollmentToken,
             publicKeyCredential: input.publicKeyCredential,

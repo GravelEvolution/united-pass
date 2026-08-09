@@ -66,6 +66,10 @@ export type AdminDashboard = {
   recentEvents: AuditEvent[];
 };
 
+export type BrowserCommandOptions = {
+  signal?: AbortSignal;
+};
+
 /**
  * Read-only data access for Server Components and pages.
  * Implementations may run on the server (reading cookies, forwarding auth)
@@ -141,13 +145,16 @@ export interface UnitedPassCommands {
     code?: string;
     passkeyAssertion?: SerializedAssertionCredential;
   }): Promise<ReauthenticationGrant>;
-  startPasskeyEnrollment(reauthToken: string): Promise<PasskeyEnrollment>;
+  startPasskeyEnrollment(
+    reauthToken: string,
+    options?: BrowserCommandOptions,
+  ): Promise<PasskeyEnrollment>;
   completePasskeyEnrollment(input: {
     enrollmentToken: string;
     passkeyId: string;
     publicKeyCredential: SerializedAttestationCredential;
     passkeyName: string;
-  }): Promise<PasskeyEnrollmentConfirmation>;
+  }, options?: BrowserCommandOptions): Promise<PasskeyEnrollmentConfirmation>;
   cancelPasskeyEnrollment(enrollmentToken: string): Promise<void>;
   removePasskey(passkeyId: string, reauthToken: string): Promise<SecuritySummary>;
   generateRecoveryCodes(): Promise<{ codes: string[] }>;
