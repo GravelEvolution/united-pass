@@ -74,7 +74,7 @@
 | ADR-0005 | Application 与 OAuth Client 分离 | Accepted |
 | ADR-0006 | 前端、API、OAuth endpoints 与 Cookie 部署拓扑 | Accepted |
 
-> **P4.5 Accepted Amendment（2026-08-09）**：Passkey 的真实 browser
+> **P4.5 Frozen Amendment（2026-08-09；acceptance `194b6d2`）**：Passkey 的真实 browser
 > ceremony、多凭据 summary、action/target-bound reauthentication 与 abandoned
 > enrollment settlement 由 `backend/docs/adr-0008.md` 统一定义并实现；真实
 > ZITADEL 浏览器仪式仍须据实验收。P4.5 不顺带开启密码/TOTP/Session mutation

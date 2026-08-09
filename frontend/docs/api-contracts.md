@@ -1,6 +1,6 @@
 # United Pass 前端 API 接入清单
 
-- 状态：Frozen v1 + P4.5 Accepted Amendment（ADR-0008；真实 ZITADEL 浏览器验收 Pending）
+- 状态：Frozen v1 + P4.5 Frozen Amendment（ADR-0008；implementation acceptance `194b6d2`；真实 ZITADEL A14 Pending）
 - 日期：2026-08-09（P4.5 Passkey 浏览器仪式修订）
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect
