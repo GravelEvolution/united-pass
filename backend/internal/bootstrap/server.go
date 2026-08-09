@@ -114,6 +114,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var providerCloser interface{ Close() error }
 	var mfaStore httpapi.MFAChallengeStore
 	var rateChecker httpapi.RateChecker
+	var sessionAuditor session.SecurityAuditor
 
 	if pool != nil {
 		userRepo := postgres.NewUserRepository(pool.PgxPool())
@@ -142,8 +143,8 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			// Durable session security audit (ADR-0004 §8): session revocations
 			// are persisted through the canonical security event store —
 			// log-based audit alone is not a substitute.
-			sessionOpts = append(sessionOpts,
-				session.WithSecurityAuditor(newSessionSecurityAuditor(postgres.NewSecurityEventStore(pool.PgxPool()))))
+			sessionAuditor = newSessionSecurityAuditor(postgres.NewSecurityEventStore(pool.PgxPool()))
+			sessionOpts = append(sessionOpts, session.WithSecurityAuditor(sessionAuditor))
 		}
 		sessionSvc = session.NewService(sessionStore, session.SystemClock{},
 			cfg.Session.TTL, cfg.Session.RememberTTL,
@@ -219,6 +220,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var appHandlers *httpapi.ApplicationHandlers
 	var reauthHandlers *httpapi.ReauthHandlers
 	var securityHandlers *httpapi.SecurityHandlers
+	var passwordHandlers *httpapi.PasswordHandlers
 	var workerStops []func()
 	if pool != nil && provisioner != nil && userReader != nil && sessionSvc != nil && cfg.Session.EncryptionKey != "" {
 		var err error
@@ -261,6 +263,16 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				securityHandlers = httpapi.NewSecurityHandlers(
 					factorManager, reauthVerifier, redis.NewEnrollmentStore(redisClient),
 					cfg.Reauth.GrantTTL, logger)
+			}
+
+			// Password management (ADR-0006 §6): the authenticator doubles as
+			// the password authority (ZITADEL adapter or dev fake). The
+			// mutation consumes an account.password.change reauth grant,
+			// rotates the current session and revokes all others; the durable
+			// audit shares the canonical session security auditor.
+			if passwordManager, ok := authenticator.(auth.PasswordManager); ok && reauthVerifier != nil && sessionSvc != nil {
+				passwordHandlers = httpapi.NewPasswordHandlers(
+					passwordManager, reauthVerifier, sessionSvc, sessionAuditor, cfg, logger)
 			}
 		}
 
@@ -468,6 +480,9 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				r.Post("/me/security/passkeys/enrollment", securityHandlers.BeginPasskeyEnrollment)
 				r.Post("/me/security/passkeys/enrollment/confirm", securityHandlers.ConfirmPasskeyEnrollment)
 				r.Delete("/me/security/passkeys/{passkeyId}", securityHandlers.RemovePasskey)
+			}
+			if passwordHandlers != nil {
+				r.Post("/me/security/password", passwordHandlers.ChangePassword)
 			}
 		})
 

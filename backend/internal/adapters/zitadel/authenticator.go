@@ -72,6 +72,7 @@ type userService interface {
 	VerifyPasskeyRegistration(ctx context.Context, in *userv2.VerifyPasskeyRegistrationRequest, opts ...grpc.CallOption) (*userv2.VerifyPasskeyRegistrationResponse, error)
 	ListPasskeys(ctx context.Context, in *userv2.ListPasskeysRequest, opts ...grpc.CallOption) (*userv2.ListPasskeysResponse, error)
 	RemovePasskey(ctx context.Context, in *userv2.RemovePasskeyRequest, opts ...grpc.CallOption) (*userv2.RemovePasskeyResponse, error)
+	SetPassword(ctx context.Context, in *userv2.SetPasswordRequest, opts ...grpc.CallOption) (*userv2.SetPasswordResponse, error)
 }
 
 // Authenticator implements auth.Authenticator against ZITADEL's LoginV2 API.

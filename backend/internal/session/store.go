@@ -430,6 +430,84 @@ func (s *Service) DeleteSession(ctx context.Context, token string) error {
 	return s.store.Delete(ctx, tokenHash)
 }
 
+// RotateSessionResult carries the rotated session's fresh raw tokens, the
+// preserved record and the remaining absolute lifetime for cookie re-issue.
+// The raw tokens are returned to the caller so it can set cookies; they are
+// never stored in Redis.
+type RotateSessionResult struct {
+	SessionToken string
+	CSRFToken    string
+	TokenHash    string
+	Record       SessionRecord
+	// RemainingTTL is the session's remaining absolute lifetime
+	// (ExpiresAt - now) after rotation; callers derive the cookie MaxAge
+	// from it. Rotation never extends a session's absolute deadline.
+	RemainingTTL time.Duration
+}
+
+// RotateSession replaces the session token and CSRF token of an existing
+// session while keeping its identity stable (ADR-0006 §6 step 4): the
+// SessionID, CreatedAt, ExpiresAt, Remember flag, provider reference and
+// sealed provider credential all survive; LastSeenAt is refreshed and a
+// fresh CSRF token hash is bound. Rotation never extends the absolute
+// expiry — the key TTL becomes the remaining lifetime.
+//
+// The vanished-session guard is a production invariant here: if the record
+// disappears between validation and the atomic store rotation (a concurrent
+// logout or revocation won the race), rotation fails closed with
+// ErrSessionNotFound and never resurrects the session. An expired record is
+// cleaned up and reported as ErrSessionExpired.
+func (s *Service) RotateSession(ctx context.Context, oldToken string) (RotateSessionResult, error) {
+	if oldToken == "" {
+		return RotateSessionResult{}, ErrSessionNotFound
+	}
+	oldHash := HashToken(oldToken)
+	record, err := s.store.Get(ctx, oldHash)
+	if err != nil {
+		return RotateSessionResult{}, err
+	}
+
+	now := s.clock.Now()
+	if record.IsExpired(now, s.idleTTL) {
+		// Best-effort cleanup of the expired record (mirrors ValidateSession).
+		_ = s.store.Delete(ctx, oldHash)
+		return RotateSessionResult{}, ErrSessionExpired
+	}
+
+	token, err := GenerateToken()
+	if err != nil {
+		return RotateSessionResult{}, fmt.Errorf("session: generate token: %w", err)
+	}
+	csrfToken, err := GenerateCSRFToken()
+	if err != nil {
+		return RotateSessionResult{}, fmt.Errorf("session: generate CSRF token: %w", err)
+	}
+
+	remaining := record.ExpiresAt.Sub(now)
+	if remaining <= 0 {
+		// Past its absolute deadline between the expiry check and now:
+		// clean up and treat as expired.
+		_ = s.store.Delete(ctx, oldHash)
+		return RotateSessionResult{}, ErrSessionExpired
+	}
+
+	record.LastSeenAt = now
+	record.CSRFTokenHash = HashToken(csrfToken)
+
+	newHash := HashToken(token)
+	if err := s.store.Rotate(ctx, oldHash, newHash, record, remaining, s.idleTTL); err != nil {
+		return RotateSessionResult{}, err
+	}
+
+	return RotateSessionResult{
+		SessionToken: token,
+		CSRFToken:    csrfToken,
+		TokenHash:    newHash,
+		Record:       record,
+		RemainingTTL: remaining,
+	}, nil
+}
+
 // ListUserSessions returns the caller's live sessions (the current session
 // included; handlers mark it via the Principal). Expired entries are
 // filtered by the authoritative IsExpired replay inside the store, with the

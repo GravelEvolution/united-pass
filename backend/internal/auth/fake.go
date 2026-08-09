@@ -213,3 +213,29 @@ func (f *FakeAuthenticator) VerifyUserPassword(
 	// credential error so no account state is revealed.
 	return AuthenticationResult{Status: StatusInvalidCredentials}, nil
 }
+
+// SetPassword changes the password of an already-known fake user
+// (ADR-0006 §6): the newPassword-only mode — identity proof is the consumed
+// reauth grant, never a current password. The user is located by the stable
+// United Pass user ID, never by a caller-supplied identifier; an unknown
+// user fails closed with the stable password-change sentinel.
+func (f *FakeAuthenticator) SetPassword(
+	ctx context.Context,
+	userID identity.UserID,
+	newPassword SecretPassword,
+) error {
+	if newPassword.Empty() {
+		return ErrPasswordChangeFailed
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for identifier, user := range f.users {
+		if user.UserID != userID {
+			continue
+		}
+		user.Password = newPassword.Password()
+		f.users[identifier] = user
+		return nil
+	}
+	return ErrPasswordChangeFailed
+}

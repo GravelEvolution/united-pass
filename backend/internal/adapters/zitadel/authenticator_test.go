@@ -59,6 +59,7 @@ type fakeUserService struct {
 	verifyPasskeyFn   func(*userv2.VerifyPasskeyRegistrationRequest) (*userv2.VerifyPasskeyRegistrationResponse, error)
 	listPasskeysFn    func(*userv2.ListPasskeysRequest) (*userv2.ListPasskeysResponse, error)
 	removePasskeyFn   func(*userv2.RemovePasskeyRequest) (*userv2.RemovePasskeyResponse, error)
+	setPasswordFn     func(*userv2.SetPasswordRequest) (*userv2.SetPasswordResponse, error)
 }
 
 func (f *fakeUserService) GetUserByID(_ context.Context, in *userv2.GetUserByIDRequest, _ ...grpc.CallOption) (*userv2.GetUserByIDResponse, error) {
@@ -87,6 +88,12 @@ func (f *fakeUserService) ListPasskeys(_ context.Context, in *userv2.ListPasskey
 }
 func (f *fakeUserService) RemovePasskey(_ context.Context, in *userv2.RemovePasskeyRequest, _ ...grpc.CallOption) (*userv2.RemovePasskeyResponse, error) {
 	return f.removePasskeyFn(in)
+}
+func (f *fakeUserService) SetPassword(_ context.Context, in *userv2.SetPasswordRequest, _ ...grpc.CallOption) (*userv2.SetPasswordResponse, error) {
+	if f.setPasswordFn == nil {
+		return &userv2.SetPasswordResponse{}, nil
+	}
+	return f.setPasswordFn(in)
 }
 
 type fakeLinker struct {

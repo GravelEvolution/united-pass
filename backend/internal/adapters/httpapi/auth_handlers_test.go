@@ -34,6 +34,10 @@ import (
 type fakeSessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]session.SessionRecord
+	// rotateErr / revokeOthersErr inject infrastructure failures into the
+	// rotation and bulk-revocation paths (nil = healthy).
+	rotateErr       error
+	revokeOthersErr error
 }
 
 func newFakeSessionStore() *fakeSessionStore {
@@ -77,6 +81,14 @@ func (s *fakeSessionStore) Touch(_ context.Context, tokenHash string, record ses
 func (s *fakeSessionStore) Rotate(_ context.Context, oldHash, newHash string, newRecord session.SessionRecord, _, _ time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.rotateErr != nil {
+		return s.rotateErr
+	}
+	if _, ok := s.sessions[oldHash]; !ok {
+		// Mirrors the frozen Redis semantics: rotating a vanished session
+		// must never resurrect it.
+		return session.ErrSessionNotFound
+	}
 	s.sessions[newHash] = newRecord
 	delete(s.sessions, oldHash)
 	return nil
@@ -138,6 +150,9 @@ func (s *fakeSessionStore) ListUserSessions(_ context.Context, userID identity.U
 func (s *fakeSessionStore) RevokeAllOtherSessions(_ context.Context, userID identity.UserID, currentSessionID session.SessionID, now time.Time, idleTTL time.Duration) ([]session.SessionRecord, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.revokeOthersErr != nil {
+		return nil, 0, s.revokeOthersErr
+	}
 	var victims []session.SessionRecord
 	for hash, r := range s.sessions {
 		if r.UserID != userID || r.SessionID == currentSessionID {
