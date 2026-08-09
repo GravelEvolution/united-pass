@@ -31,6 +31,8 @@ export type BrowserHttpClientOptions = {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   signal?: AbortSignal;
+  /** Constrained step-up grant header; callers cannot attach arbitrary headers. */
+  reauthToken?: string;
   /** When true, sends body as FormData without setting Content-Type. */
   formData?: boolean;
 };
@@ -39,7 +41,7 @@ export async function browserFetch<T>(
   path: string,
   options: BrowserHttpClientOptions = {},
 ): Promise<T> {
-  const { method = "GET", body, signal, formData } = options;
+  const { method = "GET", body, signal, formData, reauthToken } = options;
 
   const headers: Record<string, string> = {};
 
@@ -52,6 +54,10 @@ export async function browserFetch<T>(
     if (csrfToken) {
       headers[CSRF_HEADER_NAME] = csrfToken;
     }
+  }
+
+  if (reauthToken) {
+    headers["X-Reauthentication-Token"] = reauthToken;
   }
 
   const response = await fetch(`${BROWSER_API_BASE_URL}${path}`, {

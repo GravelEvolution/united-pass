@@ -62,6 +62,9 @@ type EnrollmentTokenStore interface {
 	// ConsumeEnrollment permanently deletes the enrollment under the claim
 	// (single-use). auth.ErrEnrollmentNotHeld when the lock is gone.
 	ConsumeEnrollment(ctx context.Context, tokenHash, claimID string) error
+	// AbandonEnrollment consumes the browser capability but preserves and
+	// schedules passkey provider cleanup. TOTP callers never use it.
+	AbandonEnrollment(ctx context.Context, tokenHash, claimID string) error
 }
 
 // SecurityHandlers serves GET /api/v1/me/security and the TOTP/passkey
@@ -247,7 +250,7 @@ func (h *SecurityHandlers) ConfirmTOTPEnrollment(w http.ResponseWriter, r *http.
 	_ = data // TOTP bindings carry no target; passkey confirmations use it.
 
 	err := h.factors.ConfirmTOTPEnrollment(r.Context(), principal.UserID, req.Code)
-	h.settleEnrollment(r.Context(), tokenHash, claimID, err)
+	h.settleEnrollment(r.Context(), tokenHash, claimID, auth.EnrollmentTOTP, err)
 	if err != nil {
 		h.logSecurityEvent("security.totp_enrollment_confirmed", principal.UserID, "totp", err)
 		h.writeFactorError(w, r, err)
@@ -377,8 +380,10 @@ func (h *SecurityHandlers) ConfirmPasskeyEnrollment(w http.ResponseWriter, r *ht
 		return
 	}
 
-	err := h.factors.ConfirmPasskeyEnrollment(r.Context(), principal.UserID, data.Target, req.PasskeyName, req.PublicKeyCredential)
-	h.settleEnrollment(r.Context(), tokenHash, claimID, err)
+	providerCtx, cancel := context.WithTimeout(r.Context(), passkeyProviderTimeout)
+	err := h.factors.ConfirmPasskeyEnrollment(providerCtx, principal.UserID, data.Target, req.PasskeyName, req.PublicKeyCredential)
+	cancel()
+	h.settleEnrollment(r.Context(), tokenHash, claimID, auth.EnrollmentPasskey, err)
 	if err != nil {
 		h.logSecurityEvent("security.passkey_enrollment_confirmed", principal.UserID, "passkey", err)
 		h.writeFactorError(w, r, err)
@@ -390,6 +395,55 @@ func (h *SecurityHandlers) ConfirmPasskeyEnrollment(w http.ResponseWriter, r *ht
 		Status    string `json:"status"`
 		PasskeyID string `json:"passkeyId"`
 	}{Status: "confirmed", PasskeyID: data.Target})
+}
+
+type passkeyCancelRequest struct {
+	EnrollmentToken string `json:"enrollmentToken"`
+}
+
+// CancelPasskeyEnrollment settles a provider registration that the browser
+// abandoned after begin. The enrollment capability already carries the
+// completed step-up binding, so this route requires Session + CSRF but never
+// a second reauthentication grant (ADR-0008 §7).
+func (h *SecurityHandlers) CancelPasskeyEnrollment(w http.ResponseWriter, r *http.Request) {
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		WriteUnauthorized(w, r)
+		return
+	}
+	var req passkeyCancelRequest
+	if err := decodeJSONBody(w, r, &req, "passkey enrollment cancel"); err != nil {
+		return
+	}
+	data, tokenHash, claimID, ok := h.claimEnrollmentData(w, r, principal, req.EnrollmentToken, auth.EnrollmentPasskey)
+	if !ok {
+		return
+	}
+
+	providerCtx, cancel := context.WithTimeout(r.Context(), passkeyProviderTimeout)
+	err := h.factors.RemovePasskey(providerCtx, principal.UserID, data.Target)
+	cancel()
+	if err == nil || errors.Is(err, auth.ErrFactorNotSet) {
+		// Stable provider not-found is already settled. A local finalization
+		// failure leaves the active-preserving cleanup marker for retry.
+		if settleErr := h.enrollments.ConsumeEnrollment(r.Context(), tokenHash, claimID); settleErr != nil && !errors.Is(settleErr, auth.ErrEnrollmentNotHeld) {
+			h.lg().Warn("passkey cancellation finalization failed",
+				"errorClass", observability.ClassifyError(settleErr))
+		}
+		h.logSecurityEvent("security.passkey_enrollment_cancelled", principal.UserID, "passkey", nil)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if errors.Is(err, auth.ErrProviderUnavailable) || errors.Is(err, auth.ErrProviderForbidden) {
+		_ = h.enrollments.ReleaseEnrollment(r.Context(), tokenHash, claimID)
+	} else {
+		// Unexpected provider outcomes are ambiguous. Burn the browser token
+		// and let provider-readback cleanup settle them safely.
+		_ = h.enrollments.AbandonEnrollment(r.Context(), tokenHash, claimID)
+	}
+	h.logSecurityEvent("security.passkey_enrollment_cancelled", principal.UserID, "passkey", err)
+	h.writeFactorError(w, r, err)
 }
 
 // RemovePasskey handles DELETE /api/v1/me/security/passkeys/{passkeyId}. The
@@ -529,7 +583,7 @@ func (h *SecurityHandlers) claimEnrollmentData(w http.ResponseWriter, r *http.Re
 	// Binding verification is fail closed: wrong user, wrong session or a
 	// kind mismatch denies the confirmation — and burns the enrollment.
 	if data.UserID != principal.UserID || data.SessionID != string(principal.SessionID) || data.Kind != kind {
-		if err := h.enrollments.ConsumeEnrollment(r.Context(), tokenHash, claimID); err != nil {
+		if err := h.finalizeRejectedEnrollment(r.Context(), data, tokenHash, claimID); err != nil {
 			h.lg().Warn("enrollment consume after binding mismatch failed",
 				"errorClass", observability.ClassifyError(err),
 			)
@@ -544,7 +598,7 @@ func (h *SecurityHandlers) claimEnrollmentData(w http.ResponseWriter, r *http.Re
 	if h.security != nil {
 		if err := h.security.AllowSensitiveConsumption(r.Context(), data.UserID, data.SecurityEpoch); err != nil {
 			if errors.Is(err, securitystate.ErrEpochStale) {
-				_ = h.enrollments.ConsumeEnrollment(r.Context(), tokenHash, claimID)
+				_ = h.finalizeRejectedEnrollment(r.Context(), data, tokenHash, claimID)
 			} else {
 				_ = h.enrollments.ReleaseEnrollment(r.Context(), tokenHash, claimID)
 			}
@@ -559,14 +613,22 @@ func (h *SecurityHandlers) claimEnrollmentData(w http.ResponseWriter, r *http.Re
 // settleEnrollment finalises the claim after the provider confirmation call
 // (frozen claim/consume lifecycle): a transient or authorization-class provider
 // failure releases the claim so the enrollment stays retryable without a
-// fresh reauth ceremony; every other outcome (success, invalid
-// code/attestation, unexpected error) consumes it. Settlement failures are
-// logged but never mask the provider outcome — the challenge TTL bounds any
-// leftover state.
-func (h *SecurityHandlers) settleEnrollment(ctx context.Context, tokenHash, claimID string, providerErr error) {
+// fresh reauth ceremony. Successful/TOTP terminal outcomes consume it;
+// terminal passkey failures preserve provider cleanup work. Settlement
+// failures never mask the provider outcome — active-preserving expiry cleanup
+// resolves any leftover passkey state.
+func (h *SecurityHandlers) settleEnrollment(ctx context.Context, tokenHash, claimID string, kind auth.EnrollmentKind, providerErr error) {
 	if errors.Is(providerErr, auth.ErrProviderUnavailable) || errors.Is(providerErr, auth.ErrProviderForbidden) {
 		if err := h.enrollments.ReleaseEnrollment(ctx, tokenHash, claimID); err != nil && !errors.Is(err, auth.ErrEnrollmentNotHeld) {
 			h.lg().Warn("enrollment claim release failed",
+				"errorClass", observability.ClassifyError(err),
+			)
+		}
+		return
+	}
+	if kind == auth.EnrollmentPasskey && providerErr != nil {
+		if err := h.enrollments.AbandonEnrollment(ctx, tokenHash, claimID); err != nil && !errors.Is(err, auth.ErrEnrollmentNotHeld) {
+			h.lg().Warn("passkey enrollment abandonment failed",
 				"errorClass", observability.ClassifyError(err),
 			)
 		}
@@ -579,9 +641,20 @@ func (h *SecurityHandlers) settleEnrollment(ctx context.Context, tokenHash, clai
 	}
 }
 
+func (h *SecurityHandlers) finalizeRejectedEnrollment(ctx context.Context, data auth.EnrollmentData, tokenHash, claimID string) error {
+	if data.Kind == auth.EnrollmentPasskey {
+		return h.enrollments.AbandonEnrollment(ctx, tokenHash, claimID)
+	}
+	return h.enrollments.ConsumeEnrollment(ctx, tokenHash, claimID)
+}
+
 // compensationTimeout bounds detached provider compensation calls so a hung
 // provider can never stall the failed begin response indefinitely.
 const compensationTimeout = 10 * time.Second
+
+// Every passkey provider mutation completes before the 60-second enrollment
+// claim TTL, so cleanup can never take over an operation still in flight.
+const passkeyProviderTimeout = 10 * time.Second
 
 // compensateTOTPBegin removes the provider-side pending TOTP registration
 // after the enrollment store write failed (A3): without compensation the

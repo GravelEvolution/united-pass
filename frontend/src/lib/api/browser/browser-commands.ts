@@ -14,6 +14,11 @@ import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import { browserFetch } from "@/lib/api/browser/browser-http-client";
 import {
   parseDecisionResponse,
+  parsePasskeyEnrollment,
+  parsePasskeyEnrollmentConfirmation,
+  parseReauthenticationGrant,
+  parseReauthenticationOutcome,
+  parseSecuritySummary,
 } from "@/lib/api/response-validators";
 
 /**
@@ -75,10 +80,72 @@ export const browserCommands: UnitedPassCommands = {
   enrollTotp: () => mockUnitedPassDataSource.enrollTotp(),
   confirmTotpEnrollment: (code) => mockUnitedPassDataSource.confirmTotpEnrollment(code),
   removeTotp: () => mockUnitedPassDataSource.removeTotp(),
-  startPasskeyEnrollment: () => mockUnitedPassDataSource.startPasskeyEnrollment(),
-  completePasskeyEnrollment: (attestation) =>
-    mockUnitedPassDataSource.completePasskeyEnrollment(attestation),
-  removePasskey: (credentialId) => mockUnitedPassDataSource.removePasskey(credentialId),
+  requestReauthentication: USE_MOCK_DATA_SOURCE
+    ? (input) => mockUnitedPassDataSource.requestReauthentication(input)
+    : async (input) => parseReauthenticationOutcome(
+        await browserFetch<unknown>("/auth/reauthentication", {
+          method: "POST",
+          body: {
+            action: input.action,
+            applicationId: "",
+            clientId: "",
+            target: input.target,
+            password: input.password,
+          },
+        }),
+      ),
+  completeReauthenticationMfa: USE_MOCK_DATA_SOURCE
+    ? (input) => mockUnitedPassDataSource.completeReauthenticationMfa(input)
+    : async (input) => parseReauthenticationGrant(
+        await browserFetch<unknown>("/auth/reauthentication/mfa", {
+          method: "POST",
+          body: {
+            reauthToken: input.reauthToken,
+            method: input.method,
+            code: input.code ?? "",
+            ...(input.passkeyAssertion !== undefined && {
+              passkeyAssertion: input.passkeyAssertion,
+            }),
+          },
+        }),
+      ),
+  startPasskeyEnrollment: USE_MOCK_DATA_SOURCE
+    ? (reauthToken) => mockUnitedPassDataSource.startPasskeyEnrollment(reauthToken)
+    : async (reauthToken) => parsePasskeyEnrollment(
+        await browserFetch<unknown>("/me/security/passkeys/enrollment", {
+          method: "POST",
+          reauthToken,
+        }),
+      ),
+  completePasskeyEnrollment: USE_MOCK_DATA_SOURCE
+    ? (input) => mockUnitedPassDataSource.completePasskeyEnrollment(input)
+    : async (input) => parsePasskeyEnrollmentConfirmation(
+        await browserFetch<unknown>("/me/security/passkeys/enrollment/confirm", {
+          method: "POST",
+          body: {
+            enrollmentToken: input.enrollmentToken,
+            publicKeyCredential: input.publicKeyCredential,
+            passkeyName: input.passkeyName,
+          },
+        }),
+        input.passkeyId,
+      ),
+  cancelPasskeyEnrollment: USE_MOCK_DATA_SOURCE
+    ? (enrollmentToken) => mockUnitedPassDataSource.cancelPasskeyEnrollment(enrollmentToken)
+    : async (enrollmentToken) => {
+        await browserFetch<unknown>("/me/security/passkeys/enrollment/cancel", {
+          method: "POST",
+          body: { enrollmentToken },
+        });
+      },
+  removePasskey: USE_MOCK_DATA_SOURCE
+    ? (passkeyId, reauthToken) => mockUnitedPassDataSource.removePasskey(passkeyId, reauthToken)
+    : async (passkeyId, reauthToken) => parseSecuritySummary(
+        await browserFetch<unknown>(
+          `/me/security/passkeys/${encodeURIComponent(passkeyId)}`,
+          { method: "DELETE", reauthToken },
+        ),
+      ),
   generateRecoveryCodes: () => mockUnitedPassDataSource.generateRecoveryCodes(),
   revokeOtherSessions: () => mockUnitedPassDataSource.revokeOtherSessions(),
   logout: () => mockUnitedPassDataSource.logout(),

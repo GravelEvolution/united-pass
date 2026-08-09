@@ -16,6 +16,7 @@ import {
   parseAuthorizedApplications,
   parseConsentResolution,
   parseCurrentUser,
+  parseSecuritySummary,
 } from "@/lib/api/response-validators";
 
 /**
@@ -42,7 +43,9 @@ export const serverQueries: UnitedPassQueries = {
     ? () => mockUnitedPassDataSource.getCurrentUser()
     : async () => parseCurrentUser(await serverFetch<unknown>("/me")),
   getCurrentPermissions: () => mockUnitedPassDataSource.getCurrentPermissions(),
-  getSecurityFactors: () => mockUnitedPassDataSource.getSecurityFactors(),
+  getSecuritySummary: USE_MOCK_DATA_SOURCE
+    ? () => mockUnitedPassDataSource.getSecuritySummary()
+    : async () => parseSecuritySummary(await serverFetch<unknown>("/me/security")),
   getSessions: () => mockUnitedPassDataSource.getSessions(),
   getConsentResolution: USE_MOCK_DATA_SOURCE
     ? (requestId) => mockUnitedPassDataSource.getConsentResolution(requestId)

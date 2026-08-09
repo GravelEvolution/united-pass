@@ -73,11 +73,12 @@ const employeeAdminUser = {
   },
 } satisfies Awaited<ReturnType<UnitedPassDataSource["getCurrentUser"]>>;
 
-const securityFactors = [
-  { factorId: "factor_password", kind: "password", label: "账户密码", status: "active", updatedAt: "2026-07-12T03:20:00Z" },
-  { factorId: "factor_totp", kind: "totp", label: "身份验证器", status: "active", updatedAt: "2026-06-02T09:10:00Z" },
-  { factorId: "factor_passkey", kind: "passkey", label: "通行密钥", status: "recommended" },
-] satisfies Awaited<ReturnType<UnitedPassDataSource["getSecurityFactors"]>>;
+const securitySummary = {
+  password: { set: true },
+  totp: { enabled: true },
+  passkeys: [],
+  recoveryCodes: { available: false, deferredReason: "provider_unsupported" },
+} satisfies Awaited<ReturnType<UnitedPassDataSource["getSecuritySummary"]>>;
 
 const sessions = [
   { sessionId: "ses_current", deviceName: "MacBook Pro", clientName: "Chrome 138 · macOS", approximateLocation: "上海市", ipAddressMasked: "203.0.113.*", lastActiveAt: "2026-08-04T05:42:00Z", isCurrent: true },
@@ -834,7 +835,7 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
   return {
     getCurrentUser: () => Promise.resolve(employeeAdminUser),
     getCurrentPermissions: () => Promise.resolve(FULL_PERMISSIONS),
-    getSecurityFactors: () => Promise.resolve(securityFactors),
+    getSecuritySummary: () => Promise.resolve(securitySummary),
     getSessions: () => Promise.resolve(sessions),
     getConsentResolution: (requestId: string) => {
       const resolution = consentResolutions[requestId];
@@ -1196,10 +1197,18 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       }),
     confirmTotpEnrollment: (): Promise<void> => Promise.resolve(),
     removeTotp: (): Promise<void> => Promise.resolve(),
-    startPasskeyEnrollment: (): Promise<{ options: string }> =>
-      Promise.resolve({ options: "mock-passkey-enrollment-options" }),
-    completePasskeyEnrollment: (): Promise<void> => Promise.resolve(),
-    removePasskey: (): Promise<void> => Promise.resolve(),
+    requestReauthentication: (): Promise<{ status: "granted"; reauthToken: string; expiresAt: string }> =>
+      Promise.resolve({ status: "granted", reauthToken: "mock-reauth-token", expiresAt: "2026-08-09T12:00:00Z" }),
+    completeReauthenticationMfa: (): Promise<{ status: "granted"; reauthToken: string; expiresAt: string }> =>
+      Promise.resolve({ status: "granted", reauthToken: "mock-reauth-token", expiresAt: "2026-08-09T12:00:00Z" }),
+    startPasskeyEnrollment: () => Promise.resolve({
+      enrollmentToken: "mock-enrollment-token",
+      passkeyId: "mock-passkey-id",
+      publicKeyCredentialCreationOptions: {},
+    }),
+    completePasskeyEnrollment: (input) => Promise.resolve({ status: "confirmed", passkeyId: input.passkeyId }),
+    cancelPasskeyEnrollment: (): Promise<void> => Promise.resolve(),
+    removePasskey: () => Promise.resolve(securitySummary),
     generateRecoveryCodes: (): Promise<{ codes: string[] }> =>
       Promise.resolve({
         codes: [

@@ -24,7 +24,18 @@ import type {
   SyncConflict,
   UserDetail,
 } from "@/features/admin/types";
-import type { SecurityFactor, UserSession, AuthorizedApplication } from "@/features/account/types";
+import type {
+  AuthorizedApplication,
+  PasskeyEnrollment,
+  PasskeyEnrollmentConfirmation,
+  ReauthenticationGrant,
+  ReauthenticationInput,
+  ReauthenticationOutcome,
+  SecuritySummary,
+  SerializedAssertionCredential,
+  SerializedAttestationCredential,
+  UserSession,
+} from "@/features/account/types";
 import type {
   AllowedScope,
   ApplicationStatus,
@@ -66,7 +77,7 @@ export type AdminDashboard = {
 export interface UnitedPassQueries {
   getCurrentUser(): Promise<CurrentUser>;
   getCurrentPermissions(): Promise<PermissionCapabilities>;
-  getSecurityFactors(): Promise<SecurityFactor[]>;
+  getSecuritySummary(): Promise<SecuritySummary>;
   getSessions(): Promise<UserSession[]>;
   getConsentResolution(requestId: string): Promise<ConsentResolution>;
   getAuthorizedApplications(): Promise<AuthorizedApplication[]>;
@@ -123,9 +134,22 @@ export interface UnitedPassCommands {
   enrollTotp(): Promise<{ secret: string; qrCodeUrl: string }>;
   confirmTotpEnrollment(code: string): Promise<void>;
   removeTotp(): Promise<void>;
-  startPasskeyEnrollment(): Promise<{ options: string }>;
-  completePasskeyEnrollment(attestation: string): Promise<void>;
-  removePasskey(credentialId: string): Promise<void>;
+  requestReauthentication(input: ReauthenticationInput): Promise<ReauthenticationOutcome>;
+  completeReauthenticationMfa(input: {
+    reauthToken: string;
+    method: "totp" | "passkey";
+    code?: string;
+    passkeyAssertion?: SerializedAssertionCredential;
+  }): Promise<ReauthenticationGrant>;
+  startPasskeyEnrollment(reauthToken: string): Promise<PasskeyEnrollment>;
+  completePasskeyEnrollment(input: {
+    enrollmentToken: string;
+    passkeyId: string;
+    publicKeyCredential: SerializedAttestationCredential;
+    passkeyName: string;
+  }): Promise<PasskeyEnrollmentConfirmation>;
+  cancelPasskeyEnrollment(enrollmentToken: string): Promise<void>;
+  removePasskey(passkeyId: string, reauthToken: string): Promise<SecuritySummary>;
   generateRecoveryCodes(): Promise<{ codes: string[] }>;
   revokeOtherSessions(): Promise<void>;
   logout(): Promise<void>;

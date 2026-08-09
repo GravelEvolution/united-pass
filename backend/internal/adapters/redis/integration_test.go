@@ -1441,6 +1441,77 @@ func TestIntegration_EnrollmentStoreReleaseAllowsRetry(t *testing.T) {
 	}
 }
 
+func TestIntegration_PasskeyEnrollmentCleanupAbandonAndLease(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewEnrollmentStore(client)
+	ctx := context.Background()
+	tokenHash := session.HashToken("passkey-cleanup-abandon")
+
+	if err := store.CreateEnrollment(ctx, tokenHash, enrollmentData(auth.EnrollmentPasskey, "pk-abandoned"), 5*time.Minute); err != nil {
+		t.Fatalf("create passkey enrollment: %v", err)
+	}
+	if _, err := store.ClaimEnrollment(ctx, tokenHash, "claim-abandon"); err != nil {
+		t.Fatalf("claim passkey enrollment: %v", err)
+	}
+	if err := store.AbandonEnrollment(ctx, tokenHash, "claim-abandon"); err != nil {
+		t.Fatalf("abandon passkey enrollment: %v", err)
+	}
+
+	entries, err := store.ClaimExpiredPasskeyEnrollments(ctx, 10)
+	if err != nil {
+		t.Fatalf("claim cleanup: %v", err)
+	}
+	if len(entries) != 1 || entries[0].TokenHash != tokenHash || entries[0].Target != "pk-abandoned" || entries[0].UserID != "user_enroll_1" {
+		t.Fatalf("cleanup entries = %+v, want abandoned binding", entries)
+	}
+	// The first worker holds a lease; a second worker cannot receive it.
+	if again, err := store.ClaimExpiredPasskeyEnrollments(ctx, 10); err != nil || len(again) != 0 {
+		t.Fatalf("cleanup lease second claim = %+v, %v; want empty", again, err)
+	}
+
+	if err := store.RequeuePasskeyEnrollmentCleanup(ctx, entries[0], 0); err != nil {
+		t.Fatalf("requeue cleanup: %v", err)
+	}
+	retried, err := store.ClaimExpiredPasskeyEnrollments(ctx, 10)
+	if err != nil {
+		t.Fatalf("claim requeued cleanup: %v", err)
+	}
+	if len(retried) != 1 || retried[0].Attempts != 1 {
+		t.Fatalf("retried entries = %+v, want attempts=1", retried)
+	}
+	if err := store.CompletePasskeyEnrollmentCleanup(ctx, tokenHash); err != nil {
+		t.Fatalf("complete cleanup: %v", err)
+	}
+	if final, err := store.ClaimExpiredPasskeyEnrollments(ctx, 10); err != nil || len(final) != 0 {
+		t.Fatalf("completed cleanup claim = %+v, %v; want empty", final, err)
+	}
+}
+
+func TestIntegration_PasskeyCleanupSkipsLiveClaimAfterChallengeExpiry(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewEnrollmentStore(client)
+	ctx := context.Background()
+	tokenHash := session.HashToken("passkey-cleanup-live-claim")
+
+	if err := store.CreateEnrollment(ctx, tokenHash, enrollmentData(auth.EnrollmentPasskey, "pk-racing"), 100*time.Millisecond); err != nil {
+		t.Fatalf("create passkey enrollment: %v", err)
+	}
+	if _, err := store.ClaimEnrollment(ctx, tokenHash, "claim-racing"); err != nil {
+		t.Fatalf("claim enrollment: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if entries, err := store.ClaimExpiredPasskeyEnrollments(ctx, 10); err != nil || len(entries) != 0 {
+		t.Fatalf("cleanup while claim live = %+v, %v; want empty", entries, err)
+	}
+	if err := store.ReleaseEnrollment(ctx, tokenHash, "claim-racing"); err != nil {
+		t.Fatalf("release expired challenge claim: %v", err)
+	}
+	entries, err := store.ClaimExpiredPasskeyEnrollments(ctx, 10)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("cleanup after claim release = %+v, %v; want one", entries, err)
+	}
+}
+
 func TestIntegration_EnrollmentStoreConcurrentClaim(t *testing.T) {
 	client := setupTestRedis(t)
 	store := NewEnrollmentStore(client)

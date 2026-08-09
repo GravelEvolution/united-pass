@@ -108,6 +108,7 @@ type memEnrollments struct {
 	mu        sync.Mutex
 	data      map[string]auth.EnrollmentData
 	claims    map[string]string
+	abandoned []string
 	createErr error
 	claimErr  error
 }
@@ -162,6 +163,18 @@ func (m *memEnrollments) ConsumeEnrollment(_ context.Context, tokenHash, claimID
 	if m.claims[tokenHash] != claimID {
 		return auth.ErrEnrollmentNotHeld
 	}
+	delete(m.claims, tokenHash)
+	delete(m.data, tokenHash)
+	return nil
+}
+
+func (m *memEnrollments) AbandonEnrollment(_ context.Context, tokenHash, claimID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.claims[tokenHash] != claimID {
+		return auth.ErrEnrollmentNotHeld
+	}
+	m.abandoned = append(m.abandoned, tokenHash)
 	delete(m.claims, tokenHash)
 	delete(m.data, tokenHash)
 	return nil
@@ -228,6 +241,7 @@ func (e *securityEnv) router(injectPrincipal bool) http.Handler {
 	r.Delete("/me/security/totp", e.handlers.RemoveTOTP)
 	r.Post("/me/security/passkeys/enrollment", e.handlers.BeginPasskeyEnrollment)
 	r.Post("/me/security/passkeys/enrollment/confirm", e.handlers.ConfirmPasskeyEnrollment)
+	r.Post("/me/security/passkeys/enrollment/cancel", e.handlers.CancelPasskeyEnrollment)
 	r.Delete("/me/security/passkeys/{passkeyId}", e.handlers.RemovePasskey)
 	return r
 }
@@ -732,6 +746,74 @@ func TestConfirmPasskeyEnrollment_BadAttestation(t *testing.T) {
 	}
 	if body := decodeErrorBody(t, rec); body.Code != CodeFactorInvalid {
 		t.Errorf("code = %q, want %q", body.Code, CodeFactorInvalid)
+	}
+	if len(env.enroll.abandoned) != 1 {
+		t.Fatalf("abandoned cleanup entries = %d, want 1", len(env.enroll.abandoned))
+	}
+}
+
+func TestCancelPasskeyEnrollment_RemovesPendingRegistration(t *testing.T) {
+	env := newSecurityEnv()
+	token, passkeyID := passkeyBegin(t, env)
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/passkeys/enrollment/cancel",
+		`{"enrollmentToken":"`+token+`"}`, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(env.factors.removedPasskeys) != 1 || env.factors.removedPasskeys[0] != passkeyID {
+		t.Fatalf("removed passkeys = %v, want [%s]", env.factors.removedPasskeys, passkeyID)
+	}
+	if env.enroll.size() != 0 {
+		t.Fatal("successful cancellation must consume the enrollment")
+	}
+}
+
+func TestCancelPasskeyEnrollment_StableNotFoundIsSettled(t *testing.T) {
+	env := newSecurityEnv()
+	token, _ := passkeyBegin(t, env)
+	env.factors.removePasskeyErr = auth.ErrFactorNotSet
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/passkeys/enrollment/cancel",
+		`{"enrollmentToken":"`+token+`"}`, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCancelPasskeyEnrollment_ProviderOutageReleasesClaim(t *testing.T) {
+	env := newSecurityEnv()
+	token, _ := passkeyBegin(t, env)
+	env.factors.removePasskeyErr = auth.ErrProviderUnavailable
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/passkeys/enrollment/cancel",
+		`{"enrollmentToken":"`+token+`"}`, nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if env.enroll.size() != 1 {
+		t.Fatal("provider outage must preserve the enrollment for retry")
+	}
+
+	env.factors.removePasskeyErr = nil
+	retry := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/passkeys/enrollment/cancel",
+		`{"enrollmentToken":"`+token+`"}`, nil)
+	if retry.Code != http.StatusNoContent {
+		t.Fatalf("retry status = %d, want 204; body=%s", retry.Code, retry.Body.String())
+	}
+}
+
+func TestCancelPasskeyEnrollment_RejectsTOTPBinding(t *testing.T) {
+	env := newSecurityEnv()
+	token := totpBegin(t, env)
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/passkeys/enrollment/cancel",
+		`{"enrollmentToken":"`+token+`"}`, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(env.factors.removedPasskeys) != 0 {
+		t.Fatal("a TOTP enrollment must never remove a passkey")
 	}
 }
 

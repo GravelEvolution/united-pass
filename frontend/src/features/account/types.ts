@@ -14,12 +14,86 @@ export type AccountProfile = {
   phoneMasked: string;
 };
 
-export type SecurityFactor = {
-  factorId: string;
-  kind: "password" | "totp" | "passkey";
-  label: string;
-  status: "active" | "recommended";
-  updatedAt?: string;
+export type SecurityPasskey = {
+  passkeyId: string;
+  createdAt: string | null;
+  state: "active" | "pending";
+};
+
+export type SecuritySummary = {
+  password: { set: boolean };
+  totp: { enabled: boolean };
+  passkeys: SecurityPasskey[];
+  recoveryCodes: {
+    available: false;
+    deferredReason: "provider_unsupported";
+  };
+};
+
+export type PasskeyReauthenticationAction =
+  | "account.passkey.enroll"
+  | "account.passkey.remove";
+
+export type ReauthenticationInput = {
+  action: PasskeyReauthenticationAction;
+  target: string;
+  password: string;
+};
+
+export type ReauthenticationGrant = {
+  status: "granted";
+  reauthToken: string;
+  expiresAt: string;
+};
+
+export type ReauthenticationChallenge = {
+  status: "mfa_required";
+  reauthToken: string;
+  availableMethods: Array<"totp" | "passkey">;
+  passkeyRequestOptions?: unknown;
+  expiresAt: string;
+};
+
+export type ReauthenticationOutcome =
+  | ReauthenticationGrant
+  | ReauthenticationChallenge;
+
+export type SerializedAttestationCredential = {
+  id: string;
+  rawId: string;
+  type: "public-key";
+  response: {
+    clientDataJSON: string;
+    attestationObject: string;
+    transports?: AuthenticatorTransport[];
+  };
+  clientExtensionResults: Record<string, unknown>;
+  authenticatorAttachment?: "platform" | "cross-platform" | null;
+};
+
+export type SerializedAssertionCredential = {
+  id: string;
+  rawId: string;
+  type: "public-key";
+  response: {
+    clientDataJSON: string;
+    authenticatorData: string;
+    signature: string;
+    userHandle: string | null;
+  };
+  clientExtensionResults: Record<string, unknown>;
+  authenticatorAttachment?: "platform" | "cross-platform" | null;
+};
+
+export type PasskeyEnrollment = {
+  enrollmentToken: string;
+  passkeyId: string;
+  publicKeyCredentialCreationOptions: unknown;
+};
+
+export type PasskeyEnrollmentConfirmation = {
+  status: "confirmed";
+  passkeyId: string;
 };
 
 export type UserSession = {

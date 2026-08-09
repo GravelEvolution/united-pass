@@ -10,6 +10,7 @@ package auth
 
 import (
 	"errors"
+	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
@@ -58,4 +59,17 @@ type EnrollmentData struct {
 	// additionally verify the user's authoritative state against this
 	// stamp. Legacy records decode as 0 and are normalized to 1 (F2).
 	SecurityEpoch securitystate.Epoch `json:"securityEpoch,omitempty"`
+}
+
+// ExpiredPasskeyEnrollment is the non-secret work item used to settle a
+// provider-side passkey registration after its browser ceremony was
+// abandoned. TokenHash is the SHA-256 hash of the browser capability; the raw
+// token and WebAuthn options/credentials are never persisted in the cleanup
+// index (ADR-0008 §7).
+type ExpiredPasskeyEnrollment struct {
+	TokenHash string          `json:"tokenHash"`
+	UserID    identity.UserID `json:"userId"`
+	Target    string          `json:"target"`
+	CreatedAt time.Time       `json:"createdAt"`
+	Attempts  int             `json:"attempts"`
 }

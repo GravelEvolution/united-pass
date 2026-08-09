@@ -75,6 +75,19 @@ describe("browserFetch CSRF wiring", () => {
 
     expect(headerOf(calls[0], "X-CSRF-Token")).toBeNull();
   });
+
+  it("maps only the constrained reauthToken option onto the step-up header", async () => {
+    vi.stubGlobal("document", { cookie: "up_csrf=csrf-token-1" });
+    const { calls } = stubFetch(jsonResponse("{}"));
+
+    await browserFetch("/me/security/passkeys/enrollment", {
+      method: "POST",
+      reauthToken: "grant-opaque",
+    });
+
+    expect(headerOf(calls[0], "X-Reauthentication-Token")).toBe("grant-opaque");
+    expect(headerOf(calls[0], "X-CSRF-Token")).toBe("csrf-token-1");
+  });
 });
 
 describe("browserFetch response parsing contract", () => {

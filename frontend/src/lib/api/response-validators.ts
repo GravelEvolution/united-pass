@@ -12,7 +12,15 @@ import type {
   ConsentResolution,
   ConsentScope,
 } from "@/features/authorization/types";
-import type { AuthorizedApplication } from "@/features/account/types";
+import type {
+  AuthorizedApplication,
+  PasskeyEnrollment,
+  PasskeyEnrollmentConfirmation,
+  ReauthenticationGrant,
+  ReauthenticationOutcome,
+  SecurityPasskey,
+  SecuritySummary,
+} from "@/features/account/types";
 import type { MfaMethod } from "@/features/auth/types";
 import type { CurrentUser, EmployeeProfile, UserPersona } from "@/types/identity";
 
@@ -46,6 +54,12 @@ function requireString(record: Record<string, unknown>, field: string): string {
   if (typeof value !== "string") {
     throw new ApiResponseShapeError(field);
   }
+  return value;
+}
+
+function requireNonEmptyString(record: Record<string, unknown>, field: string): string {
+  const value = requireString(record, field);
+  if (value.length === 0) throw new ApiResponseShapeError(field);
   return value;
 }
 
@@ -152,6 +166,125 @@ export function parseDecisionResponse(value: unknown): { redirectUrl: string } {
     throw new ApiResponseShapeError("ConsentDecisionResponse.redirectUrl");
   }
   return { redirectUrl };
+}
+
+// --- Account security / P4.5 passkeys ---
+
+function parseSecurityPasskey(value: unknown): SecurityPasskey {
+  if (!isRecord(value)) throw new ApiResponseShapeError("SecurityPasskey");
+  const state = value.state;
+  if (state !== "active" && state !== "pending") {
+    throw new ApiResponseShapeError("SecurityPasskey.state");
+  }
+  const createdAt = value.createdAt;
+  if (createdAt !== null && typeof createdAt !== "string") {
+    throw new ApiResponseShapeError("SecurityPasskey.createdAt");
+  }
+  return {
+    passkeyId: requireNonEmptyString(value, "passkeyId"),
+    createdAt,
+    state,
+  };
+}
+
+export function parseSecuritySummary(value: unknown): SecuritySummary {
+  if (!isRecord(value)) throw new ApiResponseShapeError("SecuritySummary");
+  if (!isRecord(value.password) || !isRecord(value.totp)) {
+    throw new ApiResponseShapeError("SecuritySummary.factorState");
+  }
+  if (!Array.isArray(value.passkeys)) {
+    throw new ApiResponseShapeError("SecuritySummary.passkeys");
+  }
+  if (!isRecord(value.recoveryCodes)) {
+    throw new ApiResponseShapeError("SecuritySummary.recoveryCodes");
+  }
+  if (
+    value.recoveryCodes.available !== false ||
+    value.recoveryCodes.deferredReason !== "provider_unsupported"
+  ) {
+    throw new ApiResponseShapeError("SecuritySummary.recoveryCodes");
+  }
+  return {
+    password: { set: requireBoolean(value.password, "set") },
+    totp: { enabled: requireBoolean(value.totp, "enabled") },
+    passkeys: value.passkeys.map(parseSecurityPasskey),
+    recoveryCodes: {
+      available: false,
+      deferredReason: "provider_unsupported",
+    },
+  };
+}
+
+function parseReauthenticationGrantRecord(
+  value: Record<string, unknown>,
+): ReauthenticationGrant {
+  if (value.status !== "granted") {
+    throw new ApiResponseShapeError("ReauthenticationGrant.status");
+  }
+  return {
+    status: "granted",
+    reauthToken: requireNonEmptyString(value, "reauthToken"),
+    expiresAt: requireNonEmptyString(value, "expiresAt"),
+  };
+}
+
+export function parseReauthenticationGrant(value: unknown): ReauthenticationGrant {
+  if (!isRecord(value)) throw new ApiResponseShapeError("ReauthenticationGrant");
+  return parseReauthenticationGrantRecord(value);
+}
+
+export function parseReauthenticationOutcome(value: unknown): ReauthenticationOutcome {
+  if (!isRecord(value)) throw new ApiResponseShapeError("ReauthenticationOutcome");
+  if (value.status === "granted") return parseReauthenticationGrantRecord(value);
+  if (value.status !== "mfa_required") {
+    throw new ApiResponseShapeError("ReauthenticationOutcome.status");
+  }
+  if (!Array.isArray(value.availableMethods) || value.availableMethods.length === 0) {
+    throw new ApiResponseShapeError("ReauthenticationChallenge.availableMethods");
+  }
+  const availableMethods = value.availableMethods.map((method) => {
+    if (method !== "totp" && method !== "passkey") {
+      throw new ApiResponseShapeError("ReauthenticationChallenge.availableMethods");
+    }
+    return method;
+  });
+  const passkeyRequestOptions = value.passkeyRequestOptions;
+  if (availableMethods.includes("passkey") && !isRecord(passkeyRequestOptions)) {
+    throw new ApiResponseShapeError("ReauthenticationChallenge.passkeyRequestOptions");
+  }
+  return {
+    status: "mfa_required",
+    reauthToken: requireNonEmptyString(value, "reauthToken"),
+    availableMethods,
+    ...(passkeyRequestOptions !== undefined && { passkeyRequestOptions }),
+    expiresAt: requireNonEmptyString(value, "expiresAt"),
+  };
+}
+
+export function parsePasskeyEnrollment(value: unknown): PasskeyEnrollment {
+  if (!isRecord(value)) throw new ApiResponseShapeError("PasskeyEnrollment");
+  if (!isRecord(value.publicKeyCredentialCreationOptions)) {
+    throw new ApiResponseShapeError("PasskeyEnrollment.publicKeyCredentialCreationOptions");
+  }
+  return {
+    enrollmentToken: requireNonEmptyString(value, "enrollmentToken"),
+    passkeyId: requireNonEmptyString(value, "passkeyId"),
+    publicKeyCredentialCreationOptions: value.publicKeyCredentialCreationOptions,
+  };
+}
+
+export function parsePasskeyEnrollmentConfirmation(
+  value: unknown,
+  expectedPasskeyId: string,
+): PasskeyEnrollmentConfirmation {
+  if (!isRecord(value) || value.status !== "confirmed") {
+    throw new ApiResponseShapeError("PasskeyEnrollmentConfirmation");
+  }
+  const passkeyId = requireNonEmptyString(value, "passkeyId");
+  if (passkeyId !== expectedPasskeyId) {
+    throw new ApiResponseShapeError("PasskeyEnrollmentConfirmation.passkeyId");
+  }
+  return { status: "confirmed", passkeyId };
 }
 
 // --- MFARequiredResponse ---

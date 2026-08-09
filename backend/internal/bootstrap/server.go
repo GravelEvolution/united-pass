@@ -295,9 +295,14 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			// dev fake). Enrollments follow the grant TTL; both stores share
 			// the fail-closed Redis semantics of the reauth infrastructure.
 			if factorManager, ok := authenticator.(auth.FactorManager); ok && reauthVerifier != nil {
+				enrollmentStore := redis.NewEnrollmentStore(redisClient)
 				securityHandlers = httpapi.NewSecurityHandlers(
-					factorManager, reauthVerifier, redis.NewEnrollmentStore(redisClient),
+					factorManager, reauthVerifier, enrollmentStore,
 					sensitiveGate, cfg.Reauth.GrantTTL, logger)
+				cleanupWorker := httpapi.NewPasskeyEnrollmentCleanupWorker(
+					factorManager, enrollmentStore, cfg.Reauth.CleanupInterval, logger)
+				cleanupWorker.Start()
+				workerStops = append(workerStops, cleanupWorker.Stop)
 			}
 
 			// Password management (ADR-0006 §6 amended by ADR-0007): the
@@ -527,6 +532,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				r.Delete("/me/security/totp", securityHandlers.RemoveTOTP)
 				r.Post("/me/security/passkeys/enrollment", securityHandlers.BeginPasskeyEnrollment)
 				r.Post("/me/security/passkeys/enrollment/confirm", securityHandlers.ConfirmPasskeyEnrollment)
+				r.Post("/me/security/passkeys/enrollment/cancel", securityHandlers.CancelPasskeyEnrollment)
 				r.Delete("/me/security/passkeys/{passkeyId}", securityHandlers.RemovePasskey)
 			}
 			if passwordHandlers != nil {

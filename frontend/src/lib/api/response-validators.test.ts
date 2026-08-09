@@ -14,6 +14,10 @@ import {
   parseCurrentUser,
   parseDecisionResponse,
   parseMfaRequiredResponse,
+  parsePasskeyEnrollment,
+  parsePasskeyEnrollmentConfirmation,
+  parseReauthenticationOutcome,
+  parseSecuritySummary,
 } from "./response-validators";
 
 describe("parseConsentResolution", () => {
@@ -274,5 +278,96 @@ describe("parseMfaRequiredResponse", () => {
       parseMfaRequiredResponse({ status: "mfa_required", mfaToken: "t", availableMethods: [] }),
     ).toThrow(ApiResponseShapeError);
     expect(() => parseMfaRequiredResponse(null)).toThrow(ApiResponseShapeError);
+  });
+});
+
+describe("P4.5 account security validators", () => {
+  const summary = {
+    password: { set: true },
+    totp: { enabled: false },
+    passkeys: [
+      { passkeyId: "pk-active", createdAt: null, state: "active" },
+      { passkeyId: "pk-pending", createdAt: "2026-08-09T10:00:00Z", state: "pending" },
+    ],
+    recoveryCodes: { available: false, deferredReason: "provider_unsupported" },
+  };
+
+  it("preserves multiple passkeys, pending state and nullable creation time", () => {
+    expect(parseSecuritySummary(summary)).toEqual(summary);
+  });
+
+  it("fails closed on unknown passkey state or real recovery-code availability", () => {
+    expect(() => parseSecuritySummary({ ...summary, passkeys: [{ ...summary.passkeys[0], state: "ready" }] })).toThrow(
+      ApiResponseShapeError,
+    );
+    expect(() => parseSecuritySummary({
+      ...summary,
+      recoveryCodes: { available: true, deferredReason: "provider_unsupported" },
+    })).toThrow(ApiResponseShapeError);
+  });
+
+  it("narrows granted and MFA-required reauthentication outcomes", () => {
+    expect(parseReauthenticationOutcome({
+      status: "granted",
+      reauthToken: "grant",
+      expiresAt: "2026-08-09T10:00:00Z",
+    })).toEqual({ status: "granted", reauthToken: "grant", expiresAt: "2026-08-09T10:00:00Z" });
+
+    expect(parseReauthenticationOutcome({
+      status: "mfa_required",
+      reauthToken: "challenge",
+      availableMethods: ["totp", "passkey"],
+      passkeyRequestOptions: { challenge: "Y2hhbGxlbmdl" },
+      expiresAt: "2026-08-09T10:00:00Z",
+    })).toEqual({
+      status: "mfa_required",
+      reauthToken: "challenge",
+      availableMethods: ["totp", "passkey"],
+      passkeyRequestOptions: { challenge: "Y2hhbGxlbmdl" },
+      expiresAt: "2026-08-09T10:00:00Z",
+    });
+  });
+
+  it("rejects unknown MFA methods and passkey challenges without request options", () => {
+    expect(() => parseReauthenticationOutcome({
+      status: "mfa_required",
+      reauthToken: "challenge",
+      availableMethods: ["sms"],
+      expiresAt: "x",
+    })).toThrow(ApiResponseShapeError);
+    expect(() => parseReauthenticationOutcome({
+      status: "mfa_required",
+      reauthToken: "challenge",
+      availableMethods: ["passkey"],
+      expiresAt: "x",
+    })).toThrow(ApiResponseShapeError);
+  });
+
+  it("keeps the enrollment capability available while narrowing options", () => {
+    expect(parsePasskeyEnrollment({
+      enrollmentToken: "enrollment",
+      passkeyId: "pk-new",
+      publicKeyCredentialCreationOptions: { challenge: "Y2hhbGxlbmdl" },
+    })).toEqual({
+      enrollmentToken: "enrollment",
+      passkeyId: "pk-new",
+      publicKeyCredentialCreationOptions: { challenge: "Y2hhbGxlbmdl" },
+    });
+    expect(() => parsePasskeyEnrollment({
+      enrollmentToken: "enrollment",
+      passkeyId: "pk-new",
+      publicKeyCredentialCreationOptions: "escaped-json",
+    })).toThrow(ApiResponseShapeError);
+  });
+
+  it("rejects a confirmation whose provider passkey ID changed", () => {
+    expect(parsePasskeyEnrollmentConfirmation(
+      { status: "confirmed", passkeyId: "pk-new" },
+      "pk-new",
+    )).toEqual({ status: "confirmed", passkeyId: "pk-new" });
+    expect(() => parsePasskeyEnrollmentConfirmation(
+      { status: "confirmed", passkeyId: "pk-other" },
+      "pk-new",
+    )).toThrow(ApiResponseShapeError);
   });
 });

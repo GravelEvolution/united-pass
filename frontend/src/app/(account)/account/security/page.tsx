@@ -13,6 +13,6 @@ import { serverQueries } from "@/lib/api/server/server-queries";
 export const metadata: Metadata = { title: "登录与安全" };
 
 export default async function SecurityPage() {
-  const securityFactors = await serverQueries.getSecurityFactors();
-  return <SecurityOverview securityFactors={securityFactors} />;
+  const securitySummary = await serverQueries.getSecuritySummary();
+  return <SecurityOverview securitySummary={securitySummary} />;
 }

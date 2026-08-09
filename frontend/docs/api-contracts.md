@@ -1,6 +1,6 @@
 # United Pass 前端 API 接入清单
 
-- 状态：Frozen v1 + P4.5 Proposed Amendment（ADR-0008；实现需复审授权）
+- 状态：Frozen v1 + P4.5 Accepted Amendment（ADR-0008；真实 ZITADEL 浏览器验收 Pending）
 - 日期：2026-08-09（P4.5 Passkey 浏览器仪式修订）
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect
@@ -229,7 +229,7 @@ Account action 的 `applicationId` / `clientId` 必须为空；只有
 | `/account/security` | `DELETE /api/v1/me/security/totp` | 删除 TOTP 因子 | 重认证；审计 |
 | `/account/security` | `POST /api/v1/me/security/passkeys/enrollment` | 开始 WebAuthn 注册并返回 creation options | `account.passkey.enroll` 重认证；no-store |
 | `/account/security` | `POST /api/v1/me/security/passkeys/enrollment/confirm` | 完成 Passkey 注册 | enrollmentToken + 浏览器 credential JSON |
-| `/account/security` | `POST /api/v1/me/security/passkeys/enrollment/cancel` | 取消/结算已放弃的 pending registration（P4.5 Proposed） | enrollmentToken capability；Session + CSRF；ADR-0008 |
+| `/account/security` | `POST /api/v1/me/security/passkeys/enrollment/cancel` | 取消/结算已放弃的 pending registration | enrollmentToken capability；Session + CSRF；ADR-0008 |
 | `/account/security` | `DELETE /api/v1/me/security/passkeys/{passkeyId}` | 删除指定 Passkey | `account.passkey.remove` 重认证且 target 必须匹配；审计 |
 | `/account/sessions` | `GET /api/v1/me/sessions` | 设备、客户端、脱敏 IP、大致位置、最近活动和当前会话标记 | 当前会话用户 |
 | `/account/sessions` | `DELETE /api/v1/me/sessions/{sessionId}` | 撤销指定会话 | 明确确认；不能误撤当前事务 |
@@ -468,7 +468,7 @@ Client Profile（`web_server`、`spa_mobile`、`server_to_server`）决定 Grant
 | `completeReauthenticationMfa(input)` | `POST /api/v1/auth/reauthentication/mfa` |
 | `startPasskeyEnrollment(reauthToken)` | `POST /api/v1/me/security/passkeys/enrollment` + `X-Reauthentication-Token` |
 | `completePasskeyEnrollment(input)` | `POST /api/v1/me/security/passkeys/enrollment/confirm` |
-| `cancelPasskeyEnrollment(enrollmentToken)` | `POST /api/v1/me/security/passkeys/enrollment/cancel`（P4.5 Proposed） |
+| `cancelPasskeyEnrollment(enrollmentToken)` | `POST /api/v1/me/security/passkeys/enrollment/cancel` |
 | `removePasskey(passkeyId, reauthToken)` | `DELETE /api/v1/me/security/passkeys/{passkeyId}` + target-bound reauth header |
 
 ### 已移除的 Mock 专用接口

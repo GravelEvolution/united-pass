@@ -27,7 +27,7 @@ info:
     Business API paths use the full `/api/v1/...` prefix explicitly rather than
     relying on a global server base path, so that root-level operational endpoints
     and versioned API endpoints can coexist accurately.
-  version: 0.3.0
+  version: 0.4.0
   contact:
     name: United Pass backend team
 
@@ -47,6 +47,8 @@ tags:
       operations require the `X-CSRF-Token` header matching the `up_csrf` cookie.
   - name: Account
     description: Current user profile and permission capabilities
+  - name: Account Security
+    description: Provider-authoritative account factors and passkey lifecycle
   - name: Reauthentication
     description: |
       High-risk operation reauthentication. A completed grant is required
@@ -651,6 +653,164 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "429":
           $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/security:
+    get:
+      tags: [Account Security]
+      summary: Read provider-authoritative account security state
+      operationId: getAccountSecuritySummary
+      security:
+        - SessionCookie: []
+      responses:
+        "200":
+          description: Password, TOTP, individual passkeys and recovery-code capability.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecuritySummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "503":
+          $ref: "#/components/responses/ProviderForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/security/passkeys/enrollment:
+    post:
+      tags: [Account Security]
+      summary: Begin a passkey browser ceremony
+      description: Consumes an `account.passkey.enroll` reauthentication grant.
+      operationId: beginPasskeyEnrollment
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "200":
+          description: Provider registration options and enrollment capability. Never cached.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PasskeyEnrollmentResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "503":
+          $ref: "#/components/responses/ProviderForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/security/passkeys/enrollment/confirm:
+    post:
+      tags: [Account Security]
+      summary: Confirm a passkey registration with browser attestation
+      operationId: confirmPasskeyEnrollment
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasskeyEnrollmentConfirmRequest"
+      responses:
+        "200":
+          description: Provider confirmed the passkey.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PasskeyEnrollmentConfirmation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "503":
+          $ref: "#/components/responses/ProviderForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/security/passkeys/enrollment/cancel:
+    post:
+      tags: [Account Security]
+      summary: Settle an abandoned passkey registration
+      description: |
+        Uses the user/session/epoch-bound enrollment capability; no second
+        reauthentication grant is accepted or required. Stable provider
+        not-found is treated as already settled.
+      operationId: cancelPasskeyEnrollment
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasskeyEnrollmentCancelRequest"
+      responses:
+        "204":
+          description: Pending registration removed or already absent.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "503":
+          $ref: "#/components/responses/ProviderForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/security/passkeys/{passkeyId}:
+    delete:
+      tags: [Account Security]
+      summary: Remove one passkey
+      description: Consumes an `account.passkey.remove` grant bound to this passkey ID.
+      operationId: removePasskey
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PasskeyIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "200":
+          description: Fresh provider-authoritative security summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecuritySummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "503":
+          $ref: "#/components/responses/ProviderForbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -1425,6 +1585,15 @@ components:
         type: string
         example: clt_01HQFGXKN8H2C4JVMW7K3R4D8Z
 
+    PasskeyIdPath:
+      name: passkeyId
+      in: path
+      required: true
+      description: Opaque provider-issued passkey identifier.
+      schema:
+        type: string
+        minLength: 1
+
     X-Reauthentication-Token:
       name: X-Reauthentication-Token
       in: header
@@ -1520,6 +1689,17 @@ components:
         The identity provider rejected or failed the provisioning call. The
         response carries a stable internal error class only — never raw
         provider errors.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ProviderForbidden:
+      description: |
+        The provider service account lacks the required permission. This is a
+        server-side configuration failure, not a caller authorization denial.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/X-Request-ID"
@@ -1895,14 +2075,25 @@ components:
       properties:
         action:
           type: string
-          enum: [application.delete, client.delete, client.secret.rotate]
+          enum:
+            - application.delete
+            - client.delete
+            - client.secret.rotate
+            - account.password.change
+            - account.totp.enroll
+            - account.totp.remove
+            - account.passkey.enroll
+            - account.passkey.remove
           description: The high-risk action the grant will authorize.
         applicationId:
           type: string
-          description: Target application (required for all current actions).
+          description: Target application for application-scoped actions; must be empty for account actions.
         clientId:
           type: string
           description: Target client (required for client actions).
+        target:
+          type: string
+          description: Required only for `account.passkey.remove`; forbidden for other account actions.
         password:
           type: string
           minLength: 1
@@ -1972,6 +2163,109 @@ components:
           type: object
           writeOnly: true
           description: WebAuthn assertion; required for `passkey`. Never logged.
+
+    SecuritySummary:
+      type: object
+      required: [password, totp, passkeys, recoveryCodes]
+      additionalProperties: false
+      properties:
+        password:
+          type: object
+          required: [set]
+          additionalProperties: false
+          properties:
+            set: { type: boolean }
+        totp:
+          type: object
+          required: [enabled]
+          additionalProperties: false
+          properties:
+            enabled: { type: boolean }
+        passkeys:
+          type: array
+          items:
+            $ref: "#/components/schemas/PasskeySummary"
+        recoveryCodes:
+          type: object
+          required: [available, deferredReason]
+          additionalProperties: false
+          properties:
+            available:
+              type: boolean
+              const: false
+            deferredReason:
+              type: string
+              const: provider_unsupported
+
+    PasskeySummary:
+      type: object
+      required: [passkeyId, createdAt, state]
+      additionalProperties: false
+      properties:
+        passkeyId:
+          type: string
+          minLength: 1
+        createdAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        state:
+          type: string
+          enum: [active, pending]
+
+    PasskeyEnrollmentResponse:
+      type: object
+      required: [enrollmentToken, passkeyId, publicKeyCredentialCreationOptions]
+      additionalProperties: false
+      properties:
+        enrollmentToken:
+          type: string
+          minLength: 1
+        passkeyId:
+          type: string
+          minLength: 1
+        publicKeyCredentialCreationOptions:
+          type: object
+          description: WebAuthn JSON wire shape; binary fields are base64url.
+
+    PasskeyEnrollmentConfirmRequest:
+      type: object
+      required: [enrollmentToken, publicKeyCredential]
+      additionalProperties: false
+      properties:
+        enrollmentToken:
+          type: string
+          minLength: 1
+        publicKeyCredential:
+          type: object
+          writeOnly: true
+          description: Browser-created credential JSON. Never logged or persisted.
+        passkeyName:
+          type: string
+          maxLength: 200
+
+    PasskeyEnrollmentCancelRequest:
+      type: object
+      required: [enrollmentToken]
+      additionalProperties: false
+      properties:
+        enrollmentToken:
+          type: string
+          minLength: 1
+          writeOnly: true
+
+    PasskeyEnrollmentConfirmation:
+      type: object
+      required: [status, passkeyId]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          const: confirmed
+        passkeyId:
+          type: string
+          minLength: 1
 
     RedirectUriEntry:
       type: object
