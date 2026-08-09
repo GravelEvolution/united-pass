@@ -136,13 +136,17 @@ api() { # method path json-body
 # unreliable for instance-level tokens in v2.71, so list all users and match
 # by preferredLoginName (prefix match on the short name covers the org or
 # email domain suffix).
+list_users() {
+  curl -sf -X POST "${BASE_URL}/v2/users" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d '{}'
+}
+
 find_user_by_name() {
   local name="$1"
   local resp
-  resp="$(curl -sf -X POST "${BASE_URL}/v2/users" \
-    -H "Authorization: Bearer ${TOKEN}" \
-    -H 'Content-Type: application/json' \
-    -d '{}' 2>/dev/null || true)"
+  resp="$(list_users 2>/dev/null || true)"
   [[ -n "${resp}" ]] && echo "${resp}" | jq -r --arg n "${name}" \
     '.result[] | select((.preferredLoginName // "") | startswith($n)) | .userId // empty' | head -1
 }
@@ -158,6 +162,13 @@ if [[ -z "${USER_ID}" ]]; then
 else
   log "user ${TEST_USER_FULL} already exists (${USER_ID})"
 fi
+
+# Persist the provider-authoritative login name, not the requested creation
+# name. ZITADEL may select the verified email domain as preferredLoginName;
+# writing TEST_USER_FULL here makes unattended E2E use a non-login alias.
+TEST_LOGIN="$(list_users | jq -r --arg id "${USER_ID}" \
+  '.result[] | select(.userId == $id) | .preferredLoginName // empty' | head -1)"
+[[ -n "${TEST_LOGIN}" ]] || die "could not resolve preferred login name for ${USER_ID}"
 
 # --- register TOTP on the test user (skips if already registered) ------------
 totp_code() { # secret
@@ -232,10 +243,7 @@ fi
 # (ORG_OWNER grants session/user API access). The org member endpoint is
 # fixed at /orgs/me/members and requires the X-Zitadel-Orgid header to
 # target a specific org (IAM-level token context differs from the org).
-ORG_ID="$(curl -sf -X POST "${BASE_URL}/v2/users" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H 'Content-Type: application/json' \
-  -d '{}' | jq -r --arg u "${USER_ID}" '.result[] | select(.userId == $u) | .details.resourceOwner')"
+ORG_ID="$(list_users | jq -r --arg u "${USER_ID}" '.result[] | select(.userId == $u) | .details.resourceOwner')"
 if [[ -n "${ORG_ID}" ]] && ! curl -sf -X POST "${BASE_URL}/management/v1/orgs/me/members" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H 'Content-Type: application/json' \
@@ -263,22 +271,23 @@ else
 fi
 
 # --- persist state for unattended integration tests --------------------------
-cat > "${STATE_FILE}" <<EOF
-{
-  "baseUrl": "${BASE_URL}",
-  "keyFile": "${SA_KEY_FILE}",
-  "user": "${TEST_USER_FULL}",
-  "password": "${TEST_PASSWORD}",
-  "userId": "${USER_ID}",
-  "totpSecret": "${TOTP_SECRET}"
-}
-EOF
+jq -n \
+  --arg baseUrl "${BASE_URL}" \
+  --arg keyFile "${SA_KEY_FILE}" \
+  --arg user "${TEST_LOGIN}" \
+  --arg password "${TEST_PASSWORD}" \
+  --arg userId "${USER_ID}" \
+  --arg totpSecret "${TOTP_SECRET}" \
+  '{baseUrl:$baseUrl,keyFile:$keyFile,user:$user,password:$password,userId:$userId,totpSecret:$totpSecret}' \
+  > "${STATE_FILE}"
+chmod 600 "${STATE_FILE}"
 log "state written to ${STATE_FILE}"
 
 log "done. Service account key: ${SA_KEY_FILE}"
-log "Integration test env:"
+log "Integration test env (secret values load from the state file):"
 echo "  UP_TEST_ZITADEL_BASE_URL=${BASE_URL}"
 echo "  UP_TEST_ZITADEL_KEY_FILE=${SA_KEY_FILE}"
-echo "  UP_TEST_ZITADEL_USER=${TEST_USER_FULL}"
-echo "  UP_TEST_ZITADEL_PASSWORD=${TEST_PASSWORD}"
-echo "  UP_TEST_ZITADEL_TOTP_SECRET=${TOTP_SECRET}"
+echo "  UP_TEST_ZITADEL_USER=${TEST_LOGIN}"
+echo "  D=${STATE_FILE}"
+echo '  export UP_TEST_ZITADEL_PASSWORD="$(jq -r .password "$D")"'
+echo '  export UP_TEST_ZITADEL_TOTP_SECRET="$(jq -r .totpSecret "$D")"'
