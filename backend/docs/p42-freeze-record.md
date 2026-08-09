@@ -85,3 +85,14 @@
 | P4.1 Session Inventory & Lifecycle | PASSED / FROZEN 🔒（re-frozen head `e6c57eb`，blocking defects 0） |
 | P4.2 Security Factors Backend | PASSED / FROZEN 🔒（本 commit 生效；implementation acceptance head `8261ee2`，blocking defects 0） |
 | P4.3+ | NOT STARTED / NOT YET AUTHORIZED |
+
+---
+
+# P4.8 closure amendment（2026-08-09）
+
+本记录第 5 节的 enrollment Redis finalization debt 已由 `b0ef98b` 按
+ADR-0010 关闭：provider outcome 返回后，TOTP/passkey confirm/cancel 的
+consume/abandon/release 统一使用 request-cancellation detached、2 秒 bounded、
+最多三次 retry 的 helper；`ErrEnrollmentNotHeld` 为幂等完成；耗尽只记录一条
+不含 capability/secret 的稳定 degraded event，且不改写 provider HTTP outcome。
+完整验收矩阵与门禁证据见 `p48-freeze-record.md`。

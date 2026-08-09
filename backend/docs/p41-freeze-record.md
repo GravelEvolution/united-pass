@@ -139,3 +139,13 @@ Wire shape：`sessionId / deviceName / clientName / approximateLocation(恒 null
 | R1 partial / R4 契约 | 已在本 closure 关闭并回归锁定 |
 | 遗留 non-blocking | provider-success 后 Redis consume 自身失败仅 Warn（distributed-settlement ambiguity），留 P4.8 hardening 专门 pin |
 
+---
+
+# P4.8 closure amendment（2026-08-09）
+
+`b0ef98b` 按 ADR-0010 关闭 partial bulk revoke durable forensic gap：部分删除后
+store failure 现在写一条 `result=denied` 的 durable event，携带精确
+`revoked_count`、稳定 store `failure_class` 以及可选独立
+`provider_failure_class`；零删除 failure 不伪造 durable side effect。audit attempt
+同时改为 request-cancellation detached、2 秒 bounded、best-effort。HTTP failure 与
+count-zero 契约不变。完整证据见 `p48-freeze-record.md`。
