@@ -254,7 +254,7 @@ export function MfaChallengePanel({
       )}
 
       {selectedMethod === "totp" && (
-        <form className={styles.form} onSubmit={handleTotpSubmit}>
+        <form className={styles.form} method="post" onSubmit={handleTotpSubmit}>
           <label className={styles.field}>
             <span>验证器动态码</span>
             <Input
@@ -329,7 +329,7 @@ export function MfaChallengePanel({
       )}
 
       {selectedMethod === "recovery_code" && (
-        <form className={styles.form} onSubmit={handleRecoverySubmit}>
+        <form className={styles.form} method="post" onSubmit={handleRecoverySubmit}>
           <label className={styles.field}>
             <span>恢复代码</span>
             <Input

@@ -386,7 +386,7 @@ function PasswordChangeModal({ onCancel, onSuccess }: PasswordChangeModalProps) 
       maskClosable={false}
       onCancel={handleCancel}
     >
-      {phase === "details" ? <form className={styles.profileForm} onSubmit={handleDetails}>
+      {phase === "details" ? <form className={styles.profileForm} method="post" onSubmit={handleDetails}>
         <label className={styles.profileField} htmlFor="new-password">
           <span>新密码</span>
           <Input
@@ -559,7 +559,7 @@ function TotpEnrollModal({ onCancel, onSuccess }: TotpEnrollModalProps) {
       maskClosable={false}
       onCancel={() => void handleCancel()}
     >
-      <form className={styles.profileForm} onSubmit={handleConfirm}>
+      <form className={styles.profileForm} method="post" onSubmit={handleConfirm}>
         <div className={styles.totpSecret}>
           <p>使用验证器应用扫描以下密钥或手动输入：</p>
           <code>{enrollment.secret}</code>
@@ -948,7 +948,7 @@ function AccountReauthenticationForm({
   }
 
   return (
-    <form className={styles.profileForm} onSubmit={requestGrant}>
+    <form className={styles.profileForm} method="post" onSubmit={requestGrant}>
       <label className={styles.profileField} htmlFor={`account-reauth-password-${action}`}>
         <span>当前密码</span>
         <Input

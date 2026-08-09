@@ -161,7 +161,7 @@ export function ResetPasswordPanel({ token }: ResetPasswordPanelProps) {
         <p>为你的统一门户账户设置一个新的登录密码。</p>
       </div>
 
-      <form className={styles.form} onSubmit={handleSubmit}>
+      <form className={styles.form} method="post" onSubmit={handleSubmit}>
         <label className={styles.field}>
           <span>新密码</span>
           <Input

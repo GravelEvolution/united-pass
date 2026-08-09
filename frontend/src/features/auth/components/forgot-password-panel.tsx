@@ -31,7 +31,7 @@ export function ForgotPasswordPanel() {
         <p>输入账户名或邮箱，我们将发送密码重置说明。</p>
       </div>
 
-      <form className={styles.form} onSubmit={handleSubmit}>
+      <form className={styles.form} method="post" onSubmit={handleSubmit}>
         <label className={styles.field}>
           <span>账户名或邮箱</span>
           <Input

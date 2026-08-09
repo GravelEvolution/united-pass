@@ -190,7 +190,7 @@ export function CredentialPanel({ mode, resumeRequestId }: CredentialPanelProps)
         <p>{isLogin ? "使用你的统一账户继续访问。" : "一站式登陆砾石进化服务"}</p>
       </div>
 
-      <form className={styles.form} onSubmit={handleSubmit}>
+      <form className={styles.form} method="post" onSubmit={handleSubmit}>
         {isLogin ? (
           <label className={styles.field}>
             <span>账户名或邮箱</span>

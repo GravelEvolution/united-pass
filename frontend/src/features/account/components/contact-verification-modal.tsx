@@ -108,7 +108,7 @@ export function ContactVerificationModal({
       onCancel={onCancel}
     >
       {step === "request" ? (
-        <form className={styles.contactForm} onSubmit={handleRequestCode}>
+        <form className={styles.contactForm} method="post" onSubmit={handleRequestCode}>
           <p className={styles.contactCurrent}>当前{contactLabel}：<strong>{currentValue}</strong></p>
           <label className={styles.profileField} htmlFor={`new-${kind}`}>
             <span>新{contactLabel}</span>
@@ -145,7 +145,7 @@ export function ContactVerificationModal({
           </div>
         </form>
       ) : (
-        <form className={styles.contactForm} onSubmit={handleVerifyCode}>
+        <form className={styles.contactForm} method="post" onSubmit={handleVerifyCode}>
           <p className={styles.contactCurrent}>正在验证：<strong>{normalizedContactValue}</strong></p>
           <div className={styles.mockCode} aria-live="polite">
             <span>本次 Mock 验证码</span>

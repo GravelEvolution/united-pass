@@ -277,7 +277,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
         maskClosable={false}
         onCancel={closeProfileEditor}
       >
-        <form className={styles.profileForm} onSubmit={handleProfileSubmit}>
+        <form className={styles.profileForm} method="post" onSubmit={handleProfileSubmit}>
           <div className={styles.profilePreview}>
             <div
               className={`${styles.avatar} ${profileDraft.avatarPreviewUrl ? styles.avatarWithImage : ""}`}

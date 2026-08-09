@@ -9,6 +9,26 @@
 import { test, expect } from "@playwright/test";
 
 test.describe("登录流程", () => {
+  test("客户端脚本不可用时凭据不会进入 URL", async ({ page }) => {
+    await page.goto("/login");
+    const form = page.locator("form");
+    await expect(form).toHaveAttribute("method", "post");
+
+    await page.fill('input[placeholder="账户名或 name@example.com"]', "fallback-user");
+    await page.fill('input[placeholder="输入密码"]', "fallback-password");
+
+    const submission = page.waitForRequest((request) =>
+      request.method() === "POST" && new URL(request.url()).pathname === "/login"
+    );
+    // Native submit bypasses React's submit handler and exercises the exact
+    // browser fallback used before hydration or when client scripts fail.
+    await form.evaluate((element) => (element as HTMLFormElement).submit());
+    const request = await submission;
+
+    expect(request.url()).not.toContain("fallback-user");
+    expect(request.url()).not.toContain("fallback-password");
+  });
+
   test("管理员可以通过密码登录并跳转到管理端", async ({ page }) => {
     await page.goto("/login");
 
