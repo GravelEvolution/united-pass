@@ -125,6 +125,11 @@ type SecurityAuditEvent struct {
 	Result       string
 	FailureClass string
 	OccurredAt   time.Time
+	// AffectedCount and ProviderFailureClass are safe additive P4.8
+	// forensic facts. They make a partial bulk revoke explicit without
+	// overloading the frozen result or primary failure-class meanings.
+	AffectedCount        int
+	ProviderFailureClass string
 
 	// ADR-0007 Decision 5 additive settlement fields (closes B5, F5): the
 	// two orthogonal outcome facts of a provider-committed password change
@@ -630,10 +635,16 @@ func (s *Service) RevokeAllOtherSessions(ctx context.Context, userID identity.Us
 	}
 	if err != nil {
 		s.logSecurityEvent(EventSessionsRevokedOthers, userID, currentSessionID, err)
+		if count > 0 {
+			s.recordAuditOutcome(ctx, EventSessionsRevokedOthers, userID, currentSessionID,
+				"session.revoke_all_others", AuditOutcomeDenied,
+				string(observability.ClassifyError(err)), count, failureClass)
+		}
 		return 0, fmt.Errorf("session: revoke all other sessions: %w", err)
 	}
 	s.logSecurityEvent(EventSessionsRevokedOthers, userID, currentSessionID, nil)
-	s.recordAudit(ctx, EventSessionsRevokedOthers, userID, currentSessionID, "session.revoke_all_others", failureClass)
+	s.recordAuditOutcome(ctx, EventSessionsRevokedOthers, userID, currentSessionID,
+		"session.revoke_all_others", AuditOutcomeSuccess, failureClass, count, "")
 	return count, nil
 }
 
@@ -713,17 +724,26 @@ func (s *Service) revokeProviderSession(ctx context.Context, record SessionRecor
 // is logged as an operational/security defect (making the audit gap visible)
 // but never masks the revocation outcome.
 func (s *Service) recordAudit(ctx context.Context, eventType string, userID identity.UserID, sessionID SessionID, operation, failureClass string) {
+	s.recordAuditOutcome(ctx, eventType, userID, sessionID, operation,
+		AuditOutcomeSuccess, failureClass, 0, "")
+}
+
+func (s *Service) recordAuditOutcome(ctx context.Context, eventType string, userID identity.UserID, sessionID SessionID, operation, result, failureClass string, affectedCount int, providerFailureClass string) {
 	if s.auditor == nil {
 		return
 	}
-	err := s.auditor.RecordSessionEvent(ctx, SecurityAuditEvent{
-		EventType:    eventType,
-		ActorUserID:  userID,
-		SessionID:    sessionID,
-		Operation:    operation,
-		Result:       AuditOutcomeSuccess,
-		FailureClass: failureClass,
-		OccurredAt:   s.clock.Now(),
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	err := s.auditor.RecordSessionEvent(auditCtx, SecurityAuditEvent{
+		EventType:            eventType,
+		ActorUserID:          userID,
+		SessionID:            sessionID,
+		Operation:            operation,
+		Result:               result,
+		FailureClass:         failureClass,
+		OccurredAt:           s.clock.Now(),
+		AffectedCount:        affectedCount,
+		ProviderFailureClass: providerFailureClass,
 	})
 	if err != nil {
 		s.lg().Warn("session security audit record failed",

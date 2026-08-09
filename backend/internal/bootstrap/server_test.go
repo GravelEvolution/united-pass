@@ -519,3 +519,27 @@ func TestToCanonicalSecurityEventMapsSessionTarget(t *testing.T) {
 		t.Errorf("OccurredAt = %v, want %v", ev.OccurredAt, occurredAt)
 	}
 }
+
+func TestToCanonicalSecurityEventMapsBulkRevokeForensics(t *testing.T) {
+	ev := toCanonicalSecurityEvent(session.SecurityAuditEvent{
+		EventType:            session.EventSessionsRevokedOthers,
+		ActorUserID:          identity.UserID("user_audit"),
+		SessionID:            session.SessionID("sess_current"),
+		Operation:            "session.revoke_all_others",
+		Result:               session.AuditOutcomeDenied,
+		FailureClass:         "internal",
+		AffectedCount:        2,
+		ProviderFailureClass: "timeout",
+		OccurredAt:           time.Now().UTC(),
+	}, "req-bulk")
+
+	if ev.Result != applications.SecurityEventDenied || ev.FailureClass != "internal" {
+		t.Errorf("bulk result/failure class = %q/%q", ev.Result, ev.FailureClass)
+	}
+	if ev.TargetKey != "session_id" || ev.TargetID != "sess_current" {
+		t.Errorf("bulk target seam = %q/%q", ev.TargetKey, ev.TargetID)
+	}
+	if ev.Extra["revoked_count"] != "2" || ev.Extra["provider_failure_class"] != "timeout" {
+		t.Errorf("P4.8 forensic extras = %v", ev.Extra)
+	}
+}

@@ -558,7 +558,11 @@ func TestIntegration_SecurityEventStoreSessionRevocationPayload(t *testing.T) {
 		FailureClass: "network",
 		TargetKey:    "session_id",
 		TargetID:     "sess_target_it",
-		OccurredAt:   time.Now().UTC(),
+		Extra: map[string]string{
+			"revoked_count":          "2",
+			"provider_failure_class": "timeout",
+		},
+		OccurredAt: time.Now().UTC(),
 	}
 	if err := store.Record(ctx, ev); err != nil {
 		t.Fatalf("record security event: %v", err)
@@ -576,7 +580,10 @@ func TestIntegration_SecurityEventStoreSessionRevocationPayload(t *testing.T) {
 	if payload["failure_class"] != "network" {
 		t.Errorf("payload failure_class = %q, want network (payload=%v)", payload["failure_class"], payload)
 	}
-	if len(payload) != 2 {
-		t.Errorf("payload = %v, want exactly session_id and failure_class", payload)
+	if payload["revoked_count"] != "2" || payload["provider_failure_class"] != "timeout" {
+		t.Errorf("payload missing P4.8 forensic extras: %v", payload)
+	}
+	if len(payload) != 4 {
+		t.Errorf("payload = %v, want session_id, failure_class and two P4.8 extras", payload)
 	}
 }

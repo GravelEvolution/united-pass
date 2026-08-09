@@ -783,6 +783,12 @@ func settlementAuditExtra(ev session.SecurityAuditEvent) map[string]string {
 	if ev.ToEpoch != 0 {
 		extra["to_epoch"] = strconv.FormatInt(ev.ToEpoch, 10)
 	}
+	if ev.AffectedCount > 0 {
+		extra["revoked_count"] = strconv.Itoa(ev.AffectedCount)
+	}
+	if ev.ProviderFailureClass != "" {
+		extra["provider_failure_class"] = ev.ProviderFailureClass
+	}
 	if len(extra) == 0 {
 		return nil
 	}

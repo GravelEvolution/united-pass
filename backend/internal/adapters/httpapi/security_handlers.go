@@ -67,6 +67,18 @@ type EnrollmentTokenStore interface {
 	AbandonEnrollment(ctx context.Context, tokenHash, claimID string) error
 }
 
+type enrollmentFinalizationMode string
+
+const (
+	finalizeEnrollmentConsume enrollmentFinalizationMode = "consume"
+	finalizeEnrollmentAbandon enrollmentFinalizationMode = "abandon"
+	finalizeEnrollmentRelease enrollmentFinalizationMode = "release"
+
+	enrollmentFinalizationAttempts = 3
+	enrollmentFinalizationTimeout  = 2 * time.Second
+	enrollmentFinalizationDelay    = 25 * time.Millisecond
+)
+
 // SecurityHandlers serves GET /api/v1/me/security and the TOTP/passkey
 // lifecycle endpoints. All routes require a valid session and CSRF token
 // (middleware-enforced); factor writes additionally consume a reauth grant.
@@ -261,13 +273,13 @@ func (h *SecurityHandlers) ConfirmTOTPEnrollment(w http.ResponseWriter, r *http.
 		// already-set while the browser no longer owns a usable capability.
 		cleanupErr := h.removePendingTOTP(r.Context(), principal.UserID)
 		if cleanupErr != nil && !errors.Is(cleanupErr, auth.ErrFactorNotSet) {
-			_ = h.enrollments.ReleaseEnrollment(r.Context(), tokenHash, claimID)
+			h.finalizeEnrollment(r.Context(), principal.UserID, auth.EnrollmentTOTP, tokenHash, claimID, finalizeEnrollmentRelease)
 			h.logSecurityEvent("security.totp_enrollment_cleanup_failed", principal.UserID, "totp", cleanupErr)
 			h.writeFactorError(w, r, cleanupErr)
 			return
 		}
 	}
-	h.settleEnrollment(r.Context(), tokenHash, claimID, auth.EnrollmentTOTP, err)
+	h.settleEnrollment(r.Context(), principal.UserID, tokenHash, claimID, auth.EnrollmentTOTP, err)
 	if err != nil {
 		h.logSecurityEvent("security.totp_enrollment_confirmed", principal.UserID, "totp", err)
 		h.writeFactorError(w, r, err)
@@ -301,10 +313,7 @@ func (h *SecurityHandlers) CancelTOTPEnrollment(w http.ResponseWriter, r *http.R
 
 	err := h.removePendingTOTP(r.Context(), principal.UserID)
 	if err == nil || errors.Is(err, auth.ErrFactorNotSet) {
-		if settleErr := h.enrollments.ConsumeEnrollment(r.Context(), tokenHash, claimID); settleErr != nil && !errors.Is(settleErr, auth.ErrEnrollmentNotHeld) {
-			h.lg().Warn("totp cancellation finalization failed",
-				"errorClass", observability.ClassifyError(settleErr))
-		}
+		h.finalizeEnrollment(r.Context(), principal.UserID, auth.EnrollmentTOTP, tokenHash, claimID, finalizeEnrollmentConsume)
 		h.logSecurityEvent("security.totp_enrollment_cancelled", principal.UserID, "totp", nil)
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -313,7 +322,7 @@ func (h *SecurityHandlers) CancelTOTPEnrollment(w http.ResponseWriter, r *http.R
 	// No durable TOTP cleanup worker exists: preserve the browser capability
 	// for an explicit retry on every unresolved provider outcome. A retry after
 	// an ambiguous provider success observes factor-not-set and consumes safely.
-	_ = h.enrollments.ReleaseEnrollment(r.Context(), tokenHash, claimID)
+	h.finalizeEnrollment(r.Context(), principal.UserID, auth.EnrollmentTOTP, tokenHash, claimID, finalizeEnrollmentRelease)
 	h.logSecurityEvent("security.totp_enrollment_cancelled", principal.UserID, "totp", err)
 	h.writeFactorError(w, r, err)
 }
@@ -448,7 +457,7 @@ func (h *SecurityHandlers) ConfirmPasskeyEnrollment(w http.ResponseWriter, r *ht
 	providerCtx, cancel := context.WithTimeout(r.Context(), passkeyProviderTimeout)
 	err := h.factors.ConfirmPasskeyEnrollment(providerCtx, principal.UserID, data.Target, req.PasskeyName, req.PublicKeyCredential)
 	cancel()
-	h.settleEnrollment(r.Context(), tokenHash, claimID, auth.EnrollmentPasskey, err)
+	h.settleEnrollment(r.Context(), principal.UserID, tokenHash, claimID, auth.EnrollmentPasskey, err)
 	if err != nil {
 		h.logSecurityEvent("security.passkey_enrollment_confirmed", principal.UserID, "passkey", err)
 		h.writeFactorError(w, r, err)
@@ -491,21 +500,18 @@ func (h *SecurityHandlers) CancelPasskeyEnrollment(w http.ResponseWriter, r *htt
 	if err == nil || errors.Is(err, auth.ErrFactorNotSet) {
 		// Stable provider not-found is already settled. A local finalization
 		// failure leaves the active-preserving cleanup marker for retry.
-		if settleErr := h.enrollments.ConsumeEnrollment(r.Context(), tokenHash, claimID); settleErr != nil && !errors.Is(settleErr, auth.ErrEnrollmentNotHeld) {
-			h.lg().Warn("passkey cancellation finalization failed",
-				"errorClass", observability.ClassifyError(settleErr))
-		}
+		h.finalizeEnrollment(r.Context(), principal.UserID, auth.EnrollmentPasskey, tokenHash, claimID, finalizeEnrollmentConsume)
 		h.logSecurityEvent("security.passkey_enrollment_cancelled", principal.UserID, "passkey", nil)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	if errors.Is(err, auth.ErrProviderUnavailable) || errors.Is(err, auth.ErrProviderForbidden) {
-		_ = h.enrollments.ReleaseEnrollment(r.Context(), tokenHash, claimID)
+		h.finalizeEnrollment(r.Context(), principal.UserID, auth.EnrollmentPasskey, tokenHash, claimID, finalizeEnrollmentRelease)
 	} else {
 		// Unexpected provider outcomes are ambiguous. Burn the browser token
 		// and let provider-readback cleanup settle them safely.
-		_ = h.enrollments.AbandonEnrollment(r.Context(), tokenHash, claimID)
+		h.finalizeEnrollment(r.Context(), principal.UserID, auth.EnrollmentPasskey, tokenHash, claimID, finalizeEnrollmentAbandon)
 	}
 	h.logSecurityEvent("security.passkey_enrollment_cancelled", principal.UserID, "passkey", err)
 	h.writeFactorError(w, r, err)
@@ -648,11 +654,7 @@ func (h *SecurityHandlers) claimEnrollmentData(w http.ResponseWriter, r *http.Re
 	// Binding verification is fail closed: wrong user, wrong session or a
 	// kind mismatch denies the confirmation — and burns the enrollment.
 	if data.UserID != principal.UserID || data.SessionID != string(principal.SessionID) || data.Kind != kind {
-		if err := h.finalizeRejectedEnrollment(r.Context(), data, tokenHash, claimID); err != nil {
-			h.lg().Warn("enrollment consume after binding mismatch failed",
-				"errorClass", observability.ClassifyError(err),
-			)
-		}
+		h.finalizeRejectedEnrollment(r.Context(), principal.UserID, data, tokenHash, claimID)
 		writeError(w, r, http.StatusForbidden, CodeEnrollmentInvalid, "绑定流程已失效，请重新开始。", nil)
 		return auth.EnrollmentData{}, "", "", false
 	}
@@ -663,9 +665,9 @@ func (h *SecurityHandlers) claimEnrollmentData(w http.ResponseWriter, r *http.Re
 	if h.security != nil {
 		if err := h.security.AllowSensitiveConsumption(r.Context(), data.UserID, data.SecurityEpoch); err != nil {
 			if errors.Is(err, securitystate.ErrEpochStale) {
-				_ = h.finalizeRejectedEnrollment(r.Context(), data, tokenHash, claimID)
+				h.finalizeRejectedEnrollment(r.Context(), principal.UserID, data, tokenHash, claimID)
 			} else {
-				_ = h.enrollments.ReleaseEnrollment(r.Context(), tokenHash, claimID)
+				h.finalizeEnrollment(r.Context(), principal.UserID, data.Kind, tokenHash, claimID, finalizeEnrollmentRelease)
 			}
 			h.logSecurityEvent("security.enrollment_gate_denied", principal.UserID, string(kind), err)
 			writeError(w, r, http.StatusForbidden, CodeEnrollmentInvalid, "账户安全状态变更中，请重新开始绑定流程。", nil)
@@ -682,35 +684,75 @@ func (h *SecurityHandlers) claimEnrollmentData(w http.ResponseWriter, r *http.Re
 // terminal passkey failures preserve provider cleanup work. Settlement
 // failures never mask the provider outcome — active-preserving expiry cleanup
 // resolves any leftover passkey state.
-func (h *SecurityHandlers) settleEnrollment(ctx context.Context, tokenHash, claimID string, kind auth.EnrollmentKind, providerErr error) {
+func (h *SecurityHandlers) settleEnrollment(ctx context.Context, userID identity.UserID, tokenHash, claimID string, kind auth.EnrollmentKind, providerErr error) {
 	if errors.Is(providerErr, auth.ErrProviderUnavailable) || errors.Is(providerErr, auth.ErrProviderForbidden) {
-		if err := h.enrollments.ReleaseEnrollment(ctx, tokenHash, claimID); err != nil && !errors.Is(err, auth.ErrEnrollmentNotHeld) {
-			h.lg().Warn("enrollment claim release failed",
-				"errorClass", observability.ClassifyError(err),
-			)
-		}
+		h.finalizeEnrollment(ctx, userID, kind, tokenHash, claimID, finalizeEnrollmentRelease)
 		return
 	}
 	if kind == auth.EnrollmentPasskey && providerErr != nil {
-		if err := h.enrollments.AbandonEnrollment(ctx, tokenHash, claimID); err != nil && !errors.Is(err, auth.ErrEnrollmentNotHeld) {
-			h.lg().Warn("passkey enrollment abandonment failed",
-				"errorClass", observability.ClassifyError(err),
-			)
-		}
+		h.finalizeEnrollment(ctx, userID, kind, tokenHash, claimID, finalizeEnrollmentAbandon)
 		return
 	}
-	if err := h.enrollments.ConsumeEnrollment(ctx, tokenHash, claimID); err != nil && !errors.Is(err, auth.ErrEnrollmentNotHeld) {
-		h.lg().Warn("enrollment consume failed",
-			"errorClass", observability.ClassifyError(err),
-		)
-	}
+	h.finalizeEnrollment(ctx, userID, kind, tokenHash, claimID, finalizeEnrollmentConsume)
 }
 
-func (h *SecurityHandlers) finalizeRejectedEnrollment(ctx context.Context, data auth.EnrollmentData, tokenHash, claimID string) error {
+func (h *SecurityHandlers) finalizeRejectedEnrollment(ctx context.Context, actorUserID identity.UserID, data auth.EnrollmentData, tokenHash, claimID string) {
 	if data.Kind == auth.EnrollmentPasskey {
-		return h.enrollments.AbandonEnrollment(ctx, tokenHash, claimID)
+		h.finalizeEnrollment(ctx, actorUserID, data.Kind, tokenHash, claimID, finalizeEnrollmentAbandon)
+		return
 	}
-	return h.enrollments.ConsumeEnrollment(ctx, tokenHash, claimID)
+	h.finalizeEnrollment(ctx, actorUserID, data.Kind, tokenHash, claimID, finalizeEnrollmentConsume)
+}
+
+// finalizeEnrollment settles a claimed browser capability after the provider
+// outcome is known. It is detached from request cancellation but bounded and
+// retried: a client disconnect must not erase the finalization attempt, while
+// a Redis outage must not hang the handler or rewrite the provider outcome.
+// Raw token hashes and claim IDs never enter the degraded event.
+func (h *SecurityHandlers) finalizeEnrollment(rctx context.Context, userID identity.UserID, kind auth.EnrollmentKind, tokenHash, claimID string, mode enrollmentFinalizationMode) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(rctx), enrollmentFinalizationTimeout)
+	defer cancel()
+
+	var finalErr error
+	for attempt := 1; attempt <= enrollmentFinalizationAttempts; attempt++ {
+		switch mode {
+		case finalizeEnrollmentConsume:
+			finalErr = h.enrollments.ConsumeEnrollment(ctx, tokenHash, claimID)
+		case finalizeEnrollmentAbandon:
+			finalErr = h.enrollments.AbandonEnrollment(ctx, tokenHash, claimID)
+		case finalizeEnrollmentRelease:
+			finalErr = h.enrollments.ReleaseEnrollment(ctx, tokenHash, claimID)
+		default:
+			finalErr = errors.New("httpapi: unknown enrollment finalization mode")
+		}
+		if finalErr == nil || errors.Is(finalErr, auth.ErrEnrollmentNotHeld) {
+			return
+		}
+		if attempt == enrollmentFinalizationAttempts {
+			break
+		}
+		timer := time.NewTimer(enrollmentFinalizationDelay * time.Duration(attempt))
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			finalErr = ctx.Err()
+			attempt = enrollmentFinalizationAttempts
+		}
+	}
+
+	h.lg().Warn("security.enrollment_finalization_degraded",
+		"userId", string(userID),
+		"factorKind", string(kind),
+		"finalizationMode", string(mode),
+		"outcome", "degraded",
+		"errorClass", observability.ClassifyError(finalErr),
+	)
 }
 
 // compensationTimeout bounds detached provider compensation calls so a hung

@@ -144,10 +144,10 @@ type fakeRevoker struct {
 }
 
 func (f *fakeRevoker) RevokeProviderSession(_ context.Context, ref string) error {
+	f.refs = append(f.refs, ref)
 	if f.failRef != "" && ref == f.failRef {
 		return errors.New("provider unavailable")
 	}
-	f.refs = append(f.refs, ref)
 	return nil
 }
 
@@ -398,8 +398,10 @@ func TestRevokeAllOtherSessionsPropagatesInfrastructureFailure(t *testing.T) {
 		fakeStore: newFakeStore(),
 		revokeErr: errors.New("redis: range session index: connection refused"),
 	}
+	auditor := &fakeAuditor{}
 	svc := NewService(store, SystemClock{},
-		12*time.Hour, 720*time.Hour, 15*time.Minute, 5*time.Minute, testEncryptor())
+		12*time.Hour, 720*time.Hour, 15*time.Minute, 5*time.Minute, testEncryptor(),
+		WithSecurityAuditor(auditor))
 
 	_, err := svc.RevokeAllOtherSessions(context.Background(), "user_infra", "sess_current")
 	if err == nil {
@@ -407,6 +409,9 @@ func TestRevokeAllOtherSessionsPropagatesInfrastructureFailure(t *testing.T) {
 	}
 	if errors.Is(err, ErrSessionNotFound) {
 		t.Fatal("infrastructure failure must not be collapsed into ErrSessionNotFound")
+	}
+	if len(auditor.events) != 0 {
+		t.Fatalf("zero-victim failure durable audit events = %d, want 0", len(auditor.events))
 	}
 }
 
@@ -428,10 +433,11 @@ func TestRevokeAllOtherSessionsPartialFailureStillCleansVictims(t *testing.T) {
 			{SessionID: "sess_victim_b", ProviderSessionReference: refB},
 		},
 	}
-	revoker := &fakeRevoker{}
+	revoker := &fakeRevoker{failRef: "provider-ref-b"}
+	auditor := &fakeAuditor{}
 	svc := NewService(store, SystemClock{},
 		12*time.Hour, 720*time.Hour, 15*time.Minute, 5*time.Minute, enc,
-		WithProviderRevoker(revoker))
+		WithProviderRevoker(revoker), WithSecurityAuditor(auditor))
 
 	count, err := svc.RevokeAllOtherSessions(context.Background(), "user_partial", "sess_current")
 	if err == nil {
@@ -444,6 +450,22 @@ func TestRevokeAllOtherSessionsPartialFailureStillCleansVictims(t *testing.T) {
 	// provider cleanup even though a later victim's deletion failed.
 	if len(revoker.refs) != 2 || revoker.refs[0] != "provider-ref-a" || revoker.refs[1] != "provider-ref-b" {
 		t.Fatalf("provider cleanup = %v, want both partial victims cleaned up", revoker.refs)
+	}
+	if len(auditor.events) != 1 {
+		t.Fatalf("partial durable audit events = %d, want 1", len(auditor.events))
+	}
+	ev := auditor.events[0]
+	if ev.EventType != EventSessionsRevokedOthers || ev.Result != AuditOutcomeDenied {
+		t.Errorf("partial audit event/result = %q/%q", ev.EventType, ev.Result)
+	}
+	if ev.AffectedCount != 2 {
+		t.Errorf("partial audit affected count = %d, want 2", ev.AffectedCount)
+	}
+	if ev.FailureClass != "internal" {
+		t.Errorf("partial audit store failure class = %q, want internal", ev.FailureClass)
+	}
+	if ev.ProviderFailureClass != "internal" {
+		t.Errorf("partial audit provider failure class = %q, want internal", ev.ProviderFailureClass)
 	}
 }
 
@@ -481,12 +503,14 @@ func TestBulkRevokeHonoursIdleExpiry(t *testing.T) {
 
 // fakeAuditor captures durable session audit events for service tests.
 type fakeAuditor struct {
-	events []SecurityAuditEvent
-	err    error
+	events        []SecurityAuditEvent
+	err           error
+	contextErrors []error
 }
 
-func (f *fakeAuditor) RecordSessionEvent(_ context.Context, ev SecurityAuditEvent) error {
+func (f *fakeAuditor) RecordSessionEvent(ctx context.Context, ev SecurityAuditEvent) error {
 	f.events = append(f.events, ev)
+	f.contextErrors = append(f.contextErrors, ctx.Err())
 	return f.err
 }
 
@@ -541,6 +565,35 @@ func TestRevokeRecordsDurableSecurityAudit(t *testing.T) {
 	}
 	if bulk.SessionID != current.Record.SessionID {
 		t.Errorf("bulk audit session = %q, want the current session", bulk.SessionID)
+	}
+	if bulk.AffectedCount != 1 {
+		t.Errorf("bulk audit affected count = %d, want 1", bulk.AffectedCount)
+	}
+}
+
+func TestRevokeAuditAttemptDetachedFromCallerCancellation(t *testing.T) {
+	auditor := &fakeAuditor{}
+	store := newFakeStore()
+	svc := NewService(store, SystemClock{},
+		12*time.Hour, 720*time.Hour, 15*time.Minute, 5*time.Minute, testEncryptor(),
+		WithSecurityAuditor(auditor))
+	ctx := context.Background()
+	current, err := svc.CreateSession(ctx, inventoryInput("user_detached_audit", false))
+	if err != nil {
+		t.Fatalf("create current: %v", err)
+	}
+	victim, err := svc.CreateSession(ctx, inventoryInput("user_detached_audit", false))
+	if err != nil {
+		t.Fatalf("create victim: %v", err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := svc.RevokeSession(cancelled, "user_detached_audit", current.Record.SessionID, victim.Record.SessionID); err != nil {
+		t.Fatalf("revoke under cancelled caller context: %v", err)
+	}
+	if len(auditor.contextErrors) != 1 || auditor.contextErrors[0] != nil {
+		t.Fatalf("audit inherited caller cancellation: %v", auditor.contextErrors)
 	}
 }
 
@@ -610,6 +663,9 @@ func TestBulkRevokeAuditRecordsProviderFailureClass(t *testing.T) {
 	}
 	if ev.FailureClass == "" {
 		t.Error("a degraded victim provider cleanup must surface in the bulk audit failure class")
+	}
+	if ev.AffectedCount != 1 {
+		t.Errorf("bulk audit affected count = %d, want 1", ev.AffectedCount)
 	}
 }
 

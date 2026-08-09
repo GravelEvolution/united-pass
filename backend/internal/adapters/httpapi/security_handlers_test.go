@@ -105,12 +105,22 @@ func (f *fakeFactorManager) FactorSummary(_ context.Context, _ identity.UserID) 
 // single-winner lock, ReleaseEnrollment drops it (transient provider
 // failure), ConsumeEnrollment permanently deletes the challenge.
 type memEnrollments struct {
-	mu        sync.Mutex
-	data      map[string]auth.EnrollmentData
-	claims    map[string]string
-	abandoned []string
-	createErr error
-	claimErr  error
+	mu                sync.Mutex
+	data              map[string]auth.EnrollmentData
+	claims            map[string]string
+	abandoned         []string
+	createErr         error
+	claimErr          error
+	consumeErr        error
+	consumeFailures   int
+	consumeCalls      int
+	consumeContextErr []error
+	releaseFailures   int
+	releaseCalls      int
+	releaseContextErr []error
+	abandonFailures   int
+	abandonCalls      int
+	abandonContextErr []error
 }
 
 func newMemEnrollments() *memEnrollments {
@@ -147,9 +157,15 @@ func (m *memEnrollments) ClaimEnrollment(_ context.Context, tokenHash, claimID s
 	return data, nil
 }
 
-func (m *memEnrollments) ReleaseEnrollment(_ context.Context, tokenHash, claimID string) error {
+func (m *memEnrollments) ReleaseEnrollment(ctx context.Context, tokenHash, claimID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.releaseCalls++
+	m.releaseContextErr = append(m.releaseContextErr, ctx.Err())
+	if m.releaseFailures > 0 {
+		m.releaseFailures--
+		return errors.New("redis: transient enrollment release failure")
+	}
 	if m.claims[tokenHash] != claimID {
 		return auth.ErrEnrollmentNotHeld
 	}
@@ -157,9 +173,18 @@ func (m *memEnrollments) ReleaseEnrollment(_ context.Context, tokenHash, claimID
 	return nil
 }
 
-func (m *memEnrollments) ConsumeEnrollment(_ context.Context, tokenHash, claimID string) error {
+func (m *memEnrollments) ConsumeEnrollment(ctx context.Context, tokenHash, claimID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.consumeCalls++
+	m.consumeContextErr = append(m.consumeContextErr, ctx.Err())
+	if m.consumeErr != nil {
+		return m.consumeErr
+	}
+	if m.consumeFailures > 0 {
+		m.consumeFailures--
+		return errors.New("redis: transient enrollment consume failure")
+	}
 	if m.claims[tokenHash] != claimID {
 		return auth.ErrEnrollmentNotHeld
 	}
@@ -168,9 +193,15 @@ func (m *memEnrollments) ConsumeEnrollment(_ context.Context, tokenHash, claimID
 	return nil
 }
 
-func (m *memEnrollments) AbandonEnrollment(_ context.Context, tokenHash, claimID string) error {
+func (m *memEnrollments) AbandonEnrollment(ctx context.Context, tokenHash, claimID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.abandonCalls++
+	m.abandonContextErr = append(m.abandonContextErr, ctx.Err())
+	if m.abandonFailures > 0 {
+		m.abandonFailures--
+		return errors.New("redis: transient enrollment abandon failure")
+	}
 	if m.claims[tokenHash] != claimID {
 		return auth.ErrEnrollmentNotHeld
 	}
@@ -207,14 +238,17 @@ type securityEnv struct {
 	factors  *fakeFactorManager
 	grants   *memReauthGrants
 	enroll   *memEnrollments
+	logs     *strings.Builder
 }
 
 func newSecurityEnv() *securityEnv {
 	factors := &fakeFactorManager{}
 	grants := newMemReauthGrants()
 	enroll := newMemEnrollments()
-	handlers := NewSecurityHandlers(factors, NewReauthGrants(grants, nil), enroll, nil, 5*time.Minute, discardLogger())
-	return &securityEnv{handlers: handlers, factors: factors, grants: grants, enroll: enroll}
+	logs := &strings.Builder{}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
+	handlers := NewSecurityHandlers(factors, NewReauthGrants(grants, nil), enroll, nil, 5*time.Minute, logger)
+	return &securityEnv{handlers: handlers, factors: factors, grants: grants, enroll: enroll, logs: logs}
 }
 
 func (e *securityEnv) router(injectPrincipal bool) http.Handler {
@@ -500,6 +534,135 @@ func TestConfirmTOTPEnrollment_Success(t *testing.T) {
 	}
 	if env.enroll.size() != 0 {
 		t.Error("enrollment must be consumed by the confirmation")
+	}
+}
+
+func TestConfirmTOTPEnrollment_FinalizationRetriesDetachedFromRequest(t *testing.T) {
+	env := newSecurityEnv()
+	token := totpBegin(t, env)
+	env.enroll.consumeFailures = 2
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/me/security/totp/enrollment/confirm",
+		strings.NewReader(`{"enrollmentToken":"`+token+`","code":"123456"}`)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	env.router(true).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if env.enroll.consumeCalls != enrollmentFinalizationAttempts {
+		t.Fatalf("consume calls = %d, want %d", env.enroll.consumeCalls, enrollmentFinalizationAttempts)
+	}
+	for i, contextErr := range env.enroll.consumeContextErr {
+		if contextErr != nil {
+			t.Fatalf("consume attempt %d inherited request cancellation: %v", i+1, contextErr)
+		}
+	}
+	if env.enroll.size() != 0 {
+		t.Fatal("transient consume failures must converge within the bounded retry budget")
+	}
+}
+
+func TestConfirmTOTPEnrollment_FinalizationExhaustionIsSafeAndDoesNotMaskProviderSuccess(t *testing.T) {
+	env := newSecurityEnv()
+	token := totpBegin(t, env)
+	env.enroll.consumeFailures = enrollmentFinalizationAttempts + 1
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/totp/enrollment/confirm",
+		`{"enrollmentToken":"`+token+`","code":"123456"}`, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want provider-success 200; body=%s", rec.Code, rec.Body.String())
+	}
+	logs := env.logs.String()
+	if strings.Count(logs, "security.enrollment_finalization_degraded") != 1 {
+		t.Fatalf("degraded finalization events = %d, want exactly 1; logs=%s",
+			strings.Count(logs, "security.enrollment_finalization_degraded"), logs)
+	}
+	if strings.Contains(logs, token) || strings.Contains(logs, "123456") || strings.Contains(logs, env.factors.totpEnrollment.Secret) {
+		t.Fatal("degraded finalization event leaked a token, TOTP code or secret")
+	}
+}
+
+func TestConfirmTOTPEnrollment_FinalizationNotHeldIsIdempotent(t *testing.T) {
+	env := newSecurityEnv()
+	token := totpBegin(t, env)
+	env.enroll.consumeErr = auth.ErrEnrollmentNotHeld
+
+	rec := doSecurityJSON(t, env.router(true), http.MethodPost, "/me/security/totp/enrollment/confirm",
+		`{"enrollmentToken":"`+token+`","code":"123456"}`, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if env.enroll.consumeCalls != 1 {
+		t.Fatalf("consume calls = %d, want 1", env.enroll.consumeCalls)
+	}
+	if strings.Contains(env.logs.String(), "security.enrollment_finalization_degraded") {
+		t.Fatal("ErrEnrollmentNotHeld is idempotent completion, not degraded finalization")
+	}
+}
+
+func TestEnrollmentFinalizationRetriesReleaseAndAbandonDetachedFromRequest(t *testing.T) {
+	tests := []struct {
+		name      string
+		mode      enrollmentFinalizationMode
+		configure func(*memEnrollments)
+		calls     func(*memEnrollments) (int, []error)
+	}{
+		{
+			name:      "release",
+			mode:      finalizeEnrollmentRelease,
+			configure: func(store *memEnrollments) { store.releaseFailures = 2 },
+			calls: func(store *memEnrollments) (int, []error) {
+				return store.releaseCalls, store.releaseContextErr
+			},
+		},
+		{
+			name:      "abandon",
+			mode:      finalizeEnrollmentAbandon,
+			configure: func(store *memEnrollments) { store.abandonFailures = 2 },
+			calls: func(store *memEnrollments) (int, []error) {
+				return store.abandonCalls, store.abandonContextErr
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newMemEnrollments()
+			const tokenHash = "test-token-hash"
+			const claimID = "test-claim-id"
+			store.data[tokenHash] = auth.EnrollmentData{Kind: auth.EnrollmentPasskey}
+			store.claims[tokenHash] = claimID
+			tt.configure(store)
+			handler := NewSecurityHandlers(nil, nil, store, nil, time.Minute, slog.Default())
+
+			cancelled, cancel := context.WithCancel(context.Background())
+			cancel()
+			handler.finalizeEnrollment(cancelled, "user-finalize", auth.EnrollmentPasskey, tokenHash, claimID, tt.mode)
+
+			calls, contextErrors := tt.calls(store)
+			if calls != enrollmentFinalizationAttempts {
+				t.Fatalf("calls = %d, want %d", calls, enrollmentFinalizationAttempts)
+			}
+			for i, contextErr := range contextErrors {
+				if contextErr != nil {
+					t.Fatalf("attempt %d inherited request cancellation: %v", i+1, contextErr)
+				}
+			}
+			if _, held := store.claims[tokenHash]; held {
+				t.Fatal("successful finalization must clear the claim")
+			}
+			_, enrollmentRemains := store.data[tokenHash]
+			if tt.mode == finalizeEnrollmentRelease && !enrollmentRemains {
+				t.Fatal("release must preserve the enrollment for retry")
+			}
+			if tt.mode == finalizeEnrollmentAbandon && enrollmentRemains {
+				t.Fatal("abandon must remove the browser capability")
+			}
+		})
 	}
 }
 
