@@ -1,6 +1,6 @@
 # United Pass 前端 API 接入清单
 
-- 状态：Frozen v1 + P4.5 Frozen Amendment + P4.7 Architecture Amendment（ADR-0009）
+- 状态：Frozen v1 + P4.5 Frozen Amendment + P4.7 Frozen Amendment（ADR-0009；implementation `e0dcc47`；live A15 Pending）
 - 日期：2026-08-09（P4.7 Account Security real-seam 接入修订）
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect

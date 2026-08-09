@@ -70,6 +70,13 @@
 
 > 仅当后续出现证明冻结的 factor lifecycle / enrollment settlement / provider 错误分类不变量存在缺陷的证据时才可重开 P4.2。Recovery Codes 的架构性 deferral 与 P4.5 attestation 实演不构成 reopen 触发。
 
+> **P4.7 closure amendment（2026-08-09；`e0dcc47`）**：该 criterion 曾被
+> provider-compatible fake 的 TOTP invalid-code pending-state 证据触发。原
+> handler 消耗本地 token 后 provider pending 仍存活，导致 fresh begin 永久
+> `already set`。`e0dcc47` 以 invalid-code provider cleanup + capability-bound
+> cancel endpoint 关闭该 reachability blocker；action binding、provider authority
+> 与 provider-derived readback 均未改变。详见 ADR-0009 / `p47-freeze-record.md`。
+
 ## 7. 正式状态
 
 | 项 | 状态 |

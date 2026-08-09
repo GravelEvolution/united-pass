@@ -80,6 +80,12 @@
 > ZITADEL 浏览器仪式仍须据实验收。P4.5 不顺带开启密码/TOTP/Session mutation
 > 的 P4.7 迁移。
 
+> **P4.7 Frozen Amendment（2026-08-09；implementation `e0dcc47`）**：password、
+> TOTP、current-user Session 与 logout 已迁移为 real HTTP seam；runtime parser、
+> action-bound reauth、secret lifecycle、authoritative refresh、TOTP abandonment
+> settlement 与 admin/current-user 权限隔离按 ADR-0009 冻结。Recovery/profile/
+> admin mutation 仍在原边界内；真实 ZITADEL A15 留 P4.9。
+
 ## 3. 后端必须实现的 API 合同
 
 完整且唯一的 API 路径清单见 `docs/api-contracts.md`（状态：Frozen v1 — Accepted for backend implementation）。本文不再重复定义全部路径，以避免两份文档漂移。
