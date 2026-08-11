@@ -31,11 +31,14 @@ export default async function UserDetailPage({
   params: Promise<{ userId: string }>;
 }) {
   const { userId } = await params;
-  const detail = await serverQueries.getUserDetail(userId);
+  const [detail, permissions] = await Promise.all([
+    serverQueries.getUserDetail(userId),
+    serverQueries.getCurrentPermissions(),
+  ]);
 
   if (!detail) {
     notFound();
   }
 
-  return <UserDetail detail={detail} />;
+  return <UserDetail detail={detail} canManage={permissions.userDisable} />;
 }

@@ -36,6 +36,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
 	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
+	"github.com/GravelEvolution/united-pass/backend/internal/workforce"
 )
 
 // Server bundles the configured *http.Server with its router so the entry point
@@ -117,6 +118,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var mfaStore httpapi.MFAChallengeStore
 	var rateChecker httpapi.RateChecker
 	var sessionAuditor session.SecurityAuditor
+	var workerStops []func()
 
 	if pool != nil {
 		userRepo := postgres.NewUserRepository(pool.PgxPool())
@@ -194,6 +196,27 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	// Permission resolver: fail-closed by default, with optional dev override.
 	permResolver = permissions.NewResolver(cfg)
 
+	// Phase 5 identity/workforce authority (ADR-0011). PostgreSQL owns the
+	// employee/department state and wraps every permission decision with the
+	// mandatory offboarding deny. The service uses only the target user's
+	// Redis session index for cleanup; unresolved cleanups remain durable jobs.
+	var workforceRepo *postgres.WorkforceRepository
+	var workforceSvc *workforce.Service
+	var workforceHandlers *httpapi.WorkforceHandlers
+	if pool != nil && cfg.Session.EncryptionKey != "" {
+		workforceRepo, err = postgres.NewWorkforceRepository(pool.PgxPool(), cfg.Session.EncryptionKey)
+		if err != nil {
+			return nil, fmt.Errorf("workforce repository: %w", err)
+		}
+		permResolver = permissions.NewWorkforceGuardResolver(permResolver, workforceRepo)
+		if sessionSvc != nil {
+			workforceSvc = workforce.NewService(workforceRepo, sessionSvc, logger)
+			reconciler := workforce.NewReconciler(workforceSvc, 30*time.Second, 25)
+			reconciler.Start()
+			workerStops = append(workerStops, reconciler.Stop)
+		}
+	}
+
 	// When using the fake development authenticator, skip database-backed
 	// user existence checks: fake users have hardcoded IDs that do not exist
 	// in PostgreSQL. Replace the userReader with an in-memory fake that
@@ -256,7 +279,47 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var reauthHandlers *httpapi.ReauthHandlers
 	var securityHandlers *httpapi.SecurityHandlers
 	var passwordHandlers *httpapi.PasswordHandlers
-	var workerStops []func()
+	var reauthVerifier httpapi.ReauthVerifier
+	var rotationRates httpapi.RotationRateChecker
+	// Reauthentication is shared infrastructure for account, application and
+	// workforce high-risk operations. It must not disappear merely because an
+	// unrelated OAuth provisioner is unavailable (ADR-0011 §3).
+	if pool != nil && redisClient != nil && sessionSvc != nil {
+		limiter := redis.NewRateLimiter(redisClient)
+		rotationRates = limiter
+		reauthStore := redis.NewReauthStore(redisClient)
+		reauthVerifier = httpapi.NewReauthGrants(reauthStore, sensitiveGate)
+		if reauthAuth, ok := authenticator.(httpapi.ReauthAuthenticator); ok {
+			reauthAuditor := newReauthSecurityAuditor(postgres.NewSecurityEventStore(pool.PgxPool()))
+			reauthHandlers = httpapi.NewReauthHandlers(
+				reauthAuth, reauthStore, reauthStore, limiter, reauthAuditor,
+				cfg.Reauth.ChallengeTTL, cfg.Reauth.GrantTTL,
+				cfg.Reauth.MaxAttempts, cfg.Reauth.RateLimit, cfg.Reauth.RateWindow,
+				logger)
+			cleanupWorker := httpapi.NewReauthCleanupWorker(
+				reauthAuth, reauthStore, reauthAuditor, cfg.Reauth.CleanupInterval, logger)
+			cleanupWorker.Start()
+			workerStops = append(workerStops, cleanupWorker.Stop)
+		}
+
+		if factorManager, ok := authenticator.(auth.FactorManager); ok {
+			enrollmentStore := redis.NewEnrollmentStore(redisClient)
+			securityHandlers = httpapi.NewSecurityHandlers(
+				factorManager, reauthVerifier, enrollmentStore,
+				sensitiveGate, cfg.Reauth.GrantTTL, logger)
+			cleanupWorker := httpapi.NewPasskeyEnrollmentCleanupWorker(
+				factorManager, enrollmentStore, cfg.Reauth.CleanupInterval, logger)
+			cleanupWorker.Start()
+			workerStops = append(workerStops, cleanupWorker.Stop)
+		}
+
+		if passwordManager, ok := authenticator.(auth.PasswordManager); ok && securitySvc != nil {
+			passwordHandlers = httpapi.NewPasswordHandlers(
+				passwordManager, reauthVerifier, sessionSvc, securitySvc, sessionAuditor,
+				cfg.SecurityState.ProviderDeadline, cfg.SecurityState.SettlementTimeout,
+				cfg, logger)
+		}
+	}
 	if pool != nil && provisioner != nil && userReader != nil && sessionSvc != nil && cfg.Session.EncryptionKey != "" {
 		var err error
 		appRepo, err = postgres.NewApplicationRepository(pool.PgxPool(), cfg.Session.EncryptionKey)
@@ -267,64 +330,12 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		appSvc := applications.NewService(appRepo, provisioner, eventStore, eventStore, userReader,
 			providerName, cfg.Auth.ProjectID, cfg.Rotation.GracePeriod)
 
-		// Reauthentication and rotation infrastructure follow Redis
-		// availability; both fail closed while it is absent (ADR-0004 §6/§7).
-		var reauthVerifier httpapi.ReauthVerifier
-		var rotationRates httpapi.RotationRateChecker
-		if redisClient != nil {
-			limiter := redis.NewRateLimiter(redisClient)
-			rotationRates = limiter
-			reauthStore := redis.NewReauthStore(redisClient)
-			reauthVerifier = httpapi.NewReauthGrants(reauthStore, sensitiveGate)
-			if reauthAuth, ok := authenticator.(httpapi.ReauthAuthenticator); ok {
-				reauthHandlers = httpapi.NewReauthHandlers(
-					reauthAuth, reauthStore, reauthStore, limiter, appSvc,
-					cfg.Reauth.ChallengeTTL, cfg.Reauth.GrantTTL,
-					cfg.Reauth.MaxAttempts, cfg.Reauth.RateLimit, cfg.Reauth.RateWindow,
-					logger)
-				// Abandoned/expired challenges leak their temporary provider
-				// session unless the cleanup worker revokes them (ADR-0004 §7).
-				cleanupWorker := httpapi.NewReauthCleanupWorker(
-					reauthAuth, reauthStore, appSvc, cfg.Reauth.CleanupInterval, logger)
-				cleanupWorker.Start()
-				workerStops = append(workerStops, cleanupWorker.Stop)
-			}
-
-			// Account security factor endpoints (ADR-0006 §7/§8): the
-			// authenticator doubles as the factor manager (ZITADEL adapter or
-			// dev fake). Enrollments follow the grant TTL; both stores share
-			// the fail-closed Redis semantics of the reauth infrastructure.
-			if factorManager, ok := authenticator.(auth.FactorManager); ok && reauthVerifier != nil {
-				enrollmentStore := redis.NewEnrollmentStore(redisClient)
-				securityHandlers = httpapi.NewSecurityHandlers(
-					factorManager, reauthVerifier, enrollmentStore,
-					sensitiveGate, cfg.Reauth.GrantTTL, logger)
-				cleanupWorker := httpapi.NewPasskeyEnrollmentCleanupWorker(
-					factorManager, enrollmentStore, cfg.Reauth.CleanupInterval, logger)
-				cleanupWorker.Start()
-				workerStops = append(workerStops, cleanupWorker.Stop)
-			}
-
-			// Password management (ADR-0006 §6 amended by ADR-0007): the
-			// authenticator doubles as the password authority (ZITADEL
-			// adapter or dev fake). The mutation consumes an
-			// account.password.change reauth grant, acquires the durable
-			// single-winner intent before the provider call, advances the
-			// epoch atomically with the outcome record, rotates the current
-			// session and performs the generation-scoped cleanup; the
-			// durable audit shares the canonical session security auditor.
-			// Without the PostgreSQL security-state authority the route stays
-			// unregistered (fail closed).
-			if passwordManager, ok := authenticator.(auth.PasswordManager); ok && reauthVerifier != nil && sessionSvc != nil && securitySvc != nil {
-				passwordHandlers = httpapi.NewPasswordHandlers(
-					passwordManager, reauthVerifier, sessionSvc, securitySvc, sessionAuditor,
-					cfg.SecurityState.ProviderDeadline, cfg.SecurityState.SettlementTimeout,
-					cfg, logger)
-			}
-		}
-
 		appHandlers = httpapi.NewApplicationHandlers(appSvc, permResolver, reauthVerifier,
 			rotationRates, cfg.Rotation.RateLimit, cfg.Rotation.RateWindow, logger)
+	}
+	if workforceSvc != nil {
+		workforceHandlers = httpapi.NewWorkforceHandlers(
+			workforceSvc, permResolver, reauthVerifier, sessionSvc, logger)
 	}
 
 	// Consent resolution (P3.3, ADR-0005 §2): the side-effect free
@@ -497,6 +508,9 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			}
 			if userReader != nil && permResolver != nil {
 				accountHandlers := httpapi.NewAccountHandlers(userReader, permResolver)
+				if workforceRepo != nil {
+					accountHandlers = httpapi.NewAccountHandlers(userReader, permResolver, workforceRepo)
+				}
 				r.Get("/me", accountHandlers.GetCurrentUser)
 				r.Get("/me/permissions", accountHandlers.GetPermissions)
 			}
@@ -563,6 +577,37 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				r.Post("/admin/applications/{applicationId}/clients/{clientId}/disable", appHandlers.DisableClient)
 				r.Delete("/admin/applications/{applicationId}/clients/{clientId}", appHandlers.DeleteClient)
 				r.Post("/admin/applications/{applicationId}/clients/{clientId}/secret-rotations", appHandlers.RotateClientSecret)
+			}
+		})
+
+		// Phase 5 identity and workforce management plane (ADR-0011). All
+		// routes require session + CSRF; reads and mutations independently
+		// resolve their capability inside WorkforceHandlers. High-risk target
+		// operations additionally consume target-bound reauth grants.
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
+				r.Use(httpapi.RequireCSRF())
+			}
+			if workforceHandlers != nil {
+				r.Get("/admin/users", workforceHandlers.ListUsers)
+				r.Get("/admin/users/{userId}", workforceHandlers.GetUser)
+				r.Post("/admin/users/{userId}/enable", workforceHandlers.EnableUser)
+				r.Post("/admin/users/{userId}/disable", workforceHandlers.DisableUser)
+				r.Delete("/admin/users/{userId}/sessions", workforceHandlers.RevokeUserSessions)
+				r.Delete("/admin/users/{userId}/sessions/{sessionId}", workforceHandlers.RevokeUserSession)
+
+				r.Get("/admin/employees", workforceHandlers.ListEmployees)
+				r.Post("/admin/employees/link", workforceHandlers.LinkEmployee)
+				r.Get("/admin/users/{userId}/employee-profile", workforceHandlers.GetEmployee)
+				r.Put("/admin/users/{userId}/employee-profile", workforceHandlers.UpdateEmployee)
+				r.Post("/admin/users/{userId}/offboarding", workforceHandlers.OffboardEmployee)
+
+				r.Get("/admin/departments", workforceHandlers.ListDepartments)
+				r.Post("/admin/departments", workforceHandlers.CreateDepartment)
+				r.Get("/admin/departments/{departmentId}", workforceHandlers.GetDepartment)
+				r.Patch("/admin/departments/{departmentId}", workforceHandlers.UpdateDepartment)
+				r.Delete("/admin/departments/{departmentId}", workforceHandlers.DeleteDepartment)
 			}
 		})
 	})
@@ -738,6 +783,33 @@ func (a *sessionSecurityAuditor) RecordSessionEvent(ctx context.Context, ev sess
 		requestID = request.ID(ctx)
 	}
 	return a.store.Record(ctx, toCanonicalSecurityEvent(ev, requestID))
+}
+
+// reauthSecurityAuditor keeps the shared reauthentication plane independent
+// from OAuth application provisioning while writing to the same canonical
+// audit table. Recording remains best-effort at this narrow seam, matching
+// ReauthEventRecorder semantics.
+type reauthSecurityAuditor struct {
+	store *postgres.SecurityEventStore
+}
+
+func newReauthSecurityAuditor(store *postgres.SecurityEventStore) *reauthSecurityAuditor {
+	return &reauthSecurityAuditor{store: store}
+}
+
+func (a *reauthSecurityAuditor) RecordEvent(ctx context.Context, eventType string,
+	actor identity.UserID, appID applications.ApplicationID, clientID applications.OAuthClientID,
+	requestID, operation string, result applications.SecurityEventResult, failureClass string,
+) {
+	if a == nil || a.store == nil {
+		return
+	}
+	_ = a.store.Record(ctx, applications.SecurityEvent{
+		EventID: applications.NewSecurityEventID(), EventType: eventType,
+		ActorUserID: actor, ApplicationID: appID, ClientID: clientID,
+		RequestID: requestID, Operation: operation, Result: result,
+		FailureClass: failureClass, OccurredAt: time.Now().UTC(),
+	})
 }
 
 // toCanonicalSecurityEvent maps the session package's audit event onto the

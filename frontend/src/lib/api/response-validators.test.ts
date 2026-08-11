@@ -13,16 +13,91 @@ import {
   parseConsentResolution,
   parseCurrentUser,
   parseDecisionResponse,
+  parseDepartmentDetail,
+  parseDepartments,
+  parseEmployeeDetail,
+  parseEmployees,
+  parseManagedUsers,
   parseMfaRequiredResponse,
   parsePasskeyEnrollment,
   parsePasskeyEnrollmentConfirmation,
+  parsePermissionCapabilities,
   parseReauthenticationOutcome,
   parseRevokedSessionCount,
   parseSecuritySummary,
   parseTotpEnrollment,
   parseTotpEnrollmentConfirmation,
   parseUserSessions,
+  parseUserDetail,
 } from "./response-validators";
+
+describe("P5 identity and workforce validators", () => {
+  const page = { nextCursor: null, hasMore: false };
+
+  it("fails closed when any permission capability is missing or malformed", () => {
+    const permissions = Object.fromEntries([
+      "userRead", "userDisable", "employeeManage", "employeeOffboard", "departmentManage",
+      "applicationRead", "applicationManage", "applicationSecretRotate", "policyRead",
+      "policyManage", "policyPublish", "auditRead", "auditExport", "providerRead", "providerManage",
+    ].map((key) => [key, true]));
+    expect(parsePermissionCapabilities(permissions)).toEqual(permissions);
+    expect(() => parsePermissionCapabilities({ ...permissions, userRead: "yes" })).toThrow(ApiResponseShapeError);
+    const missing = { ...permissions };
+    delete missing.userRead;
+    expect(() => parsePermissionCapabilities(missing)).toThrow(ApiResponseShapeError);
+  });
+
+  it("narrows user pages and rejects cursor/status drift", () => {
+    const user = {
+      userId: "user_A", displayName: "Alice", email: "a@example.com",
+      personaLabel: "外部用户", status: "active", lastActiveAt: "2026-08-11T00:00:00Z",
+    };
+    expect(parseManagedUsers({ items: [user], page })).toEqual({ items: [user], page });
+    expect(() => parseManagedUsers({ items: [{ ...user, status: "deleted" }], page })).toThrow(ApiResponseShapeError);
+    expect(() => parseManagedUsers({ items: [user], page: { nextCursor: 1, hasMore: true } })).toThrow(ApiResponseShapeError);
+  });
+
+  it("narrows complete user detail arrays without fabricating optional employee data", () => {
+    const detail = {
+      userId: "user_A", displayName: "Alice", email: "a@example.com", phoneMasked: "",
+      personaLabel: "外部用户", status: "active", lastActiveAt: "2026-08-11T00:00:00Z",
+      personas: ["consumer"],
+      linkedIdentities: [{ providerId: "idp_1", providerName: "ZITADEL", externalSubject: "subject", linkedAt: "2026-08-11T00:00:00Z" }],
+      activeSessions: [{ sessionId: "session_A", deviceName: "Chrome", lastActiveAt: "2026-08-11T00:00:00Z", isCurrent: false }],
+      authorizedApplications: [{ applicationName: "App", scopes: ["openid"], grantedAt: "2026-08-11T00:00:00Z", status: "active" }],
+      recentAuditEvents: [{ eventId: "event_A", eventType: "user.enabled", actorName: "Admin", actorId: "user_admin", targetLabel: "Alice", targetId: "user_A", occurredAt: "2026-08-11T00:00:00Z", result: "success", requestId: "req_12345678", details: "" }],
+    };
+    expect(parseUserDetail(detail)).toEqual(detail);
+    expect(() => parseUserDetail({ ...detail, activeSessions: [{ sessionId: "x", isCurrent: "false" }] })).toThrow(ApiResponseShapeError);
+  });
+
+  it("narrows employee pages and nullable supervisor identity", () => {
+    const summary = {
+      userId: "user_A", displayName: "Alice", employeeId: "EMP-1",
+      departmentName: "Platform", title: "Engineer", status: "active",
+    };
+    expect(parseEmployees({ items: [summary], page })).toEqual({ items: [summary], page });
+    const detail = {
+      ...summary, email: "a@example.com", departmentId: "dep_platform",
+      supervisorUserId: null, supervisorName: null, onboardedAt: "2026-08-11T00:00:00Z",
+      linkedConsumerAccount: true,
+    };
+    expect(parseEmployeeDetail(detail)).toEqual(detail);
+    expect(() => parseEmployeeDetail({ ...detail, supervisorUserId: 42 })).toThrow(ApiResponseShapeError);
+  });
+
+  it("narrows department summaries/details and rejects negative counts", () => {
+    const summary = { departmentId: "dep_A", name: "Platform", parentName: "", memberCount: 1, ownerName: "Alice" };
+    expect(parseDepartments([summary])).toEqual([summary]);
+    const detail = {
+      ...summary, parentDepartmentId: null, parentName: null, ownerUserId: "user_A",
+      childDepartments: [{ departmentId: "dep_B", name: "SRE", memberCount: 0 }],
+      members: [{ userId: "user_A", displayName: "Alice", title: "Engineer", employeeId: "EMP-1" }],
+    };
+    expect(parseDepartmentDetail(detail)).toEqual(detail);
+    expect(() => parseDepartmentDetail({ ...detail, memberCount: -1 })).toThrow(ApiResponseShapeError);
+  });
+});
 
 describe("P4.7 account security validators", () => {
   const session = {

@@ -8,7 +8,7 @@
 
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, Empty, Modal, Popconfirm, Tabs, Toast } from "@douyinfe/semi-ui";
@@ -16,11 +16,13 @@ import { StatusBadge } from "@/components/common/status-badge";
 import { PageHeader } from "@/components/common/page-header";
 import type { UserDetail } from "@/features/admin/types";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
+import { AccountReauthenticationForm } from "@/features/account/components/security-overview";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import styles from "./admin-detail.module.css";
 
 type UserDetailProps = {
   detail: UserDetail;
+  canManage?: boolean;
 };
 
 const VALID_TABS = ["profile", "sessions", "authorizations", "audit", "danger"] as const;
@@ -34,10 +36,11 @@ function personaLabel(personas: UserDetail["personas"]): string {
   return personas.map((p) => (p === "consumer" ? "外部用户" : "员工")).join(" · ");
 }
 
-export function UserDetail({ detail }: UserDetailProps) {
+export function UserDetail({ detail, canManage = false }: UserDetailProps) {
   const router = useRouter();
   const tabParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("tab") : null;
-  const activeTab: TabKey = isTabKey(tabParam) ? tabParam : "profile";
+  const requestedTab: TabKey = isTabKey(tabParam) ? tabParam : "profile";
+  const activeTab: TabKey = requestedTab === "danger" && !canManage ? "profile" : requestedTab;
 
   function handleTabChange(itemKey: string) {
     const params = new URLSearchParams(window.location.search);
@@ -83,7 +86,7 @@ export function UserDetail({ detail }: UserDetailProps) {
           </Tabs.TabPane>
 
           <Tabs.TabPane tab="活跃会话" itemKey="sessions">
-            <SessionsTab detail={detail} />
+            <SessionsTab detail={detail} canManage={canManage} />
           </Tabs.TabPane>
 
           <Tabs.TabPane tab="授权应用" itemKey="authorizations">
@@ -94,9 +97,11 @@ export function UserDetail({ detail }: UserDetailProps) {
             <AuditTab detail={detail} />
           </Tabs.TabPane>
 
-          <Tabs.TabPane tab="危险操作" itemKey="danger">
-            <DangerTab detail={detail} />
-          </Tabs.TabPane>
+          {canManage && (
+            <Tabs.TabPane tab="危险操作" itemKey="danger">
+              <DangerTab detail={detail} />
+            </Tabs.TabPane>
+          )}
         </Tabs>
       </div>
     </>
@@ -151,7 +156,8 @@ function ProfileTab({ detail }: UserDetailProps) {
   );
 }
 
-function SessionsTab({ detail }: UserDetailProps) {
+function SessionsTab({ detail, canManage = false }: UserDetailProps) {
+  const router = useRouter();
   const [revokingId, setRevokingId] = useState<string | null>(null);
 
   async function handleRevoke(sessionId: string): Promise<void> {
@@ -159,7 +165,7 @@ function SessionsTab({ detail }: UserDetailProps) {
     try {
       await browserCommands.revokeUserSession(detail.userId, sessionId);
       Toast.success({ content: "会话已撤销。" });
-      // Note: in real implementation, the page would refresh or update locally
+      router.refresh();
     } catch {
       Toast.error({ content: "撤销会话失败，请稍后重试。" });
     } finally {
@@ -180,7 +186,7 @@ function SessionsTab({ detail }: UserDetailProps) {
             <p>{formatSecurityDateTime(session.lastActiveAt)}</p>
             {session.isCurrent && <StatusBadge label="当前会话" tone="success" />}
           </div>
-          {!session.isCurrent && (
+          {canManage && !session.isCurrent && (
             <Popconfirm
               title={`撤销 ${session.deviceName} 的会话？`}
               content="该设备上的登录会话将立即失效。"
@@ -266,17 +272,26 @@ function DangerTab({ detail }: UserDetailProps) {
   const router = useRouter();
   const [toggling, setToggling] = useState(false);
   const [revokingSessions, setRevokingSessions] = useState(false);
+  const [reauthAction, setReauthAction] = useState<"disable" | "sessions" | null>(null);
+  const browserOperation = useRef<AbortController | null>(null);
 
   const isActive = detail.status === "active";
 
   async function handleToggleStatus(): Promise<void> {
-    const nextStatus = isActive ? "disabled" : "active";
-
-    const onOk = async () => {
+    if (isActive) {
+      setReauthAction("disable");
+      return;
+    }
+    Modal.info({
+      title: "启用此用户？",
+      content: "恢复后用户可重新登录。已有授权保持原状态。",
+      okText: "确认启用",
+      cancelText: "取消",
+      onOk: async () => {
       setToggling(true);
       try {
-        await browserCommands.updateUserStatus(detail.userId, nextStatus);
-        Toast.success({ content: isActive ? "用户已停用。" : "用户已启用。" });
+          await browserCommands.updateUserStatus(detail.userId, "active");
+          Toast.success({ content: "用户已启用。" });
         router.refresh();
       } catch {
         Toast.error({ content: "操作失败，请重试。" });
@@ -284,49 +299,41 @@ function DangerTab({ detail }: UserDetailProps) {
       } finally {
         setToggling(false);
       }
-    };
-
-    if (isActive) {
-      Modal.warning({
-        title: "停用此用户？",
-        content: (
-          <div>
-            <p>停用 <strong>{detail.displayName}</strong> 后：</p>
-            <ul>
-              <li>用户将无法登录</li>
-              <li>已有会话不会立即失效，仍可手动撤销</li>
-              <li>已授权的 OAuth 应用不会自动撤销</li>
-            </ul>
-            <p>此操作需要重认证。当前为 Mock 实现。</p>
-          </div>
-        ),
-        okText: "确认停用",
-        cancelText: "取消",
-        okType: "danger",
-        onOk,
-      });
-    } else {
-      Modal.info({
-        title: "启用此用户？",
-        content: "恢复后用户可重新登录。已有授权不会自动恢复。",
-        okText: "确认启用",
-        cancelText: "取消",
-        onOk,
-      });
-    }
+      },
+    });
   }
 
-  async function handleRevokeAllSessions(): Promise<void> {
-    setRevokingSessions(true);
-    try {
-      await browserCommands.revokeUserSessions(detail.userId);
-      Toast.success({ content: "已撤销该用户的所有会话。" });
-      router.refresh();
-    } catch {
-      Toast.error({ content: "撤销会话失败，请重试。" });
-    } finally {
-      setRevokingSessions(false);
+  function closeReauthentication(): void {
+    browserOperation.current?.abort();
+    browserOperation.current = null;
+    setReauthAction(null);
+  }
+
+  async function runHighRiskOperation(reauthToken: string, signal: AbortSignal): Promise<void> {
+    if (reauthAction === "disable") {
+      setToggling(true);
+      try {
+        await browserCommands.updateUserStatus(
+          detail.userId,
+          "disabled",
+          reauthToken,
+          { signal },
+        );
+        Toast.success({ content: "用户已停用，关联会话撤销已启动。" });
+      } finally {
+        setToggling(false);
+      }
+    } else if (reauthAction === "sessions") {
+      setRevokingSessions(true);
+      try {
+        await browserCommands.revokeUserSessions(detail.userId, reauthToken, { signal });
+        Toast.success({ content: "已撤销该用户的所有会话。" });
+      } finally {
+        setRevokingSessions(false);
+      }
     }
+    setReauthAction(null);
+    router.refresh();
   }
 
   return (
@@ -334,7 +341,7 @@ function DangerTab({ detail }: UserDetailProps) {
       <div className={`${styles.notice} ${styles.noticeDanger}`}>
         <div>
           <strong>危险操作</strong>
-          以下操作会影响该用户的登录和授权。后端将强制执行并记录审计事件。
+          以下操作会影响该用户的登录和会话。后端将强制执行并记录审计事件。
         </div>
       </div>
 
@@ -343,7 +350,7 @@ function DangerTab({ detail }: UserDetailProps) {
           <strong>{isActive ? "停用用户" : "启用用户"}</strong>
           <p>
             {isActive
-              ? "停用后用户将无法登录，已有会话和授权不会立即失效。"
+              ? "停用后用户将无法登录，并启动已有会话撤销；OAuth 授权记录保持不变。"
               : "恢复后用户可重新登录。"}
           </p>
         </div>
@@ -362,23 +369,42 @@ function DangerTab({ detail }: UserDetailProps) {
           <strong>撤销所有会话</strong>
           <p>立即撤销该用户在所有设备上的登录会话。用户需要重新登录。</p>
         </div>
-        <Popconfirm
-          title={`撤销 ${detail.displayName} 的所有会话？`}
-          content="该用户在所有设备上的会话将立即失效。"
-          type="warning"
-          onConfirm={handleRevokeAllSessions}
+        <Button
+          type="danger"
+          theme="solid"
+          loading={revokingSessions}
           disabled={revokingSessions}
+          onClick={() => setReauthAction("sessions")}
         >
-          <Button
-            type="danger"
-            theme="solid"
-            loading={revokingSessions}
-            disabled={revokingSessions}
-          >
-            撤销所有会话
-          </Button>
-        </Popconfirm>
+          撤销所有会话
+        </Button>
       </div>
+
+      <Modal
+        title={reauthAction === "disable" ? "重新认证并停用用户" : "重新认证并撤销所有会话"}
+        visible={reauthAction !== null}
+        footer={null}
+        onCancel={closeReauthentication}
+        closeOnEsc={!toggling && !revokingSessions}
+        maskClosable={false}
+      >
+        <p>
+          本次授权仅绑定到用户 <strong>{detail.displayName}</strong>（{detail.userId}），
+          且只能使用一次。
+        </p>
+        {reauthAction !== null && (
+          <AccountReauthenticationForm
+            action={reauthAction === "disable" ? "user.disable" : "user.sessions.revoke"}
+            target={detail.userId}
+            submitLabel={reauthAction === "disable" ? "验证并停用" : "验证并撤销"}
+            browserOperationRef={browserOperation}
+            onGranted={runHighRiskOperation}
+            onCancel={closeReauthentication}
+            operationError="操作未完成；此次单次授权不会被重复使用，请重新验证后再试。"
+            destructive
+          />
+        )}
+      </Modal>
     </div>
   );
 }

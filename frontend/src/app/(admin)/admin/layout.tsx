@@ -9,10 +9,12 @@
 import type { ReactNode } from "react";
 import { DashboardShell } from "@/components/layouts/dashboard-shell";
 import { serverQueries } from "@/lib/api/server/server-queries";
+import { requireSession } from "@/lib/api/server/server-session";
 
 export const dynamic = "force-dynamic";
 
 export default async function AdminLayout({ children }: { children: ReactNode }) {
+  await requireSession();
   const [currentUser, permissions] = await Promise.all([
     serverQueries.getCurrentUser(),
     serverQueries.getCurrentPermissions(),

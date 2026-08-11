@@ -30,10 +30,14 @@ import type {
   AuditExportResult,
   AuditQuery,
   DepartmentDetail,
+  DepartmentInput,
+  DepartmentPatch,
+  DepartmentRecord,
   DirectorySyncHistoryEntry,
   DirectorySyncResult,
   EmployeeDetail,
   EmployeeLinkInput,
+  EmployeeProfileInput,
   ProviderDetail,
   SyncConflict,
   UserDetail,
@@ -171,11 +175,11 @@ const employees = [
   { userId: "usr_05QG6E8W4NR7Y2Z1PC9S", displayName: "顾言", employeeId: "UP-0815", departmentName: "客户成功", title: "客户成功经理", status: "offboarding" },
 ] satisfies Awaited<ReturnType<UnitedPassDataSource["getEmployees"]>>["items"];
 
-const departments = [
+const departments: DepartmentRecord[] = [
   { departmentId: "dep_identity", name: "身份平台", parentName: "产品与体验", memberCount: 18, ownerName: "许清和" },
   { departmentId: "dep_infra", name: "基础架构", parentName: "技术中心", memberCount: 32, ownerName: "程越" },
   { departmentId: "dep_success", name: "客户成功", parentName: "商业化中心", memberCount: 24, ownerName: "沈叙" },
-] satisfies Awaited<ReturnType<UnitedPassDataSource["getDepartments"]>>;
+];
 
 const userDetails: Record<string, UserDetail> = {
   usr_01JUP8M8B4Q7R4T6PK1D: {
@@ -232,6 +236,7 @@ const employeeDetails: Record<string, EmployeeDetail> = {
     departmentId: "dep_identity",
     title: "产品设计师",
     status: "active",
+    supervisorUserId: "usr_0A1",
     supervisorName: "许清和",
     onboardedAt: "2025-03-15T00:00:00Z",
     linkedConsumerAccount: true,
@@ -245,6 +250,7 @@ const employeeDetails: Record<string, EmployeeDetail> = {
     departmentId: "dep_infra",
     title: "高级工程师",
     status: "active",
+    supervisorUserId: null,
     supervisorName: "程越",
     onboardedAt: "2024-08-01T00:00:00Z",
     linkedConsumerAccount: true,
@@ -258,6 +264,7 @@ const employeeDetails: Record<string, EmployeeDetail> = {
     departmentId: "dep_success",
     title: "客户成功经理",
     status: "offboarding",
+    supervisorUserId: null,
     supervisorName: "沈叙",
     onboardedAt: "2024-06-10T00:00:00Z",
     linkedConsumerAccount: true,
@@ -270,6 +277,7 @@ const departmentDetails: Record<string, DepartmentDetail> = {
     name: "身份平台",
     parentDepartmentId: "dep_product",
     parentName: "产品与体验",
+    ownerUserId: "usr_0A1",
     ownerName: "许清和",
     memberCount: 18,
     childDepartments: [],
@@ -284,6 +292,7 @@ const departmentDetails: Record<string, DepartmentDetail> = {
     name: "基础架构",
     parentDepartmentId: "dep_tech",
     parentName: "技术中心",
+    ownerUserId: null,
     ownerName: "程越",
     memberCount: 32,
     childDepartments: [
@@ -299,6 +308,7 @@ const departmentDetails: Record<string, DepartmentDetail> = {
     name: "客户成功",
     parentDepartmentId: "dep_commerce",
     parentName: "商业化中心",
+    ownerUserId: null,
     ownerName: "沈叙",
     memberCount: 24,
     childDepartments: [],
@@ -858,7 +868,18 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
     getUserDetail: (userId: string) => Promise.resolve(userDetails[userId] ?? null),
     getEmployees: (query?: PageQuery) => Promise.resolve(toCursorPage(employees, query)),
     getEmployeeDetail: (userId: string) => Promise.resolve(employeeDetails[userId] ?? null),
-    getDepartments: () => Promise.resolve(departments),
+    getDepartments: (query?: PageQuery) => {
+      const term = query?.query?.trim().toLocaleLowerCase("zh-CN");
+      const filtered = term
+        ? departments.filter((department) =>
+            [department.name, department.parentName, department.ownerName]
+              .join(" ")
+              .toLocaleLowerCase("zh-CN")
+              .includes(term),
+          )
+        : departments;
+      return Promise.resolve(filtered.slice(0, query?.limit ?? 100));
+    },
     getDepartmentDetail: (departmentId: string) => Promise.resolve(departmentDetails[departmentId] ?? null),
     getIdentityProviders: (query?: PageQuery) => Promise.resolve(toCursorPage(identityProviders, query)),
     getProviderDetail: (providerId: string): Promise<ProviderDetail | null> => {
@@ -1271,6 +1292,22 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       return Promise.resolve();
     },
 
+    updateEmployeeProfile: (userId: string, input: EmployeeProfileInput): Promise<void> => {
+      const detail = employeeDetails[userId];
+      const department = departments.find((item) => item.departmentId === input.departmentId);
+      if (detail) {
+        detail.departmentId = input.departmentId;
+        detail.departmentName = department?.name ?? detail.departmentName;
+        detail.title = input.title;
+      }
+      const summary = employees.find((item) => item.userId === userId);
+      if (summary) {
+        summary.departmentName = department?.name ?? summary.departmentName;
+        summary.title = input.title;
+      }
+      return Promise.resolve();
+    },
+
     offboardEmployee: (userId: string): Promise<void> => {
       const detail = employeeDetails[userId];
       if (detail) {
@@ -1280,6 +1317,64 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       if (employee) {
         employee.status = "offboarding";
       }
+      return Promise.resolve();
+    },
+
+    createDepartment: (input: DepartmentInput): Promise<DepartmentDetail> => {
+      const departmentId = `dep_mock_${Date.now()}`;
+      const parent = departments.find((item) => item.departmentId === input.parentDepartmentId);
+      const owner = employees.find((item) => item.userId === input.ownerUserId);
+      const detail: DepartmentDetail = {
+        departmentId,
+        name: input.name,
+        parentDepartmentId: input.parentDepartmentId ?? null,
+        parentName: parent?.name ?? null,
+        ownerUserId: input.ownerUserId ?? null,
+        ownerName: owner?.displayName ?? "",
+        memberCount: 0,
+        childDepartments: [],
+        members: [],
+      };
+      departments.push({
+        departmentId,
+        name: input.name,
+        parentName: detail.parentName ?? "",
+        memberCount: 0,
+        ownerName: detail.ownerName,
+      });
+      departmentDetails[departmentId] = detail;
+      return Promise.resolve(detail);
+    },
+
+    updateDepartment: (departmentId: string, input: DepartmentPatch): Promise<DepartmentDetail> => {
+      const detail = departmentDetails[departmentId];
+      if (!detail) return Promise.reject(new Error("department not found"));
+      if (input.name !== undefined) detail.name = input.name;
+      if (input.parentDepartmentId !== undefined) {
+        detail.parentDepartmentId = input.parentDepartmentId;
+        detail.parentName = input.parentDepartmentId
+          ? departments.find((item) => item.departmentId === input.parentDepartmentId)?.name ?? null
+          : null;
+      }
+      if (input.ownerUserId !== undefined) {
+        detail.ownerUserId = input.ownerUserId;
+        detail.ownerName = input.ownerUserId
+          ? employees.find((item) => item.userId === input.ownerUserId)?.displayName ?? ""
+          : "";
+      }
+      const summary = departments.find((item) => item.departmentId === departmentId);
+      if (summary) {
+        summary.name = detail.name;
+        summary.parentName = detail.parentName ?? "";
+        summary.ownerName = detail.ownerName;
+      }
+      return Promise.resolve(detail);
+    },
+
+    deleteDepartment: (departmentId: string): Promise<void> => {
+      const index = departments.findIndex((item) => item.departmentId === departmentId);
+      if (index !== -1) departments.splice(index, 1);
+      delete departmentDetails[departmentId];
       return Promise.resolve();
     },
 

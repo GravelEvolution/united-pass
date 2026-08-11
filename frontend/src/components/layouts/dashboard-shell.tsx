@@ -60,8 +60,8 @@ const accountNavigation = [
 const adminNavigation = [
   { href: "/admin", label: "工作台", icon: IconHome },
   { href: "/admin/users", label: "用户", icon: IconUser, requiresPermission: "userRead" as const },
-  { href: "/admin/employees", label: "员工", icon: IconUserGroup, requiresPermission: "employeeManage" as const },
-  { href: "/admin/departments", label: "部门", icon: IconUserGroup, requiresPermission: "departmentManage" as const },
+  { href: "/admin/employees", label: "员工", icon: IconUserGroup, requiresPermission: "userRead" as const },
+  { href: "/admin/departments", label: "部门", icon: IconUserGroup, requiresPermission: "userRead" as const },
   { href: "/admin/providers", label: "Provider", icon: IconGlobe, requiresPermission: "providerRead" as const },
   { href: "/admin/applications", label: "OAuth 应用", icon: IconApps, requiresPermission: "applicationRead" as const },
   { href: "/admin/policies", label: "授权策略", icon: IconShield, requiresPermission: "policyRead" as const },

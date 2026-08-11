@@ -26,5 +26,12 @@ export default async function UsersPage({
     cursor: params.cursor,
   };
   const page = await serverQueries.getUsers(query);
-  return <UsersTable records={page.items} />;
+  return (
+    <UsersTable
+      records={page.items}
+      page={page.page}
+      query={params.q}
+      hasPrevious={Boolean(params.cursor)}
+    />
+  );
 }

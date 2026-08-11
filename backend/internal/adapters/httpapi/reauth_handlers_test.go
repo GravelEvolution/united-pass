@@ -891,8 +891,8 @@ func TestReauthGrants_BindingChecks(t *testing.T) {
 // TestReauthRequest_AccountActionValidation locks the §4 request validation
 // split: account actions bind user + session + action only (application and
 // client bindings are forbidden), Target is exclusive to
-// account.passkey.remove, management actions never accept a Target, and the
-// reserved account.sessions.revoke_others action is never accepted.
+// account.passkey.remove, application/client actions never accept a Target,
+// and the reserved account.sessions.revoke_others action is never accepted.
 func TestReauthRequest_AccountActionValidation(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1031,5 +1031,49 @@ func TestReauthMFA_AccountActionTargetCarriesThrough(t *testing.T) {
 	grants := NewReauthGrants(env.grants, nil)
 	if err := grants.VerifyAndConsume(context.Background(), grantToken, "account.passkey.remove", "sess-1", "pk-B", "", ""); err == nil {
 		t.Fatal("grant minted for pk-A must not authorize pk-B")
+	}
+}
+
+func TestReauthRequest_Phase5ActionRequiresOnlyTargetUserBinding(t *testing.T) {
+	for _, action := range []string{
+		auth.ReauthActionUserDisable,
+		auth.ReauthActionUserSessionsRevoke,
+		auth.ReauthActionEmployeeOffboard,
+	} {
+		t.Run(action, func(t *testing.T) {
+			env := newReauthEnv()
+			env.authz.verifyResult = auth.AuthenticationResult{Status: auth.StatusAuthenticated}
+			router := reauthRouter(env.handlers, reauthPrincipal)
+
+			w := doReauthJSON(t, router, "/auth/reauthentication",
+				`{"action":"`+action+`","target":"user_target","password":"pw"}`)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+			}
+			grantToken := decodeReauthToken(t, w)
+			verifier := NewReauthGrants(env.grants, nil)
+			if err := verifier.VerifyAndConsume(context.Background(), grantToken,
+				action, "sess-1", "user_other", "", ""); err == nil {
+				t.Fatal("target-user mismatch must fail closed")
+			}
+
+			w = doReauthJSON(t, router, "/auth/reauthentication",
+				`{"action":"`+action+`","password":"pw"}`)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("missing target status = %d, want 400", w.Code)
+			}
+
+			w = doReauthJSON(t, router, "/auth/reauthentication",
+				`{"action":"`+action+`","target":"user/foreign","password":"pw"}`)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("malformed target status = %d, want 400", w.Code)
+			}
+
+			w = doReauthJSON(t, router, "/auth/reauthentication",
+				`{"action":"`+action+`","target":"user_target","applicationId":"app_forbidden","password":"pw"}`)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("forbidden app binding status = %d, want 400", w.Code)
+			}
+		})
 	}
 }

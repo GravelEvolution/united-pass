@@ -74,6 +74,11 @@ func setupTestRedis(t *testing.T) *Client {
 		t.Fatalf("ping redis: %v", err)
 	}
 
+	// A killed test process cannot run t.Cleanup. Clear only the dedicated
+	// integration prefix before each test so stale enrollment/claim leases do
+	// not turn a fresh run into a false concurrency failure.
+	cleanupTestKeys(t, client, cfg.KeyPrefix)
+
 	// Clean up: delete only keys under the test prefix. Never FLUSHALL or
 	// FLUSHDB.
 	t.Cleanup(func() {
@@ -1509,13 +1514,16 @@ func TestIntegration_PasskeyCleanupSkipsLiveClaimAfterChallengeExpiry(t *testing
 	ctx := context.Background()
 	tokenHash := session.HashToken("passkey-cleanup-live-claim")
 
-	if err := store.CreateEnrollment(ctx, tokenHash, enrollmentData(auth.EnrollmentPasskey, "pk-racing"), 100*time.Millisecond); err != nil {
+	// Keep the pre-claim window comfortably above one remote Redis round trip
+	// under the race detector. This TTL is test-only; the assertion begins
+	// after the challenge has expired while its claim lease remains live.
+	if err := store.CreateEnrollment(ctx, tokenHash, enrollmentData(auth.EnrollmentPasskey, "pk-racing"), 2*time.Second); err != nil {
 		t.Fatalf("create passkey enrollment: %v", err)
 	}
 	if _, err := store.ClaimEnrollment(ctx, tokenHash, "claim-racing"); err != nil {
 		t.Fatalf("claim enrollment: %v", err)
 	}
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(2200 * time.Millisecond)
 	if entries, err := store.ClaimExpiredPasskeyEnrollments(ctx, 10); err != nil || len(entries) != 0 {
 		t.Fatalf("cleanup while claim live = %+v, %v; want empty", entries, err)
 	}

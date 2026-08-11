@@ -13,6 +13,7 @@ import Link from "next/link";
 import { Button } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import type { EmployeeRecord } from "@/features/admin/types";
+import type { CursorPage } from "@/types/pagination";
 import {
   createScopedColumn,
   ManagementDirectory,
@@ -64,7 +65,13 @@ const columns: ColumnProps<EmployeeRecord>[] = [
   }),
 ];
 
-export function EmployeesTable({ records, actionHref }: { records: EmployeeRecord[]; actionHref?: string }) {
+export function EmployeesTable({ records, page, query, hasPrevious, actionHref }: {
+  records: EmployeeRecord[];
+  page: CursorPage<EmployeeRecord>["page"];
+  query?: string;
+  hasPrevious: boolean;
+  actionHref?: string;
+}) {
   const action = actionHref ? (
     <Link href={actionHref}>
       <Button theme="solid" type="primary">关联员工档案</Button>
@@ -75,10 +82,13 @@ export function EmployeesTable({ records, actionHref }: { records: EmployeeRecor
     <ManagementDirectory
       columns={columns}
       copy={copy}
-      getSearchText={(record) => [record.displayName, record.employeeId, record.departmentName, record.title].join(" ")}
       records={records}
       rowKey="userId"
       action={action}
+      basePath="/admin/employees"
+      initialQuery={query}
+      page={page}
+      hasPrevious={hasPrevious}
     />
   );
 }

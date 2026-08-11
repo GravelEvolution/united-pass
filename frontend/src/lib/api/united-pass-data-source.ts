@@ -12,11 +12,14 @@ import type {
   AuditQuery,
   DashboardMetric,
   DepartmentDetail,
+  DepartmentInput,
+  DepartmentPatch,
   DepartmentRecord,
   DirectorySyncHistoryEntry,
   DirectorySyncResult,
   EmployeeDetail,
   EmployeeLinkInput,
+  EmployeeProfileInput,
   EmployeeRecord,
   IdentityProviderRecord,
   ManagedUser,
@@ -91,7 +94,7 @@ export interface UnitedPassQueries {
   getUserDetail(userId: string): Promise<UserDetail | null>;
   getEmployees(query?: PageQuery): Promise<CursorPage<EmployeeRecord>>;
   getEmployeeDetail(userId: string): Promise<EmployeeDetail | null>;
-  getDepartments(): Promise<DepartmentRecord[]>;
+  getDepartments(query?: PageQuery): Promise<DepartmentRecord[]>;
   getDepartmentDetail(departmentId: string): Promise<DepartmentDetail | null>;
   getIdentityProviders(query?: PageQuery): Promise<CursorPage<IdentityProviderRecord>>;
   getProviderDetail(providerId: string): Promise<ProviderDetail | null>;
@@ -167,11 +170,20 @@ export interface UnitedPassCommands {
   revokeOwnSession(sessionId: string): Promise<void>;
 
   // Admin user management
-  updateUserStatus(userId: string, status: "active" | "disabled"): Promise<void>;
+  updateUserStatus(
+    userId: string,
+    status: "active" | "disabled",
+    reauthToken?: string,
+    options?: BrowserCommandOptions,
+  ): Promise<void>;
   revokeUserSession(userId: string, sessionId: string): Promise<void>;
-  revokeUserSessions(userId: string): Promise<void>;
+  revokeUserSessions(userId: string, reauthToken: string, options?: BrowserCommandOptions): Promise<void>;
   linkEmployeeProfile(input: EmployeeLinkInput): Promise<void>;
-  offboardEmployee(userId: string): Promise<void>;
+  updateEmployeeProfile(userId: string, input: EmployeeProfileInput): Promise<void>;
+  offboardEmployee(userId: string, reauthToken: string, options?: BrowserCommandOptions): Promise<void>;
+  createDepartment(input: DepartmentInput): Promise<DepartmentDetail>;
+  updateDepartment(departmentId: string, input: DepartmentPatch): Promise<DepartmentDetail>;
+  deleteDepartment(departmentId: string): Promise<void>;
 
   // Policy management
   savePolicyDraft(input: PolicyDraftInput): Promise<{ policyId: string; version: number }>;

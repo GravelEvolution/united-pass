@@ -11,10 +11,12 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
+	"github.com/GravelEvolution/united-pass/backend/internal/workforce"
 )
 
 // UserReader loads user data for the current-user endpoints. The PostgreSQL
@@ -31,28 +33,43 @@ type UserReader interface {
 type AccountHandlers struct {
 	userReader   UserReader
 	permResolver permissions.Resolver
+	employees    interface {
+		GetEmployeeProfile(ctx context.Context, userID identity.UserID) (workforce.EmployeeProfile, error)
+	}
 }
 
 // NewAccountHandlers builds AccountHandlers from the given dependencies.
-func NewAccountHandlers(userReader UserReader, permResolver permissions.Resolver) *AccountHandlers {
-	return &AccountHandlers{
+func NewAccountHandlers(userReader UserReader, permResolver permissions.Resolver, employeeReaders ...interface {
+	GetEmployeeProfile(ctx context.Context, userID identity.UserID) (workforce.EmployeeProfile, error)
+}) *AccountHandlers {
+	handler := &AccountHandlers{
 		userReader:   userReader,
 		permResolver: permResolver,
 	}
+	if len(employeeReaders) > 0 {
+		handler.employees = employeeReaders[0]
+	}
+	return handler
 }
 
 // currentUserResponse is the JSON response for GET /api/v1/me. Field names
 // match the frontend CurrentUser type exactly.
 // See ../frontend/src/types/identity.ts.
 type currentUserResponse struct {
-	UserID          string   `json:"userId"`
-	DisplayName     string   `json:"displayName"`
-	Nickname        string   `json:"nickname"`
-	AvatarURL       *string  `json:"avatarUrl"`
-	Email           string   `json:"email"`
-	PhoneMasked     string   `json:"phoneMasked"`
-	Personas        []string `json:"personas"`
-	EmployeeProfile *any     `json:"employeeProfile"`
+	UserID          string                          `json:"userId"`
+	DisplayName     string                          `json:"displayName"`
+	Nickname        string                          `json:"nickname"`
+	AvatarURL       *string                         `json:"avatarUrl"`
+	Email           string                          `json:"email"`
+	PhoneMasked     string                          `json:"phoneMasked"`
+	Personas        []string                        `json:"personas"`
+	EmployeeProfile *currentEmployeeProfileResponse `json:"employeeProfile"`
+}
+
+type currentEmployeeProfileResponse struct {
+	EmployeeID     string `json:"employeeId"`
+	DepartmentName string `json:"departmentName"`
+	Title          string `json:"title"`
 }
 
 // GetCurrentUser handles GET /api/v1/me.
@@ -89,6 +106,20 @@ func (h *AccountHandlers) GetCurrentUser(w http.ResponseWriter, r *http.Request)
 		personas = []string{}
 	}
 
+	var employeeProfile *currentEmployeeProfileResponse
+	if h.employees != nil {
+		profile, err := h.employees.GetEmployeeProfile(r.Context(), principal.UserID)
+		if err == nil {
+			employeeProfile = &currentEmployeeProfileResponse{
+				EmployeeID: profile.EmployeeNumber, DepartmentName: profile.DepartmentName,
+				Title: profile.Title,
+			}
+		} else if !errors.Is(err, workforce.ErrNotFound) {
+			WriteInternalError(w, r)
+			return
+		}
+	}
+
 	resp := currentUserResponse{
 		UserID:          string(user.ID),
 		DisplayName:     user.DisplayName,
@@ -97,7 +128,7 @@ func (h *AccountHandlers) GetCurrentUser(w http.ResponseWriter, r *http.Request)
 		Email:           user.Email,
 		PhoneMasked:     identity.MaskPhone(user.Phone),
 		Personas:        personas,
-		EmployeeProfile: nil,
+		EmployeeProfile: employeeProfile,
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

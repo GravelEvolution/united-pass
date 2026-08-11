@@ -285,3 +285,20 @@ registration/provider readback, and performs passkey step-up target-bound
 removal. Password/TOTP/session/logout and `prompt=none` live matrices also
 passed. Historical future-work descriptions above are freeze-v1 context, not
 the current Phase 4 status.
+
+## 11. P5 identity/workforce amendment — 2026-08-11
+
+The user, employee and department surfaces are now real HTTP seams in
+non-Mock mode. Every response is runtime-narrowed before it reaches a page.
+User and employee directories use URL-driven server search and signed cursor
+pagination; no full directory is loaded for browser filtering. Department
+search is server-side and bounded to 100 rows.
+
+The UI implements explicit existing-user employee linking, employee profile
+updates, user enable/disable, targeted and bulk session revocation,
+offboarding, and department create/update/delete. High-risk operations reuse
+the password/TOTP/passkey reauthentication flow with single-use grants bound
+to `user.disable`, `user.sessions.revoke`, or `employee.offboard` and the exact
+target `userId`. Frontend capability checks remain UX-only; backend checks are
+authoritative. The old “Mock 完成” table above is historical freeze context for
+these P5 routes.

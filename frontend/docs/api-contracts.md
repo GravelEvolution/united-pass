@@ -337,7 +337,7 @@ Recovery Codes 在当前 provider baseline 下为架构性 Deferred：真实模�
 
 前端权限仅用于导航和控件可用性。以下每个请求仍须由后端执行 ABAC 决策，不能依赖角色名称或前端传入的权限结论。
 
-当前管理表格仅对 Mock 返回的显式展示字段执行浏览器内搜索。接入真实 API 后，搜索词、游标、页容量、排序和筛选必须随对应 `GET /api/v1/admin/*` 请求发送，由服务端在权限过滤和字段裁剪后返回当前页；不得先把完整用户、员工或审计集合传入浏览器再过滤。
+P5 用户、员工和部门目录已接入真实 API。搜索词、游标、页容量、排序和筛选随对应 `GET /api/v1/admin/*` 请求发送，由服务端在权限过滤和字段裁剪后返回当前页；浏览器不接收完整用户或员工集合再做本地过滤。尚未迁移的管理目录仍可在 Mock mode 保留显式字段的本地原型搜索。
 
 ## OAuth Application 与 Client
 
@@ -380,20 +380,23 @@ Client Profile（`web_server`、`spa_mobile`、`server_to_server`）决定 Grant
 | 用户详情 | `POST /api/v1/admin/users/{userId}/disable` | 停用用户并声明是否撤销会话 | `user.disable`；重认证；审计 |
 | 用户详情 | `POST /api/v1/admin/users/{userId}/enable` | 恢复已停用用户 | `user.enable`；审计 |
 | 用户详情 | `DELETE /api/v1/admin/users/{userId}/sessions` | 撤销用户所有会话 | `user.disable`；重认证 |
-| `/admin/employees` | `GET /api/v1/admin/employees` | 分页搜索员工档案 | `employee.read` |
-| 员工详情 | `GET /api/v1/admin/users/{userId}/employee-profile` | 获取员工档案 | `employee.read` |
+| 用户详情 | `DELETE /api/v1/admin/users/{userId}/sessions/{sessionId}` | 撤销属于该用户的单个会话 | `user.disable`；所有权校验；审计 |
+| `/admin/employees` | `GET /api/v1/admin/employees` | 分页搜索员工档案 | `user.read` |
+| 员工详情 | `GET /api/v1/admin/users/{userId}/employee-profile` | 获取员工档案 | `user.read` |
 | 员工详情 | `PUT /api/v1/admin/users/{userId}/employee-profile` | 为既有用户关联/更新员工档案 | `employee.manage`；不得创建第二身份 |
 | `/admin/employees/link` | `POST /api/v1/admin/employees/link` | 搜索已有普通用户并为其建立员工档案 | `employee.manage` |
 | 员工详情 | `POST /api/v1/admin/users/{userId}/offboarding` | 启动离职并声明访问撤销范围 | `employee.offboard`；重认证；审计 |
 
 用户与员工共用同一 `userId`。外部用户关联员工档案后保留 Consumer Persona。不得仅凭邮箱、手机号、域名或显示名合并账户。
 
+`user.disable`、`user.sessions.revoke` 与 `employee.offboard` 必须使用绑定到当前 actor session、动作和精确目标 `userId` 的单次重认证 grant。离职提交后，`offboarding` 是立即生效的管理权限 deny；消费者 Persona 与 OAuth grant 保留。Redis/ZITADEL 会话撤销可由持久化作业继续收敛，`202` 不得描述为所有外部会话已经完成撤销。
+
 ## 部门
 
 | 页面 | 方法与路径 | 用途 | 权限标识建议 |
 | --- | --- | --- | --- |
-| `/admin/departments` | `GET /api/v1/admin/departments` | 获取树形或分页部门数据 | `department.read` |
-| 部门详情 | `GET /api/v1/admin/departments/{departmentId}` | 获取部门信息、负责人和成员 | `department.read` |
+| `/admin/departments` | `GET /api/v1/admin/departments` | 获取树形或分页部门数据 | `user.read` |
+| 部门详情 | `GET /api/v1/admin/departments/{departmentId}` | 获取部门信息、负责人和成员 | `user.read` |
 | 部门详情 | `POST /api/v1/admin/departments` | 创建部门 | `department.manage` |
 | 部门详情 | `PATCH /api/v1/admin/departments/{departmentId}` | 修改名称、负责人或上级 | `department.manage`；防止循环层级 |
 | 部门详情 | `DELETE /api/v1/admin/departments/{departmentId}` | 删除空部门 | `department.manage`；审计 |
@@ -448,7 +451,7 @@ Client Profile（`web_server`、`spa_mobile`、`server_to_server`）决定 Grant
 | `getAdminDashboard()` | `GET /api/v1/admin/dashboard` | `AdminDashboard` |
 | `getUsers(query)` | `GET /api/v1/admin/users` | `CursorPage<ManagedUser>` |
 | `getEmployees(query)` | `GET /api/v1/admin/employees` | `CursorPage<EmployeeRecord>` |
-| `getDepartments()` | `GET /api/v1/admin/departments` | `DepartmentRecord[]`（树形） |
+| `getDepartments(query)` | `GET /api/v1/admin/departments` | `DepartmentRecord[]`（服务端搜索，最多 100 条） |
 | `getIdentityProviders(query)` | `GET /api/v1/admin/identity-providers` | `CursorPage<IdentityProviderRecord>` |
 | `getApplications(query)` | `GET /api/v1/admin/applications` | `CursorPage<OAuthApplication>` |
 | `getApplicationDetail(applicationId)` | `GET /api/v1/admin/applications/{applicationId}` | `OAuthApplicationDetail \| null` |
@@ -483,6 +486,15 @@ Client Profile（`web_server`、`spa_mobile`、`server_to_server`）决定 Grant
 | `revokeOwnSession(sessionId)` | `DELETE /api/v1/me/sessions/{sessionId}` |
 | `revokeOtherSessions()` | `DELETE /api/v1/me/sessions`；返回 `{revoked}` |
 | `logout()` | `DELETE /api/v1/auth/session`；成功后再跳转登录页 |
+| `updateUserStatus(userId, status, reauthToken?)` | `POST /api/v1/admin/users/{userId}/enable\|disable`；disable 需要 target-bound grant |
+| `revokeUserSession(userId, sessionId)` | `DELETE /api/v1/admin/users/{userId}/sessions/{sessionId}` |
+| `revokeUserSessions(userId, reauthToken)` | `DELETE /api/v1/admin/users/{userId}/sessions` + target-bound grant |
+| `linkEmployeeProfile(input)` | `POST /api/v1/admin/employees/link`；body 使用显式稳定 `userId` |
+| `updateEmployeeProfile(userId, input)` | `PUT /api/v1/admin/users/{userId}/employee-profile` |
+| `offboardEmployee(userId, reauthToken)` | `POST /api/v1/admin/users/{userId}/offboarding` + target-bound grant |
+| `createDepartment(input)` | `POST /api/v1/admin/departments` |
+| `updateDepartment(departmentId, input)` | `PATCH /api/v1/admin/departments/{departmentId}` |
+| `deleteDepartment(departmentId)` | `DELETE /api/v1/admin/departments/{departmentId}` |
 
 ### 已移除的 Mock 专用接口
 

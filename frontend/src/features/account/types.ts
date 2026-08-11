@@ -37,8 +37,17 @@ export type AccountReauthenticationAction =
   | "account.passkey.enroll"
   | "account.passkey.remove";
 
+export type AdminReauthenticationAction =
+  | "user.disable"
+  | "user.sessions.revoke"
+  | "employee.offboard";
+
+export type ReauthenticationAction =
+  | AccountReauthenticationAction
+  | AdminReauthenticationAction;
+
 export type ReauthenticationInput = {
-  action: AccountReauthenticationAction;
+  action: ReauthenticationAction;
   target: string;
   password: string;
 };

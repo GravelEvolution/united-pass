@@ -188,7 +188,10 @@ func isValidReauthAction(action string) bool {
 		auth.ReauthActionTOTPEnroll,
 		auth.ReauthActionTOTPRemove,
 		auth.ReauthActionPasskeyEnroll,
-		auth.ReauthActionPasskeyRemove:
+		auth.ReauthActionPasskeyRemove,
+		auth.ReauthActionUserDisable,
+		auth.ReauthActionUserSessionsRevoke,
+		auth.ReauthActionEmployeeOffboard:
 		return true
 	default:
 		return false
@@ -198,6 +201,19 @@ func isValidReauthAction(action string) bool {
 // reauthNeedsClient reports whether the action binds the grant to a client.
 func reauthNeedsClient(action string) bool {
 	return action == auth.ReauthActionClientDelete || action == auth.ReauthActionClientSecretRotate
+}
+
+func isValidReauthUserTarget(raw string) bool {
+	if raw == "" || len(raw) > 128 {
+		return false
+	}
+	for _, value := range raw {
+		if !(value >= 'a' && value <= 'z') && !(value >= 'A' && value <= 'Z') &&
+			!(value >= '0' && value <= '9') && value != '_' && value != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // Request handles POST /api/v1/auth/reauthentication. It verifies the
@@ -239,6 +255,11 @@ func (h *ReauthHandlers) Request(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if req.Target != "" {
 			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "该操作不支持目标绑定。", nil)
+			return
+		}
+	} else if auth.IsTargetReauthAction(req.Action) {
+		if req.ApplicationID != "" || req.ClientID != "" || !isValidReauthUserTarget(req.Target) {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "该管理操作需要且仅支持目标用户绑定。", nil)
 			return
 		}
 	} else {

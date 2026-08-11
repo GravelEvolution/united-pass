@@ -12,14 +12,23 @@ import Link from "next/link";
 import { Empty } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import { PageHeader } from "@/components/common/page-header";
-import type { DepartmentDetail } from "@/features/admin/types";
+import type { DepartmentDetail, DepartmentRecord, EmployeeRecord } from "@/features/admin/types";
+import { DepartmentManageActions } from "@/features/admin/components/department-actions";
 import styles from "./admin-detail.module.css";
 
 type DepartmentDetailProps = {
   detail: DepartmentDetail;
+  canManage?: boolean;
+  departments?: DepartmentRecord[];
+  employees?: EmployeeRecord[];
 };
 
-export function DepartmentDetail({ detail }: DepartmentDetailProps) {
+export function DepartmentDetail({
+  detail,
+  canManage = false,
+  departments = [],
+  employees = [],
+}: DepartmentDetailProps) {
   return (
     <>
       <Link href="/admin/departments" className={styles.backLink}>
@@ -47,6 +56,13 @@ export function DepartmentDetail({ detail }: DepartmentDetailProps) {
       </div>
 
       <div className={styles.tabContent}>
+        {canManage && (
+          <DepartmentManageActions
+            detail={detail}
+            departments={departments}
+            employees={employees}
+          />
+        )}
         <dl className={styles.descriptionList}>
           <dt>部门 ID</dt>
           <dd><code>{detail.departmentId}</code></dd>

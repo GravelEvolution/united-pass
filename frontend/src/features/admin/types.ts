@@ -128,6 +128,7 @@ export type EmployeeDetail = {
   departmentId: string;
   title: string;
   status: "active" | "offboarding";
+  supervisorUserId: string | null;
   supervisorName: string | null;
   onboardedAt: string;
   linkedConsumerAccount: boolean;
@@ -138,6 +139,7 @@ export type DepartmentDetail = {
   name: string;
   parentDepartmentId: string | null;
   parentName: string | null;
+  ownerUserId: string | null;
   ownerName: string;
   memberCount: number;
   childDepartments: Array<{
@@ -158,6 +160,24 @@ export type EmployeeLinkInput = {
   departmentId: string;
   title: string;
   supervisorUserId?: string;
+};
+
+export type EmployeeProfileInput = {
+  departmentId: string;
+  title: string;
+  supervisorUserId?: string;
+};
+
+export type DepartmentInput = {
+  name: string;
+  parentDepartmentId?: string;
+  ownerUserId?: string;
+};
+
+export type DepartmentPatch = {
+  name?: string;
+  parentDepartmentId?: string | null;
+  ownerUserId?: string | null;
 };
 
 export type ProviderDetail = {

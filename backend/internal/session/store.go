@@ -102,6 +102,12 @@ const (
 	// EventSessionsRevokedOthers audits a bulk revocation of the caller's
 	// other sessions.
 	EventSessionsRevokedOthers = "session.revoked_others"
+	// EventSessionRevokedByAdmin and EventSessionsRevokedByAdmin are
+	// structured operational events for the Phase 5 management plane. The
+	// workforce service owns their durable actor/target audit rows so these
+	// helpers never misattribute an administrator action to the target user.
+	EventSessionRevokedByAdmin  = "session.revoked_by_admin"
+	EventSessionsRevokedByAdmin = "session.revoked_all_by_admin"
 	// EventSessionsRevokedEpoch audits the generation-scoped settlement
 	// cleanup after a password mutation advanced the security epoch
 	// (ADR-0007 F4). Unlike the user-initiated events above it is emitted
@@ -646,6 +652,54 @@ func (s *Service) RevokeAllOtherSessions(ctx context.Context, userID identity.Us
 	s.recordAuditOutcome(ctx, EventSessionsRevokedOthers, userID, currentSessionID,
 		"session.revoke_all_others", AuditOutcomeSuccess, failureClass, count, "")
 	return count, nil
+}
+
+// RevokeUserSessionByAdmin removes one session belonging to the named target
+// user without applying the self-service "current session" guard. The
+// workforce service has already authenticated/authorized the actor and owns
+// the durable audit row. Provider cleanup remains best-effort and is returned
+// as a stable failure class for that audit.
+func (s *Service) RevokeUserSessionByAdmin(ctx context.Context, userID identity.UserID, rawSessionID string) (string, error) {
+	sessionID := SessionID(rawSessionID)
+	if sessionID == "" {
+		return "", ErrSessionNotFound
+	}
+	record, err := s.store.GetBySessionID(ctx, userID, sessionID, s.clock.Now(), s.idleTTL)
+	if err != nil {
+		return "", err
+	}
+	if err := s.store.DeleteBySessionID(ctx, userID, sessionID, s.clock.Now(), s.idleTTL); err != nil {
+		return "", fmt.Errorf("session: admin revoke session: %w", err)
+	}
+	providerFailure := s.revokeProviderSession(ctx, record)
+	s.lg().Info(EventSessionRevokedByAdmin,
+		"userId", string(userID), "sessionId", rawSessionID,
+		"providerFailureClass", providerFailure, "outcome", "success")
+	return providerFailure, nil
+}
+
+// RevokeAllUserSessionsByAdmin removes every indexed session for the target
+// user by passing an empty exclusion to the per-user Redis walk. It never uses
+// a global key scan. Partial store failures propagate with the already-removed
+// count so the durable access-revocation job remains pending and can retry.
+func (s *Service) RevokeAllUserSessionsByAdmin(ctx context.Context, userID identity.UserID) (int, string, error) {
+	victims, count, err := s.store.RevokeAllOtherSessions(ctx, userID, "", s.clock.Now(), s.idleTTL)
+	var providerFailure string
+	for i := range victims {
+		if failure := s.revokeProviderSession(ctx, victims[i]); failure != "" && providerFailure == "" {
+			providerFailure = failure
+		}
+	}
+	if err != nil {
+		s.lg().Warn(EventSessionsRevokedByAdmin,
+			"userId", string(userID), "revoked", count,
+			"outcome", "failed", "errorClass", observability.ClassifyError(err))
+		return count, providerFailure, fmt.Errorf("session: admin revoke all user sessions: %w", err)
+	}
+	s.lg().Info(EventSessionsRevokedByAdmin,
+		"userId", string(userID), "revoked", count,
+		"providerFailureClass", providerFailure, "outcome", "success")
+	return count, providerFailure, nil
 }
 
 // RevokeSessionsBeforeEpoch is the generation-scoped settlement cleanup

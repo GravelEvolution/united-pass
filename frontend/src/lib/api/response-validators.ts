@@ -25,6 +25,17 @@ import type {
 } from "@/features/account/types";
 import type { MfaMethod } from "@/features/auth/types";
 import type { CurrentUser, EmployeeProfile, UserPersona } from "@/types/identity";
+import type {
+  AuditEvent,
+  DepartmentDetail,
+  DepartmentRecord,
+  EmployeeDetail,
+  EmployeeRecord,
+  ManagedUser,
+  UserDetail,
+} from "@/features/admin/types";
+import type { CursorPage } from "@/types/pagination";
+import type { PermissionCapabilities } from "@/types/permissions";
 
 /**
  * Response body validators for the real HTTP seams.
@@ -96,6 +107,41 @@ function requireNonNegativeInteger(record: Record<string, unknown>, field: strin
     throw new ApiResponseShapeError(field);
   }
   return value as number;
+}
+
+function requireNullableString(record: Record<string, unknown>, field: string): string | null {
+  const value = record[field];
+  if (value !== null && typeof value !== "string") {
+    throw new ApiResponseShapeError(field);
+  }
+  return value;
+}
+
+function requireArray(record: Record<string, unknown>, field: string): unknown[] {
+  const value = record[field];
+  if (!Array.isArray(value)) throw new ApiResponseShapeError(field);
+  return value;
+}
+
+function parseCursorPage<T>(
+  value: unknown,
+  contract: string,
+  parseItem: (item: unknown) => T,
+): CursorPage<T> {
+  if (!isRecord(value) || !isRecord(value.page)) {
+    throw new ApiResponseShapeError(contract);
+  }
+  const nextCursor = value.page.nextCursor;
+  if (nextCursor !== null && typeof nextCursor !== "string") {
+    throw new ApiResponseShapeError(`${contract}.page.nextCursor`);
+  }
+  return {
+    items: requireArray(value, "items").map(parseItem),
+    page: {
+      nextCursor,
+      hasMore: requireBoolean(value.page, "hasMore"),
+    },
+  };
 }
 
 // --- ConsentResolution ---
@@ -456,4 +502,208 @@ export function parseCurrentUser(value: unknown): CurrentUser {
   if (employeeProfile !== undefined) user.employeeProfile = employeeProfile;
 
   return user;
+}
+
+// --- Phase 5 identity and workforce management ---
+
+export function parsePermissionCapabilities(value: unknown): PermissionCapabilities {
+  if (!isRecord(value)) throw new ApiResponseShapeError("PermissionCapabilities");
+  return {
+    userRead: requireBoolean(value, "userRead"),
+    userDisable: requireBoolean(value, "userDisable"),
+    employeeManage: requireBoolean(value, "employeeManage"),
+    employeeOffboard: requireBoolean(value, "employeeOffboard"),
+    departmentManage: requireBoolean(value, "departmentManage"),
+    applicationRead: requireBoolean(value, "applicationRead"),
+    applicationManage: requireBoolean(value, "applicationManage"),
+    applicationSecretRotate: requireBoolean(value, "applicationSecretRotate"),
+    policyRead: requireBoolean(value, "policyRead"),
+    policyManage: requireBoolean(value, "policyManage"),
+    policyPublish: requireBoolean(value, "policyPublish"),
+    auditRead: requireBoolean(value, "auditRead"),
+    auditExport: requireBoolean(value, "auditExport"),
+    providerRead: requireBoolean(value, "providerRead"),
+    providerManage: requireBoolean(value, "providerManage"),
+  };
+}
+
+function parseManagedUser(value: unknown): ManagedUser {
+  if (!isRecord(value)) throw new ApiResponseShapeError("ManagedUser");
+  const status = value.status;
+  if (status !== "active" && status !== "disabled" && status !== "pending") {
+    throw new ApiResponseShapeError("ManagedUser.status");
+  }
+  return {
+    userId: requireNonEmptyString(value, "userId"),
+    displayName: requireString(value, "displayName"),
+    email: requireString(value, "email"),
+    personaLabel: requireString(value, "personaLabel"),
+    status,
+    lastActiveAt: requireNonEmptyString(value, "lastActiveAt"),
+  };
+}
+
+export function parseManagedUsers(value: unknown): CursorPage<ManagedUser> {
+  return parseCursorPage(value, "ManagedUserListResponse", parseManagedUser);
+}
+
+function parseAuditEvent(value: unknown): AuditEvent {
+  if (!isRecord(value)) throw new ApiResponseShapeError("AuditEvent");
+  const result = value.result;
+  if (result !== "success" && result !== "denied") {
+    throw new ApiResponseShapeError("AuditEvent.result");
+  }
+  return {
+    eventId: requireString(value, "eventId"),
+    eventType: requireString(value, "eventType"),
+    actorName: requireString(value, "actorName"),
+    actorId: requireString(value, "actorId"),
+    targetLabel: requireString(value, "targetLabel"),
+    targetId: requireString(value, "targetId"),
+    occurredAt: requireNonEmptyString(value, "occurredAt"),
+    result,
+    requestId: requireString(value, "requestId"),
+    details: requireString(value, "details"),
+  };
+}
+
+export function parseUserDetail(value: unknown): UserDetail {
+  if (!isRecord(value)) throw new ApiResponseShapeError("UserDetail");
+  const status = value.status;
+  if (status !== "active" && status !== "disabled" && status !== "pending") {
+    throw new ApiResponseShapeError("UserDetail.status");
+  }
+  const employeeProfile = parseEmployeeProfile(value.employeeProfile);
+  const personas = requireArray(value, "personas").map(parseUserPersona);
+  return {
+    userId: requireNonEmptyString(value, "userId"),
+    displayName: requireString(value, "displayName"),
+    email: requireString(value, "email"),
+    phoneMasked: requireString(value, "phoneMasked"),
+    personaLabel: requireString(value, "personaLabel"),
+    status,
+    lastActiveAt: requireNonEmptyString(value, "lastActiveAt"),
+    personas,
+    ...(employeeProfile !== undefined && { employeeProfile }),
+    linkedIdentities: requireArray(value, "linkedIdentities").map((item) => {
+      if (!isRecord(item)) throw new ApiResponseShapeError("UserDetail.linkedIdentities");
+      return {
+        providerId: requireString(item, "providerId"),
+        providerName: requireString(item, "providerName"),
+        externalSubject: requireString(item, "externalSubject"),
+        linkedAt: requireNonEmptyString(item, "linkedAt"),
+      };
+    }),
+    activeSessions: requireArray(value, "activeSessions").map((item) => {
+      if (!isRecord(item)) throw new ApiResponseShapeError("UserDetail.activeSessions");
+      return {
+        sessionId: requireNonEmptyString(item, "sessionId"),
+        deviceName: requireString(item, "deviceName"),
+        lastActiveAt: requireNonEmptyString(item, "lastActiveAt"),
+        isCurrent: requireBoolean(item, "isCurrent"),
+      };
+    }),
+    authorizedApplications: requireArray(value, "authorizedApplications").map((item) => {
+      if (!isRecord(item)) throw new ApiResponseShapeError("UserDetail.authorizedApplications");
+      const authorizationStatus = item.status;
+      if (authorizationStatus !== "active" && authorizationStatus !== "revoked") {
+        throw new ApiResponseShapeError("UserDetail.authorizedApplications.status");
+      }
+      return {
+        applicationName: requireString(item, "applicationName"),
+        scopes: requireStringArray(item, "scopes"),
+        grantedAt: requireNonEmptyString(item, "grantedAt"),
+        status: authorizationStatus,
+      };
+    }),
+    recentAuditEvents: requireArray(value, "recentAuditEvents").map(parseAuditEvent),
+  };
+}
+
+function parseEmployeeRecord(value: unknown): EmployeeRecord {
+  if (!isRecord(value)) throw new ApiResponseShapeError("EmployeeRecord");
+  const status = value.status;
+  if (status !== "active" && status !== "offboarding") {
+    throw new ApiResponseShapeError("EmployeeRecord.status");
+  }
+  return {
+    userId: requireNonEmptyString(value, "userId"),
+    displayName: requireString(value, "displayName"),
+    employeeId: requireNonEmptyString(value, "employeeId"),
+    departmentName: requireString(value, "departmentName"),
+    title: requireString(value, "title"),
+    status,
+  };
+}
+
+export function parseEmployees(value: unknown): CursorPage<EmployeeRecord> {
+  return parseCursorPage(value, "EmployeeListResponse", parseEmployeeRecord);
+}
+
+export function parseEmployeeDetail(value: unknown): EmployeeDetail {
+  if (!isRecord(value)) throw new ApiResponseShapeError("EmployeeDetail");
+  const status = value.status;
+  if (status !== "active" && status !== "offboarding") {
+    throw new ApiResponseShapeError("EmployeeDetail.status");
+  }
+  return {
+    userId: requireNonEmptyString(value, "userId"),
+    displayName: requireString(value, "displayName"),
+    email: requireString(value, "email"),
+    employeeId: requireNonEmptyString(value, "employeeId"),
+    departmentName: requireString(value, "departmentName"),
+    departmentId: requireNonEmptyString(value, "departmentId"),
+    title: requireString(value, "title"),
+    status,
+    supervisorUserId: requireNullableString(value, "supervisorUserId"),
+    supervisorName: requireNullableString(value, "supervisorName"),
+    onboardedAt: requireNonEmptyString(value, "onboardedAt"),
+    linkedConsumerAccount: requireBoolean(value, "linkedConsumerAccount"),
+  };
+}
+
+function parseDepartmentRecord(value: unknown): DepartmentRecord {
+  if (!isRecord(value)) throw new ApiResponseShapeError("DepartmentRecord");
+  return {
+    departmentId: requireNonEmptyString(value, "departmentId"),
+    name: requireString(value, "name"),
+    parentName: requireString(value, "parentName"),
+    memberCount: requireNonNegativeInteger(value, "memberCount"),
+    ownerName: requireString(value, "ownerName"),
+  };
+}
+
+export function parseDepartments(value: unknown): DepartmentRecord[] {
+  if (!Array.isArray(value)) throw new ApiResponseShapeError("DepartmentRecord[]");
+  return value.map(parseDepartmentRecord);
+}
+
+export function parseDepartmentDetail(value: unknown): DepartmentDetail {
+  if (!isRecord(value)) throw new ApiResponseShapeError("DepartmentDetail");
+  return {
+    departmentId: requireNonEmptyString(value, "departmentId"),
+    name: requireString(value, "name"),
+    parentDepartmentId: requireNullableString(value, "parentDepartmentId"),
+    parentName: requireNullableString(value, "parentName"),
+    ownerUserId: requireNullableString(value, "ownerUserId"),
+    ownerName: requireString(value, "ownerName"),
+    memberCount: requireNonNegativeInteger(value, "memberCount"),
+    childDepartments: requireArray(value, "childDepartments").map((item) => {
+      if (!isRecord(item)) throw new ApiResponseShapeError("DepartmentDetail.childDepartments");
+      return {
+        departmentId: requireNonEmptyString(item, "departmentId"),
+        name: requireString(item, "name"),
+        memberCount: requireNonNegativeInteger(item, "memberCount"),
+      };
+    }),
+    members: requireArray(value, "members").map((item) => {
+      if (!isRecord(item)) throw new ApiResponseShapeError("DepartmentDetail.members");
+      return {
+        userId: requireNonEmptyString(item, "userId"),
+        displayName: requireString(item, "displayName"),
+        title: requireString(item, "title"),
+        employeeId: requireNonEmptyString(item, "employeeId"),
+      };
+    }),
+  };
 }

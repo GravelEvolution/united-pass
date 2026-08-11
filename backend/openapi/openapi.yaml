@@ -22,12 +22,14 @@ info:
     permission capabilities.
     Phase 2 scope: OAuth application and client management plane (scope
     catalog, application/client lifecycle, secret rotation, reauthentication).
-    See `../docs/adr-0004.md` for the architecture decisions.
+    Phase 5 scope: stable user administration, optional employee profiles,
+    departments, offboarding and durable access-revocation convergence.
+    See `../docs/adr-0004.md` and `../docs/adr-0011.md` for the architecture decisions.
 
     Business API paths use the full `/api/v1/...` prefix explicitly rather than
     relying on a global server base path, so that root-level operational endpoints
     and versioned API endpoints can coexist accurately.
-  version: 0.4.0
+  version: 0.5.0
   contact:
     name: United Pass backend team
 
@@ -54,6 +56,12 @@ tags:
       High-risk operation reauthentication. A completed grant is required
       (single-use, action-bound, session-bound) before delete or secret
       rotation operations execute.
+  - name: Admin Users
+    description: Stable identity administration and target user session lifecycle
+  - name: Admin Employees
+    description: Employee profiles linked explicitly to stable user identities
+  - name: Admin Departments
+    description: Cycle-safe organization hierarchy and membership views
   - name: Scope Catalog
     description: Backend-authoritative OAuth scope catalog
   - name: Admin Applications
@@ -1103,6 +1111,490 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/admin/users:
+    get:
+      tags: [Admin Users]
+      summary: Search managed users
+      description: |
+        Server-side search and cursor pagination over stable United Pass users.
+        The opaque cursor is signed and bound to query, sort and status.
+      operationId: listAdminUsers
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+        - $ref: "#/components/parameters/SearchQuery"
+        - $ref: "#/components/parameters/SortQuery"
+        - $ref: "#/components/parameters/UserStatusQuery"
+      responses:
+        "200":
+          description: Cursor-paginated user summaries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedUserListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/users/{userId}:
+    get:
+      tags: [Admin Users]
+      summary: Get a managed user
+      operationId: getAdminUser
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/UserIdPath"
+      responses:
+        "200":
+          description: Managed user detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedUserDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/users/{userId}/enable:
+    post:
+      tags: [Admin Users]
+      summary: Enable a user
+      operationId: enableAdminUser
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/UserIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      responses:
+        "204":
+          description: User enabled
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/users/{userId}/disable:
+    post:
+      tags: [Admin Users]
+      summary: Disable a user
+      description: |
+        Requires a single-use `user.disable` reauthentication grant bound to
+        this exact `userId`. When session cleanup cannot finish synchronously,
+        the disabled state and durable cleanup job remain committed and a 202
+        response reports convergence pending.
+      operationId: disableAdminUser
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/UserIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DisableUserRequest"
+      responses:
+        "202":
+          description: User disabled; session cleanup is pending
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessCleanupStatus"
+        "204":
+          description: User disabled and no cleanup remains pending
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/users/{userId}/sessions:
+    delete:
+      tags: [Admin Users]
+      summary: Revoke every session owned by a user
+      description: |
+        Requires a single-use `user.sessions.revoke` grant bound to the exact
+        target user. Failure to finish the synchronous Redis walk is returned
+        as an error while the durable cleanup job continues convergence.
+      operationId: revokeAdminUserSessions
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/UserIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "204":
+          description: All indexed sessions were revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/users/{userId}/sessions/{sessionId}:
+    delete:
+      tags: [Admin Users]
+      summary: Revoke one session owned by a user
+      operationId: revokeAdminUserSession
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/UserIdPath"
+        - $ref: "#/components/parameters/AdminSessionIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      responses:
+        "204":
+          description: Session revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/employees:
+    get:
+      tags: [Admin Employees]
+      summary: Search employee profiles
+      operationId: listAdminEmployees
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+        - $ref: "#/components/parameters/SearchQuery"
+        - $ref: "#/components/parameters/SortQuery"
+        - $ref: "#/components/parameters/EmployeeStatusQuery"
+      responses:
+        "200":
+          description: Cursor-paginated employee summaries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmployeeListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/employees/link:
+    post:
+      tags: [Admin Employees]
+      summary: Link an employee profile to an existing user
+      description: |
+        The request accepts only an explicit stable `userId`. It never matches
+        or merges identities by email, phone, display name or domain. Existing
+        personas and OAuth grants are preserved.
+      operationId: linkAdminEmployee
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmployeeProfileMutation"
+      responses:
+        "201":
+          description: Employee profile linked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmployeeProfileMutationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/users/{userId}/employee-profile:
+    get:
+      tags: [Admin Employees]
+      summary: Get a user's employee profile
+      operationId: getAdminEmployee
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/UserIdPath"
+      responses:
+        "200":
+          description: Employee profile detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmployeeDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    put:
+      tags: [Admin Employees]
+      summary: Update a user's active employee profile
+      operationId: updateAdminEmployee
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/UserIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmployeeProfileUpdate"
+      responses:
+        "200":
+          description: Employee profile updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmployeeProfileMutationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/users/{userId}/offboarding:
+    post:
+      tags: [Admin Employees]
+      summary: Start employee offboarding
+      description: |
+        Requires a single-use `employee.offboard` grant bound to this user.
+        The response confirms that the authoritative offboarding deny, audit
+        event and cleanup job committed atomically; external session cleanup
+        may still be converging.
+      operationId: offboardAdminEmployee
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/UserIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "202":
+          description: Offboarding durably started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessCleanupStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/departments:
+    get:
+      tags: [Admin Departments]
+      summary: Search departments
+      operationId: listAdminDepartments
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/LimitQuery"
+        - $ref: "#/components/parameters/SearchQuery"
+      responses:
+        "200":
+          description: Bounded department summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DepartmentRecord"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [Admin Departments]
+      summary: Create a department
+      operationId: createAdminDepartment
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DepartmentMutation"
+      responses:
+        "201":
+          description: Department created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DepartmentDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/departments/{departmentId}:
+    get:
+      tags: [Admin Departments]
+      summary: Get department hierarchy and direct members
+      operationId: getAdminDepartment
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/DepartmentIdPath"
+      responses:
+        "200":
+          description: Department detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DepartmentDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      tags: [Admin Departments]
+      summary: Update a department
+      description: Parent changes reject self-parenting and all hierarchy cycles.
+      operationId: updateAdminDepartment
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/DepartmentIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DepartmentPatch"
+      responses:
+        "200":
+          description: Department updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DepartmentDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [Admin Departments]
+      summary: Delete an empty department
+      description: A department with direct members or child departments is never deleted.
+      operationId: deleteAdminDepartment
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/DepartmentIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      responses:
+        "204":
+          description: Empty department deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/admin/scopes:
     get:
       tags: [Scope Catalog]
@@ -1854,6 +2346,89 @@ components:
         type: string
         minLength: 1
 
+    UserIdPath:
+      name: userId
+      in: path
+      required: true
+      description: Stable United Pass user ID; never an email or provider subject.
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{1,128}$"
+        example: usr_01HQFGXKN8H2C4JVMW7K3R4D8Z
+
+    DepartmentIdPath:
+      name: departmentId
+      in: path
+      required: true
+      description: United Pass department ID (`dep_…`).
+      schema:
+        type: string
+        pattern: "^dep_[A-Za-z0-9_-]{1,124}$"
+
+    AdminSessionIdPath:
+      name: sessionId
+      in: path
+      required: true
+      description: Opaque United Pass session ID asserted to belong to the target user.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+
+    CursorQuery:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque signed cursor returned by the previous page.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+
+    LimitQuery:
+      name: limit
+      in: query
+      required: false
+      description: Page or bounded-list size; defaults to 20 and is capped at 100.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+    SearchQuery:
+      name: query
+      in: query
+      required: false
+      description: Server-side free-text search term.
+      schema:
+        type: string
+        maxLength: 200
+
+    SortQuery:
+      name: sort
+      in: query
+      required: false
+      description: Endpoint-specific stable sort name.
+      schema:
+        type: string
+
+    UserStatusQuery:
+      name: status
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [active, disabled, pending]
+
+    EmployeeStatusQuery:
+      name: status
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [active, offboarding]
+
     X-Reauthentication-Token:
       name: X-Reauthentication-Token
       in: header
@@ -2162,8 +2737,9 @@ components:
     EmployeeProfile:
       type: object
       description: |
-        Active employee profile linked to the stable user identity. Optional —
-        present only when the user has an active employee persona.
+        Employee profile linked to the stable user identity. Optional and kept
+        as historical display/audit data after offboarding; it is never a
+        second account.
       required: [employeeId, departmentName, title]
       additionalProperties: false
       properties:
@@ -2185,8 +2761,8 @@ components:
       description: |
         Profile of the authenticated user. The `userId` is the stable United
         Pass identity primary key — not an email, phone number or external
-        Provider identifier. `employeeProfile` is present only when the user
-        has an active employee persona.
+        Provider identifier. `employeeProfile` is present when an employee
+        profile exists, including historical offboarding profiles.
       required: [userId, displayName, email, phoneMasked, personas]
       additionalProperties: false
       properties:
@@ -2231,7 +2807,7 @@ components:
           allOf:
             - $ref: "#/components/schemas/EmployeeProfile"
           nullable: true
-          description: Active employee profile, present only for employees.
+          description: Employee profile, including historical offboarding state.
 
     PermissionCapabilities:
       type: object
@@ -2305,6 +2881,439 @@ components:
           type: boolean
           description: May create, update, enable and disable identity providers.
 
+    CursorPageMetadata:
+      type: object
+      required: [nextCursor, hasMore]
+      additionalProperties: false
+      properties:
+        nextCursor:
+          type: string
+          nullable: true
+          description: Opaque signed cursor; null when no next page exists.
+        hasMore:
+          type: boolean
+
+    ManagedUser:
+      type: object
+      required: [userId, displayName, email, personaLabel, status, lastActiveAt]
+      additionalProperties: false
+      properties:
+        userId:
+          type: string
+        displayName:
+          type: string
+        email:
+          type: string
+          format: email
+        personaLabel:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled, pending]
+        lastActiveAt:
+          type: string
+          format: date-time
+
+    ManagedUserListResponse:
+      type: object
+      required: [items, page]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManagedUser"
+        page:
+          $ref: "#/components/schemas/CursorPageMetadata"
+
+    ManagedUserSession:
+      type: object
+      required: [sessionId, deviceName, lastActiveAt, isCurrent]
+      additionalProperties: false
+      properties:
+        sessionId:
+          type: string
+        deviceName:
+          type: string
+        lastActiveAt:
+          type: string
+          format: date-time
+        isCurrent:
+          type: boolean
+
+    LinkedIdentity:
+      type: object
+      required: [providerId, providerName, externalSubject, linkedAt]
+      additionalProperties: false
+      properties:
+        providerId:
+          type: string
+        providerName:
+          type: string
+        externalSubject:
+          type: string
+        linkedAt:
+          type: string
+          format: date-time
+
+    UserAuthorization:
+      type: object
+      required: [applicationName, scopes, grantedAt, status]
+      additionalProperties: false
+      properties:
+        applicationName:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        grantedAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [active, revoked]
+
+    AdminAuditEvent:
+      type: object
+      required:
+        [eventId, eventType, actorName, actorId, targetLabel, targetId,
+         occurredAt, result, requestId, details]
+      additionalProperties: false
+      properties:
+        eventId:
+          type: string
+        eventType:
+          type: string
+        actorName:
+          type: string
+        actorId:
+          type: string
+        targetLabel:
+          type: string
+        targetId:
+          type: string
+        occurredAt:
+          type: string
+          format: date-time
+        result:
+          type: string
+          enum: [success, denied]
+        requestId:
+          type: string
+        details:
+          type: string
+
+    ManagedUserDetail:
+      type: object
+      required:
+        [userId, displayName, email, phoneMasked, personaLabel, status,
+         lastActiveAt, personas, linkedIdentities, activeSessions,
+         authorizedApplications, recentAuditEvents]
+      additionalProperties: false
+      properties:
+        userId:
+          type: string
+        displayName:
+          type: string
+        email:
+          type: string
+          format: email
+        phoneMasked:
+          type: string
+        personaLabel:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled, pending]
+        lastActiveAt:
+          type: string
+          format: date-time
+        personas:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserPersona"
+        employeeProfile:
+          allOf:
+            - $ref: "#/components/schemas/EmployeeProfile"
+          nullable: true
+        linkedIdentities:
+          type: array
+          items:
+            $ref: "#/components/schemas/LinkedIdentity"
+        activeSessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManagedUserSession"
+        authorizedApplications:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserAuthorization"
+        recentAuditEvents:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminAuditEvent"
+
+    DisableUserRequest:
+      type: object
+      required: [revokeSessions]
+      additionalProperties: false
+      properties:
+        revokeSessions:
+          type: boolean
+
+    AccessCleanupStatus:
+      type: object
+      required: [status, sessionCleanupPending]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [disabled, offboarding]
+        sessionCleanupPending:
+          type: boolean
+
+    EmployeeRecord:
+      type: object
+      required:
+        [userId, displayName, employeeId, departmentName, title, status]
+      additionalProperties: false
+      properties:
+        userId:
+          type: string
+        displayName:
+          type: string
+        employeeId:
+          type: string
+        departmentName:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+          enum: [active, offboarding]
+
+    EmployeeListResponse:
+      type: object
+      required: [items, page]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/EmployeeRecord"
+        page:
+          $ref: "#/components/schemas/CursorPageMetadata"
+
+    EmployeeDetail:
+      type: object
+      required:
+        [userId, displayName, email, employeeId, departmentName,
+         departmentId, title, status, supervisorUserId, supervisorName, onboardedAt,
+         linkedConsumerAccount]
+      additionalProperties: false
+      properties:
+        userId:
+          type: string
+        displayName:
+          type: string
+        email:
+          type: string
+          format: email
+        employeeId:
+          type: string
+        departmentName:
+          type: string
+        departmentId:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+          enum: [active, offboarding]
+        supervisorName:
+          type: string
+          nullable: true
+        supervisorUserId:
+          type: string
+          nullable: true
+        onboardedAt:
+          type: string
+          format: date-time
+        linkedConsumerAccount:
+          type: boolean
+
+    EmployeeProfileMutation:
+      type: object
+      required: [userId, departmentId, title]
+      additionalProperties: false
+      properties:
+        userId:
+          type: string
+          description: Existing stable user ID selected explicitly by an administrator.
+        departmentId:
+          type: string
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        supervisorUserId:
+          type: string
+          description: Optional stable user ID of an active employee supervisor.
+
+    EmployeeProfileUpdate:
+      type: object
+      required: [departmentId, title]
+      additionalProperties: false
+      properties:
+        departmentId:
+          type: string
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        supervisorUserId:
+          type: string
+
+    EmployeeProfileMutationResult:
+      type: object
+      required:
+        [userId, employeeId, departmentName, departmentId, title, status,
+         supervisorName, onboardedAt]
+      additionalProperties: false
+      properties:
+        userId:
+          type: string
+        employeeId:
+          type: string
+        departmentName:
+          type: string
+        departmentId:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+          enum: [active, offboarding]
+        supervisorName:
+          type: string
+          nullable: true
+        onboardedAt:
+          type: string
+          format: date-time
+
+    DepartmentRecord:
+      type: object
+      required: [departmentId, name, parentName, memberCount, ownerName]
+      additionalProperties: false
+      properties:
+        departmentId:
+          type: string
+        name:
+          type: string
+        parentName:
+          type: string
+        memberCount:
+          type: integer
+          minimum: 0
+        ownerName:
+          type: string
+
+    DepartmentChild:
+      type: object
+      required: [departmentId, name, memberCount]
+      additionalProperties: false
+      properties:
+        departmentId:
+          type: string
+        name:
+          type: string
+        memberCount:
+          type: integer
+          minimum: 0
+
+    DepartmentMember:
+      type: object
+      required: [userId, displayName, title, employeeId]
+      additionalProperties: false
+      properties:
+        userId:
+          type: string
+        displayName:
+          type: string
+        title:
+          type: string
+        employeeId:
+          type: string
+
+    DepartmentDetail:
+      type: object
+      required:
+        [departmentId, name, parentDepartmentId, parentName, ownerUserId, ownerName,
+         memberCount, childDepartments, members]
+      additionalProperties: false
+      properties:
+        departmentId:
+          type: string
+        name:
+          type: string
+        parentDepartmentId:
+          type: string
+          nullable: true
+        parentName:
+          type: string
+          nullable: true
+        ownerName:
+          type: string
+        ownerUserId:
+          type: string
+          nullable: true
+        memberCount:
+          type: integer
+          minimum: 0
+        childDepartments:
+          type: array
+          items:
+            $ref: "#/components/schemas/DepartmentChild"
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/DepartmentMember"
+
+    DepartmentMutation:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        parentDepartmentId:
+          type: string
+          description: Omit or send an empty string for a root department.
+        ownerUserId:
+          type: string
+          description: Omit or send an empty string when no owner is assigned.
+
+    DepartmentPatch:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        parentDepartmentId:
+          type: string
+          nullable: true
+          description: Null clears the parent and makes the department a root.
+        ownerUserId:
+          type: string
+          nullable: true
+          description: Null clears the owner.
+
     ScopeCatalogItem:
       type: object
       description: One entry of the backend-authoritative OAuth scope catalog.
@@ -2344,6 +3353,9 @@ components:
             - account.totp.remove
             - account.passkey.enroll
             - account.passkey.remove
+            - user.disable
+            - user.sessions.revoke
+            - employee.offboard
           description: The high-risk action the grant will authorize.
         applicationId:
           type: string
@@ -2353,7 +3365,9 @@ components:
           description: Target client (required for client actions).
         target:
           type: string
-          description: Required only for `account.passkey.remove`; forbidden for other account actions.
+          description: |
+            Required for `account.passkey.remove` (passkey ID) and for the
+            Phase 5 target-user actions (stable user ID); forbidden otherwise.
         password:
           type: string
           minLength: 1

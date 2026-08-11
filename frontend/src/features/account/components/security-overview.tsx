@@ -16,7 +16,7 @@ import { IconDelete, IconKey, IconShield, IconRefresh, IconLock } from "@douyinf
 import { PageHeader } from "@/components/common/page-header";
 import { StatusBadge } from "@/components/common/status-badge";
 import type {
-  AccountReauthenticationAction,
+  ReauthenticationAction,
   ReauthenticationChallenge,
   SecurityPasskey,
   SecuritySummary,
@@ -784,7 +784,7 @@ function replaceAbortController(
 }
 
 type AccountReauthenticationFormProps = {
-  action: AccountReauthenticationAction;
+  action: ReauthenticationAction;
   target: string;
   submitLabel: string;
   browserOperationRef: MutableRefObject<AbortController | null>;
@@ -794,7 +794,7 @@ type AccountReauthenticationFormProps = {
   destructive?: boolean;
 };
 
-function AccountReauthenticationForm({
+export function AccountReauthenticationForm({
   action,
   target,
   submitLabel,

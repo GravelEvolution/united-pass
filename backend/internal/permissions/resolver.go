@@ -14,10 +14,12 @@ package permissions
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/workforce"
 )
 
 // DefaultResolver always returns no capabilities (fail-closed). This is the
@@ -100,4 +102,42 @@ func NewResolver(cfg config.Config) Resolver {
 		return NewDevOverrideResolver(base, cfg.Permission)
 	}
 	return base
+}
+
+// EmployeeStatusReader is the narrow PostgreSQL-backed workforce view needed
+// for the mandatory Phase 5 offboarding deny. It intentionally exposes no
+// employee mutation or private field.
+type EmployeeStatusReader interface {
+	GetEmployeeProfile(ctx context.Context, userID identity.UserID) (workforce.EmployeeProfile, error)
+}
+
+// WorkforceGuardResolver enforces the durable offboarding deny before any
+// temporary or future policy resolver can grant administration capabilities.
+// A user with no employee profile keeps the base result; an offboarding user
+// always receives no capabilities. Infrastructure errors fail closed.
+type WorkforceGuardResolver struct {
+	base   Resolver
+	reader EmployeeStatusReader
+}
+
+func NewWorkforceGuardResolver(base Resolver, reader EmployeeStatusReader) *WorkforceGuardResolver {
+	return &WorkforceGuardResolver{base: base, reader: reader}
+}
+
+func (r *WorkforceGuardResolver) Resolve(ctx context.Context, userID identity.UserID) (Capabilities, error) {
+	if r.base == nil || r.reader == nil {
+		return NoCapabilities(), nil
+	}
+	profile, err := r.reader.GetEmployeeProfile(ctx, userID)
+	if err == nil && profile.Status == workforce.EmployeeStatusOffboarding {
+		return NoCapabilities(), nil
+	}
+	if err != nil && !errors.Is(err, workforce.ErrNotFound) {
+		return NoCapabilities(), fmt.Errorf("permission workforce guard: %w", err)
+	}
+	caps, err := r.base.Resolve(ctx, userID)
+	if err != nil {
+		return NoCapabilities(), err
+	}
+	return caps, nil
 }

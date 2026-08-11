@@ -14,6 +14,7 @@ import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import { browserFetch } from "@/lib/api/browser/browser-http-client";
 import {
   parseDecisionResponse,
+  parseDepartmentDetail,
   parsePasskeyEnrollment,
   parsePasskeyEnrollmentConfirmation,
   parseReauthenticationGrant,
@@ -36,7 +37,8 @@ import {
  * source until their backend contract lands.
  *
  * Migrated seams: decideConsent, revokeGrant, account reauthentication,
- * password/TOTP/passkey security operations, own-session revocation and logout.
+ * password/TOTP/passkey security operations, own-session revocation, logout,
+ * and all Phase 5 identity/workforce mutations.
  *
  * See ADR-0004 for the full architecture.
  */
@@ -215,16 +217,77 @@ export const browserCommands: UnitedPassCommands = {
       },
 
   // Admin user management
-  updateUserStatus: (userId, status) =>
-    mockUnitedPassDataSource.updateUserStatus(userId, status),
-  revokeUserSession: (userId, sessionId) =>
-    mockUnitedPassDataSource.revokeUserSession(userId, sessionId),
-  revokeUserSessions: (userId) =>
-    mockUnitedPassDataSource.revokeUserSessions(userId),
-  linkEmployeeProfile: (input) =>
-    mockUnitedPassDataSource.linkEmployeeProfile(input),
-  offboardEmployee: (userId) =>
-    mockUnitedPassDataSource.offboardEmployee(userId),
+  updateUserStatus: USE_MOCK_DATA_SOURCE
+    ? (userId, status) => mockUnitedPassDataSource.updateUserStatus(userId, status)
+    : async (userId, status, reauthToken, options) => {
+        await browserFetch<unknown>(
+          `/admin/users/${encodeURIComponent(userId)}/${status === "active" ? "enable" : "disable"}`,
+          {
+            method: "POST",
+            reauthToken: status === "disabled" ? reauthToken : undefined,
+            signal: options?.signal,
+            ...(status === "disabled" && { body: { revokeSessions: true } }),
+          },
+        );
+      },
+  revokeUserSession: USE_MOCK_DATA_SOURCE
+    ? (userId, sessionId) => mockUnitedPassDataSource.revokeUserSession(userId, sessionId)
+    : async (userId, sessionId) => {
+        await browserFetch<unknown>(
+          `/admin/users/${encodeURIComponent(userId)}/sessions/${encodeURIComponent(sessionId)}`,
+          { method: "DELETE" },
+        );
+      },
+  revokeUserSessions: USE_MOCK_DATA_SOURCE
+    ? (userId) => mockUnitedPassDataSource.revokeUserSessions(userId, "")
+    : async (userId, reauthToken, options) => {
+        await browserFetch<unknown>(
+          `/admin/users/${encodeURIComponent(userId)}/sessions`,
+          { method: "DELETE", reauthToken, signal: options?.signal },
+        );
+      },
+  linkEmployeeProfile: USE_MOCK_DATA_SOURCE
+    ? (input) => mockUnitedPassDataSource.linkEmployeeProfile(input)
+    : async (input) => {
+        await browserFetch<unknown>("/admin/employees/link", { method: "POST", body: input });
+      },
+  updateEmployeeProfile: USE_MOCK_DATA_SOURCE
+    ? (userId, input) => mockUnitedPassDataSource.updateEmployeeProfile(userId, input)
+    : async (userId, input) => {
+        await browserFetch<unknown>(
+          `/admin/users/${encodeURIComponent(userId)}/employee-profile`,
+          { method: "PUT", body: input },
+        );
+      },
+  offboardEmployee: USE_MOCK_DATA_SOURCE
+    ? (userId) => mockUnitedPassDataSource.offboardEmployee(userId, "")
+    : async (userId, reauthToken, options) => {
+        await browserFetch<unknown>(
+          `/admin/users/${encodeURIComponent(userId)}/offboarding`,
+          { method: "POST", reauthToken, signal: options?.signal },
+        );
+      },
+  createDepartment: USE_MOCK_DATA_SOURCE
+    ? (input) => mockUnitedPassDataSource.createDepartment(input)
+    : async (input) => parseDepartmentDetail(
+        await browserFetch<unknown>("/admin/departments", { method: "POST", body: input }),
+      ),
+  updateDepartment: USE_MOCK_DATA_SOURCE
+    ? (departmentId, input) => mockUnitedPassDataSource.updateDepartment(departmentId, input)
+    : async (departmentId, input) => parseDepartmentDetail(
+        await browserFetch<unknown>(
+          `/admin/departments/${encodeURIComponent(departmentId)}`,
+          { method: "PATCH", body: input },
+        ),
+      ),
+  deleteDepartment: USE_MOCK_DATA_SOURCE
+    ? (departmentId) => mockUnitedPassDataSource.deleteDepartment(departmentId)
+    : async (departmentId) => {
+        await browserFetch<unknown>(
+          `/admin/departments/${encodeURIComponent(departmentId)}`,
+          { method: "DELETE" },
+        );
+      },
 
   // Policy management
   savePolicyDraft: (input) => mockUnitedPassDataSource.savePolicyDraft(input),

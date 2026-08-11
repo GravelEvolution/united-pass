@@ -31,11 +31,24 @@ export default async function EmployeeDetailPage({
   params: Promise<{ userId: string }>;
 }) {
   const { userId } = await params;
-  const detail = await serverQueries.getEmployeeDetail(userId);
+  const [detail, permissions, departments, supervisorsPage] = await Promise.all([
+    serverQueries.getEmployeeDetail(userId),
+    serverQueries.getCurrentPermissions(),
+    serverQueries.getDepartments({ limit: 100 }),
+    serverQueries.getEmployees({ limit: 20, status: "active", sort: "displayName" }),
+  ]);
 
   if (!detail) {
     notFound();
   }
 
-  return <EmployeeDetail detail={detail} />;
+  return (
+    <EmployeeDetail
+      detail={detail}
+      canManage={permissions.employeeManage}
+      canOffboard={permissions.employeeOffboard}
+      departments={departments}
+      supervisors={supervisorsPage.items}
+    />
+  );
 }

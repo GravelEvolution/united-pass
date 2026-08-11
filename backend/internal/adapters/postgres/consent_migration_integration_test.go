@@ -54,24 +54,16 @@ func openMigrationTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quotedSchema)); err != nil {
 		t.Fatalf("create test schema: %v", err)
 	}
+	// A prior killed package cannot run t.Cleanup. Reuse the authoritative
+	// migration-object cleanup so newer phase tables/sequences cannot leak
+	// into this historical upgrade-path fixture.
+	dropTestSchemaObjects(t, db)
 	goose.SetTableName(pgx.Identifier{schema, "goose_db_version"}.Sanitize())
 	if err := goose.SetDialect("postgres"); err != nil {
 		t.Fatalf("set dialect: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = db.Exec(`DROP TABLE IF EXISTS
-			security_events, provider_reconciliation_jobs, oauth_provider_operations,
-			oauth_authorization_grant_scopes, oauth_authorization_grants,
-			oauth_authorization_decision_operation_scopes,
-			oauth_authorization_decision_operations,
-			oauth_client_secret_records, oauth_client_scopes, oauth_client_redirect_uris,
-			oauth_clients, oauth_applications,
-			password_mutation_intents,
-			user_personas, identity_links, users CASCADE`)
-		// Migration-owned sequences must be dropped too: CREATE SEQUENCE has
-		// no IF NOT EXISTS guard, so a leftover breaks the rerun.
-		_, _ = db.Exec(`DROP SEQUENCE IF EXISTS password_mutation_intent_seq`)
-		_, _ = db.Exec(`DROP TABLE IF EXISTS goose_db_version`)
+		dropTestSchemaObjects(nil, db)
 		_ = db.Close()
 	})
 	return db

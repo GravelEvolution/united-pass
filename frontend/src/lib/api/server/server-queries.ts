@@ -12,11 +12,19 @@ import type { PageQuery } from "@/types/pagination";
 import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
 import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import { serverFetch } from "@/lib/api/server/server-http-client";
+import { isApiError } from "@/lib/api/api-error";
 import {
   parseAuthorizedApplications,
   parseConsentResolution,
   parseCurrentUser,
+  parseDepartmentDetail,
+  parseDepartments,
+  parseEmployeeDetail,
+  parseEmployees,
+  parseManagedUsers,
+  parsePermissionCapabilities,
   parseSecuritySummary,
+  parseUserDetail,
   parseUserSessions,
 } from "@/lib/api/response-validators";
 
@@ -30,8 +38,8 @@ import {
  * untrusted response onto the frozen contract types; unmigrated seams keep
  * the mock source until their backend contract lands.
  *
- * Migrated seams: getCurrentUser, getSecuritySummary, getSessions,
- * getConsentResolution, getAuthorizedApplications.
+ * Migrated seams: account/session/consent reads plus the complete Phase 5
+ * identity and workforce plane.
  *
  * List endpoints accept PageQuery and return CursorPage<T> so the backend
  * can return partial results without the frontend loading all records.
@@ -39,11 +47,37 @@ import {
  * See ADR-0004 for the full architecture.
  * See ADR-0006 for the deployment topology.
  */
+function withPageQuery(path: string, query?: PageQuery): string {
+  if (!query) return path;
+  const parameters = new URLSearchParams();
+  if (query.cursor) parameters.set("cursor", query.cursor);
+  if (query.limit !== undefined) parameters.set("limit", String(query.limit));
+  if (query.query) parameters.set("query", query.query);
+  if (query.sort) parameters.set("sort", query.sort);
+  if (query.status) parameters.set("status", query.status);
+  const encoded = parameters.toString();
+  return encoded ? `${path}?${encoded}` : path;
+}
+
+async function nullableServerQuery<T>(
+  path: string,
+  parser: (value: unknown) => T,
+): Promise<T | null> {
+  try {
+    return parser(await serverFetch<unknown>(path));
+  } catch (error) {
+    if (isApiError(error) && error.kind === "not_found") return null;
+    throw error;
+  }
+}
+
 export const serverQueries: UnitedPassQueries = {
   getCurrentUser: USE_MOCK_DATA_SOURCE
     ? () => mockUnitedPassDataSource.getCurrentUser()
     : async () => parseCurrentUser(await serverFetch<unknown>("/me")),
-  getCurrentPermissions: () => mockUnitedPassDataSource.getCurrentPermissions(),
+  getCurrentPermissions: USE_MOCK_DATA_SOURCE
+    ? () => mockUnitedPassDataSource.getCurrentPermissions()
+    : async () => parsePermissionCapabilities(await serverFetch<unknown>("/me/permissions")),
   getSecuritySummary: USE_MOCK_DATA_SOURCE
     ? () => mockUnitedPassDataSource.getSecuritySummary()
     : async () => parseSecuritySummary(await serverFetch<unknown>("/me/security")),
@@ -65,12 +99,39 @@ export const serverQueries: UnitedPassQueries = {
           await serverFetch<unknown>("/me/authorized-applications"),
         ),
   getAdminDashboard: () => mockUnitedPassDataSource.getAdminDashboard(),
-  getUsers: (query?: PageQuery) => mockUnitedPassDataSource.getUsers(query),
-  getUserDetail: (userId) => mockUnitedPassDataSource.getUserDetail(userId),
-  getEmployees: (query?: PageQuery) => mockUnitedPassDataSource.getEmployees(query),
-  getEmployeeDetail: (userId) => mockUnitedPassDataSource.getEmployeeDetail(userId),
-  getDepartments: () => mockUnitedPassDataSource.getDepartments(),
-  getDepartmentDetail: (departmentId) => mockUnitedPassDataSource.getDepartmentDetail(departmentId),
+  getUsers: USE_MOCK_DATA_SOURCE
+    ? (query?: PageQuery) => mockUnitedPassDataSource.getUsers(query)
+    : async (query?: PageQuery) => parseManagedUsers(
+        await serverFetch<unknown>(withPageQuery("/admin/users", query)),
+      ),
+  getUserDetail: USE_MOCK_DATA_SOURCE
+    ? (userId) => mockUnitedPassDataSource.getUserDetail(userId)
+    : (userId) => nullableServerQuery(
+        `/admin/users/${encodeURIComponent(userId)}`,
+        parseUserDetail,
+      ),
+  getEmployees: USE_MOCK_DATA_SOURCE
+    ? (query?: PageQuery) => mockUnitedPassDataSource.getEmployees(query)
+    : async (query?: PageQuery) => parseEmployees(
+        await serverFetch<unknown>(withPageQuery("/admin/employees", query)),
+      ),
+  getEmployeeDetail: USE_MOCK_DATA_SOURCE
+    ? (userId) => mockUnitedPassDataSource.getEmployeeDetail(userId)
+    : (userId) => nullableServerQuery(
+        `/admin/users/${encodeURIComponent(userId)}/employee-profile`,
+        parseEmployeeDetail,
+      ),
+  getDepartments: USE_MOCK_DATA_SOURCE
+    ? (query?: PageQuery) => mockUnitedPassDataSource.getDepartments(query)
+    : async (query?: PageQuery) => parseDepartments(
+        await serverFetch<unknown>(withPageQuery("/admin/departments", query)),
+      ),
+  getDepartmentDetail: USE_MOCK_DATA_SOURCE
+    ? (departmentId) => mockUnitedPassDataSource.getDepartmentDetail(departmentId)
+    : (departmentId) => nullableServerQuery(
+        `/admin/departments/${encodeURIComponent(departmentId)}`,
+        parseDepartmentDetail,
+      ),
   getIdentityProviders: (query?: PageQuery) => mockUnitedPassDataSource.getIdentityProviders(query),
   getProviderDetail: (providerId) => mockUnitedPassDataSource.getProviderDetail(providerId),
   getDirectorySyncHistory: (providerId) => mockUnitedPassDataSource.getDirectorySyncHistory(providerId),

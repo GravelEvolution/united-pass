@@ -13,6 +13,7 @@ import Link from "next/link";
 import { Button } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import type { ManagedUser } from "@/features/admin/types";
+import type { CursorPage } from "@/types/pagination";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import {
   createScopedColumn,
@@ -69,14 +70,22 @@ const columns: ColumnProps<ManagedUser>[] = [
   }),
 ];
 
-export function UsersTable({ records }: { records: ManagedUser[] }) {
+export function UsersTable({ records, page, query, hasPrevious }: {
+  records: ManagedUser[];
+  page: CursorPage<ManagedUser>["page"];
+  query?: string;
+  hasPrevious: boolean;
+}) {
   return (
     <ManagementDirectory
       columns={columns}
       copy={copy}
-      getSearchText={(record) => [record.displayName, record.email, record.userId].join(" ")}
       records={records}
       rowKey="userId"
+      basePath="/admin/users"
+      initialQuery={query}
+      page={page}
+      hasPrevious={hasPrevious}
     />
   );
 }

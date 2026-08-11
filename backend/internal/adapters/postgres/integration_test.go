@@ -25,6 +25,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -101,6 +102,10 @@ func setupTestPool(t *testing.T, maxConns int32) *Pool {
 	if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quotedSchema)); err != nil {
 		t.Fatalf("create test schema: %v", err)
 	}
+	// A killed test process cannot run t.Cleanup. Clear only the validated,
+	// dedicated test schema before migration so the next run is deterministic
+	// instead of inheriting half-cleaned migration objects.
+	dropTestSchemaObjects(t, db)
 
 	goose.SetTableName(pgx.Identifier{schema, "goose_db_version"}.Sanitize())
 	if err := goose.SetDialect("postgres"); err != nil {
@@ -118,19 +123,7 @@ func setupTestPool(t *testing.T, maxConns int32) *Pool {
 	// interpolated. Every migration's tables must appear here so a rerun
 	// starts from a clean schema.
 	t.Cleanup(func() {
-		_, _ = db.Exec(`DROP TABLE IF EXISTS
-			security_events, provider_reconciliation_jobs, oauth_provider_operations,
-			oauth_authorization_grant_scopes, oauth_authorization_grants,
-			oauth_authorization_decision_operation_scopes,
-			oauth_authorization_decision_operations,
-			oauth_client_secret_records, oauth_client_scopes, oauth_client_redirect_uris,
-			oauth_clients, oauth_applications,
-			password_mutation_intents,
-			user_personas, identity_links, users CASCADE`)
-		// Migration-owned sequences must be dropped too: CREATE SEQUENCE has
-		// no IF NOT EXISTS guard, so a leftover breaks the rerun.
-		_, _ = db.Exec(`DROP SEQUENCE IF EXISTS password_mutation_intent_seq`)
-		_, _ = db.Exec(`DROP TABLE IF EXISTS goose_db_version`)
+		dropTestSchemaObjects(nil, db)
 		_ = db.Close()
 	})
 
@@ -151,6 +144,31 @@ func setupTestPool(t *testing.T, maxConns int32) *Pool {
 	t.Cleanup(func() { pool.Close() })
 
 	return pool
+}
+
+func dropTestSchemaObjects(t *testing.T, db *sql.DB) {
+	if t != nil {
+		t.Helper()
+	}
+	statements := []string{
+		`DROP TABLE IF EXISTS
+			access_revocation_jobs, employee_profiles, departments,
+			security_events, provider_reconciliation_jobs, oauth_provider_operations,
+			oauth_authorization_grant_scopes, oauth_authorization_grants,
+			oauth_authorization_decision_operation_scopes,
+			oauth_authorization_decision_operations,
+			oauth_client_secret_records, oauth_client_scopes, oauth_client_redirect_uris,
+			oauth_clients, oauth_applications,
+			password_mutation_intents,
+			user_personas, identity_links, users CASCADE`,
+		`DROP SEQUENCE IF EXISTS password_mutation_intent_seq, employee_number_seq`,
+		`DROP TABLE IF EXISTS goose_db_version`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil && t != nil {
+			t.Fatalf("clean test schema: %v", err)
+		}
+	}
 }
 
 // findMigrationsDir locates the migrations directory relative to the test file.

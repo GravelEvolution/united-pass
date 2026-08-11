@@ -25,6 +25,17 @@ export default async function EmployeesPage({
     status: params.status,
     cursor: params.cursor,
   };
-  const page = await serverQueries.getEmployees(query);
-  return <EmployeesTable records={page.items} actionHref="/admin/employees/link" />;
+  const [page, permissions] = await Promise.all([
+    serverQueries.getEmployees(query),
+    serverQueries.getCurrentPermissions(),
+  ]);
+  return (
+    <EmployeesTable
+      records={page.items}
+      page={page.page}
+      query={params.q}
+      hasPrevious={Boolean(params.cursor)}
+      actionHref={permissions.employeeManage ? "/admin/employees/link" : undefined}
+    />
+  );
 }

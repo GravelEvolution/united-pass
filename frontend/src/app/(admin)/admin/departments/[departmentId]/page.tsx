@@ -31,11 +31,23 @@ export default async function DepartmentDetailPage({
   params: Promise<{ departmentId: string }>;
 }) {
   const { departmentId } = await params;
-  const detail = await serverQueries.getDepartmentDetail(departmentId);
+  const [detail, permissions, departments, employeesPage] = await Promise.all([
+    serverQueries.getDepartmentDetail(departmentId),
+    serverQueries.getCurrentPermissions(),
+    serverQueries.getDepartments({ limit: 100 }),
+    serverQueries.getEmployees({ limit: 20, status: "active", sort: "displayName" }),
+  ]);
 
   if (!detail) {
     notFound();
   }
 
-  return <DepartmentDetail detail={detail} />;
+  return (
+    <DepartmentDetail
+      detail={detail}
+      canManage={permissions.departmentManage}
+      departments={departments}
+      employees={employeesPage.items}
+    />
+  );
 }

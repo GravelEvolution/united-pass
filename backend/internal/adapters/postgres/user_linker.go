@@ -48,6 +48,13 @@ func (r *UserRepository) GetOrCreateUserByProviderSubject(
 	// Fast path: an existing identity link needs no transaction.
 	link, err := r.GetIdentityLink(ctx, provider, providerTenantID, info.Subject)
 	if err == nil {
+		// This is the authoritative login-observation clock used by the Phase
+		// 5 directory. It updates only the already-explicit provider binding;
+		// no email/name matching or identity relinking occurs.
+		if _, touchErr := r.pool.Exec(ctx,
+			`UPDATE identity_links SET last_seen_at = NOW() WHERE id = $1`, link.ID); touchErr != nil {
+			return identity.User{}, fmt.Errorf("postgres: update identity link last seen: %w", touchErr)
+		}
 		return r.GetByID(ctx, link.UserID)
 	}
 	if !errors.Is(err, identity.ErrUserNotFound) {

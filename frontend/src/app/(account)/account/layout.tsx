@@ -9,8 +9,10 @@
 import type { ReactNode } from "react";
 import { DashboardShell } from "@/components/layouts/dashboard-shell";
 import { serverQueries } from "@/lib/api/server/server-queries";
+import { requireSession } from "@/lib/api/server/server-session";
 
 export default async function AccountLayout({ children }: { children: ReactNode }) {
+  await requireSession();
   const currentUser = await serverQueries.getCurrentUser();
   return <DashboardShell mode="account" currentUser={currentUser}>{children}</DashboardShell>;
 }

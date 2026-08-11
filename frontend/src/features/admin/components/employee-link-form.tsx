@@ -13,16 +13,18 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, Toast } from "@douyinfe/semi-ui";
 import { PageHeader } from "@/components/common/page-header";
-import type { DepartmentRecord, ManagedUser } from "@/features/admin/types";
+import type { DepartmentRecord, EmployeeRecord, ManagedUser } from "@/features/admin/types";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
 import styles from "./admin-detail.module.css";
 
 type EmployeeLinkFormProps = {
   users: ManagedUser[];
   departments: DepartmentRecord[];
+  supervisors: EmployeeRecord[];
+  initialSearch: string;
 };
 
-export function EmployeeLinkForm({ users, departments }: EmployeeLinkFormProps) {
+export function EmployeeLinkForm({ users, departments, supervisors, initialSearch }: EmployeeLinkFormProps) {
   const router = useRouter();
   const [userId, setUserId] = useState("");
   const [departmentId, setDepartmentId] = useState("");
@@ -30,6 +32,7 @@ export function EmployeeLinkForm({ users, departments }: EmployeeLinkFormProps) 
   const [supervisorUserId, setSupervisorUserId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [searchQuery, setSearchQuery] = useState(initialSearch);
 
   const eligibleUsers = users.filter((u) => u.status === "active");
 
@@ -85,7 +88,29 @@ export function EmployeeLinkForm({ users, departments }: EmployeeLinkFormProps) 
           </div>
         </div>
 
-        <form onSubmit={handleSubmit} className={styles.linkForm}>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            const query = searchQuery.trim();
+            router.replace(`/admin/employees/link${query ? `?q=${encodeURIComponent(query)}` : ""}`);
+          }}
+          className={styles.linkForm}
+          style={{ marginBottom: 20 }}
+        >
+          <label className={styles.formField}>
+            <span>搜索现有用户</span>
+            <input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="姓名、邮箱或稳定 userId"
+            />
+          </label>
+          <div className={styles.formActions}>
+            <Button htmlType="submit" theme="outline">搜索用户</Button>
+          </div>
+        </form>
+
+        <form method="post" onSubmit={handleSubmit} className={styles.linkForm}>
           <label className={styles.formField}>
             <span>用户 *</span>
             <select
@@ -132,6 +157,7 @@ export function EmployeeLinkForm({ users, departments }: EmployeeLinkFormProps) 
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="例如：产品设计师"
+              maxLength={120}
               className="semi-input semi-input-default"
               style={{ width: "100%" }}
               aria-label="职位名称"
@@ -149,11 +175,11 @@ export function EmployeeLinkForm({ users, departments }: EmployeeLinkFormProps) 
               aria-label="选择主管"
             >
               <option value="">不指定</option>
-              {eligibleUsers
-                .filter((u) => u.userId !== userId)
-                .map((user) => (
-                  <option key={user.userId} value={user.userId}>
-                    {user.displayName} · {user.email}
+              {supervisors
+                .filter((employee) => employee.status === "active" && employee.userId !== userId)
+                .map((employee) => (
+                  <option key={employee.userId} value={employee.userId}>
+                    {employee.displayName} · {employee.employeeId}
                   </option>
                 ))}
             </select>

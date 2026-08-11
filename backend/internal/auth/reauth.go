@@ -37,6 +37,12 @@ const (
 	ReauthActionTOTPRemove     = "account.totp.remove"
 	ReauthActionPasskeyEnroll  = "account.passkey.enroll"
 	ReauthActionPasskeyRemove  = "account.passkey.remove"
+
+	// Phase 5 management actions bind the grant to the exact stable target
+	// user ID through Target. They never carry application/client IDs.
+	ReauthActionUserDisable        = "user.disable"
+	ReauthActionUserSessionsRevoke = "user.sessions.revoke"
+	ReauthActionEmployeeOffboard   = "employee.offboard"
 )
 
 // ReauthActionSessionsRevokeOthers is reserved but never accepted: session
@@ -55,6 +61,19 @@ func IsAccountReauthAction(action string) bool {
 		ReauthActionTOTPRemove,
 		ReauthActionPasskeyEnroll,
 		ReauthActionPasskeyRemove:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsTargetReauthAction reports whether the action is a Phase 5 management
+// mutation bound to a stable target user ID.
+func IsTargetReauthAction(action string) bool {
+	switch action {
+	case ReauthActionUserDisable,
+		ReauthActionUserSessionsRevoke,
+		ReauthActionEmployeeOffboard:
 		return true
 	default:
 		return false
@@ -87,9 +106,9 @@ type ReauthChallengeData struct {
 	// PasskeyRequestOptions carries the WebAuthn PublicKeyCredentialRequestOptions
 	// (JSON object) when passkey is among the available methods.
 	PasskeyRequestOptions json.RawMessage `json:"passkeyRequestOptions,omitempty"`
-	// Target is the generic action-specific binding (ADR-0006 §4). Empty for
-	// every action except account.passkey.remove, where it is the passkeyId
-	// the eventual grant may authorize.
+	// Target is the generic action-specific binding. It is the passkeyId for
+	// account.passkey.remove and the stable target userId for Phase 5
+	// user/employee management actions.
 	Target string `json:"target,omitempty"`
 	// Attempts is the initial attempt count (always 0 at creation).
 	Attempts int `json:"attempts"`
@@ -137,10 +156,8 @@ type ReauthGrantData struct {
 	ApplicationID string `json:"applicationId"`
 	// ClientID is the target client the grant is bound to (client actions).
 	ClientID string `json:"clientId,omitempty"`
-	// Target is the generic action-specific binding (ADR-0006 §4). Empty for
-	// every action except account.passkey.remove, where it is the passkeyId
-	// the grant authorizes; a grant minted for one passkey can never remove
-	// another.
+	// Target is the generic action-specific binding. A grant minted for one
+	// passkey or one managed user can never mutate another target.
 	Target string `json:"target,omitempty"`
 	// CreatedAt is when the grant was issued.
 	CreatedAt time.Time `json:"createdAt"`

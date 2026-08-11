@@ -8,6 +8,7 @@
 
 "use client";
 
+import type { ReactNode } from "react";
 import type { ColumnProps } from "@douyinfe/semi-ui/lib/es/table";
 import Link from "next/link";
 import { Button } from "@douyinfe/semi-ui";
@@ -48,14 +49,20 @@ const columns: ColumnProps<DepartmentRecord>[] = [
   }),
 ];
 
-export function DepartmentsTable({ records }: { records: DepartmentRecord[] }) {
+export function DepartmentsTable({ records, query, action }: {
+  records: DepartmentRecord[];
+  query?: string;
+  action?: ReactNode;
+}) {
   return (
     <ManagementDirectory
       columns={columns}
       copy={copy}
-      getSearchText={(record) => [record.name, record.parentName, record.ownerName].join(" ")}
       records={records}
       rowKey="departmentId"
+      basePath="/admin/departments"
+      initialQuery={query}
+      action={action}
     />
   );
 }

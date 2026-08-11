@@ -14,12 +14,25 @@ import type { PageQuery } from "@/types/pagination";
 export const metadata: Metadata = { title: "关联员工档案" };
 export const dynamic = "force-dynamic";
 
-export default async function EmployeeLinkPage() {
-  const query: PageQuery = { limit: 100 };
-  const [usersPage, departments] = await Promise.all([
+export default async function EmployeeLinkPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string }>;
+}) {
+  const params = await searchParams;
+  const query: PageQuery = { limit: 20, query: params.q, status: "active", sort: "displayName" };
+  const [usersPage, departments, supervisorsPage] = await Promise.all([
     serverQueries.getUsers(query),
-    serverQueries.getDepartments(),
+    serverQueries.getDepartments({ limit: 100 }),
+    serverQueries.getEmployees({ limit: 20, status: "active", sort: "displayName" }),
   ]);
 
-  return <EmployeeLinkForm users={usersPage.items} departments={departments} />;
+  return (
+    <EmployeeLinkForm
+      users={usersPage.items}
+      departments={departments}
+      supervisors={supervisorsPage.items}
+      initialSearch={params.q ?? ""}
+    />
+  );
 }
