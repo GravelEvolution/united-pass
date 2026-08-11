@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,6 +42,20 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 )
+
+// Repository integration tests are intentionally serial and reuse one fully
+// migrated dedicated test schema. Re-running nine SSH round-trip migrations
+// for every top-level scenario made the package exceed Go's default 10-minute
+// timeout as the migration chain grew. Each setup truncates every business
+// table before returning a fresh pool; migration-path tests still build their
+// own historical schemas through openMigrationTestDB.
+var testSchemaMu sync.Mutex
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	cleanupSharedTestSchema()
+	os.Exit(code)
+}
 
 func mustLoadTestDBConfig(t *testing.T) (string, string) {
 	t.Helper()
@@ -80,6 +95,10 @@ func setupTestDBWithMaxConns(t *testing.T, maxConns int32) *UserRepository {
 // never the development or production schema.
 func setupTestPool(t *testing.T, maxConns int32) *Pool {
 	t.Helper()
+	testSchemaMu.Lock()
+	// Registered first so LIFO cleanup closes the pool and database handle
+	// before another test can reset the shared schema.
+	t.Cleanup(testSchemaMu.Unlock)
 	url, schema := mustLoadTestDBConfig(t)
 
 	// Run migrations via goose against the test schema.
@@ -102,11 +121,6 @@ func setupTestPool(t *testing.T, maxConns int32) *Pool {
 	if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quotedSchema)); err != nil {
 		t.Fatalf("create test schema: %v", err)
 	}
-	// A killed test process cannot run t.Cleanup. Clear only the validated,
-	// dedicated test schema before migration so the next run is deterministic
-	// instead of inheriting half-cleaned migration objects.
-	dropTestSchemaObjects(t, db)
-
 	goose.SetTableName(pgx.Identifier{schema, "goose_db_version"}.Sanitize())
 	if err := goose.SetDialect("postgres"); err != nil {
 		t.Fatalf("set dialect: %v", err)
@@ -116,14 +130,11 @@ func setupTestPool(t *testing.T, maxConns int32) *Pool {
 	if err := goose.UpContext(context.Background(), db, migrationsDir); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
+	resetTestSchemaData(t, db)
 
-	// Clean up: drop all tables in the test schema and close the DB. The
-	// connection's search_path is bound to the validated test schema, so
-	// unqualified DROP TABLE resolves there and no schema name needs to be
-	// interpolated. Every migration's tables must appear here so a rerun
-	// starts from a clean schema.
+	// Per-test cleanup closes only this handle. TestMain drops all objects after
+	// the package; the next setup truncates data while preserving migrations.
 	t.Cleanup(func() {
-		dropTestSchemaObjects(nil, db)
 		_ = db.Close()
 	})
 
@@ -146,12 +157,66 @@ func setupTestPool(t *testing.T, maxConns int32) *Pool {
 	return pool
 }
 
+func resetTestSchemaData(t *testing.T, db *sql.DB) {
+	t.Helper()
+	statements := []string{
+		`ALTER TABLE security_events DROP CONSTRAINT IF EXISTS test_reject_consent_audit`,
+		`TRUNCATE TABLE
+			provider_sync_conflicts, provider_directory_users,
+			provider_directory_departments, provider_sync_jobs, identity_providers,
+			access_revocation_jobs, employee_profiles, departments,
+			security_events, provider_reconciliation_jobs, oauth_provider_operations,
+			oauth_authorization_grant_scopes, oauth_authorization_grants,
+			oauth_authorization_decision_operation_scopes,
+			oauth_authorization_decision_operations,
+			oauth_client_secret_records, oauth_client_scopes, oauth_client_redirect_uris,
+			oauth_clients, oauth_applications,
+			password_mutation_intents, user_personas, identity_links, users
+		 RESTART IDENTITY CASCADE`,
+		`ALTER SEQUENCE password_mutation_intent_seq RESTART WITH 1`,
+		`ALTER SEQUENCE employee_number_seq RESTART WITH 1`,
+		`INSERT INTO identity_providers
+			(provider_id, display_name, vendor, integration_label, status, login_enabled)
+		 VALUES
+			('provider_feishu', '飞书', 'feishu', 'OAuth 2.0 + 通讯录 OpenAPI', 'disabled', FALSE)`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("reset test schema data: %v", err)
+		}
+	}
+}
+
+func cleanupSharedTestSchema() {
+	url := os.Getenv("UP_TEST_DATABASE_URL")
+	schema := os.Getenv("UP_TEST_DATABASE_SCHEMA")
+	if schema == "" {
+		schema = "united_pass_test"
+	}
+	if url == "" || !config.ValidSchemaIdentifier(schema) {
+		return
+	}
+	connConfig, err := pgx.ParseConfig(url)
+	if err != nil {
+		return
+	}
+	if connConfig.RuntimeParams == nil {
+		connConfig.RuntimeParams = make(map[string]string)
+	}
+	connConfig.RuntimeParams["search_path"] = schema
+	db := stdlib.OpenDB(*connConfig)
+	defer db.Close()
+	dropTestSchemaObjects(nil, db)
+}
+
 func dropTestSchemaObjects(t *testing.T, db *sql.DB) {
 	if t != nil {
 		t.Helper()
 	}
 	statements := []string{
 		`DROP TABLE IF EXISTS
+			provider_sync_conflicts, provider_directory_users,
+			provider_directory_departments, provider_sync_jobs, identity_providers,
 			access_revocation_jobs, employee_profiles, departments,
 			security_events, provider_reconciliation_jobs, oauth_provider_operations,
 			oauth_authorization_grant_scopes, oauth_authorization_grants,

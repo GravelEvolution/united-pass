@@ -38,6 +38,7 @@ import type {
   EmployeeDetail,
   EmployeeLinkInput,
   EmployeeProfileInput,
+  IdentityProviderRecord,
   ProviderDetail,
   SyncConflict,
   UserDetail,
@@ -318,18 +319,18 @@ const departmentDetails: Record<string, DepartmentDetail> = {
   },
 };
 
-const identityProviders = [
+const identityProviders: IdentityProviderRecord[] = [
   {
     providerId: "provider_feishu",
     displayName: "飞书",
     vendor: "feishu",
-    integrationLabel: "飞书开放平台（待技术评审）",
+    integrationLabel: "OAuth 2.0 + 通讯录 OpenAPI",
     status: "planned",
     loginEnabled: false,
     linkedUserCount: 0,
     updatedAt: "2026-08-05T06:20:00Z",
   },
-] satisfies Awaited<ReturnType<UnitedPassDataSource["getIdentityProviders"]>>["items"];
+];
 
 const providerDetails: Record<string, ProviderDetail> = {
   provider_feishu: {
@@ -343,6 +344,7 @@ const providerDetails: Record<string, ProviderDetail> = {
     callbackUrl: "https://pass.example.com/oauth2/feishu/callback",
     contactScope: "contact:user.base:readonly,contact:department.base:readonly",
     linkedUserCount: 0,
+    lastValidatedAt: null,
     lastSyncAt: null,
     lastSyncResult: null,
     updatedAt: "2026-08-05T06:20:00Z",
@@ -1550,6 +1552,21 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       });
 
       return Promise.resolve(result);
+    },
+
+    updateProviderLogin: (providerId: string, enabled: boolean): Promise<ProviderDetail> => {
+      const detail = providerDetails[providerId];
+      if (!detail) return Promise.reject(new Error("Provider 不存在。"));
+      detail.loginEnabled = enabled;
+      detail.status = enabled ? "active" : "disabled";
+      detail.lastValidatedAt = enabled ? new Date().toISOString() : detail.lastValidatedAt;
+      const summary = identityProviders.find((item) => item.providerId === providerId);
+      if (summary) {
+        summary.loginEnabled = enabled;
+        summary.status = enabled ? "active" : "disabled";
+        summary.updatedAt = new Date().toISOString();
+      }
+      return Promise.resolve({ ...detail });
     },
 
     resolveSyncConflict: (conflictId: string, userId: string): Promise<void> => {

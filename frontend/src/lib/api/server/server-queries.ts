@@ -21,9 +21,14 @@ import {
   parseDepartments,
   parseEmployeeDetail,
   parseEmployees,
+  parseDirectorySyncHistory,
+  parseIdentityProviders,
   parseManagedUsers,
   parsePermissionCapabilities,
   parseSecuritySummary,
+  parseProviderDetail,
+  parsePublicLoginProviders,
+  parseSyncConflicts,
   parseUserDetail,
   parseUserSessions,
 } from "@/lib/api/response-validators";
@@ -132,10 +137,31 @@ export const serverQueries: UnitedPassQueries = {
         `/admin/departments/${encodeURIComponent(departmentId)}`,
         parseDepartmentDetail,
       ),
-  getIdentityProviders: (query?: PageQuery) => mockUnitedPassDataSource.getIdentityProviders(query),
-  getProviderDetail: (providerId) => mockUnitedPassDataSource.getProviderDetail(providerId),
-  getDirectorySyncHistory: (providerId) => mockUnitedPassDataSource.getDirectorySyncHistory(providerId),
-  getSyncConflicts: (providerId) => mockUnitedPassDataSource.getSyncConflicts(providerId),
+  getIdentityProviders: USE_MOCK_DATA_SOURCE
+    ? (query?: PageQuery) => mockUnitedPassDataSource.getIdentityProviders(query)
+    : async (query?: PageQuery) => parseIdentityProviders(
+        await serverFetch<unknown>(withPageQuery("/admin/identity-providers", query)),
+      ),
+  getProviderDetail: USE_MOCK_DATA_SOURCE
+    ? (providerId) => mockUnitedPassDataSource.getProviderDetail(providerId)
+    : (providerId) => nullableServerQuery(
+        `/admin/identity-providers/${encodeURIComponent(providerId)}`,
+        parseProviderDetail,
+      ),
+  getDirectorySyncHistory: USE_MOCK_DATA_SOURCE
+    ? (providerId) => mockUnitedPassDataSource.getDirectorySyncHistory(providerId)
+    : async (providerId) => parseDirectorySyncHistory(
+        await serverFetch<unknown>(
+          `/admin/identity-providers/${encodeURIComponent(providerId)}/directory-syncs`,
+        ),
+      ),
+  getSyncConflicts: USE_MOCK_DATA_SOURCE
+    ? (providerId) => mockUnitedPassDataSource.getSyncConflicts(providerId)
+    : async (providerId) => parseSyncConflicts(
+        await serverFetch<unknown>(
+          `/admin/identity-providers/${encodeURIComponent(providerId)}/sync-conflicts`,
+        ),
+      ),
   getApplications: (query?: PageQuery) => mockUnitedPassDataSource.getApplications(query),
   getApplicationDetail: (applicationId) =>
     mockUnitedPassDataSource.getApplicationDetail(applicationId),
@@ -146,3 +172,13 @@ export const serverQueries: UnitedPassQueries = {
   getPolicyDetail: (policyId) => mockUnitedPassDataSource.getPolicyDetail(policyId),
   getAuditEvents: (query?: AuditQuery) => mockUnitedPassDataSource.getAuditEvents(query),
 };
+
+export async function getPublicLoginProviders() {
+  if (USE_MOCK_DATA_SOURCE) return [];
+  try {
+    return parsePublicLoginProviders(await serverFetch<unknown>("/auth/providers"));
+  } catch (error) {
+    if (isApiError(error) && error.kind === "not_found") return [];
+    throw error;
+  }
+}

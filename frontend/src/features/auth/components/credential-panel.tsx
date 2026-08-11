@@ -31,6 +31,8 @@ type CredentialPanelProps = {
    * transaction ID is accepted — never a raw returnTo URL.
    */
   resumeRequestId?: string;
+  feishuLoginEnabled?: boolean;
+  providerError?: string;
 };
 
 /**
@@ -44,11 +46,22 @@ const COMPLETABLE_MFA_METHODS: ReadonlySet<MfaMethod> = new Set([
   "totp",
 ]);
 
-export function CredentialPanel({ mode, resumeRequestId }: CredentialPanelProps) {
+export function CredentialPanel({
+  mode,
+  resumeRequestId,
+  feishuLoginEnabled = false,
+  providerError,
+}: CredentialPanelProps) {
   const router = useRouter();
   const isLogin = mode === "login";
   const [confirmPasswordError, setConfirmPasswordError] = useState<string>();
-  const [loginError, setLoginError] = useState<string>();
+  const [loginError, setLoginError] = useState<string | undefined>(() => {
+    if (providerError === "identity_unlinked") {
+      return "该飞书身份尚未关联统一门户账户，请联系管理员完成显式身份绑定。";
+    }
+    if (providerError) return "飞书登录未完成，请重试或使用统一账户登录。";
+    return undefined;
+  });
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [termsError, setTermsError] = useState<string>();
   const [remember, setRemember] = useState(true);
@@ -338,6 +351,18 @@ export function CredentialPanel({ mode, resumeRequestId }: CredentialPanelProps)
             : "创建演示账户（Mock）"}
         </Button>
       </form>
+
+      {isLogin && !USE_MOCK_DATA_SOURCE && feishuLoginEnabled && (
+        <div className={styles.providerLogin}>
+          <span>或使用企业身份</span>
+          <a
+            href={`/api/v1/auth/providers/feishu/authorize?remember=${remember ? "true" : "false"}${resumeRequestId ? `&resumeRequestId=${encodeURIComponent(resumeRequestId)}` : ""}`}
+          >
+            使用飞书登录
+          </a>
+          <small>飞书仅证明外部身份，不会自动授予员工或管理权限。</small>
+        </div>
+      )}
 
       {isLogin && USE_MOCK_DATA_SOURCE && (
         <div className={styles.demoCredential}>

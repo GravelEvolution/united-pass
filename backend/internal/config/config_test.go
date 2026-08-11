@@ -253,6 +253,57 @@ func TestValidateAcceptsValidEncryptionKey(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsPartialFeishuCredentials(t *testing.T) {
+	cfg := validDevelopmentConfig()
+	cfg.Feishu.AppID = "cli_test"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate should reject a partial Feishu credential set")
+	}
+}
+
+func TestValidateAcceptsCompleteFeishuConfiguration(t *testing.T) {
+	cfg := validDevelopmentConfig()
+	cfg.Feishu = FeishuConfig{
+		BaseURL:           "https://open.feishu.cn",
+		AuthorizeURL:      "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
+		AppID:             "cli_test",
+		AppSecret:         "secret_test",
+		TenantID:          "tenant_test",
+		RedirectURL:       "http://localhost:3000/api/v1/auth/providers/feishu/callback",
+		ContactScope:      "contact:user.base:readonly",
+		OAuthStateTTL:     5 * time.Minute,
+		RequestTimeout:    10 * time.Second,
+		ReconcileInterval: 15 * time.Second,
+		SyncTimeout:       2 * time.Minute,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate should accept complete Feishu configuration: %v", err)
+	}
+	if !cfg.Feishu.Configured() {
+		t.Fatal("complete Feishu configuration should report Configured")
+	}
+}
+
+func TestValidateRejectsWrongFeishuCallbackPath(t *testing.T) {
+	cfg := validDevelopmentConfig()
+	cfg.Feishu = FeishuConfig{
+		BaseURL:           "https://open.feishu.cn",
+		AuthorizeURL:      "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
+		AppID:             "cli_test",
+		AppSecret:         "secret_test",
+		TenantID:          "tenant_test",
+		RedirectURL:       "http://localhost:3000/auth/callback",
+		ContactScope:      "contact:user.base:readonly",
+		OAuthStateTTL:     5 * time.Minute,
+		RequestTimeout:    10 * time.Second,
+		ReconcileInterval: 15 * time.Second,
+		SyncTimeout:       2 * time.Minute,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate should reject a drifting Feishu callback path")
+	}
+}
+
 // TestValidateRejectsInsecureProductionAuthURL verifies that production
 // rejects any ZITADEL base URL that is not a bare HTTPS URL.
 func TestValidateRejectsInsecureProductionAuthURL(t *testing.T) {

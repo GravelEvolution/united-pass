@@ -1,7 +1,7 @@
 # United Pass 前端 API 接入清单
 
-- 状态：Frozen v1 + P4.5/P4.7/P4.9 Frozen Amendments（live A14/A15 Passed）
-- 日期：2026-08-09（P4.7 Account Security real-seam 接入修订）
+- 状态：Frozen v1 + P4/P5/P6 Frozen Amendments
+- 日期：2026-08-11（P6 Feishu Provider real-seam 接入修订）
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect
 
@@ -405,14 +405,22 @@ Client Profile（`web_server`、`spa_mobile`、`server_to_server`）决定 Grant
 
 | 页面 | 方法与路径 | 用途 | 权限标识建议 |
 | --- | --- | --- | --- |
-| `/admin/providers` | `GET /api/v1/admin/identity-providers` | 分页读取 Provider 状态与非敏感元数据 | `identity_provider.read` |
-| Provider 详情 | `POST /api/v1/admin/identity-providers` | 创建 Provider 草稿 | `identity_provider.manage`；重认证；审计 |
-| Provider 详情 | `GET /api/v1/admin/identity-providers/{providerId}` | 获取 Provider 配置（不含密钥明文） | `identity_provider.read` |
-| Provider 详情 | `PATCH /api/v1/admin/identity-providers/{providerId}` | 更新允许的非密钥配置 | `identity_provider.manage`；重认证；审计 |
-| Provider 详情 | `POST /api/v1/admin/identity-providers/{providerId}/enable` | 完成后端校验后启用登录 | `identity_provider.enable`；重认证；审计 |
-| Provider 详情 | `POST /api/v1/admin/identity-providers/{providerId}/disable` | 停止新的 Provider 登录并说明已有账户影响 | `identity_provider.enable`；重认证；审计 |
+| 登录页 | `GET /api/v1/auth/providers` | 获取可公开展示及当前有效的 Provider 登录选项 | 公开；只返回安全元数据 |
+| 登录页 | `GET /api/v1/auth/providers/feishu/authorize` | 创建单次 OAuth state 并跳转飞书 | 限速；只接受 opaque `resumeRequestId` |
+| 飞书回调 | `GET /api/v1/auth/providers/feishu/callback` | 服务端换码、精确 identity link、创建本地会话 | state 单次消费；不得在浏览器换 token |
+| `/admin/providers` | `GET /api/v1/admin/identity-providers` | 分页读取 Provider 状态与非敏感元数据 | `provider.read` |
+| Provider 详情 | `GET /api/v1/admin/identity-providers/{providerId}` | 获取配置摘要（不含密钥明文或 token） | `provider.read` |
+| Provider 详情 | `POST /api/v1/admin/identity-providers/{providerId}/enable` | 实时校验服务端凭据后启用新登录 | `provider.manage`；`provider.enable` target-bound 重认证；审计 |
+| Provider 详情 | `POST /api/v1/admin/identity-providers/{providerId}/disable` | 停止新的 Provider 登录；不撤销既有本地会话 | `provider.manage`；`provider.disable` target-bound 重认证；审计 |
+| Provider 详情 | `POST /api/v1/admin/identity-providers/{providerId}/directory-syncs` | 返回 `202` 并排队/复用单个持久化同步任务 | `provider.manage`；CSRF；审计 |
+| Provider 详情 | `GET /api/v1/admin/identity-providers/{providerId}/directory-syncs` | 读取 `pending/running/success/partial/failed` 同步历史 | `provider.read` |
+| Provider 详情 | `GET /api/v1/admin/identity-providers/{providerId}/sync-conflicts` | 读取显式 identity-link 冲突及候选提示 | `provider.read` |
+| 冲突处理 | `POST /api/v1/admin/identity-providers/sync-conflicts/{conflictId}/resolve` | body `{ "userId": "..." }`，原子创建精确外部身份关联 | `provider.manage`；`provider.identity.link` target-bound 重认证；审计 |
+| 冲突处理 | `POST /api/v1/admin/identity-providers/sync-conflicts/{conflictId}/ignore` | 忽略冲突，不创建关联 | `provider.manage`；CSRF；审计 |
 
-飞书是首个计划支持的厂商 Provider，但当前前端只展示规划记录。正式接入前需以后端确认飞书开放平台协议、回调和字段合同；客户端密钥只能保存在服务端密钥系统中。授权回调必须由后端校验请求关联、防重放参数、精确回调地址和供应商响应，不得由前端直接交换凭据。外部身份必须显式关联到既有稳定 `userId`，不得仅凭邮箱或手机号自动合并，也不得根据飞书组织信息直接授予员工或管理权限。
+P6 固定支持一条预置飞书记录，不提供通用 Provider 创建/编辑或浏览器录入 Secret。`appId`、回调 URL、授权范围标签和 `secretConfigured` 布尔值可读；App Secret、授权码、tenant/user access token 不得进入响应、浏览器状态或数据库。同步结果是独立 staging observation，不能自动创建用户、员工档案、部门成员、Persona 或权限。
+
+飞书返回的 `open_id` 只可通过精确 `(providerId, tenantId, subject)` link 登录。邮箱、手机号、姓名、域名、员工号和部门只能生成候选提示，绝不能自动合并；`resolve` 必须由管理员选择既有稳定 `userId` 并完成 target-bound step-up。
 
 ## 授权策略 (ABAC)
 
@@ -453,6 +461,9 @@ Client Profile（`web_server`、`spa_mobile`、`server_to_server`）决定 Grant
 | `getEmployees(query)` | `GET /api/v1/admin/employees` | `CursorPage<EmployeeRecord>` |
 | `getDepartments(query)` | `GET /api/v1/admin/departments` | `DepartmentRecord[]`（服务端搜索，最多 100 条） |
 | `getIdentityProviders(query)` | `GET /api/v1/admin/identity-providers` | `CursorPage<IdentityProviderRecord>` |
+| `getProviderDetail(providerId)` | `GET /api/v1/admin/identity-providers/{providerId}` | `ProviderDetail \| null` |
+| `getDirectorySyncHistory(providerId)` | `GET /api/v1/admin/identity-providers/{providerId}/directory-syncs` | `DirectorySyncHistoryEntry[]` |
+| `getSyncConflicts(providerId)` | `GET /api/v1/admin/identity-providers/{providerId}/sync-conflicts` | `SyncConflict[]` |
 | `getApplications(query)` | `GET /api/v1/admin/applications` | `CursorPage<OAuthApplication>` |
 | `getApplicationDetail(applicationId)` | `GET /api/v1/admin/applications/{applicationId}` | `OAuthApplicationDetail \| null` |
 | `getClientDetail(applicationId, clientId)` | `GET /api/v1/admin/applications/{applicationId}/clients/{clientId}` | `OAuthClient \| null` |
@@ -495,6 +506,10 @@ Client Profile（`web_server`、`spa_mobile`、`server_to_server`）决定 Grant
 | `createDepartment(input)` | `POST /api/v1/admin/departments` |
 | `updateDepartment(departmentId, input)` | `PATCH /api/v1/admin/departments/{departmentId}` |
 | `deleteDepartment(departmentId)` | `DELETE /api/v1/admin/departments/{departmentId}` |
+| `syncProviderDirectory(providerId)` | `POST /api/v1/admin/identity-providers/{providerId}/directory-syncs`；返回 202 durable job |
+| `updateProviderLogin(providerId, enabled, reauthToken)` | `POST /api/v1/admin/identity-providers/{providerId}/enable\|disable` + target-bound grant |
+| `resolveSyncConflict(conflictId, userId, reauthToken)` | `POST /api/v1/admin/identity-providers/sync-conflicts/{conflictId}/resolve`；显式稳定 `userId` + target-bound grant |
+| `ignoreSyncConflict(conflictId)` | `POST /api/v1/admin/identity-providers/sync-conflicts/{conflictId}/ignore` |
 
 ### 已移除的 Mock 专用接口
 

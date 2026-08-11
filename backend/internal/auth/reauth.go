@@ -43,6 +43,12 @@ const (
 	ReauthActionUserDisable        = "user.disable"
 	ReauthActionUserSessionsRevoke = "user.sessions.revoke"
 	ReauthActionEmployeeOffboard   = "employee.offboard"
+
+	// Phase 6 Provider actions bind the single-use grant to the exact
+	// provider or conflict identifier through Target.
+	ReauthActionProviderEnable       = "provider.enable"
+	ReauthActionProviderDisable      = "provider.disable"
+	ReauthActionProviderIdentityLink = "provider.identity.link"
 )
 
 // ReauthActionSessionsRevokeOthers is reserved but never accepted: session
@@ -73,7 +79,10 @@ func IsTargetReauthAction(action string) bool {
 	switch action {
 	case ReauthActionUserDisable,
 		ReauthActionUserSessionsRevoke,
-		ReauthActionEmployeeOffboard:
+		ReauthActionEmployeeOffboard,
+		ReauthActionProviderEnable,
+		ReauthActionProviderDisable,
+		ReauthActionProviderIdentityLink:
 		return true
 	default:
 		return false

@@ -153,6 +153,17 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_AUTH_PROVIDER_SERVICE_ACCOUNT_KEY_FILE` | | Path to the ZITADEL service account key.json (JWT profile auth). Required for `zitadel`. |
 | `UP_AUTH_PROVIDER_DOMAIN` | | WebAuthn relying-party domain for passkey challenges. Empty disables passkey challenges. |
 | `UP_OAUTH_PUBLIC_ORIGIN` | | Public OAuth origin the reverse proxy serves the protocol endpoints on (browser-visible issuer origin), e.g. `https://id.example.com`. Strict origin syntax: scheme + host (+ port) only — no path, userinfo, query or fragment. HTTPS required in production, where the variable is mandatory. The ZITADEL LoginV2 Interaction Base URI is derived as `<origin>/_interaction`. Do not reuse `UP_AUTH_PROVIDER_BASE_URL` for this value. |
+| `UP_FEISHU_BASE_URL` | `https://open.feishu.cn` | Feishu OpenAPI origin. HTTPS is required in production. |
+| `UP_FEISHU_AUTHORIZE_URL` | `https://accounts.feishu.cn/open-apis/authen/v1/authorize` | Feishu browser authorization endpoint. |
+| `UP_FEISHU_APP_ID` | | Feishu application ID. Must be configured atomically with App Secret, tenant ID and redirect URL. |
+| `UP_FEISHU_APP_SECRET` | | Server-only Feishu App Secret. Never expose it to the browser, logs or persistence. |
+| `UP_FEISHU_TENANT_ID` | | Expected Feishu tenant key; OAuth login fails closed on mismatch. |
+| `UP_FEISHU_REDIRECT_URL` | | Exact callback URL ending in `/api/v1/auth/providers/feishu/callback`. HTTPS is required in production. |
+| `UP_FEISHU_CONTACT_SCOPE` | `应用通讯录授权范围` | Non-secret display label for the app's configured Contact API scope. |
+| `UP_FEISHU_OAUTH_STATE_TTL` | `5m` | Redis-backed single-use login-state TTL; maximum 15 minutes. |
+| `UP_FEISHU_REQUEST_TIMEOUT` | `15s` | Per-request Feishu HTTP timeout. |
+| `UP_FEISHU_RECONCILE_INTERVAL` | `15s` | Durable directory-job worker interval. |
+| `UP_FEISHU_SYNC_TIMEOUT` | `2m` | One directory reconciliation attempt deadline. |
 | `UP_SSH_HOST` | | SSH host for the development tunnel (`scripts/tunnel.sh`). |
 | `UP_SSH_PORT` | `22` | SSH port for the development tunnel. |
 | `UP_SSH_USER` | | SSH user for the development tunnel. |
@@ -206,7 +217,7 @@ go test -tags integration -race ./internal/adapters/postgres/... ./internal/adap
 
 Integration tests never run `FLUSHALL`, `FLUSHDB`, or `DROP DATABASE`. They only delete keys under the configured test prefix and only drop tables in the test schema.
 
-## Current Implementation Scope (Phase 1 + Phase 2)
+## Current Implementation Scope (through Phase 6)
 
 Phase 0 established the HTTP foundation. Phase 1 adds session management, authentication, and current user endpoints. Phase 2 adds the OAuth Application and OAuth Client management plane (see [ADR-0004](docs/adr-0004.md)).
 
@@ -270,6 +281,25 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
 - ADR-0004 documenting the Phase 2 management-plane architecture
 - Real-provider acceptance against ZITADEL v2.71 (confidential + public client provisioning, rotation, delete, compensation); see [P2.8 acceptance record](docs/p28-acceptance-record.md)
 
+### Implemented in Phase 6
+
+- **Feishu OAuth login**: server-side v2 code exchange, user-info lookup, Redis
+  single-use state and exact tenant/subject identity-link resolution.
+- **Server-only credentials**: App Secret stays in typed runtime configuration;
+  tenant tokens are cached only in memory and user tokens are discarded after
+  callback lookup.
+- **Durable directory jobs**: idempotent single-active enqueue, stale-claim
+  recovery, bounded retry and synchronization history.
+- **Safe directory staging**: normalized Feishu departments/users are stored
+  separately from workforce authority; partial snapshots never retire unseen
+  rows and synchronization never grants employee/persona/permission state.
+- **Explicit conflict resolution**: email/name are suggestions only; a
+  target-bound reauthentication grant and selected stable `userId` create the
+  exact identity link atomically with audit.
+- **Real frontend seam**: Provider list/detail/history/conflicts, 202 job UX,
+  enable/disable and manual resolution, plus optional Feishu login entry.
+- Architecture and acceptance contract: [ADR-0012](docs/adr-0012.md).
+
 ### Not yet implemented (later phases)
 
 **Phase 1 status: implementation complete; local real-instance acceptance passed.**
@@ -328,8 +358,6 @@ for `RemoveApp` on v2.71.
 - TOTP, Passkey, Recovery Code management (MFA verification is Phase 1; factor management is Phase 4)
 - Session list and revocation of other sessions
 - Consent orchestration
-- Employee profiles, departments, workforce
-- Feishu Provider synchronization (directory provider; distinct from the authentication provider)
 - Cerbos policies and audit
 - Audit export
 

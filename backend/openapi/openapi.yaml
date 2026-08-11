@@ -24,12 +24,15 @@ info:
     catalog, application/client lifecycle, secret rotation, reauthentication).
     Phase 5 scope: stable user administration, optional employee profiles,
     departments, offboarding and durable access-revocation convergence.
-    See `../docs/adr-0004.md` and `../docs/adr-0011.md` for the architecture decisions.
+    Phase 6 scope: Feishu federated login, durable directory staging,
+    synchronization history and explicit identity-link conflict resolution.
+    See `../docs/adr-0004.md`, `../docs/adr-0011.md` and
+    `../docs/adr-0012.md` for the architecture decisions.
 
     Business API paths use the full `/api/v1/...` prefix explicitly rather than
     relying on a global server base path, so that root-level operational endpoints
     and versioned API endpoints can coexist accurately.
-  version: 0.5.0
+  version: 0.6.0
   contact:
     name: United Pass backend team
 
@@ -62,6 +65,10 @@ tags:
     description: Employee profiles linked explicitly to stable user identities
   - name: Admin Departments
     description: Cycle-safe organization hierarchy and membership views
+  - name: Provider Login
+    description: Feishu OAuth login initiation and callback; provider credentials remain server-only
+  - name: Admin Identity Providers
+    description: Provider status, durable directory synchronization and explicit identity linking
   - name: Scope Catalog
     description: Backend-authoritative OAuth scope catalog
   - name: Admin Applications
@@ -2229,6 +2236,356 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/auth/providers:
+    get:
+      tags: [Provider Login]
+      summary: List public login Providers
+      description: Returns only safe display metadata and effective login availability.
+      operationId: listPublicLoginProviders
+      responses:
+        "200":
+          description: Public Provider login choices.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicLoginProviderList"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/auth/providers/feishu/authorize:
+    get:
+      tags: [Provider Login]
+      summary: Begin Feishu OAuth login
+      description: |
+        Creates a random, hash-keyed, single-use OAuth state in Redis and
+        redirects to Feishu. The optional resumeRequestId is an opaque local
+        authorization-request ID, never an arbitrary return URL.
+      operationId: beginFeishuLogin
+      parameters:
+        - name: resumeRequestId
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9_:-]{1,256}$"
+        - name: remember
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+      responses:
+        "302":
+          description: Redirect to the configured Feishu authorization endpoint.
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/auth/providers/feishu/callback:
+    get:
+      tags: [Provider Login]
+      summary: Complete Feishu OAuth login
+      description: |
+        Atomically consumes the Redis state, exchanges the one-time code on
+        the server, requires an exact provider/tenant/subject identity link,
+        and creates a local session. Email, phone and name never authenticate
+        or merge an identity.
+      operationId: completeFeishuLogin
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 2048
+      responses:
+        "303":
+          description: Redirect to account/consent continuation or a generic login error.
+          headers:
+            Location:
+              schema:
+                type: string
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/identity-providers:
+    get:
+      tags: [Admin Identity Providers]
+      summary: List identity Providers
+      operationId: listAdminIdentityProviders
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+        - $ref: "#/components/parameters/SearchQuery"
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [planned, active, disabled]
+      responses:
+        "200":
+          description: Provider page containing only non-sensitive metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IdentityProviderListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/identity-providers/{providerId}:
+    get:
+      tags: [Admin Identity Providers]
+      summary: Get identity Provider detail
+      operationId: getAdminIdentityProvider
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderIdPath"
+      responses:
+        "200":
+          description: Provider detail. Secrets and access tokens are never returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IdentityProviderDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/identity-providers/{providerId}/enable:
+    post:
+      tags: [Admin Identity Providers]
+      summary: Validate and enable Provider login
+      operationId: enableAdminIdentityProvider
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "200":
+          description: Provider login enabled after live server-side validation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IdentityProviderDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/identity-providers/{providerId}/disable:
+    post:
+      tags: [Admin Identity Providers]
+      summary: Disable new Provider logins
+      operationId: disableAdminIdentityProvider
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "200":
+          description: New Provider logins disabled; existing local sessions are unchanged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IdentityProviderDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/identity-providers/{providerId}/directory-syncs:
+    post:
+      tags: [Admin Identity Providers]
+      summary: Queue a durable Provider directory synchronization
+      operationId: startProviderDirectorySync
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      responses:
+        "202":
+          description: Existing or newly queued single active sync job.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DirectorySyncResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      tags: [Admin Identity Providers]
+      summary: List Provider synchronization history
+      operationId: listProviderDirectorySyncHistory
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderIdPath"
+      responses:
+        "200":
+          description: Most recent synchronization jobs, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DirectorySyncHistoryEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/identity-providers/{providerId}/sync-conflicts:
+    get:
+      tags: [Admin Identity Providers]
+      summary: List Provider identity-link conflicts
+      operationId: listProviderSyncConflicts
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderIdPath"
+      responses:
+        "200":
+          description: Conflict suggestions. A suggestion is never an identity link.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProviderSyncConflict"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/identity-providers/sync-conflicts/{conflictId}/resolve:
+    post:
+      tags: [Admin Identity Providers]
+      summary: Create an explicit Provider identity link
+      operationId: resolveProviderSyncConflict
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ConflictIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveProviderConflictRequest"
+      responses:
+        "204":
+          description: Conflict resolved and exact stable user link committed atomically.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/identity-providers/sync-conflicts/{conflictId}/ignore:
+    post:
+      tags: [Admin Identity Providers]
+      summary: Ignore a Provider identity-link conflict
+      operationId: ignoreProviderSyncConflict
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ConflictIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      responses:
+        "204":
+          description: Conflict ignored; no identity link is created.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   securitySchemes:
     SessionCookie:
@@ -2364,6 +2721,24 @@ components:
       schema:
         type: string
         pattern: "^dep_[A-Za-z0-9_-]{1,124}$"
+
+    ProviderIdPath:
+      name: providerId
+      in: path
+      required: true
+      description: United Pass Provider ID (`provider_…`).
+      schema:
+        type: string
+        pattern: "^provider_[A-Za-z0-9_-]{1,119}$"
+
+    ConflictIdPath:
+      name: conflictId
+      in: path
+      required: true
+      description: Durable Provider identity-link conflict ID (`conflict_…`).
+      schema:
+        type: string
+        pattern: "^conflict_[A-Za-z0-9_-]{1,119}$"
 
     AdminSessionIdPath:
       name: sessionId
@@ -4075,3 +4450,223 @@ components:
           description: |
             Expiry of the previous secret. Against ZITADEL v2.71 this equals
             the rotation timestamp (zero grace period).
+
+    PublicLoginProvider:
+      type: object
+      required: [providerId, displayName, loginEnabled]
+      additionalProperties: false
+      properties:
+        providerId:
+          type: string
+        displayName:
+          type: string
+        loginEnabled:
+          type: boolean
+
+    PublicLoginProviderList:
+      type: object
+      required: [items]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicLoginProvider"
+
+    IdentityProviderSummary:
+      type: object
+      required:
+        [providerId, displayName, vendor, integrationLabel, status,
+         loginEnabled, linkedUserCount, updatedAt]
+      additionalProperties: false
+      properties:
+        providerId:
+          type: string
+        displayName:
+          type: string
+        vendor:
+          type: string
+          enum: [feishu, generic]
+        integrationLabel:
+          type: string
+        status:
+          type: string
+          enum: [planned, active, disabled]
+        loginEnabled:
+          type: boolean
+        linkedUserCount:
+          type: integer
+          minimum: 0
+        updatedAt:
+          type: string
+          format: date-time
+
+    IdentityProviderListResponse:
+      type: object
+      required: [items, page]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/IdentityProviderSummary"
+        page:
+          $ref: "#/components/schemas/CursorPageMetadata"
+
+    IdentityProviderDetail:
+      type: object
+      required:
+        [providerId, displayName, vendor, integrationLabel, status,
+         loginEnabled, linkedUserCount, updatedAt, appId, secretConfigured,
+         callbackUrl, contactScope, lastValidatedAt, lastSyncAt, lastSyncResult]
+      additionalProperties: false
+      properties:
+        providerId:
+          type: string
+        displayName:
+          type: string
+        vendor:
+          type: string
+          enum: [feishu, generic]
+        integrationLabel:
+          type: string
+        status:
+          type: string
+          enum: [planned, active, disabled]
+        loginEnabled:
+          type: boolean
+        linkedUserCount:
+          type: integer
+          minimum: 0
+        updatedAt:
+          type: string
+          format: date-time
+        appId:
+          type: string
+          description: Non-secret application identifier.
+        secretConfigured:
+          type: boolean
+          description: Boolean server-side credential readiness only; never the secret.
+        callbackUrl:
+          type: string
+          format: uri
+        contactScope:
+          type: string
+        lastValidatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastSyncAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastSyncResult:
+          allOf:
+            - $ref: "#/components/schemas/DirectorySyncResult"
+          nullable: true
+
+    DirectorySyncResult:
+      type: object
+      required:
+        [syncId, providerId, startedAt, completedAt, status, departmentsAdded,
+         departmentsUpdated, employeesAdded, employeesUpdated,
+         employeesOffboarded, conflictsDetected]
+      additionalProperties: false
+      properties:
+        syncId:
+          type: string
+        providerId:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          type: string
+          enum: [pending, running, success, partial, failed]
+        departmentsAdded:
+          type: integer
+          minimum: 0
+        departmentsUpdated:
+          type: integer
+          minimum: 0
+        employeesAdded:
+          type: integer
+          minimum: 0
+        employeesUpdated:
+          type: integer
+          minimum: 0
+        employeesOffboarded:
+          type: integer
+          minimum: 0
+        conflictsDetected:
+          type: integer
+          minimum: 0
+
+    DirectorySyncHistoryEntry:
+      type: object
+      required: [syncId, providerId, startedAt, completedAt, status, summary]
+      additionalProperties: false
+      properties:
+        syncId:
+          type: string
+        providerId:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          type: string
+          enum: [pending, running, success, partial, failed]
+        summary:
+          type: string
+
+    ProviderSyncConflict:
+      type: object
+      required:
+        [conflictId, providerId, externalSubject, externalName, externalEmail,
+         matchedUserId, matchedUserName, matchReason, status, detectedAt]
+      additionalProperties: false
+      properties:
+        conflictId:
+          type: string
+        providerId:
+          type: string
+        externalSubject:
+          type: string
+        externalName:
+          type: string
+        externalEmail:
+          type: string
+        matchedUserId:
+          type: string
+          nullable: true
+          description: Search suggestion only until an administrator explicitly resolves.
+        matchedUserName:
+          type: string
+          nullable: true
+        matchReason:
+          type: string
+          enum: [email, name, manual]
+        status:
+          type: string
+          enum: [pending, resolved, ignored]
+        detectedAt:
+          type: string
+          format: date-time
+
+    ResolveProviderConflictRequest:
+      type: object
+      required: [userId]
+      additionalProperties: false
+      properties:
+        userId:
+          type: string
+          description: Explicit existing stable United Pass user ID.

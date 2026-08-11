@@ -40,7 +40,10 @@ export type AccountReauthenticationAction =
 export type AdminReauthenticationAction =
   | "user.disable"
   | "user.sessions.revoke"
-  | "employee.offboard";
+  | "employee.offboard"
+  | "provider.enable"
+  | "provider.disable"
+  | "provider.identity.link";
 
 export type ReauthenticationAction =
   | AccountReauthenticationAction

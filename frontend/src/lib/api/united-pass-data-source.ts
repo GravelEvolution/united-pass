@@ -98,8 +98,8 @@ export interface UnitedPassQueries {
   getDepartmentDetail(departmentId: string): Promise<DepartmentDetail | null>;
   getIdentityProviders(query?: PageQuery): Promise<CursorPage<IdentityProviderRecord>>;
   getProviderDetail(providerId: string): Promise<ProviderDetail | null>;
-  getDirectorySyncHistory(providerId?: string): Promise<DirectorySyncHistoryEntry[]>;
-  getSyncConflicts(providerId?: string): Promise<SyncConflict[]>;
+  getDirectorySyncHistory(providerId: string): Promise<DirectorySyncHistoryEntry[]>;
+  getSyncConflicts(providerId: string): Promise<SyncConflict[]>;
   getApplications(query?: PageQuery): Promise<CursorPage<OAuthApplication>>;
   getApplicationDetail(applicationId: string): Promise<OAuthApplicationDetail | null>;
   getClientDetail(applicationId: string, clientId: string): Promise<OAuthClient | null>;
@@ -192,7 +192,18 @@ export interface UnitedPassCommands {
 
   // Provider management
   syncProviderDirectory(providerId: string): Promise<DirectorySyncResult>;
-  resolveSyncConflict(conflictId: string, userId: string): Promise<void>;
+  updateProviderLogin(
+    providerId: string,
+    enabled: boolean,
+    reauthToken: string,
+    options?: BrowserCommandOptions,
+  ): Promise<ProviderDetail>;
+  resolveSyncConflict(
+    conflictId: string,
+    userId: string,
+    reauthToken: string,
+    options?: BrowserCommandOptions,
+  ): Promise<void>;
   ignoreSyncConflict(conflictId: string): Promise<void>;
 
   // Audit export

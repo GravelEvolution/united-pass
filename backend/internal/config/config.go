@@ -83,6 +83,14 @@ const (
 	defaultSecuritySettlementTimeout     = 15 * time.Second
 	defaultSecurityRecoveryTimeout       = 15 * time.Second
 	defaultSecurityMaxSettlementAttempts = 3
+
+	defaultFeishuBaseURL           = "https://open.feishu.cn"
+	defaultFeishuAuthorizeURL      = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
+	defaultFeishuContactScope      = "应用通讯录授权范围"
+	defaultFeishuOAuthStateTTL     = 5 * time.Minute
+	defaultFeishuRequestTimeout    = 15 * time.Second
+	defaultFeishuReconcileInterval = 15 * time.Second
+	defaultFeishuSyncTimeout       = 2 * time.Minute
 )
 
 // Config holds all process-level configuration. Values are loaded once at
@@ -123,6 +131,9 @@ type Config struct {
 
 	// Phase 3 — OAuth endpoint topology
 	OAuth OAuthConfig
+
+	// Phase 6 — Feishu login and directory Provider
+	Feishu FeishuConfig
 
 	// Integration tests
 	Test TestConfig
@@ -261,6 +272,29 @@ type OAuthConfig struct {
 	PublicOrigin string
 }
 
+// FeishuConfig contains the server-only Phase 6 Provider configuration.
+// AppSecret never leaves this typed configuration object and is never copied
+// into API responses, database rows or logs.
+type FeishuConfig struct {
+	BaseURL           string
+	AuthorizeURL      string
+	AppID             string
+	AppSecret         string
+	TenantID          string
+	RedirectURL       string
+	ContactScope      string
+	OAuthStateTTL     time.Duration
+	RequestTimeout    time.Duration
+	ReconcileInterval time.Duration
+	SyncTimeout       time.Duration
+}
+
+// Configured reports whether the complete Feishu credential and tenant set
+// is present. Partial sets are rejected by Config.Validate.
+func (c FeishuConfig) Configured() bool {
+	return c.AppID != "" && c.AppSecret != "" && c.TenantID != "" && c.RedirectURL != ""
+}
+
 // InteractionBaseURI derives the ZITADEL LoginV2 Interaction Base URI from
 // the public origin: <origin>/_interaction. This is the only derivation in
 // the system — there is deliberately no independent interaction base
@@ -375,6 +409,20 @@ func Load() (Config, error) {
 
 		OAuth: OAuthConfig{
 			PublicOrigin: envOr("UP_OAUTH_PUBLIC_ORIGIN", ""),
+		},
+
+		Feishu: FeishuConfig{
+			BaseURL:           envOr("UP_FEISHU_BASE_URL", defaultFeishuBaseURL),
+			AuthorizeURL:      envOr("UP_FEISHU_AUTHORIZE_URL", defaultFeishuAuthorizeURL),
+			AppID:             envOr("UP_FEISHU_APP_ID", ""),
+			AppSecret:         envOr("UP_FEISHU_APP_SECRET", ""),
+			TenantID:          envOr("UP_FEISHU_TENANT_ID", ""),
+			RedirectURL:       envOr("UP_FEISHU_REDIRECT_URL", ""),
+			ContactScope:      envOr("UP_FEISHU_CONTACT_SCOPE", defaultFeishuContactScope),
+			OAuthStateTTL:     durationOr("UP_FEISHU_OAUTH_STATE_TTL", defaultFeishuOAuthStateTTL),
+			RequestTimeout:    durationOr("UP_FEISHU_REQUEST_TIMEOUT", defaultFeishuRequestTimeout),
+			ReconcileInterval: durationOr("UP_FEISHU_RECONCILE_INTERVAL", defaultFeishuReconcileInterval),
+			SyncTimeout:       durationOr("UP_FEISHU_SYNC_TIMEOUT", defaultFeishuSyncTimeout),
 		},
 
 		Test: TestConfig{
@@ -575,6 +623,45 @@ func (c Config) Validate() error {
 		}
 	}
 
+	// Feishu Provider validation. The integration is optional, but partial
+	// credentials are never accepted because they produce a misleading
+	// secretConfigured state and fail only after an administrator enables it.
+	feishuValues := []string{c.Feishu.AppID, c.Feishu.AppSecret, c.Feishu.TenantID, c.Feishu.RedirectURL}
+	configuredFeishuValues := 0
+	for _, value := range feishuValues {
+		if value != "" {
+			configuredFeishuValues++
+		}
+	}
+	if configuredFeishuValues != 0 && configuredFeishuValues != len(feishuValues) {
+		errs = append(errs, errors.New("Feishu requires UP_FEISHU_APP_ID, UP_FEISHU_APP_SECRET, UP_FEISHU_TENANT_ID and UP_FEISHU_REDIRECT_URL together"))
+	}
+	if configuredFeishuValues > 0 {
+		if c.Feishu.OAuthStateTTL <= 0 || c.Feishu.OAuthStateTTL > 15*time.Minute {
+			errs = append(errs, errors.New("Feishu OAuth state TTL must be positive and at most 15 minutes"))
+		}
+		if c.Feishu.RequestTimeout <= 0 || c.Feishu.ReconcileInterval <= 0 || c.Feishu.SyncTimeout <= 0 {
+			errs = append(errs, errors.New("Feishu request, reconciliation and sync durations must be positive"))
+		}
+	}
+	if c.Feishu.Configured() {
+		if len(c.Feishu.AppID) > 256 || len(c.Feishu.AppSecret) > 512 || len(c.Feishu.TenantID) > 256 {
+			errs = append(errs, errors.New("Feishu credential or tenant identifier exceeds the allowed length"))
+		}
+		if strings.TrimSpace(c.Feishu.ContactScope) == "" || len(c.Feishu.ContactScope) > 256 {
+			errs = append(errs, errors.New("Feishu contact scope label must be 1 to 256 bytes"))
+		}
+		if err := validateProviderURL(c.Feishu.BaseURL, c.IsProduction(), false); err != nil {
+			errs = append(errs, fmt.Errorf("Feishu base URL: %w", err))
+		}
+		if err := validateProviderURL(c.Feishu.AuthorizeURL, c.IsProduction(), true); err != nil {
+			errs = append(errs, fmt.Errorf("Feishu authorization URL: %w", err))
+		}
+		if err := validateFeishuRedirectURL(c.Feishu.RedirectURL, c.IsProduction()); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	// Integration test validation (when configured).
 	if c.Test.DatabaseURL != "" {
 		if c.Test.DatabaseSchema == "" {
@@ -718,6 +805,43 @@ func validateOAuthPublicOrigin(origin string, requireHTTPS bool) error {
 	}
 	if u.Fragment != "" {
 		return errors.New("oauth public origin must not contain a fragment")
+	}
+	return nil
+}
+
+func validateProviderURL(raw string, requireHTTPS, allowPath bool) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if u.Scheme != "https" && (requireHTTPS || u.Scheme != "http") {
+		return errors.New("URL must use https")
+	}
+	if u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("URL must include a host and must not contain userinfo, query or fragment")
+	}
+	if !allowPath && u.Path != "" && u.Path != "/" {
+		return errors.New("base URL must not contain a path")
+	}
+	return nil
+}
+
+func validateFeishuRedirectURL(raw string, requireHTTPS bool) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("Feishu redirect URL is invalid: %w", err)
+	}
+	if u.Scheme != "https" && (requireHTTPS || u.Scheme != "http") {
+		return errors.New("Feishu redirect URL must use https")
+	}
+	if u.Host == "" || u.User != nil || u.Fragment != "" || u.RawQuery != "" {
+		return errors.New("Feishu redirect URL must include a host and must not contain userinfo, query or fragment")
+	}
+	if u.Path == "" || u.Path == "/" {
+		return errors.New("Feishu redirect URL must contain the exact callback path")
+	}
+	if u.Path != "/api/v1/auth/providers/feishu/callback" {
+		return errors.New("Feishu redirect URL path must be /api/v1/auth/providers/feishu/callback")
 	}
 	return nil
 }

@@ -37,10 +37,9 @@ export default async function ProviderDetailPage({
     notFound();
   }
 
-  const [syncHistory, conflicts, usersPage] = await Promise.all([
+  const [syncHistory, conflicts] = await Promise.all([
     serverQueries.getDirectorySyncHistory(providerId),
     serverQueries.getSyncConflicts(providerId),
-    serverQueries.getUsers({ limit: 100 }),
   ]);
 
   return (
@@ -48,7 +47,6 @@ export default async function ProviderDetailPage({
       detail={detail}
       syncHistory={syncHistory}
       conflicts={conflicts}
-      users={usersPage.items}
     />
   );
 }

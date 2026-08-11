@@ -49,8 +49,8 @@
 | `/admin/applications/new` | Mock 完成 | 原子创建 Application + 初始 Client |
 | `/admin/applications/[applicationId]` | Mock 完成 | 应用详情、Client 列表、编辑 |
 | `/admin/applications/[applicationId]/clients/[clientId]` | Mock 完成 | 独立 Client 详情、Secret 轮换 |
-| `/admin/providers` | Mock 完成 | Provider 列表 |
-| `/admin/providers/[providerId]` | Mock 完成 | 飞书 Provider 详情、目录同步、冲突处理 |
+| `/admin/providers` | P6 real seam | Provider 列表 |
+| `/admin/providers/[providerId]` | P6 real seam | 飞书 Provider 详情、异步目录同步、显式冲突处理 |
 | `/admin/policies` | Mock 完成 | 策略列表 |
 | `/admin/policies/new` | Mock 完成 | ABAC 策略编辑器 |
 | `/admin/policies/[policyId]` | Mock 完成 | 策略详情、版本历史、模拟、发布 |
@@ -106,7 +106,7 @@
 | OAuth Application / Client | Application 与 Client 分离管理（ADR-0005） |
 | 用户与员工 | 员工档案挂在 `userId` 下，不强制使用 `/employees/{userId}` API 路径 |
 | 部门 | 树形/分页部门管理 |
-| Identity Provider | `GET /api/v1/admin/identity-providers`，飞书首个支持 |
+| Identity Provider | P6 real seam：飞书登录、Provider 状态、durable sync/history、显式冲突链接；见 ADR-0008 |
 | ABAC 策略 | 草稿、发布、模拟、版本历史 |
 | 审计 | 事件筛选与异步导出 |
 
@@ -246,7 +246,7 @@ export const serverQueries =
 - 真实密码校验与哈希
 - 真实 TOTP 和 WebAuthn Ceremony
 - 真实 OAuth Token 交换
-- 飞书 Access Token 和通讯录同步
+- 通用 Provider 创建/编辑、SCIM/LDAP/SAML/CAS（P6 仅固定飞书 Provider）
 - 数据库存储
 - CSRF 服务端验证
 - ABAC 实际决策引擎

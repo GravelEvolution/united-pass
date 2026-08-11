@@ -15,8 +15,10 @@ import { browserFetch } from "@/lib/api/browser/browser-http-client";
 import {
   parseDecisionResponse,
   parseDepartmentDetail,
+  parseDirectorySyncResult,
   parsePasskeyEnrollment,
   parsePasskeyEnrollmentConfirmation,
+  parseProviderDetail,
   parseReauthenticationGrant,
   parseReauthenticationOutcome,
   parseRevokedSessionCount,
@@ -295,9 +297,38 @@ export const browserCommands: UnitedPassCommands = {
   simulatePolicy: (input) => mockUnitedPassDataSource.simulatePolicy(input),
 
   // Provider management
-  syncProviderDirectory: (providerId) => mockUnitedPassDataSource.syncProviderDirectory(providerId),
-  resolveSyncConflict: (conflictId, userId) => mockUnitedPassDataSource.resolveSyncConflict(conflictId, userId),
-  ignoreSyncConflict: (conflictId) => mockUnitedPassDataSource.ignoreSyncConflict(conflictId),
+  syncProviderDirectory: USE_MOCK_DATA_SOURCE
+    ? (providerId) => mockUnitedPassDataSource.syncProviderDirectory(providerId)
+    : async (providerId) => parseDirectorySyncResult(
+        await browserFetch<unknown>(
+          `/admin/identity-providers/${encodeURIComponent(providerId)}/directory-syncs`,
+          { method: "POST" },
+        ),
+      ),
+  updateProviderLogin: USE_MOCK_DATA_SOURCE
+    ? (providerId, enabled) => mockUnitedPassDataSource.updateProviderLogin(providerId, enabled, "")
+    : async (providerId, enabled, reauthToken, options) => parseProviderDetail(
+        await browserFetch<unknown>(
+          `/admin/identity-providers/${encodeURIComponent(providerId)}/${enabled ? "enable" : "disable"}`,
+          { method: "POST", reauthToken, signal: options?.signal },
+        ),
+      ),
+  resolveSyncConflict: USE_MOCK_DATA_SOURCE
+    ? (conflictId, userId) => mockUnitedPassDataSource.resolveSyncConflict(conflictId, userId, "")
+    : async (conflictId, userId, reauthToken, options) => {
+        await browserFetch<unknown>(
+          `/admin/identity-providers/sync-conflicts/${encodeURIComponent(conflictId)}/resolve`,
+          { method: "POST", reauthToken, signal: options?.signal, body: { userId } },
+        );
+      },
+  ignoreSyncConflict: USE_MOCK_DATA_SOURCE
+    ? (conflictId) => mockUnitedPassDataSource.ignoreSyncConflict(conflictId)
+    : async (conflictId) => {
+        await browserFetch<unknown>(
+          `/admin/identity-providers/sync-conflicts/${encodeURIComponent(conflictId)}/ignore`,
+          { method: "POST" },
+        );
+      },
 
   // Audit export
   exportAuditEvents: (query) => mockUnitedPassDataSource.exportAuditEvents(query),

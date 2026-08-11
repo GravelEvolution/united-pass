@@ -191,7 +191,10 @@ func isValidReauthAction(action string) bool {
 		auth.ReauthActionPasskeyRemove,
 		auth.ReauthActionUserDisable,
 		auth.ReauthActionUserSessionsRevoke,
-		auth.ReauthActionEmployeeOffboard:
+		auth.ReauthActionEmployeeOffboard,
+		auth.ReauthActionProviderEnable,
+		auth.ReauthActionProviderDisable,
+		auth.ReauthActionProviderIdentityLink:
 		return true
 	default:
 		return false
@@ -203,7 +206,7 @@ func reauthNeedsClient(action string) bool {
 	return action == auth.ReauthActionClientDelete || action == auth.ReauthActionClientSecretRotate
 }
 
-func isValidReauthUserTarget(raw string) bool {
+func isValidReauthTarget(raw string) bool {
 	if raw == "" || len(raw) > 128 {
 		return false
 	}
@@ -258,8 +261,8 @@ func (h *ReauthHandlers) Request(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if auth.IsTargetReauthAction(req.Action) {
-		if req.ApplicationID != "" || req.ClientID != "" || !isValidReauthUserTarget(req.Target) {
-			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "该管理操作需要且仅支持目标用户绑定。", nil)
+		if req.ApplicationID != "" || req.ClientID != "" || !isValidReauthTarget(req.Target) {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "该管理操作需要且仅支持精确目标绑定。", nil)
 			return
 		}
 	} else {

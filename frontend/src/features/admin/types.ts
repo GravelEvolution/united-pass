@@ -191,6 +191,7 @@ export type ProviderDetail = {
   callbackUrl: string;
   contactScope: string;
   linkedUserCount: number;
+  lastValidatedAt: string | null;
   lastSyncAt: string | null;
   lastSyncResult: DirectorySyncResult | null;
   updatedAt: string;
@@ -199,8 +200,8 @@ export type ProviderDetail = {
 export type DirectorySyncResult = {
   syncId: string;
   startedAt: string;
-  completedAt: string;
-  status: "success" | "partial" | "failed";
+  completedAt: string | null;
+  status: "pending" | "running" | "success" | "partial" | "failed";
   departmentsAdded: number;
   departmentsUpdated: number;
   employeesAdded: number;
@@ -226,7 +227,7 @@ export type DirectorySyncHistoryEntry = {
   syncId: string;
   providerId: string;
   startedAt: string;
-  completedAt: string;
-  status: "success" | "partial" | "failed";
+  completedAt: string | null;
+  status: "pending" | "running" | "success" | "partial" | "failed";
   summary: string;
 };

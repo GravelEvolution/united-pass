@@ -17,19 +17,109 @@ import {
   parseDepartments,
   parseEmployeeDetail,
   parseEmployees,
+  parseDirectorySyncHistory,
+  parseDirectorySyncResult,
+  parseIdentityProviders,
   parseManagedUsers,
   parseMfaRequiredResponse,
   parsePasskeyEnrollment,
   parsePasskeyEnrollmentConfirmation,
   parsePermissionCapabilities,
+  parseProviderDetail,
+  parsePublicLoginProviders,
   parseReauthenticationOutcome,
   parseRevokedSessionCount,
   parseSecuritySummary,
   parseTotpEnrollment,
   parseTotpEnrollmentConfirmation,
+  parseSyncConflicts,
   parseUserSessions,
   parseUserDetail,
 } from "./response-validators";
+
+describe("P6 Provider validators", () => {
+  const provider = {
+    providerId: "provider_feishu",
+    displayName: "飞书",
+    vendor: "feishu",
+    integrationLabel: "OAuth 2.0 + 通讯录 OpenAPI",
+    status: "active",
+    loginEnabled: true,
+    linkedUserCount: 1,
+    updatedAt: "2026-08-11T00:00:00Z",
+  };
+  const sync = {
+    syncId: "sync_A",
+    providerId: "provider_feishu",
+    startedAt: "2026-08-11T00:00:00Z",
+    completedAt: null,
+    status: "running",
+    departmentsAdded: 0,
+    departmentsUpdated: 0,
+    employeesAdded: 0,
+    employeesUpdated: 0,
+    employeesOffboarded: 0,
+    conflictsDetected: 0,
+  };
+
+  it("narrows Provider list/detail and accepts durable in-flight jobs", () => {
+    expect(parseIdentityProviders({
+      items: [provider],
+      page: { nextCursor: null, hasMore: false },
+    }).items[0]).toEqual(provider);
+    expect(parseDirectorySyncResult(sync)).toEqual({
+      syncId: sync.syncId,
+      startedAt: sync.startedAt,
+      completedAt: null,
+      status: "running",
+      departmentsAdded: 0,
+      departmentsUpdated: 0,
+      employeesAdded: 0,
+      employeesUpdated: 0,
+      employeesOffboarded: 0,
+      conflictsDetected: 0,
+    });
+    expect(parseProviderDetail({
+      ...provider,
+      appId: "cli_test",
+      secretConfigured: true,
+      callbackUrl: "https://id.example.test/api/v1/auth/providers/feishu/callback",
+      contactScope: "contact:user.base:readonly",
+      lastValidatedAt: null,
+      lastSyncAt: sync.startedAt,
+      lastSyncResult: sync,
+    }).lastSyncResult?.status).toBe("running");
+    expect(() => parseIdentityProviders({
+      items: [{ ...provider, linkedUserCount: -1 }],
+      page: { nextCursor: null, hasMore: false },
+    })).toThrow(ApiResponseShapeError);
+  });
+
+  it("narrows history, explicit-link conflicts and public login availability", () => {
+    expect(parseDirectorySyncHistory([{ ...sync, summary: "同步执行中" }])[0]).toMatchObject({
+      providerId: "provider_feishu",
+      completedAt: null,
+      status: "running",
+    });
+    const conflict = {
+      conflictId: "conflict_A",
+      providerId: "provider_feishu",
+      externalSubject: "ou_A",
+      externalName: "Alice",
+      externalEmail: "alice@example.test",
+      matchedUserId: "user_A",
+      matchedUserName: "Alice",
+      matchReason: "email",
+      status: "pending",
+      detectedAt: "2026-08-11T00:00:00Z",
+    };
+    expect(parseSyncConflicts([conflict])).toEqual([conflict]);
+    expect(() => parseSyncConflicts([{ ...conflict, matchReason: "automatic" }])).toThrow(ApiResponseShapeError);
+    expect(parsePublicLoginProviders({ items: [{
+      providerId: "provider_feishu", displayName: "飞书", loginEnabled: true,
+    }] })).toHaveLength(1);
+  });
+});
 
 describe("P5 identity and workforce validators", () => {
   const page = { nextCursor: null, hasMore: false };

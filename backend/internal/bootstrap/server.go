@@ -23,6 +23,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	zitadelsdk "github.com/zitadel/zitadel-go/v3/pkg/client"
 
+	"github.com/GravelEvolution/united-pass/backend/internal/adapters/feishu"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/postgres"
@@ -34,6 +35,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/consent"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
+	"github.com/GravelEvolution/united-pass/backend/internal/providers"
 	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 	"github.com/GravelEvolution/united-pass/backend/internal/workforce"
@@ -217,6 +219,36 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		}
 	}
 
+	// Phase 6 Provider plane (ADR-0012). PostgreSQL stores only safe metadata,
+	// durable sync jobs, normalized directory staging and explicit identity
+	// links. Feishu credentials remain in typed process configuration and the
+	// adapter keeps access tokens in memory only.
+	var providerSvc *providers.Service
+	var providerHandlers *httpapi.ProviderHandlers
+	var providerLoginHandlers *httpapi.ProviderLoginHandlers
+	if pool != nil {
+		providerRepo := postgres.NewProviderRepository(pool.PgxPool())
+		var directorySource providers.DirectorySource
+		var oauthSource providers.OAuthSource
+		if cfg.Feishu.Configured() {
+			client, err := feishu.NewClient(cfg.Feishu)
+			if err != nil {
+				return nil, fmt.Errorf("Feishu provider: %w", err)
+			}
+			directorySource, oauthSource = client, client
+		}
+		providerSvc = providers.NewService(providerRepo, directorySource, oauthSource, providers.RuntimeMetadata{
+			AppID: cfg.Feishu.AppID, RedirectURL: cfg.Feishu.RedirectURL,
+			ContactScope: cfg.Feishu.ContactScope, TenantID: cfg.Feishu.TenantID,
+			SecretConfigured: cfg.Feishu.Configured(),
+		}, logger)
+		if directorySource != nil {
+			reconciler := providers.NewReconciler(providerSvc, cfg.Feishu.ReconcileInterval, cfg.Feishu.SyncTimeout)
+			reconciler.Start()
+			workerStops = append(workerStops, reconciler.Stop)
+		}
+	}
+
 	// When using the fake development authenticator, skip database-backed
 	// user existence checks: fake users have hardcoded IDs that do not exist
 	// in PostgreSQL. Replace the userReader with an in-memory fake that
@@ -337,6 +369,14 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		workforceHandlers = httpapi.NewWorkforceHandlers(
 			workforceSvc, permResolver, reauthVerifier, sessionSvc, logger)
 	}
+	if providerSvc != nil {
+		providerHandlers = httpapi.NewProviderHandlers(providerSvc, permResolver, reauthVerifier, logger)
+		if cfg.Feishu.Configured() && redisClient != nil && sessionSvc != nil {
+			providerLoginHandlers = httpapi.NewProviderLoginHandlers(
+				providerSvc, redis.NewProviderOAuthStateStore(redisClient), sessionSvc,
+				userChecker, rateChecker, cfg, logger)
+		}
+	}
 
 	// Consent resolution (P3.3, ADR-0005 §2): the side-effect free
 	// derivation of the ConsentResolution union. Every dependency must be
@@ -436,6 +476,11 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 
 		r.Post("/auth/sessions", authHandlers.Login)
 		r.Post("/auth/sessions/mfa", authHandlers.CompleteMFA)
+		if providerLoginHandlers != nil {
+			r.Get("/auth/providers", providerLoginHandlers.ListPublicProviders)
+			r.Get("/auth/providers/feishu/authorize", providerLoginHandlers.BeginFeishu)
+			r.Get("/auth/providers/feishu/callback", providerLoginHandlers.FeishuCallback)
+		}
 
 		// Logout requires session and CSRF.
 		r.Group(func(r chi.Router) {
@@ -608,6 +653,28 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				r.Get("/admin/departments/{departmentId}", workforceHandlers.GetDepartment)
 				r.Patch("/admin/departments/{departmentId}", workforceHandlers.UpdateDepartment)
 				r.Delete("/admin/departments/{departmentId}", workforceHandlers.DeleteDepartment)
+			}
+		})
+
+		// Phase 6 Feishu Provider administration (ADR-0012). Reads and writes
+		// independently resolve provider capabilities. Enabling/disabling and
+		// explicit identity linking consume target-bound single-use reauth
+		// grants; directory synchronization returns a durable 202 job.
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
+				r.Use(httpapi.RequireCSRF())
+			}
+			if providerHandlers != nil {
+				r.Get("/admin/identity-providers", providerHandlers.ListProviders)
+				r.Get("/admin/identity-providers/{providerId}", providerHandlers.GetProvider)
+				r.Post("/admin/identity-providers/{providerId}/enable", providerHandlers.EnableProvider)
+				r.Post("/admin/identity-providers/{providerId}/disable", providerHandlers.DisableProvider)
+				r.Post("/admin/identity-providers/{providerId}/directory-syncs", providerHandlers.StartDirectorySync)
+				r.Get("/admin/identity-providers/{providerId}/directory-syncs", providerHandlers.ListSyncHistory)
+				r.Get("/admin/identity-providers/{providerId}/sync-conflicts", providerHandlers.ListConflicts)
+				r.Post("/admin/identity-providers/sync-conflicts/{conflictId}/resolve", providerHandlers.ResolveConflict)
+				r.Post("/admin/identity-providers/sync-conflicts/{conflictId}/ignore", providerHandlers.IgnoreConflict)
 			}
 		})
 	})

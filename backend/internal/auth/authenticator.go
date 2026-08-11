@@ -43,10 +43,11 @@ const (
 type AuthenticationMethod string
 
 const (
-	MethodPassword AuthenticationMethod = "password"
-	MethodTOTP     AuthenticationMethod = "totp"
-	MethodPasskey  AuthenticationMethod = "passkey"
-	MethodRecovery AuthenticationMethod = "recovery_code"
+	MethodPassword  AuthenticationMethod = "password"
+	MethodTOTP      AuthenticationMethod = "totp"
+	MethodPasskey   AuthenticationMethod = "passkey"
+	MethodRecovery  AuthenticationMethod = "recovery_code"
+	MethodFederated AuthenticationMethod = "federated"
 )
 
 // MFAMethod is a method available for MFA challenge.

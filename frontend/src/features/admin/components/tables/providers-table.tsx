@@ -25,7 +25,7 @@ import {
 const copy = {
   eyebrow: "Identity connections",
   title: "Provider 管理",
-  description: "管理外部身份提供方的接入状态。飞书目前仅记录为未来能力，尚未启用登录。",
+  description: "管理飞书登录、服务端凭据状态、目录同步作业与显式身份关联。",
   searchPlaceholder: "搜索 Provider、厂商或接入方式",
   actionLabel: "新增 Provider",
 } satisfies DirectoryCopy;

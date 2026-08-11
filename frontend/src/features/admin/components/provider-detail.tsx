@@ -8,14 +8,15 @@
 
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Button, Toast } from "@douyinfe/semi-ui";
+import { Button, Input, Modal, Toast } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import { PageHeader } from "@/components/common/page-header";
-import type { ProviderDetail, DirectorySyncResult, SyncConflict, DirectorySyncHistoryEntry, ManagedUser } from "@/features/admin/types";
+import type { ProviderDetail, DirectorySyncResult, SyncConflict, DirectorySyncHistoryEntry } from "@/features/admin/types";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
+import { AccountReauthenticationForm } from "@/features/account/components/security-overview";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import styles from "./admin-detail.module.css";
 
@@ -23,26 +24,47 @@ type ProviderDetailProps = {
   detail: ProviderDetail;
   syncHistory: DirectorySyncHistoryEntry[];
   conflicts: SyncConflict[];
-  users: ManagedUser[];
 };
 
-export function ProviderDetail({ detail, syncHistory, conflicts, users }: ProviderDetailProps) {
+export function ProviderDetail({ detail, syncHistory, conflicts }: ProviderDetailProps) {
   const router = useRouter();
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState<DirectorySyncResult | null>(detail.lastSyncResult);
+  const [providerAction, setProviderAction] = useState<"enable" | "disable" | null>(null);
+  const providerOperation = useRef<AbortController | null>(null);
 
   async function handleSync(): Promise<void> {
     setSyncing(true);
     try {
       const result = await browserCommands.syncProviderDirectory(detail.providerId);
       setLastSync(result);
-      Toast.success({ content: "同步完成。" });
+      Toast.success({ content: "目录同步作业已排队，页面刷新后可查看进度。" });
       router.refresh();
     } catch {
       Toast.error({ content: "同步失败，请重试。" });
     } finally {
       setSyncing(false);
     }
+  }
+
+  function closeProviderAction(): void {
+    providerOperation.current?.abort();
+    providerOperation.current = null;
+    setProviderAction(null);
+  }
+
+  async function updateProviderLogin(reauthToken: string, signal: AbortSignal): Promise<void> {
+    if (providerAction === null) return;
+    const enabled = providerAction === "enable";
+    await browserCommands.updateProviderLogin(
+      detail.providerId,
+      enabled,
+      reauthToken,
+      { signal },
+    );
+    Toast.success({ content: enabled ? "飞书登录已启用。" : "飞书登录已停用。" });
+    setProviderAction(null);
+    router.refresh();
   }
 
   return (
@@ -71,6 +93,15 @@ export function ProviderDetail({ detail, syncHistory, conflicts, users }: Provid
             label={detail.loginEnabled ? "登录已启用" : "登录未启用"}
             tone={detail.loginEnabled ? "success" : "neutral"}
           />
+          <Button
+            size="small"
+            theme="outline"
+            type={detail.loginEnabled ? "danger" : "primary"}
+            disabled={!detail.loginEnabled && !detail.secretConfigured}
+            onClick={() => setProviderAction(detail.loginEnabled ? "disable" : "enable")}
+          >
+            {detail.loginEnabled ? "停用登录" : "启用登录"}
+          </Button>
         </div>
       </div>
 
@@ -101,6 +132,9 @@ export function ProviderDetail({ detail, syncHistory, conflicts, users }: Provid
           <dd>
             {detail.lastSyncAt ? formatSecurityDateTime(detail.lastSyncAt) : "从未同步"}
           </dd>
+
+          <dt>最近凭据校验</dt>
+          <dd>{detail.lastValidatedAt ? formatSecurityDateTime(detail.lastValidatedAt) : "尚未校验"}</dd>
         </dl>
 
         <div className={`${styles.notice} ${styles.noticeInfo}`} style={{ marginTop: 20 }}>
@@ -117,7 +151,7 @@ export function ProviderDetail({ detail, syncHistory, conflicts, users }: Provid
             theme="solid"
             type="primary"
             loading={syncing}
-            disabled={syncing}
+            disabled={syncing || !detail.secretConfigured}
             onClick={handleSync}
           >
             立即同步
@@ -135,21 +169,18 @@ export function ProviderDetail({ detail, syncHistory, conflicts, users }: Provid
               <dd>{formatSecurityDateTime(lastSync.startedAt)}</dd>
 
               <dt>完成时间</dt>
-              <dd>{formatSecurityDateTime(lastSync.completedAt)}</dd>
+              <dd>{lastSync.completedAt ? formatSecurityDateTime(lastSync.completedAt) : "等待后台作业完成"}</dd>
 
               <dt>状态</dt>
               <dd>
-                <StatusBadge
-                  label={lastSync.status === "success" ? "成功" : lastSync.status === "partial" ? "部分成功" : "失败"}
-                  tone={lastSync.status === "success" ? "success" : lastSync.status === "partial" ? "warning" : "danger"}
-                />
+                <SyncStatusBadge status={lastSync.status} />
               </dd>
 
               <dt>部门变更</dt>
               <dd>新增 {lastSync.departmentsAdded} · 更新 {lastSync.departmentsUpdated}</dd>
 
-              <dt>员工变更</dt>
-              <dd>新增 {lastSync.employeesAdded} · 更新 {lastSync.employeesUpdated} · 离职 {lastSync.employeesOffboarded}</dd>
+              <dt>通讯录成员变更</dt>
+              <dd>新增 {lastSync.employeesAdded} · 更新 {lastSync.employeesUpdated} · 标记不活跃 {lastSync.employeesOffboarded}</dd>
 
               <dt>冲突</dt>
               <dd>{lastSync.conflictsDetected} 个待处理</dd>
@@ -165,12 +196,12 @@ export function ProviderDetail({ detail, syncHistory, conflicts, users }: Provid
             <div>
               <strong>不允许仅凭邮箱静默合并</strong>
               以下冲突需手动确认。仅凭邮箱、手机号、域名或显示名的匹配不构成自动合并。
-              必须由管理员显式选择关联到既有的 United Pass 用户，或忽略。
+              必须由管理员显式选择关联到既有的统一门户用户，或忽略。
             </div>
           </div>
 
           {conflicts.map((conflict) => (
-            <ConflictRow key={conflict.conflictId} conflict={conflict} users={users} />
+            <ConflictRow key={conflict.conflictId} conflict={conflict} />
           ))}
         </div>
       )}
@@ -182,11 +213,8 @@ export function ProviderDetail({ detail, syncHistory, conflicts, users }: Provid
             <div key={entry.syncId} className={styles.dangerItem}>
               <div>
                 <strong>{entry.summary}</strong>
-                <p>{formatSecurityDateTime(entry.startedAt)} → {formatSecurityDateTime(entry.completedAt)}</p>
-                <StatusBadge
-                  label={entry.status === "success" ? "成功" : entry.status === "partial" ? "部分成功" : "失败"}
-                  tone={entry.status === "success" ? "success" : entry.status === "partial" ? "warning" : "danger"}
-                />
+                <p>{formatSecurityDateTime(entry.startedAt)} → {entry.completedAt ? formatSecurityDateTime(entry.completedAt) : "处理中"}</p>
+                <SyncStatusBadge status={entry.status} />
               </div>
             </div>
           ))}
@@ -198,27 +226,65 @@ export function ProviderDetail({ detail, syncHistory, conflicts, users }: Provid
           <Button theme="borderless">查看目录同步总览</Button>
         </Link>
       </div>
+
+      <Modal
+        title={providerAction === "enable" ? "重新认证并启用飞书登录" : "重新认证并停用飞书登录"}
+        visible={providerAction !== null}
+        footer={null}
+        maskClosable={false}
+        onCancel={closeProviderAction}
+      >
+        <p>本次单次授权仅绑定到 Provider {detail.providerId}。</p>
+        {providerAction !== null && (
+          <AccountReauthenticationForm
+            action={providerAction === "enable" ? "provider.enable" : "provider.disable"}
+            target={detail.providerId}
+            submitLabel={providerAction === "enable" ? "验证并启用" : "验证并停用"}
+            browserOperationRef={providerOperation}
+            onGranted={updateProviderLogin}
+            onCancel={closeProviderAction}
+            operationError="Provider 状态未变更；此次单次授权不会被重复使用，请重新验证后再试。"
+            destructive={providerAction === "disable"}
+          />
+        )}
+      </Modal>
     </>
   );
 }
 
-function ConflictRow({ conflict, users }: { conflict: SyncConflict; users: ManagedUser[] }) {
+function ConflictRow({ conflict }: { conflict: SyncConflict }) {
   const [resolving, setResolving] = useState(false);
-  const [selectedUserId, setSelectedUserId] = useState("");
+  const [selectedUserId, setSelectedUserId] = useState(conflict.matchedUserId ?? "");
   const [status, setStatus] = useState(conflict.status);
+  const [reauthVisible, setReauthVisible] = useState(false);
+  const browserOperation = useRef<AbortController | null>(null);
 
   async function handleResolve(): Promise<void> {
     if (!selectedUserId) {
       Toast.warning({ content: "请选择要关联的用户。" });
       return;
     }
+    setReauthVisible(true);
+  }
+
+  function closeReauthentication(): void {
+    browserOperation.current?.abort();
+    browserOperation.current = null;
+    setReauthVisible(false);
+  }
+
+  async function resolveWithGrant(reauthToken: string, signal: AbortSignal): Promise<void> {
     setResolving(true);
     try {
-      await browserCommands.resolveSyncConflict(conflict.conflictId, selectedUserId);
+      await browserCommands.resolveSyncConflict(
+        conflict.conflictId,
+        selectedUserId,
+        reauthToken,
+        { signal },
+      );
       setStatus("resolved");
+      setReauthVisible(false);
       Toast.success({ content: "冲突已解决，外部身份已关联到指定用户。" });
-    } catch {
-      Toast.error({ content: "操作失败，请重试。" });
     } finally {
       setResolving(false);
     }
@@ -263,20 +329,12 @@ function ConflictRow({ conflict, users }: { conflict: SyncConflict; users: Manag
       </div>
 
       <div style={{ width: "100%", display: "grid", gap: 8, marginTop: 12 }}>
-        <select
+        <Input
           value={selectedUserId}
-          onChange={(e) => setSelectedUserId(e.target.value)}
-          className="semi-input semi-input-default"
-          style={{ width: "100%" }}
+          onChange={setSelectedUserId}
+          placeholder="输入既有稳定 userId"
           aria-label="选择关联用户"
-        >
-          <option value="">选择要关联的 United Pass 用户</option>
-          {users.map((user) => (
-            <option key={user.userId} value={user.userId}>
-              {user.displayName} · {user.email} · {user.userId}
-            </option>
-          ))}
-        </select>
+        />
         <div style={{ display: "flex", gap: 8 }}>
           <Button
             theme="solid"
@@ -300,6 +358,32 @@ function ConflictRow({ conflict, users }: { conflict: SyncConflict; users: Manag
           </Button>
         </div>
       </div>
+      <Modal
+        title="重新认证并建立身份关联"
+        visible={reauthVisible}
+        footer={null}
+        maskClosable={false}
+        onCancel={closeReauthentication}
+      >
+        <p>外部 Subject 将显式绑定到所选稳定 userId；邮箱和姓名只作为候选提示。</p>
+        <AccountReauthenticationForm
+          action="provider.identity.link"
+          target={conflict.conflictId}
+          submitLabel="验证并确认关联"
+          browserOperationRef={browserOperation}
+          onGranted={resolveWithGrant}
+          onCancel={closeReauthentication}
+          operationError="身份关联未完成；此次单次授权不会被重复使用，请重新验证后再试。"
+        />
+      </Modal>
     </div>
   );
+}
+
+function SyncStatusBadge({ status }: { status: DirectorySyncResult["status"] }) {
+  if (status === "pending") return <StatusBadge label="已排队" tone="info" />;
+  if (status === "running") return <StatusBadge label="处理中" tone="info" />;
+  if (status === "success") return <StatusBadge label="成功" tone="success" />;
+  if (status === "partial") return <StatusBadge label="部分成功" tone="warning" />;
+  return <StatusBadge label="失败" tone="danger" />;
 }

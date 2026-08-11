@@ -13,7 +13,7 @@
 - `/account` 的显示名称、昵称与头像可在当前页面内修改。头像只接受本地 PNG、JPEG、WebP，经过文件头、尺寸与解码校验并重新编码后预览；不会上传原文件或接受外部 URL。刷新页面后恢复初始 mock。
 - `/account` 的邮箱和手机号使用“发送 Mock 验证码 → 校验 → 更新”的独立流程。固定验证码为 `246810`，不会真的发送邮件或短信，更新结果同样只保留到刷新前。
 - 普通用户仅包含 `consumer` 人格；员工演示用户同时包含 `consumer` 和 `employee` 人格及 `employeeProfile`。稳定 `userId` 不因员工档案关联而变化。
-- `/admin/providers` 展示 Provider 管理清单。飞书记录状态为“规划中”、登录未启用，不代表已经实现飞书认证或账户关联。
+- `/admin/providers` 的飞书记录是 Mock fixture；真实模式下 P6 改为后端状态、异步同步和显式身份冲突处理，Mock 值不代表真实凭据或租户状态。
 
 ## 演示凭据
 
@@ -30,7 +30,7 @@
 
 替换按 seam 逐步推进，由单一环境标志 `NEXT_PUBLIC_USE_MOCK` 控制（唯一读取点在 `src/lib/api/data-source-mode.ts`）：`"true"` 时所有 seam 走 mock；未设置时已迁移的 seam 调用真实后端 HTTP API，未迁移的 seam 仍走 mock。标志必须带 `NEXT_PUBLIC_` 前缀，因为浏览器端命令同样读取它（与 frontend-freeze-v1.md §5 伪代码中的 `USE_MOCK` 命名差异源于 Next.js 只会向客户端内联 `NEXT_PUBLIC_*` 变量）。示例配置见 `.env.example`；e2e 的 Playwright webServer 固定注入 `NEXT_PUBLIC_USE_MOCK=true`，保证 e2e 始终演练冻结的 mock 数据源。
 
-已迁移到真实 HTTP 的 seam（P3–P5）：
+已迁移到真实 HTTP 的 seam（P3–P6）：
 
 | Seam | 方向 | 后端路径 |
 | --- | --- | --- |
@@ -44,8 +44,10 @@
 | user list/detail and lifecycle/session commands | Query / Command | `/api/v1/admin/users*` |
 | employee list/detail/link/update/offboard | Query / Command | `/api/v1/admin/employees*`、`/api/v1/admin/users/{userId}/employee-profile`、`/offboarding` |
 | department list/detail/create/update/delete | Query / Command | `/api/v1/admin/departments*` |
+| Provider list/detail/sync history/conflicts and mutations | Query / Command | `/api/v1/admin/identity-providers*` |
+| public Feishu login availability | Query / redirect | `/api/v1/auth/providers*` |
 
-未迁移的 seam（账户资料/联系方式编辑、OAuth 应用后台、Provider、策略、审计等）在标志关闭时仍走 mock，后续阶段逐个替换。P5 用户、员工和部门 seam 在真实模式下不得回退到 mock。
+未迁移的 seam（账户资料/联系方式编辑、OAuth 应用后台、策略、审计等）在标志关闭时仍走 mock，后续阶段逐个替换。P5 用户/员工/部门与 P6 Provider seam 在真实模式下不得回退到 mock。
 
 迁移每个 seam 的步骤：
 

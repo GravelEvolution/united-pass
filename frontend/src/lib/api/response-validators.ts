@@ -29,9 +29,14 @@ import type {
   AuditEvent,
   DepartmentDetail,
   DepartmentRecord,
+  DirectorySyncHistoryEntry,
+  DirectorySyncResult,
   EmployeeDetail,
   EmployeeRecord,
+  IdentityProviderRecord,
   ManagedUser,
+  ProviderDetail,
+  SyncConflict,
   UserDetail,
 } from "@/features/admin/types";
 import type { CursorPage } from "@/types/pagination";
@@ -706,4 +711,135 @@ export function parseDepartmentDetail(value: unknown): DepartmentDetail {
       };
     }),
   };
+}
+
+// --- Phase 6 identity Providers ---
+
+function parseProviderStatus(value: unknown): "planned" | "active" | "disabled" {
+  if (value === "planned" || value === "active" || value === "disabled") return value;
+  throw new ApiResponseShapeError("Provider.status");
+}
+
+function parseProviderVendor(value: unknown): "feishu" | "generic" {
+  if (value === "feishu" || value === "generic") return value;
+  throw new ApiResponseShapeError("Provider.vendor");
+}
+
+function parseIdentityProvider(value: unknown): IdentityProviderRecord {
+  if (!isRecord(value)) throw new ApiResponseShapeError("IdentityProviderRecord");
+  return {
+    providerId: requireNonEmptyString(value, "providerId"),
+    displayName: requireString(value, "displayName"),
+    vendor: parseProviderVendor(value.vendor),
+    integrationLabel: requireString(value, "integrationLabel"),
+    status: parseProviderStatus(value.status),
+    loginEnabled: requireBoolean(value, "loginEnabled"),
+    linkedUserCount: requireNonNegativeInteger(value, "linkedUserCount"),
+    updatedAt: requireNonEmptyString(value, "updatedAt"),
+  };
+}
+
+export function parseIdentityProviders(value: unknown): CursorPage<IdentityProviderRecord> {
+  return parseCursorPage(value, "IdentityProviderPage", parseIdentityProvider);
+}
+
+function parseDirectorySyncStatus(value: unknown): DirectorySyncResult["status"] {
+  if (value === "pending" || value === "running" || value === "success" || value === "partial" || value === "failed") return value;
+  throw new ApiResponseShapeError("DirectorySyncResult.status");
+}
+
+export function parseDirectorySyncResult(value: unknown): DirectorySyncResult {
+  if (!isRecord(value)) throw new ApiResponseShapeError("DirectorySyncResult");
+  return {
+    syncId: requireNonEmptyString(value, "syncId"),
+    startedAt: requireNonEmptyString(value, "startedAt"),
+    completedAt: requireNullableString(value, "completedAt"),
+    status: parseDirectorySyncStatus(value.status),
+    departmentsAdded: requireNonNegativeInteger(value, "departmentsAdded"),
+    departmentsUpdated: requireNonNegativeInteger(value, "departmentsUpdated"),
+    employeesAdded: requireNonNegativeInteger(value, "employeesAdded"),
+    employeesUpdated: requireNonNegativeInteger(value, "employeesUpdated"),
+    employeesOffboarded: requireNonNegativeInteger(value, "employeesOffboarded"),
+    conflictsDetected: requireNonNegativeInteger(value, "conflictsDetected"),
+  };
+}
+
+export function parseProviderDetail(value: unknown): ProviderDetail {
+  const summary = parseIdentityProvider(value);
+  if (!isRecord(value)) throw new ApiResponseShapeError("ProviderDetail");
+  const lastSync = value.lastSyncResult;
+  if (lastSync !== null && !isRecord(lastSync)) {
+    throw new ApiResponseShapeError("ProviderDetail.lastSyncResult");
+  }
+  return {
+    ...summary,
+    appId: requireString(value, "appId"),
+    secretConfigured: requireBoolean(value, "secretConfigured"),
+    callbackUrl: requireString(value, "callbackUrl"),
+    contactScope: requireString(value, "contactScope"),
+    lastValidatedAt: requireNullableString(value, "lastValidatedAt"),
+    lastSyncAt: requireNullableString(value, "lastSyncAt"),
+    lastSyncResult: lastSync === null ? null : parseDirectorySyncResult(lastSync),
+  };
+}
+
+export function parseDirectorySyncHistory(value: unknown): DirectorySyncHistoryEntry[] {
+  if (!Array.isArray(value)) throw new ApiResponseShapeError("DirectorySyncHistory");
+  return value.map((item) => {
+    if (!isRecord(item)) throw new ApiResponseShapeError("DirectorySyncHistoryEntry");
+    const result = parseDirectorySyncResult(item);
+    return {
+      syncId: result.syncId,
+      providerId: requireNonEmptyString(item, "providerId"),
+      startedAt: result.startedAt,
+      completedAt: result.completedAt,
+      status: result.status,
+      summary: requireString(item, "summary"),
+    };
+  });
+}
+
+export function parseSyncConflicts(value: unknown): SyncConflict[] {
+  if (!Array.isArray(value)) throw new ApiResponseShapeError("SyncConflictList");
+  return value.map((item) => {
+    if (!isRecord(item)) throw new ApiResponseShapeError("SyncConflict");
+    const reason = item.matchReason;
+    const status = item.status;
+    if (reason !== "email" && reason !== "name" && reason !== "manual") {
+      throw new ApiResponseShapeError("SyncConflict.matchReason");
+    }
+    if (status !== "pending" && status !== "resolved" && status !== "ignored") {
+      throw new ApiResponseShapeError("SyncConflict.status");
+    }
+    return {
+      conflictId: requireNonEmptyString(item, "conflictId"),
+      providerId: requireNonEmptyString(item, "providerId"),
+      externalSubject: requireNonEmptyString(item, "externalSubject"),
+      externalName: requireString(item, "externalName"),
+      externalEmail: requireString(item, "externalEmail"),
+      matchedUserId: requireNullableString(item, "matchedUserId"),
+      matchedUserName: requireNullableString(item, "matchedUserName"),
+      matchReason: reason,
+      status,
+      detectedAt: requireNonEmptyString(item, "detectedAt"),
+    };
+  });
+}
+
+export type PublicLoginProvider = {
+  providerId: string;
+  displayName: string;
+  loginEnabled: boolean;
+};
+
+export function parsePublicLoginProviders(value: unknown): PublicLoginProvider[] {
+  if (!isRecord(value)) throw new ApiResponseShapeError("PublicLoginProviders");
+  return requireArray(value, "items").map((item) => {
+    if (!isRecord(item)) throw new ApiResponseShapeError("PublicLoginProvider");
+    return {
+      providerId: requireNonEmptyString(item, "providerId"),
+      displayName: requireString(item, "displayName"),
+      loginEnabled: requireBoolean(item, "loginEnabled"),
+    };
+  });
 }
