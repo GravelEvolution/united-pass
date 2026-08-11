@@ -16,7 +16,7 @@ import { browserCommands } from "@/lib/api/browser/browser-commands";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import styles from "./policy-editor.module.css";
 
-export function PolicySimulationPanel() {
+export function PolicySimulationPanel({ policyId }: { policyId: string }) {
   const [action, setAction] = useState("application.manage");
   const [role, setRole] = useState("application_admin");
   const [department, setDepartment] = useState("identity_platform");
@@ -26,7 +26,7 @@ export function PolicySimulationPanel() {
   async function handleSimulate(): Promise<void> {
     setSimulating(true);
     try {
-      const simulationResult = await browserCommands.simulatePolicy({
+      const simulationResult = await browserCommands.simulatePolicy(policyId, {
         principalAttributes: { role, department },
         resourceAttributes: {},
         action,

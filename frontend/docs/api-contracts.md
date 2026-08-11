@@ -1,7 +1,7 @@
 # United Pass 前端 API 接入清单
 
-- 状态：Frozen v1 + P4/P5/P6 Frozen Amendments
-- 日期：2026-08-11（P6 Feishu Provider real-seam 接入修订）
+- 状态：Frozen v1 + P4/P5/P6/P7 Frozen Amendments
+- 日期：2026-08-11（P7 Policies/Audit real-seam 接入修订）
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect
 
@@ -441,8 +441,16 @@ P6 固定支持一条预置飞书记录，不提供通用 Provider 创建/编辑
 | `/admin/audit` | `GET /api/v1/admin/audit-events` | 分页筛选安全与管理事件 | `audit.read` |
 | `/admin/audit` | `POST /api/v1/admin/audit-exports` | 创建异步导出任务 | `audit.export`；重认证；字段脱敏；审计 |
 | 导出任务 | `GET /api/v1/admin/audit-exports/{exportId}` | 查询导出状态并获取短期下载地址 | `audit.export` |
+| 导出下载 | `GET /api/v1/admin/audit-exports/{exportId}/download` | 请求者下载 15 分钟内有效的固定字段 CSV | `audit.export`；所有权校验 |
 
-审计事件建议包含 `eventId`、`eventType`、受控的 actor/target 摘要、`occurredAt`、`result` 和 `requestId`。不得把令牌、密码、授权码、完整私密策略或敏感员工字段写入事件展示载荷。
+P7 实现中，策略 PATCH 必须提交 `expectedVersion`，每次修改创建不可变新版本；
+发布提交 exact `version` 并消费绑定 `policy.publish + policyId` 的单次重认证授权。
+simulation 只预览当前 working copy，不安装到 PDP，也不参与真实请求授权。
+
+审计事件包含 `eventId`、`eventType`、受控的 actor/target 摘要、`occurredAt`、
+`result`、`requestId` 和固定 operation label。导出任务返回 202，状态为
+`pending | processing | completed | failed`，最多 10,000 条；不得把 JSON payload、
+令牌、密码、授权码、Cookie、完整私密策略或敏感员工字段写入展示或 CSV。
 
 ## 数据源方法到 API 映射
 
@@ -469,6 +477,7 @@ P6 固定支持一条预置飞书记录，不提供通用 Provider 创建/编辑
 | `getClientDetail(applicationId, clientId)` | `GET /api/v1/admin/applications/{applicationId}/clients/{clientId}` | `OAuthClient \| null` |
 | `getAvailableScopes()` | `GET /api/v1/admin/scopes` | `AllowedScope[]` |
 | `getPolicies(query)` | `GET /api/v1/admin/policies` | `CursorPage<AuthorizationPolicy>` |
+| `getPolicyDetail(policyId)` | `GET /api/v1/admin/policies/{policyId}` | `PolicyDetail \| null` |
 | `getAuditEvents(query)` | `GET /api/v1/admin/audit-events` | `CursorPage<AuditEvent>` |
 
 ### Commands（写操作）
@@ -510,6 +519,11 @@ P6 固定支持一条预置飞书记录，不提供通用 Provider 创建/编辑
 | `updateProviderLogin(providerId, enabled, reauthToken)` | `POST /api/v1/admin/identity-providers/{providerId}/enable\|disable` + target-bound grant |
 | `resolveSyncConflict(conflictId, userId, reauthToken)` | `POST /api/v1/admin/identity-providers/sync-conflicts/{conflictId}/resolve`；显式稳定 `userId` + target-bound grant |
 | `ignoreSyncConflict(conflictId)` | `POST /api/v1/admin/identity-providers/sync-conflicts/{conflictId}/ignore` |
+| `savePolicyDraft(input)` | `POST /api/v1/admin/policies` 或带 `expectedVersion` 的 `PATCH /api/v1/admin/policies/{policyId}` |
+| `publishPolicy(policyId, version, reauthToken)` | `POST /api/v1/admin/policies/{policyId}/publish` + target-bound grant |
+| `simulatePolicy(policyId, input)` | `POST /api/v1/admin/policies/{policyId}/simulate` |
+| `exportAuditEvents(query, reauthToken)` | `POST /api/v1/admin/audit-exports`；返回 202 durable job |
+| `getAuditExport(exportId)` | `GET /api/v1/admin/audit-exports/{exportId}` |
 
 ### 已移除的 Mock 专用接口
 

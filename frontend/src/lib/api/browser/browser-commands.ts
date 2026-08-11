@@ -14,10 +14,13 @@ import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import { browserFetch } from "@/lib/api/browser/browser-http-client";
 import {
   parseDecisionResponse,
+  parseAuditExport,
   parseDepartmentDetail,
   parseDirectorySyncResult,
   parsePasskeyEnrollment,
   parsePasskeyEnrollmentConfirmation,
+  parsePolicyMutation,
+  parsePolicySimulation,
   parseProviderDetail,
   parseReauthenticationGrant,
   parseReauthenticationOutcome,
@@ -292,9 +295,50 @@ export const browserCommands: UnitedPassCommands = {
       },
 
   // Policy management
-  savePolicyDraft: (input) => mockUnitedPassDataSource.savePolicyDraft(input),
-  publishPolicy: (policyId) => mockUnitedPassDataSource.publishPolicy(policyId),
-  simulatePolicy: (input) => mockUnitedPassDataSource.simulatePolicy(input),
+  savePolicyDraft: USE_MOCK_DATA_SOURCE
+    ? (input) => mockUnitedPassDataSource.savePolicyDraft(input)
+    : async (input) => {
+        const body = {
+          name: input.name,
+          description: input.description,
+          resource: input.resource,
+          action: input.action,
+          effect: input.effect,
+          principals: input.principals,
+          conditions: input.conditions,
+          ...(input.policyId !== undefined && { expectedVersion: input.expectedVersion }),
+        };
+        const value = parsePolicyMutation(
+          await browserFetch<unknown>(
+            input.policyId === undefined
+              ? "/admin/policies"
+              : `/admin/policies/${encodeURIComponent(input.policyId)}`,
+            { method: input.policyId === undefined ? "POST" : "PATCH", body },
+          ),
+        );
+        const policyId = value.policyId ?? input.policyId;
+        if (policyId === undefined) throw new Error("Policy mutation omitted policyId");
+        return { policyId, version: value.version };
+      },
+  publishPolicy: USE_MOCK_DATA_SOURCE
+    ? (policyId) => mockUnitedPassDataSource.publishPolicy(policyId, 0, "")
+    : async (policyId, version, reauthToken, options) => {
+        const value = parsePolicyMutation(
+          await browserFetch<unknown>(
+            `/admin/policies/${encodeURIComponent(policyId)}/publish`,
+            { method: "POST", body: { version }, reauthToken, signal: options?.signal },
+          ),
+        );
+        return { version: value.version };
+      },
+  simulatePolicy: USE_MOCK_DATA_SOURCE
+    ? (policyId, input) => mockUnitedPassDataSource.simulatePolicy(policyId, input)
+    : async (policyId, input) => parsePolicySimulation(
+        await browserFetch<unknown>(
+          `/admin/policies/${encodeURIComponent(policyId)}/simulate`,
+          { method: "POST", body: input },
+        ),
+      ),
 
   // Provider management
   syncProviderDirectory: USE_MOCK_DATA_SOURCE
@@ -331,5 +375,22 @@ export const browserCommands: UnitedPassCommands = {
       },
 
   // Audit export
-  exportAuditEvents: (query) => mockUnitedPassDataSource.exportAuditEvents(query),
+  exportAuditEvents: USE_MOCK_DATA_SOURCE
+    ? (query) => mockUnitedPassDataSource.exportAuditEvents(query, "")
+    : async (query, reauthToken, options) => parseAuditExport(
+        await browserFetch<unknown>("/admin/audit-exports", {
+          method: "POST",
+          body: query,
+          reauthToken,
+          signal: options?.signal,
+        }),
+      ),
+  getAuditExport: USE_MOCK_DATA_SOURCE
+    ? (exportId) => mockUnitedPassDataSource.getAuditExport(exportId)
+    : async (exportId, options) => parseAuditExport(
+        await browserFetch<unknown>(
+          `/admin/audit-exports/${encodeURIComponent(exportId)}`,
+          { signal: options?.signal },
+        ),
+      ),
 };

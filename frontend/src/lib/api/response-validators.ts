@@ -27,6 +27,7 @@ import type { MfaMethod } from "@/features/auth/types";
 import type { CurrentUser, EmployeeProfile, UserPersona } from "@/types/identity";
 import type {
   AuditEvent,
+  AuditExportResult,
   DepartmentDetail,
   DepartmentRecord,
   DirectorySyncHistoryEntry,
@@ -39,6 +40,13 @@ import type {
   SyncConflict,
   UserDetail,
 } from "@/features/admin/types";
+import type {
+  AuthorizationPolicy,
+  PolicyCondition,
+  PolicyDetail,
+  PolicyPrincipal,
+  PolicySimulationResult,
+} from "@/features/policies/types";
 import type { CursorPage } from "@/types/pagination";
 import type { PermissionCapabilities } from "@/types/permissions";
 
@@ -112,6 +120,12 @@ function requireNonNegativeInteger(record: Record<string, unknown>, field: strin
     throw new ApiResponseShapeError(field);
   }
   return value as number;
+}
+
+function requirePositiveInteger(record: Record<string, unknown>, field: string): number {
+  const value = requireNonNegativeInteger(record, field);
+  if (value < 1) throw new ApiResponseShapeError(field);
+  return value;
 }
 
 function requireNullableString(record: Record<string, unknown>, field: string): string | null {
@@ -842,4 +856,116 @@ export function parsePublicLoginProviders(value: unknown): PublicLoginProvider[]
       loginEnabled: requireBoolean(item, "loginEnabled"),
     };
   });
+}
+
+// --- Phase 7 policies and audit ---
+
+function parsePolicyStatus(value: unknown): "draft" | "published" {
+  if (value !== "draft" && value !== "published") {
+    throw new ApiResponseShapeError("Policy.status");
+  }
+  return value;
+}
+
+function parsePolicyEffect(value: unknown): "allow" | "deny" {
+  if (value !== "allow" && value !== "deny") {
+    throw new ApiResponseShapeError("Policy.effect");
+  }
+  return value;
+}
+
+function parsePolicyClause(value: unknown, principal: true): PolicyPrincipal;
+function parsePolicyClause(value: unknown, principal: false): PolicyCondition;
+function parsePolicyClause(value: unknown, principal: boolean): PolicyPrincipal | PolicyCondition {
+  if (!isRecord(value)) throw new ApiResponseShapeError("PolicyClause");
+  const operator = requireNonEmptyString(value, "operator");
+  const allowed = principal
+    ? ["eq", "neq", "in", "not_in", "contains"]
+    : ["eq", "neq", "in", "not_in", "gt", "lt", "contains"];
+  if (!allowed.includes(operator)) throw new ApiResponseShapeError("PolicyClause.operator");
+  return {
+    attribute: requireNonEmptyString(value, "attribute"),
+    operator: operator as PolicyCondition["operator"],
+    value: requireString(value, "value"),
+  } as PolicyCondition;
+}
+
+function parsePolicySummary(value: unknown): AuthorizationPolicy {
+  if (!isRecord(value)) throw new ApiResponseShapeError("AuthorizationPolicy");
+  return {
+    policyId: requireNonEmptyString(value, "policyId"),
+    name: requireNonEmptyString(value, "name"),
+    resource: requireNonEmptyString(value, "resource"),
+    version: requirePositiveInteger(value, "version"),
+    status: parsePolicyStatus(value.status),
+    updatedBy: requireString(value, "updatedBy"),
+    updatedAt: requireNonEmptyString(value, "updatedAt"),
+  };
+}
+
+export function parsePolicies(value: unknown): CursorPage<AuthorizationPolicy> {
+  return parseCursorPage(value, "AuthorizationPolicyPage", parsePolicySummary);
+}
+
+export function parsePolicyDetail(value: unknown): PolicyDetail {
+  if (!isRecord(value)) throw new ApiResponseShapeError("PolicyDetail");
+  return {
+    ...parsePolicySummary(value),
+    description: requireString(value, "description"),
+    action: requireNonEmptyString(value, "action"),
+    effect: parsePolicyEffect(value.effect),
+    principals: requireArray(value, "principals").map((item) => parsePolicyClause(item, true)),
+    conditions: requireArray(value, "conditions").map((item) => parsePolicyClause(item, false)),
+    versionHistory: requireArray(value, "versionHistory").map((item) => {
+      if (!isRecord(item)) throw new ApiResponseShapeError("PolicyVersionSummary");
+      return {
+        version: requirePositiveInteger(item, "version"),
+        status: parsePolicyStatus(item.status),
+        updatedBy: requireString(item, "updatedBy"),
+        updatedAt: requireNonEmptyString(item, "updatedAt"),
+        changeSummary: requireString(item, "changeSummary"),
+      };
+    }),
+  };
+}
+
+export function parsePolicyMutation(value: unknown): { policyId?: string; version: number } {
+  if (!isRecord(value)) throw new ApiResponseShapeError("PolicyMutation");
+  const policyId = optionalString(value, "policyId");
+  return { ...(policyId !== undefined && { policyId }), version: requirePositiveInteger(value, "version") };
+}
+
+export function parsePolicySimulation(value: unknown): PolicySimulationResult {
+  if (!isRecord(value)) throw new ApiResponseShapeError("PolicySimulationResult");
+  const decision = value.decision;
+  if (decision !== "allow" && decision !== "deny" && decision !== "no_match") {
+    throw new ApiResponseShapeError("PolicySimulationResult.decision");
+  }
+  return {
+    decision,
+    matchedPolicyId: requireNullableString(value, "matchedPolicyId"),
+    matchedPolicyName: requireNullableString(value, "matchedPolicyName"),
+    evaluatedAt: requireNonEmptyString(value, "evaluatedAt"),
+    reasons: requireStringArray(value, "reasons"),
+  };
+}
+
+export function parseAuditEvents(value: unknown): CursorPage<AuditEvent> {
+  return parseCursorPage(value, "AuditEventPage", parseAuditEvent);
+}
+
+export function parseAuditExport(value: unknown): AuditExportResult {
+  if (!isRecord(value)) throw new ApiResponseShapeError("AuditExportResult");
+  const status = value.status;
+  if (status !== "pending" && status !== "processing" && status !== "completed" && status !== "failed") {
+    throw new ApiResponseShapeError("AuditExportResult.status");
+  }
+  return {
+    exportId: requireNonEmptyString(value, "exportId"),
+    status,
+    downloadUrl: requireNullableString(value, "downloadUrl"),
+    requestedAt: requireNonEmptyString(value, "requestedAt"),
+    completedAt: requireNullableString(value, "completedAt"),
+    totalEvents: requireNonNegativeInteger(value, "totalEvents"),
+  };
 }

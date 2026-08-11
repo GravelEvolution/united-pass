@@ -1195,6 +1195,15 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       });
     },
 
+    getAuditExport: (exportId: string): Promise<AuditExportResult> => Promise.resolve({
+      exportId,
+      status: "completed",
+      downloadUrl: null,
+      requestedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      totalEvents: auditEvents.length,
+    }),
+
     updateProfile: (input: { displayName?: string; nickname?: string }): Promise<void> => {
       if (input.displayName !== undefined) {
         employeeAdminUser.displayName = input.displayName;
@@ -1474,7 +1483,7 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       return Promise.resolve({ version: detail.version });
     },
 
-    simulatePolicy: (input: PolicySimulationInput): Promise<PolicySimulationResult> => {
+    simulatePolicy: (_policyId: string, input: PolicySimulationInput): Promise<PolicySimulationResult> => {
       const now = new Date().toISOString();
       const role = input.principalAttributes["role"] ?? "";
       const department = input.principalAttributes["department"] ?? "";

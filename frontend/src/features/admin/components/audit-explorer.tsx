@@ -8,7 +8,7 @@
 
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Button,
@@ -25,23 +25,26 @@ import type { ColumnProps } from "@douyinfe/semi-ui/lib/es/table";
 import { IconSearch, IconExport } from "@douyinfe/semi-icons";
 import { StatusBadge } from "@/components/common/status-badge";
 import { PageHeader } from "@/components/common/page-header";
+import { AccountReauthenticationForm } from "@/features/account/components/security-overview";
 import type { AuditEvent, AuditExportResult } from "@/features/admin/types";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
+import type { CursorPage } from "@/types/pagination";
 import styles from "./admin.module.css";
 
 const EVENT_TYPE_OPTIONS = [
   { value: "", label: "全部事件类型" },
-  { value: "用户登录", label: "用户登录" },
-  { value: "策略发布", label: "策略发布" },
-  { value: "管理操作拒绝", label: "管理操作拒绝" },
-  { value: "会话撤销", label: "会话撤销" },
-  { value: "OAuth 授权同意", label: "OAuth 授权同意" },
-  { value: "Client Secret 轮换", label: "Client Secret 轮换" },
-  { value: "应用停用", label: "应用停用" },
-  { value: "员工入职", label: "员工入职" },
-  { value: "Provider 同步", label: "Provider 同步" },
-  { value: "密码修改", label: "密码修改" },
+  { value: "policy.published", label: "策略发布" },
+  { value: "policy.publication_failed", label: "策略发布失败" },
+  { value: "authorization.denied", label: "管理操作拒绝" },
+  { value: "session.revoked", label: "会话撤销" },
+  { value: "consent.grant_allowed", label: "OAuth 授权同意" },
+  { value: "oauth_client.secret_rotated", label: "Client Secret 轮换" },
+  { value: "application.disabled", label: "应用停用" },
+  { value: "employee.linked", label: "员工档案关联" },
+  { value: "provider.directory_sync_completed", label: "Provider 同步" },
+  { value: "account.password_changed", label: "密码修改" },
+  { value: "audit.export_requested", label: "审计导出" },
 ];
 
 const RESULT_OPTIONS = [
@@ -52,14 +55,19 @@ const RESULT_OPTIONS = [
 
 type AuditExplorerProps = {
   records: AuditEvent[];
+  page: CursorPage<unknown>["page"];
+  hasPrevious: boolean;
+  canExport: boolean;
 };
 
-export function AuditExplorer({ records }: AuditExplorerProps) {
+export function AuditExplorer({ records, page, hasPrevious, canExport }: AuditExplorerProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [selectedEvent, setSelectedEvent] = useState<AuditEvent | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportResult, setExportResult] = useState<AuditExportResult | null>(null);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const exportOperation = useRef<AbortController | null>(null);
 
   function updateFilter(key: string, value: string): void {
     const params = new URLSearchParams(searchParams.toString());
@@ -85,6 +93,13 @@ export function AuditExplorer({ records }: AuditExplorerProps) {
     router.push(`/admin/audit?${params.toString()}`);
   }
 
+  function navigateCursor(cursor?: string): void {
+    const params = new URLSearchParams(searchParams.toString());
+    if (cursor) params.set("cursor", cursor);
+    else params.delete("cursor");
+    router.push(`/admin/audit?${params.toString()}`);
+  }
+
   function buildExportQuery(): Record<string, string | undefined> {
     const params: Record<string, string | undefined> = {};
     const query = searchParams.get("q") ?? undefined;
@@ -104,38 +119,37 @@ export function AuditExplorer({ records }: AuditExplorerProps) {
     return params;
   }
 
-  async function handleExport(): Promise<void> {
+  async function handleExport(reauthToken: string, signal: AbortSignal): Promise<void> {
     setExporting(true);
     try {
-      const result = await browserCommands.exportAuditEvents(buildExportQuery());
+      let result = await browserCommands.exportAuditEvents(
+        buildExportQuery(),
+        reauthToken,
+        { signal },
+      );
       setExportResult(result);
-      Toast.success({ content: `导出完成，共 ${result.totalEvents} 条事件。` });
+      for (let attempt = 0; attempt < 30 && (result.status === "pending" || result.status === "processing"); attempt += 1) {
+        await waitForPoll(signal);
+        result = await browserCommands.getAuditExport(result.exportId, { signal });
+        setExportResult(result);
+      }
+      if (result.status === "failed") throw new Error("audit export failed");
+      if (result.status !== "completed") {
+        Toast.info({ content: "导出仍在后台处理中，可稍后刷新查看。" });
+      } else {
+        Toast.success({ content: `导出完成，共 ${result.totalEvents} 条事件。` });
+      }
+      setExportDialogOpen(false);
     } catch {
       Toast.error({ content: "导出失败，请重试。" });
+      throw new Error("audit export failed");
     } finally {
       setExporting(false);
     }
   }
 
   function openExportModal(): void {
-    Modal.confirm({
-      title: "导出审计日志",
-      content: (
-        <div>
-          <p>将根据当前筛选条件导出审计事件。</p>
-          <p>导出范围：{records.length} 条事件（当前页面可见）。</p>
-          <p>导出格式：CSV。导出完成后可下载。</p>
-          <p style={{ color: "var(--up-muted)", fontSize: 13 }}>
-            导出任务在后端异步执行。完成后会通知请求者。
-          </p>
-        </div>
-      ),
-      okText: "确认导出",
-      cancelText: "取消",
-      onOk: async () => {
-        await handleExport();
-      },
-    });
+    setExportDialogOpen(true);
   }
 
   const columns: ColumnProps<AuditEvent>[] = [
@@ -242,7 +256,7 @@ export function AuditExplorer({ records }: AuditExplorerProps) {
         eyebrow="Security audit"
         title="审计事件"
         description="查看重要身份、安全和管理操作。支持按事件类型、操作者、结果和时间范围筛选。"
-        action={
+        action={canExport ? (
           <Button
             theme="solid"
             type="primary"
@@ -253,7 +267,7 @@ export function AuditExplorer({ records }: AuditExplorerProps) {
           >
             导出审计日志
           </Button>
-        }
+        ) : undefined}
       />
 
       <section className={styles.directoryCard} aria-label="审计事件目录">
@@ -314,12 +328,27 @@ export function AuditExplorer({ records }: AuditExplorerProps) {
             columns={columns}
             dataSource={records}
             empty={<Empty title="没有匹配记录" description="请调整筛选条件后重试。" />}
-            pagination={{ pageSize: 20, hideOnSinglePage: true, showTotal: true }}
+            pagination={false}
             rowKey="eventId"
             scroll={{ x: 1200 }}
             size="middle"
           />
         </div>
+        {(page.hasMore || hasPrevious) && (
+          <div className={styles.toolbar} style={{ justifyContent: "flex-end" }}>
+            <Button theme="outline" onClick={() => router.back()} disabled={!hasPrevious}>
+              上一页
+            </Button>
+            <Button
+              theme="solid"
+              type="primary"
+              onClick={() => navigateCursor(page.nextCursor ?? undefined)}
+              disabled={!page.hasMore || !page.nextCursor}
+            >
+              下一页
+            </Button>
+          </div>
+        )}
       </section>
 
       {exportResult && (
@@ -328,8 +357,37 @@ export function AuditExplorer({ records }: AuditExplorerProps) {
           <p style={{ margin: 0, color: "var(--up-muted)", fontSize: 13 }}>
             导出 ID：<code>{exportResult.exportId}</code> · 状态：{exportResult.status === "completed" ? "已完成" : exportResult.status} · 事件数：{exportResult.totalEvents} · 请求时间：{formatSecurityDateTime(exportResult.requestedAt)}
           </p>
+          {exportResult.downloadUrl && (
+            <p style={{ margin: "8px 0 0" }}>
+              <a href={exportResult.downloadUrl}>下载 CSV（链接 15 分钟内有效）</a>
+            </p>
+          )}
         </div>
       )}
+
+      <Modal
+        title="重新认证并导出审计日志"
+        visible={exportDialogOpen}
+        footer={null}
+        maskClosable={false}
+        closeOnEsc={false}
+        onCancel={() => {
+          exportOperation.current?.abort();
+          exportOperation.current = null;
+          setExportDialogOpen(false);
+        }}
+      >
+        <p>将按当前筛选条件创建后端异步 CSV 导出任务。导出内容仅包含固定、脱敏的审计字段。</p>
+        <AccountReauthenticationForm
+          action="audit.export"
+          target="audit"
+          submitLabel="验证并导出"
+          browserOperationRef={exportOperation}
+          onGranted={handleExport}
+          onCancel={() => setExportDialogOpen(false)}
+          operationError="审计导出失败。授权不会被重复使用，请重新验证后再试。"
+        />
+      </Modal>
 
       <SideSheet
         title="审计事件详情"
@@ -387,4 +445,14 @@ export function AuditExplorer({ records }: AuditExplorerProps) {
       </SideSheet>
     </>
   );
+}
+
+function waitForPoll(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(resolve, 1000);
+    signal.addEventListener("abort", () => {
+      window.clearTimeout(timeout);
+      reject(new DOMException("Aborted", "AbortError"));
+    }, { once: true });
+  });
 }

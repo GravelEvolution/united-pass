@@ -187,8 +187,8 @@ export interface UnitedPassCommands {
 
   // Policy management
   savePolicyDraft(input: PolicyDraftInput): Promise<{ policyId: string; version: number }>;
-  publishPolicy(policyId: string): Promise<{ version: number }>;
-  simulatePolicy(input: PolicySimulationInput): Promise<PolicySimulationResult>;
+  publishPolicy(policyId: string, version: number, reauthToken: string, options?: BrowserCommandOptions): Promise<{ version: number }>;
+  simulatePolicy(policyId: string, input: PolicySimulationInput): Promise<PolicySimulationResult>;
 
   // Provider management
   syncProviderDirectory(providerId: string): Promise<DirectorySyncResult>;
@@ -207,7 +207,8 @@ export interface UnitedPassCommands {
   ignoreSyncConflict(conflictId: string): Promise<void>;
 
   // Audit export
-  exportAuditEvents(query: AuditQuery): Promise<AuditExportResult>;
+  exportAuditEvents(query: AuditQuery, reauthToken: string, options?: BrowserCommandOptions): Promise<AuditExportResult>;
+  getAuditExport(exportId: string, options?: BrowserCommandOptions): Promise<AuditExportResult>;
 }
 
 /**

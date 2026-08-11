@@ -51,10 +51,10 @@
 | `/admin/applications/[applicationId]/clients/[clientId]` | Mock 完成 | 独立 Client 详情、Secret 轮换 |
 | `/admin/providers` | P6 real seam | Provider 列表 |
 | `/admin/providers/[providerId]` | P6 real seam | 飞书 Provider 详情、异步目录同步、显式冲突处理 |
-| `/admin/policies` | Mock 完成 | 策略列表 |
-| `/admin/policies/new` | Mock 完成 | ABAC 策略编辑器 |
-| `/admin/policies/[policyId]` | Mock 完成 | 策略详情、版本历史、模拟、发布 |
-| `/admin/audit` | Mock 完成 | 审计事件筛选（类型、操作者、结果、Request ID、日期范围）、事件详情、导出 |
+| `/admin/policies` | P7 真实 API | 策略列表 |
+| `/admin/policies/new` | P7 真实 API | ABAC 策略编辑器、乐观锁草稿 |
+| `/admin/policies/[policyId]` | P7 真实 API | 策略详情、版本历史、模拟、重认证发布 |
+| `/admin/audit` | P7 真实 API | 审计事件服务端筛选、详情、重认证异步导出 |
 
 ### 1.4 法律文件
 
@@ -302,3 +302,17 @@ to `user.disable`, `user.sessions.revoke`, or `employee.offboard` and the exact
 target `userId`. Frontend capability checks remain UX-only; backend checks are
 authoritative. The old “Mock 完成” table above is historical freeze context for
 these P5 routes.
+
+## 12. P7 policy/audit amendment — 2026-08-11
+
+Policy list/detail/draft/simulation/publication and audit search/export are now
+real backend seams in non-Mock mode. Server Component reads stay uncached and
+every response is runtime-narrowed. Draft PATCHes carry `expectedVersion`;
+publication persists the exact form version and then uses the shared
+password/TOTP/passkey reauthentication UI bound to `policy.publish + policyId`.
+
+Audit export uses a grant bound to `audit.export + audit`, receives a durable
+202 job, polls boundedly and shows pending/processing/failed/completed states.
+Only a completed result exposes the backend same-origin, 15-minute CSV URL.
+Frontend capability checks remain UX-only; backend Cerbos and ownership checks
+are authoritative.

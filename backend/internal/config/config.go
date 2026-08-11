@@ -91,6 +91,9 @@ const (
 	defaultFeishuRequestTimeout    = 15 * time.Second
 	defaultFeishuReconcileInterval = 15 * time.Second
 	defaultFeishuSyncTimeout       = 2 * time.Minute
+
+	defaultCerbosRequestTimeout    = 3 * time.Second
+	defaultCerbosReconcileInterval = 30 * time.Second
 )
 
 // Config holds all process-level configuration. Values are loaded once at
@@ -134,6 +137,9 @@ type Config struct {
 
 	// Phase 6 — Feishu login and directory Provider
 	Feishu FeishuConfig
+
+	// Phase 7 — Cerbos policy decision and management APIs
+	Cerbos CerbosConfig
 
 	// Integration tests
 	Test TestConfig
@@ -289,6 +295,22 @@ type FeishuConfig struct {
 	SyncTimeout       time.Duration
 }
 
+// CerbosConfig contains server-only PDP and Admin API configuration. Admin
+// credentials are used only on policy publication and are never logged or
+// returned by an API.
+type CerbosConfig struct {
+	PDPURL            string
+	AdminURL          string
+	AdminUsername     string
+	AdminPassword     string
+	RequestTimeout    time.Duration
+	ReconcileInterval time.Duration
+}
+
+func (c CerbosConfig) Configured() bool {
+	return c.PDPURL != "" && c.AdminURL != "" && c.AdminUsername != "" && c.AdminPassword != ""
+}
+
 // Configured reports whether the complete Feishu credential and tenant set
 // is present. Partial sets are rejected by Config.Validate.
 func (c FeishuConfig) Configured() bool {
@@ -423,6 +445,15 @@ func Load() (Config, error) {
 			RequestTimeout:    durationOr("UP_FEISHU_REQUEST_TIMEOUT", defaultFeishuRequestTimeout),
 			ReconcileInterval: durationOr("UP_FEISHU_RECONCILE_INTERVAL", defaultFeishuReconcileInterval),
 			SyncTimeout:       durationOr("UP_FEISHU_SYNC_TIMEOUT", defaultFeishuSyncTimeout),
+		},
+
+		Cerbos: CerbosConfig{
+			PDPURL:            envOr("UP_CERBOS_PDP_URL", ""),
+			AdminURL:          envOr("UP_CERBOS_ADMIN_URL", ""),
+			AdminUsername:     envOr("UP_CERBOS_ADMIN_USERNAME", ""),
+			AdminPassword:     envOr("UP_CERBOS_ADMIN_PASSWORD", ""),
+			RequestTimeout:    durationOr("UP_CERBOS_REQUEST_TIMEOUT", defaultCerbosRequestTimeout),
+			ReconcileInterval: durationOr("UP_CERBOS_RECONCILE_INTERVAL", defaultCerbosReconcileInterval),
 		},
 
 		Test: TestConfig{
@@ -662,6 +693,31 @@ func (c Config) Validate() error {
 		}
 	}
 
+	cerbosValues := []string{c.Cerbos.PDPURL, c.Cerbos.AdminURL, c.Cerbos.AdminUsername, c.Cerbos.AdminPassword}
+	configuredCerbosValues := 0
+	for _, value := range cerbosValues {
+		if value != "" {
+			configuredCerbosValues++
+		}
+	}
+	if configuredCerbosValues != 0 && configuredCerbosValues != len(cerbosValues) {
+		errs = append(errs, errors.New("Cerbos requires UP_CERBOS_PDP_URL, UP_CERBOS_ADMIN_URL, UP_CERBOS_ADMIN_USERNAME and UP_CERBOS_ADMIN_PASSWORD together"))
+	}
+	if c.Cerbos.Configured() {
+		if c.Cerbos.RequestTimeout <= 0 || c.Cerbos.RequestTimeout > 30*time.Second || c.Cerbos.ReconcileInterval <= 0 {
+			errs = append(errs, errors.New("Cerbos request timeout must be positive and at most 30 seconds; reconciliation interval must be positive"))
+		}
+		if err := validateProviderURL(c.Cerbos.PDPURL, c.IsProduction(), false); err != nil {
+			errs = append(errs, fmt.Errorf("Cerbos PDP URL: %w", err))
+		}
+		if err := validateProviderURL(c.Cerbos.AdminURL, c.IsProduction(), false); err != nil {
+			errs = append(errs, fmt.Errorf("Cerbos Admin URL: %w", err))
+		}
+		if c.Cerbos.AdminUsername == "cerbos" && c.Cerbos.AdminPassword == "cerbosAdmin" {
+			errs = append(errs, errors.New("Cerbos default Admin API credentials are forbidden"))
+		}
+	}
+
 	// Integration test validation (when configured).
 	if c.Test.DatabaseURL != "" {
 		if c.Test.DatabaseSchema == "" {
@@ -729,6 +785,9 @@ func (c Config) Validate() error {
 		}
 		if c.Permission.DevOverrideEnabled {
 			errs = append(errs, errors.New("production must not enable permission dev override"))
+		}
+		if !c.Cerbos.Configured() {
+			errs = append(errs, errors.New("production requires complete Cerbos configuration"))
 		}
 	}
 

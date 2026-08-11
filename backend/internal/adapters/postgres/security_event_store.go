@@ -59,11 +59,11 @@ func insertSecurityEvent(ctx context.Context, q eventExecer, ev applications.Sec
 	if _, err := q.Exec(ctx,
 		`INSERT INTO security_events
 		     (event_id, event_type, actor_user_id, application_id, client_id,
-		      request_id, operation, result, payload, occurred_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		      request_id, operation, result, payload, occurred_at, target_kind, target_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		string(ev.EventID), ev.EventType, string(ev.ActorUserID),
 		string(ev.ApplicationID), string(ev.ClientID), ev.RequestID,
-		ev.Operation, string(ev.Result), payload, ev.OccurredAt); err != nil {
+		ev.Operation, string(ev.Result), payload, ev.OccurredAt, ev.TargetKey, ev.TargetID); err != nil {
 		return fmt.Errorf("postgres: record security event: %w", err)
 	}
 	return nil

@@ -1044,6 +1044,8 @@ func TestReauthRequest_ManagementActionRequiresOnlyExactTargetBinding(t *testing
 		{auth.ReauthActionProviderEnable, "provider_feishu", "provider_other"},
 		{auth.ReauthActionProviderDisable, "provider_feishu", "provider_other"},
 		{auth.ReauthActionProviderIdentityLink, "conflict_target", "conflict_other"},
+		{auth.ReauthActionPolicyPublish, "pol_target", "pol_other"},
+		{auth.ReauthActionAuditExport, "audit", "audit_other"},
 	} {
 		t.Run(tc.action, func(t *testing.T) {
 			env := newReauthEnv()

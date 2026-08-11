@@ -145,6 +145,11 @@ func TestValidateProductionConstraints(t *testing.T) {
 	cfg.Auth.BaseURL = "https://auth.example.com"
 	cfg.Auth.ServiceAccountKeyFile = "/secrets/zitadel/key.json"
 	cfg.OAuth.PublicOrigin = "https://id.example.com"
+	cfg.Cerbos = CerbosConfig{
+		PDPURL: "https://cerbos-pdp.example.com", AdminURL: "https://cerbos-admin.example.com",
+		AdminUsername: "united-pass", AdminPassword: "test-password",
+		RequestTimeout: 3 * time.Second, ReconcileInterval: 30 * time.Second,
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate should accept valid production config: %v", err)
 	}
@@ -259,6 +264,30 @@ func TestValidateRejectsPartialFeishuCredentials(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate should reject a partial Feishu credential set")
 	}
+}
+
+func TestValidateCerbosConfiguration(t *testing.T) {
+	t.Run("partial set", func(t *testing.T) {
+		cfg := validDevelopmentConfig()
+		cfg.Cerbos.PDPURL = "http://127.0.0.1:3592"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("partial Cerbos configuration must be rejected")
+		}
+	})
+	t.Run("default admin credentials", func(t *testing.T) {
+		cfg := validDevelopmentConfig()
+		cfg.Cerbos = CerbosConfig{PDPURL: "http://127.0.0.1:3592", AdminURL: "http://127.0.0.1:3592", AdminUsername: "cerbos", AdminPassword: "cerbosAdmin", RequestTimeout: 3 * time.Second, ReconcileInterval: 30 * time.Second}
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("default Cerbos Admin API credentials must be rejected")
+		}
+	})
+	t.Run("complete development set", func(t *testing.T) {
+		cfg := validDevelopmentConfig()
+		cfg.Cerbos = CerbosConfig{PDPURL: "http://127.0.0.1:3592", AdminURL: "http://127.0.0.1:3592", AdminUsername: "united-pass", AdminPassword: "private", RequestTimeout: 3 * time.Second, ReconcileInterval: 30 * time.Second}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("complete Cerbos configuration rejected: %v", err)
+		}
+	})
 }
 
 func TestValidateAcceptsCompleteFeishuConfiguration(t *testing.T) {
@@ -421,6 +450,11 @@ func TestValidateOAuthPublicOriginProductionHTTPS(t *testing.T) {
 	base.Auth.Provider = "zitadel"
 	base.Auth.BaseURL = "https://auth.example.com"
 	base.Auth.ServiceAccountKeyFile = "/secrets/zitadel/key.json"
+	base.Cerbos = CerbosConfig{
+		PDPURL: "https://cerbos-pdp.example.com", AdminURL: "https://cerbos-admin.example.com",
+		AdminUsername: "united-pass", AdminPassword: "test-password",
+		RequestTimeout: 3 * time.Second, ReconcileInterval: 30 * time.Second,
+	}
 
 	cfg := base
 	cfg.OAuth.PublicOrigin = "http://id.example.com"

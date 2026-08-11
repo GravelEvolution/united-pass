@@ -194,7 +194,9 @@ func isValidReauthAction(action string) bool {
 		auth.ReauthActionEmployeeOffboard,
 		auth.ReauthActionProviderEnable,
 		auth.ReauthActionProviderDisable,
-		auth.ReauthActionProviderIdentityLink:
+		auth.ReauthActionProviderIdentityLink,
+		auth.ReauthActionPolicyPublish,
+		auth.ReauthActionAuditExport:
 		return true
 	default:
 		return false

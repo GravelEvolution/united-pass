@@ -25,6 +25,17 @@ export default async function PoliciesPage({
     status: params.status,
     cursor: params.cursor,
   };
-  const page = await serverQueries.getPolicies(query);
-  return <PoliciesTable records={page.items} actionHref="/admin/policies/new" />;
+  const [page, permissions] = await Promise.all([
+    serverQueries.getPolicies(query),
+    serverQueries.getCurrentPermissions(),
+  ]);
+  return (
+    <PoliciesTable
+      records={page.items}
+      page={page.page}
+      query={params.q}
+      hasPrevious={Boolean(params.cursor)}
+      actionHref={permissions.policyManage ? "/admin/policies/new" : undefined}
+    />
+  );
 }

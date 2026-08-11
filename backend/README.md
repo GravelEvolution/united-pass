@@ -164,6 +164,12 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_FEISHU_REQUEST_TIMEOUT` | `15s` | Per-request Feishu HTTP timeout. |
 | `UP_FEISHU_RECONCILE_INTERVAL` | `15s` | Durable directory-job worker interval. |
 | `UP_FEISHU_SYNC_TIMEOUT` | `2m` | One directory reconciliation attempt deadline. |
+| `UP_CERBOS_PDP_URL` | | Cerbos PDP HTTP origin. Complete Cerbos configuration is required in production. |
+| `UP_CERBOS_ADMIN_URL` | | Mutable Cerbos Admin API origin; HTTPS required in production. |
+| `UP_CERBOS_ADMIN_USERNAME` | | Non-default, server-only Admin API Basic authentication username. |
+| `UP_CERBOS_ADMIN_PASSWORD` | | Server-only Admin API password. Default Cerbos credentials are rejected. |
+| `UP_CERBOS_REQUEST_TIMEOUT` | `3s` | Bounded PDP/Admin request timeout; maximum 30 seconds. |
+| `UP_CERBOS_RECONCILE_INTERVAL` | `30s` | Durable policy publication reconciliation interval. |
 | `UP_SSH_HOST` | | SSH host for the development tunnel (`scripts/tunnel.sh`). |
 | `UP_SSH_PORT` | `22` | SSH port for the development tunnel. |
 | `UP_SSH_USER` | | SSH user for the development tunnel. |

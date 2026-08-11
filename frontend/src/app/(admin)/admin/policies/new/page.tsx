@@ -8,10 +8,17 @@
 
 import type { Metadata } from "next";
 import { PolicyEditor } from "@/features/policies/components/policy-editor";
+import { serverQueries } from "@/lib/api/server/server-queries";
 
 export const metadata: Metadata = { title: "新建策略" };
 export const dynamic = "force-dynamic";
 
-export default function NewPolicyPage() {
-  return <PolicyEditor />;
+export default async function NewPolicyPage() {
+  const permissions = await serverQueries.getCurrentPermissions();
+  return (
+    <PolicyEditor
+      canManage={permissions.policyManage}
+      canPublish={permissions.policyPublish}
+    />
+  );
 }

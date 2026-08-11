@@ -23,6 +23,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	zitadelsdk "github.com/zitadel/zitadel-go/v3/pkg/client"
 
+	"github.com/GravelEvolution/united-pass/backend/internal/adapters/cerbos"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/feishu"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
@@ -30,11 +31,13 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/redis"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/zitadel"
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
+	"github.com/GravelEvolution/united-pass/backend/internal/audit"
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/consent"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
+	"github.com/GravelEvolution/united-pass/backend/internal/policies"
 	"github.com/GravelEvolution/united-pass/backend/internal/providers"
 	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
@@ -54,6 +57,18 @@ type Server struct {
 	// workerStops stops background workers (e.g. the abandoned reauth
 	// challenge cleanup worker) before infrastructure is closed.
 	workerStops []func()
+}
+
+type cerbosReadinessChecker struct {
+	client  interface{ Ready(context.Context) error }
+	timeout time.Duration
+}
+
+func (c *cerbosReadinessChecker) Name() string { return "cerbos" }
+func (c *cerbosReadinessChecker) Check(ctx context.Context) error {
+	checkCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	return c.client.Ready(checkCtx)
 }
 
 // NewServer constructs the router, applies middleware, mounts routes and
@@ -121,6 +136,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var rateChecker httpapi.RateChecker
 	var sessionAuditor session.SecurityAuditor
 	var workerStops []func()
+	var cerbosClient *cerbos.Client
 
 	if pool != nil {
 		userRepo := postgres.NewUserRepository(pool.PgxPool())
@@ -195,8 +211,36 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		rateChecker = redis.NewRateLimiter(redisClient)
 	}
 
-	// Permission resolver: fail-closed by default, with optional dev override.
-	permResolver = permissions.NewResolver(cfg)
+	// Phase 7 Cerbos boundary (ADR-0013). The REST adapter uses bounded HTTP
+	// calls and the Admin credentials never leave server configuration.
+	if cfg.Cerbos.Configured() {
+		cerbosClient, err = cerbos.NewClient(
+			cfg.Cerbos.PDPURL, cfg.Cerbos.AdminURL,
+			cfg.Cerbos.AdminUsername, cfg.Cerbos.AdminPassword,
+			&http.Client{Timeout: cfg.Cerbos.RequestTimeout},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("Cerbos client: %w", err)
+		}
+		readinessCheckers = append(readinessCheckers, &cerbosReadinessChecker{client: cerbosClient, timeout: cfg.Cerbos.RequestTimeout})
+	}
+
+	// Permission resolver: Cerbos is authoritative when configured. The
+	// development-only explicit override remains outermost, while the
+	// workforce offboarding guard is added below and therefore always wins.
+	var permissionBase permissions.Resolver = permissions.NewDefaultResolver()
+	var policyRepo *postgres.PolicyRepository
+	if pool != nil {
+		policyRepo = postgres.NewPolicyRepository(pool.PgxPool())
+	}
+	if pool != nil && cerbosClient != nil && policyRepo != nil {
+		permissionBase = permissions.NewCerbosResolver(
+			postgres.NewPermissionContextRepository(pool.PgxPool()), policyRepo, cerbosClient, request.ID)
+	}
+	permResolver = permissionBase
+	if cfg.Permission.DevOverrideEnabled {
+		permResolver = permissions.NewDevOverrideResolver(permissionBase, cfg.Permission)
+	}
 
 	// Phase 5 identity/workforce authority (ADR-0011). PostgreSQL owns the
 	// employee/department state and wraps every permission decision with the
@@ -247,6 +291,24 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			reconciler.Start()
 			workerStops = append(workerStops, reconciler.Stop)
 		}
+	}
+
+	// Phase 7 policy and audit services. Drafts and audit search remain
+	// available with PostgreSQL alone; publication additionally requires the
+	// explicitly configured mutable Cerbos Admin API and fails closed without it.
+	var policySvc *policies.Service
+	var auditSvc *audit.Service
+	if pool != nil && policyRepo != nil {
+		policySvc = policies.NewService(policyRepo, cerbosClient, logger)
+		if cerbosClient != nil {
+			reconciler := policies.NewReconciler(policySvc, cfg.Cerbos.ReconcileInterval, 20)
+			reconciler.Start()
+			workerStops = append(workerStops, reconciler.Stop)
+		}
+		auditSvc = audit.NewService(postgres.NewAuditRepository(pool.PgxPool()), 15*time.Minute, logger)
+		exportWorker := audit.NewWorker(auditSvc, time.Second, 5)
+		exportWorker.Start()
+		workerStops = append(workerStops, exportWorker.Stop)
 	}
 
 	// When using the fake development authenticator, skip database-backed
@@ -313,6 +375,8 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var passwordHandlers *httpapi.PasswordHandlers
 	var reauthVerifier httpapi.ReauthVerifier
 	var rotationRates httpapi.RotationRateChecker
+	var policyHandlers *httpapi.PolicyHandlers
+	var auditHandlers *httpapi.AuditHandlers
 	// Reauthentication is shared infrastructure for account, application and
 	// workforce high-risk operations. It must not disappear merely because an
 	// unrelated OAuth provisioner is unavailable (ADR-0011 §3).
@@ -376,6 +440,12 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				providerSvc, redis.NewProviderOAuthStateStore(redisClient), sessionSvc,
 				userChecker, rateChecker, cfg, logger)
 		}
+	}
+	if policySvc != nil {
+		policyHandlers = httpapi.NewPolicyHandlers(policySvc, permResolver, reauthVerifier)
+	}
+	if auditSvc != nil {
+		auditHandlers = httpapi.NewAuditHandlers(auditSvc, permResolver, reauthVerifier)
 	}
 
 	// Consent resolution (P3.3, ADR-0005 §2): the side-effect free
@@ -675,6 +745,31 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				r.Get("/admin/identity-providers/{providerId}/sync-conflicts", providerHandlers.ListConflicts)
 				r.Post("/admin/identity-providers/sync-conflicts/{conflictId}/resolve", providerHandlers.ResolveConflict)
 				r.Post("/admin/identity-providers/sync-conflicts/{conflictId}/ignore", providerHandlers.IgnoreConflict)
+			}
+		})
+
+		// Phase 7 policy authority and audit plane (ADR-0013). All handlers
+		// independently enforce Cerbos-derived capabilities. Publishing and
+		// export creation consume target-bound single-use reauthentication.
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
+				r.Use(httpapi.RequireCSRF())
+			}
+			if policyHandlers != nil {
+				r.Get("/admin/policies", policyHandlers.List)
+				r.Post("/admin/policies", policyHandlers.Create)
+				r.Get("/admin/policies/{policyId}", policyHandlers.Get)
+				r.Patch("/admin/policies/{policyId}", policyHandlers.Update)
+				r.Post("/admin/policies/{policyId}/publish", policyHandlers.Publish)
+				r.Post("/admin/policies/{policyId}/simulate", policyHandlers.Simulate)
+				r.Get("/admin/policies/{policyId}/versions", policyHandlers.Versions)
+			}
+			if auditHandlers != nil {
+				r.Get("/admin/audit-events", auditHandlers.List)
+				r.Post("/admin/audit-exports", auditHandlers.CreateExport)
+				r.Get("/admin/audit-exports/{exportId}", auditHandlers.GetExport)
+				r.Get("/admin/audit-exports/{exportId}/download", auditHandlers.Download)
 			}
 		})
 	})

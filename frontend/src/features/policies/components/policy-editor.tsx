@@ -8,12 +8,13 @@
 
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, Modal, Toast } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import { PageHeader } from "@/components/common/page-header";
+import { AccountReauthenticationForm } from "@/features/account/components/security-overview";
 import type {
   PolicyDetail,
   PolicyDraftInput,
@@ -27,6 +28,8 @@ import styles from "./policy-editor.module.css";
 
 type PolicyEditorProps = {
   detail?: PolicyDetail;
+  canManage?: boolean;
+  canPublish?: boolean;
 };
 
 const EFFECT_OPTIONS: Array<{ value: PolicyEffect; label: string }> = [
@@ -36,7 +39,7 @@ const EFFECT_OPTIONS: Array<{ value: PolicyEffect; label: string }> = [
 
 const OPERATOR_OPTIONS = ["eq", "neq", "in", "not_in", "gt", "lt", "contains"] as const;
 
-export function PolicyEditor({ detail }: PolicyEditorProps) {
+export function PolicyEditor({ detail, canManage = true, canPublish = true }: PolicyEditorProps) {
   const router = useRouter();
   const isEditing = Boolean(detail);
 
@@ -47,8 +50,12 @@ export function PolicyEditor({ detail }: PolicyEditorProps) {
   const [effect, setEffect] = useState<PolicyEffect>(detail?.effect ?? "allow");
   const [principals, setPrincipals] = useState<PolicyPrincipal[]>(detail?.principals ?? []);
   const [conditions, setConditions] = useState<PolicyCondition[]>(detail?.conditions ?? []);
+  const [policyId, setPolicyId] = useState(detail?.policyId);
+  const [currentVersion, setCurrentVersion] = useState(detail?.version ?? 0);
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [publishTarget, setPublishTarget] = useState<{ policyId: string; version: number } | null>(null);
+  const publishOperation = useRef<AbortController | null>(null);
 
   function addPrincipal(): void {
     setPrincipals([...principals, { attribute: "", operator: "eq", value: "" }]);
@@ -89,7 +96,8 @@ export function PolicyEditor({ detail }: PolicyEditorProps) {
     }
 
     return {
-      policyId: detail?.policyId,
+      policyId,
+      ...(policyId !== undefined && { expectedVersion: currentVersion }),
       name: name.trim(),
       description: description.trim(),
       resource: resource.trim(),
@@ -101,12 +109,15 @@ export function PolicyEditor({ detail }: PolicyEditorProps) {
   }
 
   async function handleSaveDraft(): Promise<void> {
+    if (!canManage) return;
     const input = buildInput();
     if (!input) return;
 
     setSaving(true);
     try {
       const result = await browserCommands.savePolicyDraft(input);
+      setPolicyId(result.policyId);
+      setCurrentVersion(result.version);
       Toast.success({ content: `草稿已保存（v${result.version}）。` });
       if (!isEditing) {
         router.push(`/admin/policies/${result.policyId}`);
@@ -121,39 +132,21 @@ export function PolicyEditor({ detail }: PolicyEditorProps) {
   }
 
   async function handlePublish(): Promise<void> {
+    if (!canManage || !canPublish) return;
     const input = buildInput();
     if (!input) return;
 
-    const onOk = async () => {
-      setPublishing(true);
-      try {
-        const draftResult = await browserCommands.savePolicyDraft(input);
-        await browserCommands.publishPolicy(draftResult.policyId);
-        Toast.success({ content: `策略已发布（v${draftResult.version}）。` });
-        router.push(`/admin/policies/${draftResult.policyId}`);
-        router.refresh();
-      } catch {
-        Toast.error({ content: "发布失败，请重试。" });
-        throw new Error("publish failed");
-      } finally {
-        setPublishing(false);
-      }
-    };
-
-    Modal.warning({
-      title: "发布此策略？",
-      content: (
-        <div>
-          <p>发布后策略将立即生效。后端 ABAC 引擎将按此策略评估所有匹配请求。</p>
-          <p>已发布的版本不可修改，但可以创建新版本。</p>
-          <p>此操作需要重认证。当前为 Mock 实现。</p>
-        </div>
-      ),
-      okText: "确认发布",
-      cancelText: "取消",
-      okType: "danger",
-      onOk,
-    });
+    setPublishing(true);
+    try {
+      const draftResult = await browserCommands.savePolicyDraft(input);
+      setPolicyId(draftResult.policyId);
+      setCurrentVersion(draftResult.version);
+      setPublishTarget(draftResult);
+    } catch {
+      Toast.error({ content: "保存发布草稿失败，请刷新后重试。" });
+    } finally {
+      setPublishing(false);
+    }
   }
 
   return (
@@ -329,25 +322,29 @@ export function PolicyEditor({ detail }: PolicyEditorProps) {
             <Button theme="borderless" htmlType="button" onClick={() => router.push("/admin/policies")}>
               取消
             </Button>
-            <Button
-              theme="borderless"
-              type="primary"
-              htmlType="submit"
-              loading={saving}
-              disabled={saving || publishing}
-            >
-              保存草稿
-            </Button>
-            <Button
-              theme="solid"
-              type="primary"
-              htmlType="button"
-              loading={publishing}
-              disabled={saving || publishing}
-              onClick={handlePublish}
-            >
-              发布策略
-            </Button>
+            {canManage && (
+              <Button
+                theme="borderless"
+                type="primary"
+                htmlType="submit"
+                loading={saving}
+                disabled={saving || publishing}
+              >
+                保存草稿
+              </Button>
+            )}
+            {canManage && canPublish && (
+              <Button
+                theme="solid"
+                type="primary"
+                htmlType="button"
+                loading={publishing}
+                disabled={saving || publishing}
+                onClick={handlePublish}
+              >
+                发布策略
+              </Button>
+            )}
           </div>
         </form>
       </div>
@@ -374,6 +371,46 @@ export function PolicyEditor({ detail }: PolicyEditorProps) {
           </div>
         </div>
       )}
+
+      <Modal
+        title="重新认证并发布策略"
+        visible={publishTarget !== null}
+        footer={null}
+        maskClosable={false}
+        closeOnEsc={false}
+        onCancel={() => {
+          publishOperation.current?.abort();
+          publishOperation.current = null;
+          setPublishTarget(null);
+        }}
+      >
+        {publishTarget && (
+          <>
+            <p>发布后，Cerbos 将立即对匹配请求使用版本 v{publishTarget.version}。已发布版本不可修改。</p>
+            <AccountReauthenticationForm
+              action="policy.publish"
+              target={publishTarget.policyId}
+              submitLabel="验证并发布"
+              browserOperationRef={publishOperation}
+              onGranted={async (reauthToken, signal) => {
+                await browserCommands.publishPolicy(
+                  publishTarget.policyId,
+                  publishTarget.version,
+                  reauthToken,
+                  { signal },
+                );
+                Toast.success({ content: `策略已发布（v${publishTarget.version}）。` });
+                setPublishTarget(null);
+                router.push(`/admin/policies/${publishTarget.policyId}`);
+                router.refresh();
+              }}
+              onCancel={() => setPublishTarget(null)}
+              operationError="策略发布失败。授权不会被重复使用，请刷新策略版本后重试。"
+              destructive
+            />
+          </>
+        )}
+      </Modal>
     </>
   );
 }

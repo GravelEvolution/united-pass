@@ -14,6 +14,7 @@ import { Button } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import type { AuthorizationPolicy } from "@/features/policies/types";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
+import type { CursorPage } from "@/types/pagination";
 import {
   createScopedColumn,
   ManagementDirectory,
@@ -76,7 +77,15 @@ const columns: ColumnProps<AuthorizationPolicy>[] = [
   }),
 ];
 
-export function PoliciesTable({ records, actionHref }: { records: AuthorizationPolicy[]; actionHref?: string }) {
+type PoliciesTableProps = {
+  records: AuthorizationPolicy[];
+  actionHref?: string;
+  page: CursorPage<unknown>["page"];
+  query?: string;
+  hasPrevious: boolean;
+};
+
+export function PoliciesTable({ records, actionHref, page, query, hasPrevious }: PoliciesTableProps) {
   const action = actionHref ? (
     <Link href={actionHref}>
       <Button theme="solid" type="primary">新建策略</Button>
@@ -91,6 +100,10 @@ export function PoliciesTable({ records, actionHref }: { records: AuthorizationP
       records={records}
       rowKey="policyId"
       action={action}
+      basePath="/admin/policies"
+      initialQuery={query}
+      page={page}
+      hasPrevious={hasPrevious}
     />
   );
 }

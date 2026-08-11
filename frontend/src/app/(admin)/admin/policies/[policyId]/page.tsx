@@ -32,7 +32,10 @@ export default async function PolicyDetailPage({
   params: Promise<{ policyId: string }>;
 }) {
   const { policyId } = await params;
-  const detail = await serverQueries.getPolicyDetail(policyId);
+  const [detail, permissions] = await Promise.all([
+    serverQueries.getPolicyDetail(policyId),
+    serverQueries.getCurrentPermissions(),
+  ]);
 
   if (!detail) {
     notFound();
@@ -40,9 +43,13 @@ export default async function PolicyDetailPage({
 
   return (
     <>
-      <PolicyEditor detail={detail} />
+      <PolicyEditor
+        detail={detail}
+        canManage={permissions.policyManage}
+        canPublish={permissions.policyPublish}
+      />
       <div style={{ marginTop: 24 }}>
-        <PolicySimulationPanel />
+        <PolicySimulationPanel policyId={detail.policyId} />
       </div>
     </>
   );

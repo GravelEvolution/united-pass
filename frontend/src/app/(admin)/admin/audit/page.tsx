@@ -39,6 +39,16 @@ export default async function AuditPage({
     to: params.to,
     cursor: params.cursor,
   };
-  const page = await serverQueries.getAuditEvents(query);
-  return <AuditExplorer records={page.items} />;
+  const [page, permissions] = await Promise.all([
+    serverQueries.getAuditEvents(query),
+    serverQueries.getCurrentPermissions(),
+  ]);
+  return (
+    <AuditExplorer
+      records={page.items}
+      page={page.page}
+      hasPrevious={Boolean(params.cursor)}
+      canExport={permissions.auditExport}
+    />
+  );
 }

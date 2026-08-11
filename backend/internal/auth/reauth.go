@@ -49,6 +49,11 @@ const (
 	ReauthActionProviderEnable       = "provider.enable"
 	ReauthActionProviderDisable      = "provider.disable"
 	ReauthActionProviderIdentityLink = "provider.identity.link"
+
+	// Phase 7 policy and audit operations bind grants to the exact policy ID
+	// or the fixed audit export target.
+	ReauthActionPolicyPublish = "policy.publish"
+	ReauthActionAuditExport   = "audit.export"
 )
 
 // ReauthActionSessionsRevokeOthers is reserved but never accepted: session
@@ -82,7 +87,9 @@ func IsTargetReauthAction(action string) bool {
 		ReauthActionEmployeeOffboard,
 		ReauthActionProviderEnable,
 		ReauthActionProviderDisable,
-		ReauthActionProviderIdentityLink:
+		ReauthActionProviderIdentityLink,
+		ReauthActionPolicyPublish,
+		ReauthActionAuditExport:
 		return true
 	default:
 		return false

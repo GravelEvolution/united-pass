@@ -26,13 +26,15 @@ info:
     departments, offboarding and durable access-revocation convergence.
     Phase 6 scope: Feishu federated login, durable directory staging,
     synchronization history and explicit identity-link conflict resolution.
+    Phase 7 scope: Cerbos-backed ABAC policy drafts/version publication and
+    durable audit search/export jobs.
     See `../docs/adr-0004.md`, `../docs/adr-0011.md` and
-    `../docs/adr-0012.md` for the architecture decisions.
+    `../docs/adr-0012.md` and `../docs/adr-0013.md` for the architecture decisions.
 
     Business API paths use the full `/api/v1/...` prefix explicitly rather than
     relying on a global server base path, so that root-level operational endpoints
     and versioned API endpoints can coexist accurately.
-  version: 0.6.0
+  version: 0.7.0
   contact:
     name: United Pass backend team
 
@@ -69,6 +71,10 @@ tags:
     description: Feishu OAuth login initiation and callback; provider credentials remain server-only
   - name: Admin Identity Providers
     description: Provider status, durable directory synchronization and explicit identity linking
+  - name: Admin Policies
+    description: Versioned ABAC drafts, simulation and Cerbos publication
+  - name: Admin Audit
+    description: Durable security-event filtering and short-lived asynchronous CSV exports
   - name: Scope Catalog
     description: Backend-authoritative OAuth scope catalog
   - name: Admin Applications
@@ -2586,6 +2592,280 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/admin/policies:
+    get:
+      tags: [Admin Policies]
+      summary: List policy working copies
+      operationId: listPolicies
+      security:
+        - SessionCookie: []
+      parameters:
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
+        - {name: query, in: query, schema: {type: string, maxLength: 120}}
+        - {name: status, in: query, schema: {type: string, enum: [draft, published]}}
+      responses:
+        "200":
+          description: Cursor page of policies. Requires `policy.read`.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PolicyPage"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "500": {$ref: "#/components/responses/InternalError"}
+    post:
+      tags: [Admin Policies]
+      summary: Create policy draft version 1
+      operationId: createPolicy
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PolicyDraftRequest"}
+      responses:
+        "201":
+          description: Draft created. Requires `policy.manage`.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PolicyMutationResult"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/policies/{policyId}:
+    parameters:
+      - $ref: "#/components/parameters/PolicyIdPath"
+    get:
+      tags: [Admin Policies]
+      summary: Get current policy working copy and version history
+      operationId: getPolicy
+      security:
+        - SessionCookie: []
+      responses:
+        "200":
+          description: Policy detail. Requires `policy.read`.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PolicyDetail"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalError"}
+    patch:
+      tags: [Admin Policies]
+      summary: Create the next immutable draft version
+      operationId: updatePolicyDraft
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PolicyUpdateRequest"}
+      responses:
+        "200":
+          description: New draft version created using optimistic concurrency.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PolicyMutationResult"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/policies/{policyId}/publish:
+    post:
+      tags: [Admin Policies]
+      summary: Publish an exact policy version to Cerbos
+      operationId: publishPolicy
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PolicyIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              additionalProperties: false
+              properties:
+                version: {type: integer, minimum: 1}
+      responses:
+        "200":
+          description: Cerbos accepted the policy and the database selected it atomically.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version]
+                additionalProperties: false
+                properties:
+                  version: {type: integer, minimum: 1}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "502": {$ref: "#/components/responses/ProviderUnavailable"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/policies/{policyId}/simulate:
+    post:
+      tags: [Admin Policies]
+      summary: Simulate the selected working copy without publishing it
+      operationId: simulatePolicy
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PolicyIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PolicySimulationRequest"}
+      responses:
+        "200":
+          description: Side-effect-free preview decision.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PolicySimulationResult"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/policies/{policyId}/versions:
+    get:
+      tags: [Admin Policies]
+      summary: List immutable policy versions
+      operationId: listPolicyVersions
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PolicyIdPath"
+      responses:
+        "200":
+          description: Version history, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/PolicyVersionSummary"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/audit-events:
+    get:
+      tags: [Admin Audit]
+      summary: Filter durable security audit events
+      operationId: listAuditEvents
+      security:
+        - SessionCookie: []
+      parameters:
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
+        - {name: query, in: query, schema: {type: string, maxLength: 200}}
+        - {name: eventType, in: query, schema: {type: string}}
+        - {name: result, in: query, schema: {type: string, enum: [success, denied]}}
+        - {name: actorName, in: query, schema: {type: string}}
+        - {name: requestId, in: query, schema: {type: string}}
+        - {name: from, in: query, schema: {type: string, format: date-time}}
+        - {name: to, in: query, schema: {type: string, format: date-time}}
+      responses:
+        "200":
+          description: Redacted audit cursor page. Requires `audit.read`.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AuditEventPage"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/audit-exports:
+    post:
+      tags: [Admin Audit]
+      summary: Create a durable asynchronous audit CSV export
+      operationId: createAuditExport
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/AuditQuery"}
+      responses:
+        "202":
+          description: Export accepted. Requires `audit.export` and a grant bound to `audit.export + audit`.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AuditExport"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/audit-exports/{exportId}:
+    get:
+      tags: [Admin Audit]
+      summary: Get the requester's audit export job
+      operationId: getAuditExport
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/AuditExportIdPath"
+      responses:
+        "200":
+          description: Export status and same-origin download URL when complete.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AuditExport"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/audit-exports/{exportId}/download:
+    get:
+      tags: [Admin Audit]
+      summary: Download a completed unexpired export owned by the requester
+      operationId: downloadAuditExport
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/AuditExportIdPath"
+      responses:
+        "200":
+          description: UTF-8 CSV with a BOM and fixed redacted columns.
+          content:
+            text/csv:
+              schema: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
 components:
   securitySchemes:
     SessionCookie:
@@ -2739,6 +3019,24 @@ components:
       schema:
         type: string
         pattern: "^conflict_[A-Za-z0-9_-]{1,119}$"
+
+    PolicyIdPath:
+      name: policyId
+      in: path
+      required: true
+      description: Stable United Pass authorization policy ID (`pol_…`).
+      schema:
+        type: string
+        pattern: "^pol_[A-Za-z0-9_-]{8,76}$"
+
+    AuditExportIdPath:
+      name: exportId
+      in: path
+      required: true
+      description: Durable audit export job ID (`exp_…`).
+      schema:
+        type: string
+        pattern: "^exp_[A-Za-z0-9_-]{8,76}$"
 
     AdminSessionIdPath:
       name: sessionId
@@ -4670,3 +4968,204 @@ components:
         userId:
           type: string
           description: Explicit existing stable United Pass user ID.
+
+    PolicyClause:
+      type: object
+      required: [attribute, operator, value]
+      additionalProperties: false
+      properties:
+        attribute:
+          type: string
+          pattern: "^[a-z][A-Za-z0-9_]{0,63}$"
+        operator:
+          type: string
+          enum: [eq, neq, in, not_in, gt, lt, contains]
+        value:
+          type: string
+          maxLength: 256
+
+    PolicyDraftRequest:
+      type: object
+      required: [name, description, resource, action, effect, principals, conditions]
+      additionalProperties: false
+      properties:
+        name: {type: string, minLength: 1, maxLength: 120}
+        description: {type: string, maxLength: 1000}
+        resource: {type: string, minLength: 1, maxLength: 128, example: "application:*"}
+        action: {type: string, minLength: 1, maxLength: 128, example: application.manage}
+        effect: {type: string, enum: [allow, deny]}
+        principals:
+          type: array
+          maxItems: 20
+          items: {$ref: "#/components/schemas/PolicyClause"}
+        conditions:
+          type: array
+          maxItems: 20
+          items: {$ref: "#/components/schemas/PolicyClause"}
+
+    PolicyUpdateRequest:
+      type: object
+      required: [expectedVersion, name, description, resource, action, effect, principals, conditions]
+      additionalProperties: false
+      properties:
+        expectedVersion: {type: integer, minimum: 1}
+        name: {type: string, minLength: 1, maxLength: 120}
+        description: {type: string, maxLength: 1000}
+        resource: {type: string, minLength: 1, maxLength: 128}
+        action: {type: string, minLength: 1, maxLength: 128}
+        effect: {type: string, enum: [allow, deny]}
+        principals:
+          type: array
+          maxItems: 20
+          items: {$ref: "#/components/schemas/PolicyClause"}
+        conditions:
+          type: array
+          maxItems: 20
+          items: {$ref: "#/components/schemas/PolicyClause"}
+
+    PolicyMutationResult:
+      type: object
+      required: [policyId, version]
+      additionalProperties: false
+      properties:
+        policyId: {type: string}
+        version: {type: integer, minimum: 1}
+
+    PolicySummary:
+      type: object
+      required: [policyId, name, resource, version, status, updatedBy, updatedAt]
+      additionalProperties: false
+      properties:
+        policyId: {type: string}
+        name: {type: string}
+        resource: {type: string}
+        version: {type: integer, minimum: 1}
+        status: {type: string, enum: [draft, published]}
+        updatedBy: {type: string}
+        updatedAt: {type: string, format: date-time}
+
+    PolicyVersionSummary:
+      type: object
+      required: [version, status, updatedBy, updatedAt, changeSummary]
+      additionalProperties: false
+      properties:
+        version: {type: integer, minimum: 1}
+        status: {type: string, enum: [draft, published]}
+        updatedBy: {type: string}
+        updatedAt: {type: string, format: date-time}
+        changeSummary: {type: string}
+
+    PolicyDetail:
+      type: object
+      required: [policyId, name, description, resource, action, effect, version, status, principals, conditions, updatedBy, updatedAt, versionHistory]
+      additionalProperties: false
+      properties:
+        policyId: {type: string}
+        name: {type: string}
+        description: {type: string}
+        resource: {type: string}
+        action: {type: string}
+        effect: {type: string, enum: [allow, deny]}
+        version: {type: integer, minimum: 1}
+        status: {type: string, enum: [draft, published]}
+        principals:
+          type: array
+          items: {$ref: "#/components/schemas/PolicyClause"}
+        conditions:
+          type: array
+          items: {$ref: "#/components/schemas/PolicyClause"}
+        updatedBy: {type: string}
+        updatedAt: {type: string, format: date-time}
+        versionHistory:
+          type: array
+          items: {$ref: "#/components/schemas/PolicyVersionSummary"}
+
+    PolicyPage:
+      type: object
+      required: [items, page]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/PolicySummary"}
+        page: {$ref: "#/components/schemas/CursorPageMetadata"}
+
+    PolicySimulationRequest:
+      type: object
+      required: [principalAttributes, resourceAttributes, action]
+      additionalProperties: false
+      properties:
+        principalAttributes:
+          type: object
+          maxProperties: 30
+          additionalProperties: {type: string, maxLength: 256}
+        resourceAttributes:
+          type: object
+          maxProperties: 30
+          additionalProperties: {type: string, maxLength: 256}
+        action: {type: string, maxLength: 128}
+
+    PolicySimulationResult:
+      type: object
+      required: [decision, matchedPolicyId, matchedPolicyName, evaluatedAt, reasons]
+      additionalProperties: false
+      properties:
+        decision: {type: string, enum: [allow, deny, no_match]}
+        matchedPolicyId: {type: [string, "null"]}
+        matchedPolicyName: {type: [string, "null"]}
+        evaluatedAt: {type: string, format: date-time}
+        reasons:
+          type: array
+          items: {type: string}
+
+    AuditQuery:
+      type: object
+      additionalProperties: false
+      properties:
+        cursor: {type: string}
+        limit: {type: integer, minimum: 1, maximum: 100}
+        query: {type: string, maxLength: 200}
+        eventType: {type: string, maxLength: 120}
+        result: {type: string, enum: [success, denied]}
+        actorName: {type: string, maxLength: 120}
+        requestId: {type: string, maxLength: 200}
+        from: {type: string, format: date-time}
+        to: {type: string, format: date-time}
+
+    AuditEvent:
+      type: object
+      required: [eventId, eventType, actorName, actorId, targetLabel, targetId, occurredAt, result, requestId, details]
+      additionalProperties: false
+      properties:
+        eventId: {type: string}
+        eventType: {type: string}
+        actorName: {type: string}
+        actorId: {type: string}
+        targetLabel: {type: string}
+        targetId: {type: string}
+        occurredAt: {type: string, format: date-time}
+        result: {type: string, enum: [success, denied]}
+        requestId: {type: string}
+        details: {type: string, description: Fixed safe operation label; never raw payload or provider error.}
+
+    AuditEventPage:
+      type: object
+      required: [items, page]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/AuditEvent"}
+        page: {$ref: "#/components/schemas/CursorPageMetadata"}
+
+    AuditExport:
+      type: object
+      required: [exportId, status, downloadUrl, requestedAt, completedAt, totalEvents]
+      additionalProperties: false
+      properties:
+        exportId: {type: string}
+        status: {type: string, enum: [pending, processing, completed, failed]}
+        downloadUrl: {type: [string, "null"]}
+        requestedAt: {type: string, format: date-time}
+        completedAt: {type: [string, "null"], format: date-time}
+        totalEvents: {type: integer, minimum: 0}

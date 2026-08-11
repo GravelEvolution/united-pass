@@ -54,6 +54,7 @@ export type PolicyDetail = {
 
 export type PolicyDraftInput = {
   policyId?: string;
+  expectedVersion?: number;
   name: string;
   description: string;
   resource: string;

@@ -162,6 +162,8 @@ func resetTestSchemaData(t *testing.T, db *sql.DB) {
 	statements := []string{
 		`ALTER TABLE security_events DROP CONSTRAINT IF EXISTS test_reject_consent_audit`,
 		`TRUNCATE TABLE
+			audit_export_jobs, policy_publication_jobs,
+			authorization_policy_versions, authorization_policies,
 			provider_sync_conflicts, provider_directory_users,
 			provider_directory_departments, provider_sync_jobs, identity_providers,
 			access_revocation_jobs, employee_profiles, departments,
@@ -215,6 +217,8 @@ func dropTestSchemaObjects(t *testing.T, db *sql.DB) {
 	}
 	statements := []string{
 		`DROP TABLE IF EXISTS
+			audit_export_jobs, policy_publication_jobs,
+			authorization_policy_versions, authorization_policies,
 			provider_sync_conflicts, provider_directory_users,
 			provider_directory_departments, provider_sync_jobs, identity_providers,
 			access_revocation_jobs, employee_profiles, departments,

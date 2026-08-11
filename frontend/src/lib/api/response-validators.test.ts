@@ -10,6 +10,8 @@ import { describe, it, expect } from "vitest";
 import {
   ApiResponseShapeError,
   parseAuthorizedApplications,
+  parseAuditEvents,
+  parseAuditExport,
   parseConsentResolution,
   parseCurrentUser,
   parseDecisionResponse,
@@ -24,6 +26,9 @@ import {
   parseMfaRequiredResponse,
   parsePasskeyEnrollment,
   parsePasskeyEnrollmentConfirmation,
+  parsePolicies,
+  parsePolicyDetail,
+  parsePolicySimulation,
   parsePermissionCapabilities,
   parseProviderDetail,
   parsePublicLoginProviders,
@@ -36,6 +41,59 @@ import {
   parseUserSessions,
   parseUserDetail,
 } from "./response-validators";
+
+describe("P7 policy and audit validators", () => {
+  const policy = {
+    policyId: "pol_0123456789abcdef",
+    name: "应用管理员",
+    resource: "application:*",
+    version: 2,
+    status: "draft",
+    updatedBy: "管理员",
+    updatedAt: "2026-08-11T00:00:00Z",
+  } as const;
+
+  it("narrows policy pages, immutable detail and simulation unions", () => {
+    expect(parsePolicies({ items: [policy], page: { nextCursor: null, hasMore: false } }).items[0]).toEqual(policy);
+    expect(parsePolicyDetail({
+      ...policy,
+      description: "说明",
+      action: "application.manage",
+      effect: "allow",
+      principals: [{ attribute: "department", operator: "eq", value: "Identity" }],
+      conditions: [],
+      versionHistory: [{ version: 2, status: "draft", updatedBy: "管理员", updatedAt: policy.updatedAt, changeSummary: "编辑草稿" }],
+    }).principals[0].operator).toBe("eq");
+    expect(parsePolicySimulation({
+      decision: "no_match", matchedPolicyId: null, matchedPolicyName: null,
+      evaluatedAt: policy.updatedAt, reasons: ["未匹配"],
+    }).decision).toBe("no_match");
+    expect(() => parsePolicySimulation({
+      decision: "maybe", matchedPolicyId: null, matchedPolicyName: null,
+      evaluatedAt: policy.updatedAt, reasons: [],
+    })).toThrow(ApiResponseShapeError);
+  });
+
+  it("accepts only redacted audit rows and durable export states", () => {
+    expect(parseAuditEvents({
+      items: [{
+        eventId: "evt_1", eventType: "policy.published", actorName: "管理员",
+        actorId: "user_1", targetLabel: "policy_id", targetId: policy.policyId,
+        occurredAt: policy.updatedAt, result: "success", requestId: "req_1",
+        details: "policy.publish",
+      }],
+      page: { nextCursor: null, hasMore: false },
+    }).items[0].eventType).toBe("policy.published");
+    expect(parseAuditExport({
+      exportId: "exp_1", status: "processing", downloadUrl: null,
+      requestedAt: policy.updatedAt, completedAt: null, totalEvents: 0,
+    }).status).toBe("processing");
+    expect(() => parseAuditExport({
+      exportId: "exp_1", status: "ready", downloadUrl: null,
+      requestedAt: policy.updatedAt, completedAt: null, totalEvents: 0,
+    })).toThrow(ApiResponseShapeError);
+  });
+});
 
 describe("P6 Provider validators", () => {
   const provider = {

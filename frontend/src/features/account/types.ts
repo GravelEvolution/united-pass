@@ -43,7 +43,9 @@ export type AdminReauthenticationAction =
   | "employee.offboard"
   | "provider.enable"
   | "provider.disable"
-  | "provider.identity.link";
+  | "provider.identity.link"
+  | "policy.publish"
+  | "audit.export";
 
 export type ReauthenticationAction =
   | AccountReauthenticationAction

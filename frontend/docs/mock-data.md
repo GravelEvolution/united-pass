@@ -47,7 +47,7 @@
 | Provider list/detail/sync history/conflicts and mutations | Query / Command | `/api/v1/admin/identity-providers*` |
 | public Feishu login availability | Query / redirect | `/api/v1/auth/providers*` |
 
-未迁移的 seam（账户资料/联系方式编辑、OAuth 应用后台、策略、审计等）在标志关闭时仍走 mock，后续阶段逐个替换。P5 用户/员工/部门与 P6 Provider seam 在真实模式下不得回退到 mock。
+未迁移的 seam（账户资料/联系方式编辑、OAuth 应用后台等）在标志关闭时仍走 mock，后续阶段逐个替换。P5 用户/员工/部门、P6 Provider 与 P7 策略/审计 seam 在真实模式下不得回退到 mock。
 
 迁移每个 seam 的步骤：
 

@@ -15,6 +15,7 @@ import { serverFetch } from "@/lib/api/server/server-http-client";
 import { isApiError } from "@/lib/api/api-error";
 import {
   parseAuthorizedApplications,
+  parseAuditEvents,
   parseConsentResolution,
   parseCurrentUser,
   parseDepartmentDetail,
@@ -25,6 +26,8 @@ import {
   parseIdentityProviders,
   parseManagedUsers,
   parsePermissionCapabilities,
+  parsePolicies,
+  parsePolicyDetail,
   parseSecuritySummary,
   parseProviderDetail,
   parsePublicLoginProviders,
@@ -60,6 +63,22 @@ function withPageQuery(path: string, query?: PageQuery): string {
   if (query.query) parameters.set("query", query.query);
   if (query.sort) parameters.set("sort", query.sort);
   if (query.status) parameters.set("status", query.status);
+  const encoded = parameters.toString();
+  return encoded ? `${path}?${encoded}` : path;
+}
+
+function withAuditQuery(path: string, query?: AuditQuery): string {
+  if (!query) return path;
+  const parameters = new URLSearchParams();
+  if (query.cursor) parameters.set("cursor", query.cursor);
+  if (query.limit !== undefined) parameters.set("limit", String(query.limit));
+  if (query.query) parameters.set("query", query.query);
+  if (query.eventType) parameters.set("eventType", query.eventType);
+  if (query.result) parameters.set("result", query.result);
+  if (query.actorName) parameters.set("actorName", query.actorName);
+  if (query.requestId) parameters.set("requestId", query.requestId);
+  if (query.from) parameters.set("from", query.from);
+  if (query.to) parameters.set("to", query.to);
   const encoded = parameters.toString();
   return encoded ? `${path}?${encoded}` : path;
 }
@@ -168,9 +187,22 @@ export const serverQueries: UnitedPassQueries = {
   getClientDetail: (applicationId, clientId) =>
     mockUnitedPassDataSource.getClientDetail(applicationId, clientId),
   getAvailableScopes: () => mockUnitedPassDataSource.getAvailableScopes(),
-  getPolicies: (query?: PageQuery) => mockUnitedPassDataSource.getPolicies(query),
-  getPolicyDetail: (policyId) => mockUnitedPassDataSource.getPolicyDetail(policyId),
-  getAuditEvents: (query?: AuditQuery) => mockUnitedPassDataSource.getAuditEvents(query),
+  getPolicies: USE_MOCK_DATA_SOURCE
+    ? (query?: PageQuery) => mockUnitedPassDataSource.getPolicies(query)
+    : async (query?: PageQuery) => parsePolicies(
+        await serverFetch<unknown>(withPageQuery("/admin/policies", query)),
+      ),
+  getPolicyDetail: USE_MOCK_DATA_SOURCE
+    ? (policyId) => mockUnitedPassDataSource.getPolicyDetail(policyId)
+    : (policyId) => nullableServerQuery(
+        `/admin/policies/${encodeURIComponent(policyId)}`,
+        parsePolicyDetail,
+      ),
+  getAuditEvents: USE_MOCK_DATA_SOURCE
+    ? (query?: AuditQuery) => mockUnitedPassDataSource.getAuditEvents(query)
+    : async (query?: AuditQuery) => parseAuditEvents(
+        await serverFetch<unknown>(withAuditQuery("/admin/audit-events", query)),
+      ),
 };
 
 export async function getPublicLoginProviders() {
