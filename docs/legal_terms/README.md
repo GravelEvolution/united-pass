@@ -9,7 +9,7 @@ United Pass 法律文档索引。所有文档当前为**草案状态**，尚未�
 | Overall status | Draft / Not Effective |
 | Approved by | Pending — legal review |
 | Effective date | Pending |
-| Frontend publication | Not enabled（页面显示"暂未生效"） |
+| Frontend publication | Controlled / Not activated（无匹配审批记录时显示“暂未生效”） |
 
 > 正式生效应安排在 Phase 8 产品正式上线阶段，由法务最终确认后统一发布。
 
@@ -46,6 +46,7 @@ docs/legal_terms/
 
 - [ ] 法务最终签字确认
 - [ ] 版本号与生效日期锁定
-- [ ] 前端 `/privacy` 和 `/terms` 页面移除"暂未生效"标记
-- [ ] 后端提供生效版本的 API 端点
-- [ ] Audit log 记录发布事件
+- [x] 前端 `/privacy` 和 `/terms` 仅在版本 + SHA-256 与后端审批记录一致时显示生效状态
+- [x] 后端提供受控发布命令和公开状态 API
+- [x] 发布事务写入 durable Audit log
+- [ ] 使用真实审批引用运行受控发布命令（当前未运行）

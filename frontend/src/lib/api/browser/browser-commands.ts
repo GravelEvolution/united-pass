@@ -13,12 +13,14 @@ import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
 import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import { browserFetch } from "@/lib/api/browser/browser-http-client";
 import {
+  parseAccountDeletion,
   parseDecisionResponse,
   parseAuditExport,
   parseDepartmentDetail,
   parseDirectorySyncResult,
   parsePasskeyEnrollment,
   parsePasskeyEnrollmentConfirmation,
+  parsePersonalDataExport,
   parsePolicyMutation,
   parsePolicySimulation,
   parseProviderDetail,
@@ -213,6 +215,41 @@ export const browserCommands: UnitedPassCommands = {
     : async () => {
         await browserFetch<unknown>("/auth/session", { method: "DELETE" });
       },
+
+  requestPersonalDataExport: USE_MOCK_DATA_SOURCE
+    ? (reauthToken) => mockUnitedPassDataSource.requestPersonalDataExport(reauthToken)
+    : async (reauthToken, options) => parsePersonalDataExport(
+        await browserFetch<unknown>("/me/data-exports", {
+          method: "POST",
+          reauthToken,
+          signal: options?.signal,
+        }),
+      ),
+  getPersonalDataExport: USE_MOCK_DATA_SOURCE
+    ? (exportId) => mockUnitedPassDataSource.getPersonalDataExport(exportId)
+    : async (exportId, options) => parsePersonalDataExport(
+        await browserFetch<unknown>(
+          `/me/data-exports/${encodeURIComponent(exportId)}`,
+          { signal: options?.signal },
+        ),
+      ),
+  requestAccountDeletion: USE_MOCK_DATA_SOURCE
+    ? (reauthToken) => mockUnitedPassDataSource.requestAccountDeletion(reauthToken)
+    : async (reauthToken, options) => parseAccountDeletion(
+        await browserFetch<unknown>("/me/account-deletion", {
+          method: "POST",
+          reauthToken,
+          signal: options?.signal,
+        }),
+      ),
+  cancelAccountDeletion: USE_MOCK_DATA_SOURCE
+    ? () => mockUnitedPassDataSource.cancelAccountDeletion()
+    : async (options) => parseAccountDeletion(
+        await browserFetch<unknown>("/me/account-deletion", {
+          method: "DELETE",
+          signal: options?.signal,
+        }),
+      ),
   revokeOwnSession: USE_MOCK_DATA_SOURCE
     ? (sessionId) => mockUnitedPassDataSource.revokeOwnSession(sessionId)
     : async (sessionId) => {

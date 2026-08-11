@@ -1084,3 +1084,38 @@ func TestReauthRequest_ManagementActionRequiresOnlyExactTargetBinding(t *testing
 		})
 	}
 }
+
+func TestReauthRequest_PrivacyActionsBindOnlyCurrentUser(t *testing.T) {
+	for _, action := range []string{
+		auth.ReauthActionPersonalDataExport,
+		auth.ReauthActionAccountDelete,
+	} {
+		t.Run(action, func(t *testing.T) {
+			env := newReauthEnv()
+			env.authz.verifyResult = auth.AuthenticationResult{Status: auth.StatusAuthenticated}
+			router := reauthRouter(env.handlers, reauthPrincipal)
+			w := doReauthJSON(t, router, "/auth/reauthentication",
+				`{"action":"`+action+`","target":"user_actor","password":"pw"}`)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			token := decodeReauthToken(t, w)
+			verifier := NewReauthGrants(env.grants, nil)
+			if err := verifier.VerifyAndConsume(context.Background(), token,
+				action, "sess-1", "user_other", "", ""); err == nil {
+				t.Fatal("privacy grant must reject another user target")
+			}
+
+			w = doReauthJSON(t, router, "/auth/reauthentication",
+				`{"action":"`+action+`","target":"user_other","password":"pw"}`)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("foreign target status=%d, want 400", w.Code)
+			}
+			w = doReauthJSON(t, router, "/auth/reauthentication",
+				`{"action":"`+action+`","password":"pw"}`)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("missing target status=%d, want 400", w.Code)
+			}
+		})
+	}
+}

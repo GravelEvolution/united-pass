@@ -54,6 +54,12 @@ const (
 	// or the fixed audit export target.
 	ReauthActionPolicyPublish = "policy.publish"
 	ReauthActionAuditExport   = "audit.export"
+
+	// Phase 8 privacy-rights operations bind the grant to the caller's stable
+	// user ID. Export and deletion can therefore never be replayed against a
+	// different account.
+	ReauthActionPersonalDataExport = "account.data_export"
+	ReauthActionAccountDelete      = "account.delete"
 )
 
 // ReauthActionSessionsRevokeOthers is reserved but never accepted: session
@@ -89,7 +95,9 @@ func IsTargetReauthAction(action string) bool {
 		ReauthActionProviderDisable,
 		ReauthActionProviderIdentityLink,
 		ReauthActionPolicyPublish,
-		ReauthActionAuditExport:
+		ReauthActionAuditExport,
+		ReauthActionPersonalDataExport,
+		ReauthActionAccountDelete:
 		return true
 	default:
 		return false

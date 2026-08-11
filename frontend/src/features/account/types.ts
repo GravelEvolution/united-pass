@@ -35,7 +35,36 @@ export type AccountReauthenticationAction =
   | "account.totp.enroll"
   | "account.totp.remove"
   | "account.passkey.enroll"
-  | "account.passkey.remove";
+  | "account.passkey.remove"
+  | "account.data_export"
+  | "account.delete";
+
+export type PersonalDataExport = {
+  exportId: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  requestedAt: string;
+  completedAt: string | null;
+  expiresAt: string | null;
+  downloadUrl: string | null;
+  totalSections: number;
+};
+
+export type AccountDeletion =
+  | { status: "none" }
+  | {
+      deletionId: string;
+      status:
+        | "pending"
+        | "processing"
+        | "provider_deleted"
+        | "completed"
+        | "cancelled"
+        | "failed";
+      requestedAt: string;
+      executeAfter: string;
+      cancelledAt: string | null;
+      completedAt: string | null;
+    };
 
 export type AdminReauthenticationAction =
   | "user.disable"

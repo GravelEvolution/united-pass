@@ -14,6 +14,7 @@ import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import { serverFetch } from "@/lib/api/server/server-http-client";
 import { isApiError } from "@/lib/api/api-error";
 import {
+  parseAccountDeletion,
   parseAuthorizedApplications,
   parseAuditEvents,
   parseConsentResolution,
@@ -122,6 +123,11 @@ export const serverQueries: UnitedPassQueries = {
         parseAuthorizedApplications(
           await serverFetch<unknown>("/me/authorized-applications"),
         ),
+  getAccountDeletion: USE_MOCK_DATA_SOURCE
+    ? () => mockUnitedPassDataSource.getAccountDeletion()
+    : async () => parseAccountDeletion(
+        await serverFetch<unknown>("/me/account-deletion"),
+      ),
   getAdminDashboard: () => mockUnitedPassDataSource.getAdminDashboard(),
   getUsers: USE_MOCK_DATA_SOURCE
     ? (query?: PageQuery) => mockUnitedPassDataSource.getUsers(query)

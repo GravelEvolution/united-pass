@@ -9,6 +9,7 @@
 import { describe, it, expect } from "vitest";
 import {
   ApiResponseShapeError,
+  parseAccountDeletion,
   parseAuthorizedApplications,
   parseAuditEvents,
   parseAuditExport,
@@ -26,6 +27,7 @@ import {
   parseMfaRequiredResponse,
   parsePasskeyEnrollment,
   parsePasskeyEnrollmentConfirmation,
+  parsePersonalDataExport,
   parsePolicies,
   parsePolicyDetail,
   parsePolicySimulation,
@@ -41,6 +43,41 @@ import {
   parseUserSessions,
   parseUserDetail,
 } from "./response-validators";
+
+describe("P8 privacy-rights validators", () => {
+  it("narrows export and deletion lifecycle responses", () => {
+    expect(parsePersonalDataExport({
+      exportId: "pexp_0123456789abcdef",
+      status: "completed",
+      requestedAt: "2026-08-11T00:00:00Z",
+      completedAt: "2026-08-11T00:00:01Z",
+      expiresAt: "2026-08-11T00:15:01Z",
+      downloadUrl: "/api/v1/me/data-exports/pexp_0123456789abcdef/download",
+      totalSections: 6,
+    }).totalSections).toBe(6);
+
+    expect(parseAccountDeletion({ status: "none" })).toEqual({ status: "none" });
+    expect(parseAccountDeletion({
+      deletionId: "del_0123456789abcdef",
+      status: "pending",
+      requestedAt: "2026-08-11T00:00:00Z",
+      executeAfter: "2026-09-10T00:00:00Z",
+      cancelledAt: null,
+      completedAt: null,
+    }).status).toBe("pending");
+  });
+
+  it("fails closed on unknown lifecycle states and missing nullable fields", () => {
+    expect(() => parsePersonalDataExport({
+      exportId: "pexp_0123456789abcdef", status: "ready", requestedAt: "x",
+      completedAt: null, expiresAt: null, downloadUrl: null, totalSections: 0,
+    })).toThrow(ApiResponseShapeError);
+    expect(() => parseAccountDeletion({
+      deletionId: "del_0123456789abcdef", status: "pending",
+      requestedAt: "x", executeAfter: "y", completedAt: null,
+    })).toThrow(ApiResponseShapeError);
+  });
+});
 
 describe("P7 policy and audit validators", () => {
   const policy = {

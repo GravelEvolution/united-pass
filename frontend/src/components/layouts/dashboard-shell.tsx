@@ -55,6 +55,8 @@ const accountNavigation = [
   { href: "/account/security", label: "登录与安全", icon: IconShield },
   { href: "/account/sessions", label: "活跃会话", icon: IconKey },
   { href: "/account/applications", label: "授权应用", icon: IconApps },
+  { href: "/account/data-export", label: "数据导出", icon: IconHistory },
+  { href: "/account/delete", label: "注销账户", icon: IconUser },
 ] satisfies NavigationItem[];
 
 const adminNavigation = [

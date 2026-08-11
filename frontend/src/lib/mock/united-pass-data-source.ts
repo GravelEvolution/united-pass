@@ -8,7 +8,7 @@
 
 import type { UnitedPassDataSource } from "@/lib/api/united-pass-data-source";
 import { SYSTEM_NAME } from "@/lib/branding";
-import type { AuthorizedApplication } from "@/features/account/types";
+import type { AccountDeletion, AuthorizedApplication } from "@/features/account/types";
 import type { CursorPage, PageQuery } from "@/types/pagination";
 import { FULL_PERMISSIONS } from "@/types/permissions";
 import type {
@@ -843,6 +843,7 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
   const applications: OAuthApplication[] = structuredClone(initialApplications);
   const applicationDetails: Record<string, OAuthApplicationDetail> = structuredClone(initialApplicationDetails);
   const authorizedApplications: AuthorizedApplication[] = structuredClone(initialAuthorizedApplications);
+  let deletion: AccountDeletion = { status: "none" };
 
   return {
     getCurrentUser: () => Promise.resolve(employeeAdminUser),
@@ -857,6 +858,7 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       return Promise.resolve({ status: "client_not_found", requestId });
     },
     getAuthorizedApplications: () => Promise.resolve(authorizedApplications),
+    getAccountDeletion: () => Promise.resolve(deletion),
     getAdminDashboard: () => Promise.resolve({
       metrics: [
         { label: "活跃用户", value: "12,840", change: "近 30 天 +8.4%", tone: "positive" },
@@ -1203,6 +1205,49 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       completedAt: new Date().toISOString(),
       totalEvents: auditEvents.length,
     }),
+
+    requestPersonalDataExport: () => {
+      const now = new Date().toISOString();
+      return Promise.resolve({
+        exportId: `pexp_mock_${Date.now().toString(36)}`,
+        status: "completed" as const,
+        requestedAt: now,
+        completedAt: now,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        downloadUrl: null,
+        totalSections: 6,
+      });
+    },
+    getPersonalDataExport: (exportId: string) => {
+      const now = new Date().toISOString();
+      return Promise.resolve({
+        exportId,
+        status: "completed" as const,
+        requestedAt: now,
+        completedAt: now,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        downloadUrl: null,
+        totalSections: 6,
+      });
+    },
+    requestAccountDeletion: () => {
+      const now = new Date();
+      deletion = {
+        deletionId: `del_mock_${Date.now().toString(36)}`,
+        status: "pending",
+        requestedAt: now.toISOString(),
+        executeAfter: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        cancelledAt: null,
+        completedAt: null,
+      };
+      return Promise.resolve(deletion);
+    },
+    cancelAccountDeletion: () => {
+      if (deletion.status !== "none") {
+        deletion = { ...deletion, status: "cancelled", cancelledAt: new Date().toISOString() };
+      }
+      return Promise.resolve(deletion);
+    },
 
     updateProfile: (input: { displayName?: string; nickname?: string }): Promise<void> => {
       if (input.displayName !== undefined) {

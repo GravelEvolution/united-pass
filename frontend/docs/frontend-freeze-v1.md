@@ -30,8 +30,8 @@
 | `/account/security` | Mock 完成 | 修改密码、TOTP 绑定/删除、Passkey 列表、恢复代码、撤销其他会话 |
 | `/account/sessions` | Mock 完成 | 会话列表、撤销单个会话 |
 | `/account/applications` | Mock 完成 | 已授权应用列表、撤销授权 |
-| `/account/data-export` | 入口占位 | 法律文件描述的能力，标记为尚未开放 |
-| `/account/delete` | 入口占位 | 法律文件描述的能力，标记为尚未开放 |
+| `/account/data-export` | P8 真实 API | 重认证、异步生成、owner-bound 15 分钟 JSON 下载 |
+| `/account/delete` | P8 真实 API | 重认证、30 天可取消冷静期、durable 删除状态 |
 
 ### 1.3 管理端
 
@@ -60,8 +60,8 @@
 
 | 路由 | 状态 | 说明 |
 | --- | --- | --- |
-| `/privacy` | 完成 | 隐私政策（标记"暂未生效"） |
-| `/terms` | 完成 | 服务条款（标记"暂未生效"） |
+| `/privacy` | P8 受控发布 | 仅 version + SHA-256 匹配后端审批记录时显示生效日期 |
+| `/terms` | P8 受控发布 | 仅 version + SHA-256 匹配后端审批记录时显示生效日期 |
 
 ## 2. 架构决策记录（ADR）
 

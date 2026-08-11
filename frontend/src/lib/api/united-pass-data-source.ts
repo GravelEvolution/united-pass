@@ -28,9 +28,11 @@ import type {
   UserDetail,
 } from "@/features/admin/types";
 import type {
+  AccountDeletion,
   AuthorizedApplication,
   PasskeyEnrollment,
   PasskeyEnrollmentConfirmation,
+  PersonalDataExport,
   ReauthenticationGrant,
   ReauthenticationInput,
   ReauthenticationOutcome,
@@ -89,6 +91,7 @@ export interface UnitedPassQueries {
   getSessions(): Promise<UserSession[]>;
   getConsentResolution(requestId: string): Promise<ConsentResolution>;
   getAuthorizedApplications(): Promise<AuthorizedApplication[]>;
+  getAccountDeletion(): Promise<AccountDeletion>;
   getAdminDashboard(): Promise<AdminDashboard>;
   getUsers(query?: PageQuery): Promise<CursorPage<ManagedUser>>;
   getUserDetail(userId: string): Promise<UserDetail | null>;
@@ -165,6 +168,12 @@ export interface UnitedPassCommands {
   generateRecoveryCodes(): Promise<{ codes: string[] }>;
   revokeOtherSessions(): Promise<{ revoked: number }>;
   logout(): Promise<void>;
+
+  // Privacy rights
+  requestPersonalDataExport(reauthToken: string, options?: BrowserCommandOptions): Promise<PersonalDataExport>;
+  getPersonalDataExport(exportId: string, options?: BrowserCommandOptions): Promise<PersonalDataExport>;
+  requestAccountDeletion(reauthToken: string, options?: BrowserCommandOptions): Promise<AccountDeletion>;
+  cancelAccountDeletion(options?: BrowserCommandOptions): Promise<AccountDeletion>;
 
   // Session management
   revokeOwnSession(sessionId: string): Promise<void>;

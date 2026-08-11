@@ -223,7 +223,7 @@ go test -tags integration -race ./internal/adapters/postgres/... ./internal/adap
 
 Integration tests never run `FLUSHALL`, `FLUSHDB`, or `DROP DATABASE`. They only delete keys under the configured test prefix and only drop tables in the test schema.
 
-## Current Implementation Scope (through Phase 6)
+## Current Implementation Scope (through Phase 8 technical implementation)
 
 Phase 0 established the HTTP foundation. Phase 1 adds session management, authentication, and current user endpoints. Phase 2 adds the OAuth Application and OAuth Client management plane (see [ADR-0004](docs/adr-0004.md)).
 
@@ -306,7 +306,25 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
   enable/disable and manual resolution, plus optional Feishu login entry.
 - Architecture and acceptance contract: [ADR-0012](docs/adr-0012.md).
 
-### Not yet implemented (later phases)
+### Implemented in Phase 7
+
+- Cerbos-backed fail-closed capability resolution, versioned policy drafts,
+  durable publication jobs, simulation and canonical audit search/export.
+- Architecture: [ADR-0013](docs/adr-0013.md).
+
+### Implemented in Phase 8
+
+- Controlled legal publication bound to an external approval reference and the
+  exact frontend source SHA-256; code deployment alone cannot activate text.
+- Step-up protected personal-data JSON exports, owner-bound download and
+  15-minute artifact expiry.
+- Step-up protected account deletion with a 30-day cancellable cooling period,
+  provider-first durable convergence, session purge and local anonymisation.
+- Architecture and operations: [ADR-0014](docs/adr-0014.md) and
+  [Phase 8 launch runbook](docs/p8-launch-runbook.md).
+- Legal approval and real production cutover remain external Pending items.
+
+### Status and remaining external acceptance
 
 **Phase 1 status: implementation complete; local real-instance acceptance passed.**
 The session, current user, MFA (atomic consumption, opaque server-generated
@@ -358,14 +376,11 @@ for `RemoveApp` on v2.71.
 - Passkey browser ceremony against the real instance (WebAuthn begin fails in the local dev instance; adapter unit tests cover the contract and the fail-closed path)
 - Production HTTPS instance + Secret Manager rollout (Phase 1.2 production operational sign-off)
 - gRPC error-code calibration follow-ups on the production instance (see `internal/adapters/zitadel/errors.go`; local codes are recorded in ADR-0003)
-- Passkey / recovery-code factor management (passkey verification + WebAuthn ceremony contract work; factor *management* UI is Phase 4)
 - User registration, password reset, email verification
 - Profile updates and avatar upload
-- TOTP, Passkey, Recovery Code management (MFA verification is Phase 1; factor management is Phase 4)
-- Session list and revocation of other sessions
-- Consent orchestration
-- Cerbos policies and audit
-- Audit export
+- Recovery Code management (provider capability remains unsupported)
+- Legal sign-off, production backup/restore exercise, real production-like
+  destructive account-deletion acceptance and traffic cutover
 
 ## Local ZITADEL Instance
 
@@ -442,6 +457,16 @@ High-risk operations additionally require a fresh reauthentication grant
 | `/api/v1/admin/applications/{applicationId}/clients/{clientId}/enable` | POST | No | Enable client |
 | `/api/v1/admin/applications/{applicationId}/clients/{clientId}/disable` | POST | No | Disable client |
 | `/api/v1/admin/applications/{applicationId}/clients/{clientId}/secret-rotations` | POST | Yes | Rotate confidential client secret (one-time display) |
+
+## API Endpoints (Phase 8)
+
+| Endpoint | Method | Reauth | Description |
+| --- | --- | --- | --- |
+| `/api/v1/legal-documents` | GET | No | Public effective/scheduled legal document identity |
+| `/api/v1/me/data-exports` | POST | Yes | Request a personal-data export |
+| `/api/v1/me/data-exports/{exportId}` | GET | No | Poll an owner-bound export job |
+| `/api/v1/me/data-exports/{exportId}/download` | GET | No | Download an unexpired JSON artifact |
+| `/api/v1/me/account-deletion` | GET / POST / DELETE | POST | Read, request, or cancel delayed deletion |
 
 ## Cookie and CSRF Conventions
 

@@ -8,11 +8,16 @@
 
 import type { Metadata } from "next";
 import { PageHeader } from "@/components/common/page-header";
-import { UnavailableNotice } from "@/features/account/components/unavailable-notice";
+import { AccountDeletionPanel } from "@/features/account/components/privacy-rights";
+import { serverQueries } from "@/lib/api/server/server-queries";
 
 export const metadata: Metadata = { title: "注销账户" };
 
-export default function DeleteAccountPage() {
+export default async function DeleteAccountPage() {
+  const [currentUser, deletion] = await Promise.all([
+    serverQueries.getCurrentUser(),
+    serverQueries.getAccountDeletion(),
+  ]);
   return (
     <>
       <PageHeader
@@ -20,10 +25,7 @@ export default function DeleteAccountPage() {
         title="注销账户"
         description="永久注销当前账户并删除相关数据。"
       />
-      <UnavailableNotice
-        bannerTitle="账户注销功能尚未开放"
-        bannerDescription="该功能正在开发中，暂不支持自助注销账户。相关能力上线后，你将可以在此页面提交注销申请，注销前请确保已了解不可恢复的后果。"
-      />
+      <AccountDeletionPanel userId={currentUser.userId} initialDeletion={deletion} />
     </>
   );
 }

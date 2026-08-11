@@ -196,7 +196,9 @@ func isValidReauthAction(action string) bool {
 		auth.ReauthActionProviderDisable,
 		auth.ReauthActionProviderIdentityLink,
 		auth.ReauthActionPolicyPublish,
-		auth.ReauthActionAuditExport:
+		auth.ReauthActionAuditExport,
+		auth.ReauthActionPersonalDataExport,
+		auth.ReauthActionAccountDelete:
 		return true
 	default:
 		return false
@@ -265,6 +267,11 @@ func (h *ReauthHandlers) Request(w http.ResponseWriter, r *http.Request) {
 	} else if auth.IsTargetReauthAction(req.Action) {
 		if req.ApplicationID != "" || req.ClientID != "" || !isValidReauthTarget(req.Target) {
 			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "该管理操作需要且仅支持精确目标绑定。", nil)
+			return
+		}
+		if (req.Action == auth.ReauthActionPersonalDataExport || req.Action == auth.ReauthActionAccountDelete) &&
+			req.Target != string(principal.UserID) {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "隐私权利操作只能绑定当前账户。", nil)
 			return
 		}
 	} else {

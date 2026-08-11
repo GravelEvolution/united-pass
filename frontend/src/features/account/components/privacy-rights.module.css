@@ -1,0 +1,39 @@
+/*
+ * Copyright (c) 2026 Chen Jiajie(Ariakage)
+ * Phase 8 privacy-rights controls
+ */
+
+.card,
+.statusCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+  margin-bottom: 18px;
+  padding: 26px;
+  border: 1px solid var(--up-line);
+  border-radius: var(--up-radius-md);
+  background: var(--up-surface);
+  box-shadow: var(--up-card-shadow);
+}
+
+.dangerCard { border-color: var(--up-danger-line); }
+.card h2,
+.statusCard h2 { margin: 4px 0 0; font-size: 17px; }
+.eyebrow { margin: 0; color: var(--up-brand); font-size: 11px; font-weight: 760; letter-spacing: .13em; text-transform: uppercase; }
+.description,
+.modalCopy,
+.muted { margin: 8px 0 0; color: var(--up-muted); font-size: 13px; line-height: 1.7; }
+
+.statusCard { display: block; }
+.details { display: grid; gap: 0; margin: 16px 0; }
+.details > div { display: grid; grid-template-columns: 110px 1fr; gap: 14px; padding: 11px 0; border-top: 1px solid var(--up-line-soft); }
+.details dt { color: var(--up-muted); font-size: 12px; }
+.details dd { margin: 0; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.downloadLink { display: inline-flex; color: var(--up-brand); font-size: 13px; font-weight: 650; }
+.reauthBlock { margin-top: 18px; }
+
+@media (max-width: 760px) {
+  .card { align-items: stretch; flex-direction: column; }
+  .details > div { grid-template-columns: 1fr; gap: 6px; }
+}

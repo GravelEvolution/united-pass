@@ -38,6 +38,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
 	"github.com/GravelEvolution/united-pass/backend/internal/policies"
+	"github.com/GravelEvolution/united-pass/backend/internal/privacy"
 	"github.com/GravelEvolution/united-pass/backend/internal/providers"
 	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
@@ -137,6 +138,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var sessionAuditor session.SecurityAuditor
 	var workerStops []func()
 	var cerbosClient *cerbos.Client
+	var accountDeleter privacy.ProviderAccountDeleter
 
 	if pool != nil {
 		userRepo := postgres.NewUserRepository(pool.PgxPool())
@@ -153,6 +155,9 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	authenticator, sdkClient, providerCloser, err = buildAuthenticator(cfg, userLinker, logger)
 	if err != nil {
 		return nil, err
+	}
+	if sdkClient != nil {
+		accountDeleter = zitadel.NewAccountDeleter(sdkClient.UserServiceV2())
 	}
 
 	// Security-state authority (ADR-0007): the PostgreSQL epoch + durable
@@ -377,6 +382,8 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var rotationRates httpapi.RotationRateChecker
 	var policyHandlers *httpapi.PolicyHandlers
 	var auditHandlers *httpapi.AuditHandlers
+	var privacyHandlers *httpapi.PrivacyHandlers
+	var legalHandlers *httpapi.LegalHandlers
 	// Reauthentication is shared infrastructure for account, application and
 	// workforce high-risk operations. It must not disappear merely because an
 	// unrelated OAuth provisioner is unavailable (ADR-0011 §3).
@@ -446,6 +453,17 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	if auditSvc != nil {
 		auditHandlers = httpapi.NewAuditHandlers(auditSvc, permResolver, reauthVerifier)
+	}
+	if pool != nil {
+		privacySvc := privacy.NewService(
+			postgres.NewPrivacyRepository(pool.PgxPool(), cfg.Auth.Provider),
+			accountDeleter, sessionSvc, logger,
+		)
+		privacyHandlers = httpapi.NewPrivacyHandlers(privacySvc, reauthVerifier)
+		legalHandlers = httpapi.NewLegalHandlers(privacySvc)
+		privacyWorker := privacy.NewWorker(privacySvc, time.Second, 5)
+		privacyWorker.Start()
+		workerStops = append(workerStops, privacyWorker.Stop)
 	}
 
 	// Consent resolution (P3.3, ADR-0005 §2): the side-effect free
@@ -546,6 +564,9 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 
 		r.Post("/auth/sessions", authHandlers.Login)
 		r.Post("/auth/sessions/mfa", authHandlers.CompleteMFA)
+		if legalHandlers != nil {
+			r.Get("/legal-documents", legalHandlers.List)
+		}
 		if providerLoginHandlers != nil {
 			r.Get("/auth/providers", providerLoginHandlers.ListPublicProviders)
 			r.Get("/auth/providers/feishu/authorize", providerLoginHandlers.BeginFeishu)
@@ -628,6 +649,25 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				}
 				r.Get("/me", accountHandlers.GetCurrentUser)
 				r.Get("/me/permissions", accountHandlers.GetPermissions)
+			}
+		})
+
+		// Phase 8 privacy rights (ADR-0014): requester-owned short-lived
+		// exports and a cancellable 30-day deletion lifecycle. All mutations
+		// pass CSRF; export/deletion creation additionally consume a grant
+		// bound to the caller's stable user ID.
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
+				r.Use(httpapi.RequireCSRF())
+			}
+			if privacyHandlers != nil {
+				r.Post("/me/data-exports", privacyHandlers.BeginExport)
+				r.Get("/me/data-exports/{exportId}", privacyHandlers.GetExport)
+				r.Get("/me/data-exports/{exportId}/download", privacyHandlers.Download)
+				r.Get("/me/account-deletion", privacyHandlers.GetDeletion)
+				r.Post("/me/account-deletion", privacyHandlers.RequestDeletion)
+				r.Delete("/me/account-deletion", privacyHandlers.CancelDeletion)
 			}
 		})
 

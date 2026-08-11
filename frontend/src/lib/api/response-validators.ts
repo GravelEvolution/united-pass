@@ -13,9 +13,11 @@ import type {
   ConsentScope,
 } from "@/features/authorization/types";
 import type {
+  AccountDeletion,
   AuthorizedApplication,
   PasskeyEnrollment,
   PasskeyEnrollmentConfirmation,
+  PersonalDataExport,
   ReauthenticationGrant,
   ReauthenticationOutcome,
   SecurityPasskey,
@@ -478,6 +480,49 @@ function parseAuthorizedApplication(value: unknown): AuthorizedApplication {
 export function parseAuthorizedApplications(value: unknown): AuthorizedApplication[] {
   if (!Array.isArray(value)) throw new ApiResponseShapeError("AuthorizedApplication[]");
   return value.map(parseAuthorizedApplication);
+}
+
+// --- Phase 8 privacy rights ---
+
+export function parsePersonalDataExport(value: unknown): PersonalDataExport {
+  if (!isRecord(value)) throw new ApiResponseShapeError("PersonalDataExport");
+  const status = value.status;
+  if (status !== "pending" && status !== "processing" && status !== "completed" && status !== "failed") {
+    throw new ApiResponseShapeError("PersonalDataExport.status");
+  }
+  return {
+    exportId: requireNonEmptyString(value, "exportId"),
+    status,
+    requestedAt: requireNonEmptyString(value, "requestedAt"),
+    completedAt: requireNullableString(value, "completedAt"),
+    expiresAt: requireNullableString(value, "expiresAt"),
+    downloadUrl: requireNullableString(value, "downloadUrl"),
+    totalSections: requireNonNegativeInteger(value, "totalSections"),
+  };
+}
+
+export function parseAccountDeletion(value: unknown): AccountDeletion {
+  if (!isRecord(value)) throw new ApiResponseShapeError("AccountDeletion");
+  if (value.status === "none") return { status: "none" };
+  const status = value.status;
+  if (
+    status !== "pending" &&
+    status !== "processing" &&
+    status !== "provider_deleted" &&
+    status !== "completed" &&
+    status !== "cancelled" &&
+    status !== "failed"
+  ) {
+    throw new ApiResponseShapeError("AccountDeletion.status");
+  }
+  return {
+    deletionId: requireNonEmptyString(value, "deletionId"),
+    status,
+    requestedAt: requireNonEmptyString(value, "requestedAt"),
+    executeAfter: requireNonEmptyString(value, "executeAfter"),
+    cancelledAt: requireNullableString(value, "cancelledAt"),
+    completedAt: requireNullableString(value, "completedAt"),
+  };
 }
 
 // --- CurrentUser ---

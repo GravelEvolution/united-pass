@@ -1,7 +1,7 @@
 # United Pass 前端 API 接入清单
 
-- 状态：Frozen v1 + P4/P5/P6/P7 Frozen Amendments
-- 日期：2026-08-11（P7 Policies/Audit real-seam 接入修订）
+- 状态：Frozen v1 + P4/P5/P6/P7/P8 Frozen Amendments
+- 日期：2026-08-11（P8 Launch privacy/legal real-seam 接入修订）
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect
 
@@ -236,6 +236,13 @@ Account action 的 `applicationId` / `clientId` 必须为空；只有
 | `/account/security` | `DELETE /api/v1/me/sessions` | 撤销除当前会话外的全部会话 | 明确确认；当前会话保留 |
 | `/account/applications` | `GET /api/v1/me/authorized-applications` | 已授权应用列表 | 当前会话用户 |
 | `/account/applications` | `DELETE /api/v1/me/authorized-applications/{grantId}` | 撤销指定应用授权 | 当前会话用户 |
+| `/account/data-export` | `POST /api/v1/me/data-exports` | 创建个人数据 JSON 导出 | `account.data_export` 重认证，target 为当前 userId |
+| `/account/data-export` | `GET /api/v1/me/data-exports/{exportId}` | 轮询 owner-bound 导出状态 | 外部/未知 ID 统一 404 |
+| `/account/data-export` | `GET /api/v1/me/data-exports/{exportId}/download` | 下载 15 分钟有效的数据副本 | 当前会话用户；no-store |
+| `/account/delete` | `GET /api/v1/me/account-deletion` | 读取注销状态 | 当前会话用户 |
+| `/account/delete` | `POST /api/v1/me/account-deletion` | 启动 30 天冷静期 | `account.delete` 重认证，target 为当前 userId |
+| `/account/delete` | `DELETE /api/v1/me/account-deletion` | 冷静期内取消注销 | Session + CSRF；执行开始后 409 |
+| `/privacy`、`/terms` | `GET /api/v1/legal-documents` | 读取公开的受控生效状态 | 无审批引用/approver 字段；version + hash 必须匹配 |
 
 `GET /me` 必须以稳定 `userId` 作为身份主键。`employeeProfile` 可为空；外部用户关联员工档案后仍使用原 `userId`，且保留普通用户能力。
 

@@ -28,13 +28,15 @@ info:
     synchronization history and explicit identity-link conflict resolution.
     Phase 7 scope: Cerbos-backed ABAC policy drafts/version publication and
     durable audit search/export jobs.
+    Phase 8 scope: controlled legal-document publication, requester-owned
+    personal-data exports and cancellable delayed account deletion.
     See `../docs/adr-0004.md`, `../docs/adr-0011.md` and
     `../docs/adr-0012.md` and `../docs/adr-0013.md` for the architecture decisions.
 
     Business API paths use the full `/api/v1/...` prefix explicitly rather than
     relying on a global server base path, so that root-level operational endpoints
     and versioned API endpoints can coexist accurately.
-  version: 0.7.0
+  version: 0.8.0
   contact:
     name: United Pass backend team
 
@@ -56,6 +58,8 @@ tags:
     description: Current user profile and permission capabilities
   - name: Account Security
     description: Provider-authoritative account factors and passkey lifecycle
+  - name: Privacy and Legal
+    description: Personal-data rights and controlled public legal-document status
   - name: Reauthentication
     description: |
       High-risk operation reauthentication. A completed grant is required
@@ -626,6 +630,144 @@ paths:
                   code: internal.unexpected
                   message: "服务暂时无法处理该请求。"
                   requestId: req_0123456789abcdef
+
+  /api/v1/legal-documents:
+    get:
+      tags: [Privacy and Legal]
+      summary: List current controlled legal-document publications
+      description: Returns public status only. Approval references and approver identities are never exposed.
+      operationId: listLegalDocuments
+      responses:
+        "200":
+          description: Current effective or scheduled publications whose content digest was accepted by the release manifest.
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegalPublicationList"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/data-exports:
+    post:
+      tags: [Privacy and Legal]
+      summary: Request a short-lived personal-data export
+      description: Consumes a single-use `account.data_export` reauthentication grant. Only one pending or processing export is allowed per user.
+      operationId: requestPersonalDataExport
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "202":
+          description: Export job accepted.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PersonalDataExport"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/me/data-exports/{exportId}:
+    get:
+      tags: [Privacy and Legal]
+      summary: Read an owned personal-data export job
+      description: Foreign and unknown export IDs return the same 404 response.
+      operationId: getPersonalDataExport
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PersonalDataExportIdPath"
+      responses:
+        "200":
+          description: Current job status and a download URL only while the completed artifact remains live.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PersonalDataExport"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/me/data-exports/{exportId}/download:
+    get:
+      tags: [Privacy and Legal]
+      summary: Download an owned, unexpired personal-data JSON artifact
+      operationId: downloadPersonalDataExport
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PersonalDataExportIdPath"
+      responses:
+        "200":
+          description: JSON attachment. The artifact is physically purged after its 15-minute lifetime.
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/me/account-deletion:
+    get:
+      tags: [Privacy and Legal]
+      summary: Read the current account-deletion lifecycle
+      operationId: getAccountDeletion
+      security:
+        - SessionCookie: []
+      responses:
+        "200":
+          description: "Current deletion request, or `{status: none}`."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AccountDeletionState"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "500": {$ref: "#/components/responses/InternalError"}
+    post:
+      tags: [Privacy and Legal]
+      summary: Start a cancellable 30-day account-deletion cooling period
+      description: Consumes a single-use `account.delete` reauthentication grant. Provider deletion and local anonymisation run durably after the cooling period.
+      operationId: requestAccountDeletion
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "202":
+          description: Deletion request accepted.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AccountDeletion"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "500": {$ref: "#/components/responses/InternalError"}
+    delete:
+      tags: [Privacy and Legal]
+      summary: Cancel a deletion request during its cooling period
+      operationId: cancelAccountDeletion
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      responses:
+        "200":
+          description: Deletion request cancelled.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AccountDeletion"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "500": {$ref: "#/components/responses/InternalError"}
 
   /api/v1/auth/reauthentication:
     post:
@@ -3038,6 +3180,15 @@ components:
         type: string
         pattern: "^exp_[A-Za-z0-9_-]{8,76}$"
 
+    PersonalDataExportIdPath:
+      name: exportId
+      in: path
+      required: true
+      description: Requester-owned personal-data export job ID (`pexp_…`).
+      schema:
+        type: string
+        pattern: "^pexp_[A-Za-z0-9_-]{13,74}$"
+
     AdminSessionIdPath:
       name: sessionId
       in: path
@@ -5169,3 +5320,59 @@ components:
         requestedAt: {type: string, format: date-time}
         completedAt: {type: [string, "null"], format: date-time}
         totalEvents: {type: integer, minimum: 0}
+
+    PersonalDataExport:
+      type: object
+      required: [exportId, status, requestedAt, completedAt, expiresAt, downloadUrl, totalSections]
+      additionalProperties: false
+      properties:
+        exportId: {type: string, pattern: "^pexp_[A-Za-z0-9_-]{13,74}$"}
+        status: {type: string, enum: [pending, processing, completed, failed]}
+        requestedAt: {type: string, format: date-time}
+        completedAt: {type: [string, "null"], format: date-time}
+        expiresAt: {type: [string, "null"], format: date-time}
+        downloadUrl: {type: [string, "null"]}
+        totalSections: {type: integer, minimum: 0}
+
+    AccountDeletion:
+      type: object
+      required: [deletionId, status, requestedAt, executeAfter, cancelledAt, completedAt]
+      additionalProperties: false
+      properties:
+        deletionId: {type: string, pattern: "^del_[A-Za-z0-9_-]{13,75}$"}
+        status: {type: string, enum: [pending, processing, provider_deleted, completed, cancelled, failed]}
+        requestedAt: {type: string, format: date-time}
+        executeAfter: {type: string, format: date-time}
+        cancelledAt: {type: [string, "null"], format: date-time}
+        completedAt: {type: [string, "null"], format: date-time}
+
+    AccountDeletionState:
+      oneOf:
+        - type: object
+          required: [status]
+          additionalProperties: false
+          properties:
+            status: {type: string, const: none}
+        - $ref: "#/components/schemas/AccountDeletion"
+
+    PublicLegalPublication:
+      type: object
+      required: [documentKind, version, contentSha256, effectiveAt, publishedAt, status]
+      additionalProperties: false
+      properties:
+        documentKind: {type: string, enum: [privacy, terms]}
+        version: {type: string}
+        contentSha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        effectiveAt: {type: string, format: date-time}
+        publishedAt: {type: string, format: date-time}
+        status: {type: string, enum: [scheduled, effective]}
+
+    LegalPublicationList:
+      type: object
+      required: [items]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          maxItems: 2
+          items: {$ref: "#/components/schemas/PublicLegalPublication"}
