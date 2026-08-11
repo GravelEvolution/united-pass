@@ -18,12 +18,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi"
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
@@ -53,6 +57,60 @@ func testConfig() config.Config {
 		ShutdownTimeout:     3 * time.Second,
 		MaxRequestBodyBytes: 1 << 20,
 		LogLevel:            "info",
+	}
+}
+
+// prepareBootstrapTestDatabase makes the database-backed bootstrap regression
+// test hermetic. The API server deliberately never runs migrations at startup,
+// so a test that opts into a real database must prepare its dedicated test
+// schema explicitly instead of depending on another package or CI step to run
+// first.
+func prepareBootstrapTestDatabase(t *testing.T, databaseURL, schema string) {
+	t.Helper()
+	if schema == "" {
+		schema = "united_pass_test"
+	}
+	if !config.ValidSchemaIdentifier(schema) {
+		t.Fatalf("test schema %q is not a valid PostgreSQL identifier", schema)
+	}
+
+	connConfig, err := pgx.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	if connConfig.RuntimeParams == nil {
+		connConfig.RuntimeParams = make(map[string]string)
+	}
+	connConfig.RuntimeParams["search_path"] = schema
+
+	db := stdlib.OpenDB(*connConfig)
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.ExecContext(context.Background(), "CREATE SCHEMA IF NOT EXISTS "+pgx.Identifier{schema}.Sanitize()); err != nil {
+		t.Fatalf("create test schema: %v", err)
+	}
+	goose.SetTableName(pgx.Identifier{schema, "goose_db_version"}.Sanitize())
+	if err := goose.SetDialect("postgres"); err != nil {
+		t.Fatalf("set migration dialect: %v", err)
+	}
+
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+	var migrationsDir string
+	for range 5 {
+		candidate := filepath.Join(dir, "migrations")
+		if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
+			migrationsDir = candidate
+			break
+		}
+		dir = filepath.Dir(dir)
+	}
+	if migrationsDir == "" {
+		t.Fatal("migrations directory not found")
+	}
+	if err := goose.UpContext(context.Background(), db, migrationsDir); err != nil {
+		t.Fatalf("apply test migrations: %v", err)
 	}
 }
 
@@ -402,6 +460,11 @@ func TestFakeProviderWithDatabaseServesCurrentUser(t *testing.T) {
 	if dbURL == "" || redisURL == "" {
 		t.Skip("UP_TEST_DATABASE_URL and UP_TEST_REDIS_URL required for this test")
 	}
+	dbSchema := os.Getenv("UP_TEST_DATABASE_SCHEMA")
+	if dbSchema == "" {
+		dbSchema = "united_pass_test"
+	}
+	prepareBootstrapTestDatabase(t, dbURL, dbSchema)
 
 	cfg := testConfig()
 	cfg.Auth.Provider = "fake"
@@ -421,7 +484,7 @@ func TestFakeProviderWithDatabaseServesCurrentUser(t *testing.T) {
 	cfg.RateLimit.MFALimit = 10
 	cfg.RateLimit.MFAWindow = 15 * time.Minute
 	cfg.Database.URL = dbURL
-	cfg.Database.Schema = "united_pass_test"
+	cfg.Database.Schema = dbSchema
 	cfg.Database.MaxConns = 5
 	cfg.Database.MinConns = 1
 	cfg.Database.ConnectTimeout = 10 * time.Second
