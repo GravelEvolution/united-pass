@@ -70,3 +70,8 @@ export const FULL_PERMISSIONS: PermissionCapabilities = {
   providerRead: true,
   providerManage: true,
 } as const;
+
+/** Returns whether the caller may enter any part of the administration console. */
+export function canAccessAdminConsole(permissions: PermissionCapabilities): boolean {
+  return Object.values(permissions).some(Boolean);
+}

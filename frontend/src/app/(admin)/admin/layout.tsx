@@ -7,9 +7,11 @@
 //
 
 import type { ReactNode } from "react";
+import { redirect } from "next/navigation";
 import { DashboardShell } from "@/components/layouts/dashboard-shell";
 import { serverQueries } from "@/lib/api/server/server-queries";
 import { requireSession } from "@/lib/api/server/server-session";
+import { canAccessAdminConsole } from "@/types/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +21,9 @@ export default async function AdminLayout({ children }: { children: ReactNode })
     serverQueries.getCurrentUser(),
     serverQueries.getCurrentPermissions(),
   ]);
+  if (!canAccessAdminConsole(permissions)) {
+    redirect("/account");
+  }
   return (
     <DashboardShell mode="admin" currentUser={currentUser} permissions={permissions}>
       {children}
