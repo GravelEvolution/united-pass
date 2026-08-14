@@ -50,6 +50,7 @@
   opacity: 0.42;
   pointer-events: none;
   transform: rotate(22deg);
+  animation: auth-orbit-drift 16s ease-in-out infinite alternate;
 }
 
 .brandCarousel {
@@ -81,10 +82,13 @@
 .brandLogoLink {
   align-self: flex-start;
   border-radius: 12px;
+  animation: auth-brand-in 600ms var(--up-ease-out) both;
+  transition: transform var(--up-duration-base) var(--up-ease-out);
 }
 
 .brandCopy {
   max-width: 640px;
+  animation: auth-brand-in 680ms 90ms var(--up-ease-out) both;
 }
 
 .kicker {
@@ -119,6 +123,7 @@
   gap: 9px;
   color: rgb(255 255 255 / 76%);
   font-size: 13px;
+  animation: auth-brand-in 680ms 180ms var(--up-ease-out) both;
 }
 
 .securityDot {
@@ -128,27 +133,53 @@
   border-radius: 50%;
   background: #3fcf91;
   box-shadow: 0 0 0 4px rgb(22 134 92 / 12%);
+  animation: auth-security-pulse 2.8s ease-in-out infinite;
 }
 
 .contentPanel {
   position: relative;
+  isolation: isolate;
   display: flex;
   min-width: 0;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
   padding: 40px 28px 48px;
+  background:
+    radial-gradient(circle at 88% 12%, var(--up-brand-glow), transparent 28%),
+    radial-gradient(circle at 4% 92%, color-mix(in srgb, var(--up-brand) 6%, transparent), transparent 26%),
+    var(--up-surface);
+}
+
+.contentPanel::before {
+  position: absolute;
+  z-index: -1;
+  top: 7%;
+  right: -180px;
+  width: 360px;
+  height: 360px;
+  border: 1px solid color-mix(in srgb, var(--up-brand) 16%, transparent);
+  border-radius: 42% 58% 55% 45%;
+  content: "";
+  opacity: 0.65;
+  pointer-events: none;
+  transform: rotate(-12deg);
+  animation: auth-ambient-drift 18s ease-in-out infinite alternate;
 }
 
 .themeToggle {
   position: absolute;
+  z-index: 2;
   top: 28px;
   right: 28px;
+  animation: auth-content-in 500ms 240ms var(--up-ease-out) both;
 }
 
 .content {
   width: min(100%, 430px);
   margin: auto;
+  animation: auth-content-in 620ms 80ms var(--up-ease-out) both;
 }
 
 .mobileBrand {
@@ -163,10 +194,55 @@
   margin: 32px 0 0;
   color: var(--up-muted-soft);
   font-size: 12px;
+  animation: auth-content-in 560ms 180ms var(--up-ease-out) both;
 }
 
-.footer a { color: var(--up-muted); }
+.footer a {
+  color: var(--up-muted);
+  transition: color var(--up-duration-fast) ease;
+}
+
 .footer a:hover { color: var(--up-brand); }
+
+@media (hover: hover) {
+  .brandLogoLink:hover { transform: translateY(-2px); }
+}
+
+@keyframes auth-brand-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes auth-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes auth-orbit-drift {
+  to { transform: rotate(30deg) translate3d(-10px, -14px, 0); }
+}
+
+@keyframes auth-ambient-drift {
+  to { transform: rotate(-4deg) translate3d(-24px, 18px, 0); }
+}
+
+@keyframes auth-security-pulse {
+  50% { box-shadow: 0 0 0 7px rgb(63 207 145 / 4%); }
+}
 
 @keyframes auth-brand-slide {
   0% {
@@ -187,6 +263,19 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .brandPanel::after,
+  .brandLogoLink,
+  .brandCopy,
+  .securityNote,
+  .securityDot,
+  .contentPanel::before,
+  .themeToggle,
+  .content,
+  .footer {
+    transform: none;
+    animation: none;
+  }
+
   .brandSlide {
     opacity: 0;
     transform: none;
@@ -200,6 +289,18 @@
   .page { grid-template-columns: 1fr; }
   .brandPanel { display: none; }
   .contentPanel { min-height: 100vh; justify-content: flex-start; }
-  .mobileBrand { display: block; width: min(100%, 430px); margin-bottom: 56px; }
+  .mobileBrand {
+    display: block;
+    width: min(100%, 430px);
+    margin-bottom: 56px;
+    animation: auth-content-in 520ms var(--up-ease-out) both;
+  }
   .themeToggle { top: 20px; right: 20px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobileBrand {
+    transform: none;
+    animation: none;
+  }
 }

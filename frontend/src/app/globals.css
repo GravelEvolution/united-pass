@@ -55,6 +55,14 @@
   --up-radius-lg: 22px;
   --up-shadow: 0 16px 48px rgb(34 54 94 / 8%);
   --up-card-shadow: 0 10px 30px rgb(35 55 90 / 4%);
+  --up-shadow-raised: 0 18px 44px rgb(32 57 108 / 10%);
+  --up-brand-glow: rgb(36 87 214 / 12%);
+  --up-focus-ring: rgb(36 87 214 / 16%);
+  --up-duration-fast: 150ms;
+  --up-duration-base: 240ms;
+  --up-duration-slow: 420ms;
+  --up-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --up-ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
   --semi-color-primary: var(--up-brand);
   --semi-color-primary-hover: var(--up-brand-strong);
   --semi-border-radius-small: var(--up-radius-sm);
@@ -109,6 +117,9 @@ html[data-theme="dark"] {
   --up-status-info-bg: #26385e;
   --up-shadow: 0 18px 54px rgb(0 0 0 / 28%);
   --up-card-shadow: 0 12px 34px rgb(0 0 0 / 18%);
+  --up-shadow-raised: 0 20px 48px rgb(0 0 0 / 28%);
+  --up-brand-glow: rgb(127 165 255 / 13%);
+  --up-focus-ring: rgb(127 165 255 / 18%);
 }
 
 * {
@@ -133,6 +144,9 @@ body[theme-mode="dark"] {
   background: var(--up-canvas);
   font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
+  transition:
+    color var(--up-duration-base) var(--up-ease-standard),
+    background-color var(--up-duration-base) var(--up-ease-standard);
 }
 
 /* Ensure Semi Design components inherit the project font in both modes */
@@ -161,4 +175,46 @@ a {
 ::selection {
   color: var(--up-ink);
   background: #cddcff;
+}
+
+button.semi-button {
+  transition:
+    transform var(--up-duration-fast) var(--up-ease-out),
+    border-color var(--up-duration-fast) ease,
+    color var(--up-duration-fast) ease,
+    background-color var(--up-duration-fast) ease,
+    box-shadow var(--up-duration-base) var(--up-ease-out);
+}
+
+.semi-input-wrapper,
+.semi-input-textarea-wrapper {
+  transition:
+    border-color var(--up-duration-fast) ease,
+    background-color var(--up-duration-fast) ease,
+    box-shadow var(--up-duration-base) var(--up-ease-out);
+}
+
+.semi-input-wrapper:focus-within,
+.semi-input-textarea-wrapper:focus-within {
+  box-shadow: 0 0 0 4px var(--up-focus-ring);
+}
+
+@media (hover: hover) {
+  button.semi-button:not([disabled]):hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 20px rgb(26 48 93 / 10%);
+  }
+}
+
+button.semi-button:not([disabled]):active {
+  transform: scale(0.985);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body,
+  button.semi-button,
+  .semi-input-wrapper,
+  .semi-input-textarea-wrapper {
+    transition: none;
+  }
 }

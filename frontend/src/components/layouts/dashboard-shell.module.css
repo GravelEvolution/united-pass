@@ -8,7 +8,9 @@
 
 .shell {
   min-height: 100vh;
-  background: var(--up-canvas);
+  background:
+    radial-gradient(circle at 88% 4%, var(--up-brand-glow), transparent 24rem),
+    var(--up-canvas);
 }
 
 .sidebar {
@@ -21,13 +23,26 @@
   width: 252px;
   flex-direction: column;
   border-right: 1px solid var(--up-line);
-  background: var(--up-glass);
+  background: linear-gradient(180deg, var(--up-glass), color-mix(in srgb, var(--up-glass) 94%, var(--up-brand-soft)));
   backdrop-filter: blur(20px);
+}
+
+.sidebar::before {
+  position: absolute;
+  top: 0;
+  right: -1px;
+  width: 1px;
+  height: 180px;
+  background: linear-gradient(180deg, var(--up-brand), transparent);
+  content: "";
+  opacity: 0.45;
+  pointer-events: none;
 }
 
 .brandLink {
   display: block;
   margin: 28px 28px 26px;
+  transition: transform var(--up-duration-base) var(--up-ease-out);
 }
 
 .surfaceRow {
@@ -59,6 +74,7 @@
 }
 
 .navigationItem {
+  position: relative;
   display: flex;
   min-height: 44px;
   align-items: center;
@@ -68,7 +84,30 @@
   color: var(--up-muted);
   font-size: 14px;
   font-weight: 520;
-  transition: color 160ms ease, background 160ms ease;
+  transition:
+    color var(--up-duration-fast) ease,
+    background-color var(--up-duration-fast) ease,
+    transform var(--up-duration-base) var(--up-ease-out);
+}
+
+.navigationItem::before {
+  position: absolute;
+  top: 11px;
+  bottom: 11px;
+  left: 0;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--up-brand);
+  content: "";
+  opacity: 0;
+  transform: scaleY(0.45);
+  transition:
+    opacity var(--up-duration-fast) ease,
+    transform var(--up-duration-base) var(--up-ease-out);
+}
+
+.navigationItem > svg {
+  transition: transform var(--up-duration-base) var(--up-ease-out);
 }
 
 .navigationItem:hover {
@@ -80,6 +119,11 @@
   color: var(--up-brand);
   background: var(--up-brand-soft);
   font-weight: 650;
+}
+
+.navigationItemActive::before {
+  opacity: 1;
+  transform: scaleY(1);
 }
 
 .sidebarFooter {
@@ -103,6 +147,11 @@
   border: 1px solid var(--up-line);
   border-radius: 12px;
   background: var(--up-surface-muted);
+  transition:
+    border-color var(--up-duration-fast) ease,
+    background-color var(--up-duration-fast) ease,
+    box-shadow var(--up-duration-base) var(--up-ease-out),
+    transform var(--up-duration-base) var(--up-ease-out);
 }
 
 .profile > div {
@@ -124,6 +173,44 @@
   min-height: 100vh;
   margin-left: 252px;
   padding: clamp(34px, 5vw, 64px) clamp(24px, 5vw, 64px) clamp(56px, 8vw, 96px);
+}
+
+.main > * {
+  animation: dashboard-page-in 520ms var(--up-ease-out) both;
+}
+
+@media (hover: hover) {
+  .brandLink:hover { transform: translateY(-1px); }
+
+  .navigationItem:hover {
+    transform: translateX(2px);
+  }
+
+  .navigationItem:hover > svg { transform: scale(1.06); }
+
+  .profile:hover {
+    border-color: color-mix(in srgb, var(--up-brand) 24%, var(--up-line));
+    background: var(--up-surface);
+    box-shadow: 0 10px 24px var(--up-brand-glow);
+    transform: translateY(-1px);
+  }
+}
+
+@keyframes dashboard-page-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes dashboard-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .mobileHeader,
@@ -149,7 +236,7 @@
   .sidebar {
     width: min(84vw, 300px);
     transform: translateX(-102%);
-    transition: transform 220ms ease;
+    transition: transform 280ms var(--up-ease-out);
   }
 
   .sidebarOpen { transform: translateX(0); }
@@ -162,10 +249,28 @@
     width: 100%;
     border: 0;
     background: var(--up-overlay);
+    animation: dashboard-backdrop-in var(--up-duration-base) ease both;
   }
 
   .main {
     margin-left: 0;
     padding: 30px 20px 48px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brandLink,
+  .navigationItem,
+  .navigationItem::before,
+  .navigationItem > svg,
+  .profile,
+  .sidebar {
+    transition: none;
+  }
+
+  .main > *,
+  .backdrop {
+    transform: none;
+    animation: none;
   }
 }

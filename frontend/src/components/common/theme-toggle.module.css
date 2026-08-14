@@ -13,6 +13,14 @@
   background: var(--up-surface-muted);
 }
 
+@media (hover: hover) {
+  .toggle:hover {
+    border-color: color-mix(in srgb, var(--up-brand) 35%, var(--up-line));
+    color: var(--up-brand);
+    background: var(--up-surface);
+  }
+}
+
 .icons {
   display: grid;
   width: 18px;

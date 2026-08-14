@@ -14,7 +14,19 @@
   border-radius: var(--up-radius-md);
   background: var(--up-surface);
   box-shadow: var(--up-card-shadow);
+  transition:
+    border-color var(--up-duration-fast) ease,
+    box-shadow var(--up-duration-slow) var(--up-ease-out),
+    transform var(--up-duration-base) var(--up-ease-out);
 }
+
+.overviewGrid > * {
+  animation: account-card-in 500ms var(--up-ease-out) both;
+}
+
+.overviewGrid > :nth-child(2) { animation-delay: 55ms; }
+.overviewGrid > :nth-child(3) { animation-delay: 110ms; }
+.overviewGrid > :nth-child(4) { animation-delay: 165ms; }
 
 .heroCard {
   position: relative;
@@ -36,9 +48,12 @@
   background: linear-gradient(145deg, var(--up-brand-soft), color-mix(in srgb, var(--up-brand) 34%, var(--up-surface)));
   content: "";
   transform: rotate(28deg);
+  animation: account-hero-shape 16s ease-in-out infinite alternate;
 }
 
 .avatar {
+  position: relative;
+  z-index: 1;
   display: grid;
   width: 70px;
   height: 70px;
@@ -50,6 +65,9 @@
   font-size: 26px;
   font-weight: 700;
   box-shadow: 0 12px 28px rgb(36 87 214 / 22%);
+  transition:
+    box-shadow var(--up-duration-slow) var(--up-ease-out),
+    transform var(--up-duration-base) var(--up-ease-out);
 }
 
 .avatarWithImage {
@@ -58,7 +76,11 @@
   background-size: cover;
 }
 
-.heroCopy { min-width: 0; }
+.heroCopy {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
 .label { color: var(--up-muted-soft); font-size: 12px; font-weight: 750; letter-spacing: 0.13em; }
 .heroCopy h2 { margin: 4px 0 2px; font-size: 23px; }
 .heroCopy p { margin: 0; color: var(--up-muted); font-size: 13px; }
@@ -74,6 +96,10 @@
   border-radius: 11px;
   background: var(--up-glass-subtle);
   backdrop-filter: blur(8px);
+  transition:
+    border-color var(--up-duration-fast) ease,
+    background-color var(--up-duration-fast) ease,
+    transform var(--up-duration-base) var(--up-ease-out);
 }
 
 .stableId span,
@@ -174,7 +200,15 @@
 .factorList,
 .sessionList { display: grid; }
 .factorRow,
-.sessionRow { display: flex; align-items: center; gap: 16px; padding: 20px 0; border-top: 1px solid var(--up-line-soft); }
+.sessionRow {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 10px;
+  border-top: 1px solid var(--up-line-soft);
+  border-radius: 10px;
+  transition: background-color var(--up-duration-fast) ease;
+}
 .factorRow:first-child,
 .sessionRow:first-child { border-top: 0; }
 .factorIcon,
@@ -225,6 +259,62 @@
   font-size: 13px;
   font-weight: 600;
   text-align: center;
+}
+
+@keyframes account-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes account-hero-shape {
+  to { transform: rotate(34deg) translate3d(-10px, 12px, 0); }
+}
+
+@media (hover: hover) {
+  .heroCard:hover,
+  .card:hover {
+    border-color: color-mix(in srgb, var(--up-brand) 20%, var(--up-line));
+    box-shadow: var(--up-shadow-raised);
+    transform: translateY(-2px);
+  }
+
+  .heroCard:hover .avatar {
+    box-shadow: 0 16px 34px rgb(36 87 214 / 28%);
+    transform: translateY(-2px) rotate(-1deg);
+  }
+
+  .stableId:hover {
+    border-color: color-mix(in srgb, var(--up-brand) 25%, var(--up-glass-line));
+    background: var(--up-glass);
+    transform: translateY(-1px);
+  }
+
+  .factorRow:hover,
+  .sessionRow:hover { background: var(--up-surface-hover); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .heroCard,
+  .card,
+  .avatar,
+  .stableId,
+  .factorRow,
+  .sessionRow {
+    transition: none;
+  }
+
+  .overviewGrid > *,
+  .heroCard::after {
+    transform: none;
+    animation: none;
+  }
 }
 
 @media (max-width: 760px) {

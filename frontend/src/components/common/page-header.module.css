@@ -15,12 +15,24 @@
 }
 
 .eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
   margin: 0 0 8px;
   color: var(--up-brand);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
+}
+
+.eyebrow::before {
+  width: 18px;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--up-brand), color-mix(in srgb, var(--up-brand) 24%, transparent));
+  box-shadow: 0 0 12px var(--up-brand-glow);
+  content: "";
 }
 
 .header h1 {
@@ -42,6 +54,7 @@
 
 .action {
   flex: none;
+  padding-top: 2px;
 }
 
 @media (max-width: 640px) {
