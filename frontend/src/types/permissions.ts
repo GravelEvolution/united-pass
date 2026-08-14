@@ -71,7 +71,36 @@ export const FULL_PERMISSIONS: PermissionCapabilities = {
   providerManage: true,
 } as const;
 
+export const ADMIN_CONSOLE_CAPABILITIES = [
+  "userRead",
+  "userDisable",
+  "employeeManage",
+  "employeeOffboard",
+  "departmentManage",
+  "applicationRead",
+  "applicationManage",
+  "applicationSecretRotate",
+  "policyRead",
+  "policyManage",
+  "policyPublish",
+  "auditRead",
+  "auditExport",
+  "providerRead",
+  "providerManage",
+] as const satisfies readonly (keyof PermissionCapabilities)[];
+
+/** Narrows an untrusted permission response before it controls routing. */
+export function isPermissionCapabilities(value: unknown): value is PermissionCapabilities {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return ADMIN_CONSOLE_CAPABILITIES.every((capability) =>
+    typeof record[capability] === "boolean"
+  );
+}
+
 /** Returns whether the caller may enter any part of the administration console. */
 export function canAccessAdminConsole(permissions: PermissionCapabilities): boolean {
-  return Object.values(permissions).some(Boolean);
+  return ADMIN_CONSOLE_CAPABILITIES.some((capability) => permissions[capability]);
 }
