@@ -8,7 +8,7 @@
 
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, Empty, Modal, Toast } from "@douyinfe/semi-ui";
@@ -22,6 +22,7 @@ import {
   type SecretRotationResult,
 } from "@/features/applications/types";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
+import { AccountReauthenticationForm } from "@/features/account/components/security-overview";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import styles from "./application-detail.module.css";
 import clientStyles from "./client-detail.module.css";
@@ -210,7 +211,9 @@ function ClientScopes({ client }: { client: OAuthClient }) {
 function ClientSecrets({ client }: { client: OAuthClient }) {
   const router = useRouter();
   const [rotating, setRotating] = useState(false);
+  const [rotationReauthenticationVisible, setRotationReauthenticationVisible] = useState(false);
   const [rotatedSecret, setRotatedSecret] = useState<SecretRotationResult>();
+  const browserOperation = useRef<AbortController | null>(null);
 
   if (client.clientType === "public") {
     return (
@@ -224,33 +227,34 @@ function ClientSecrets({ client }: { client: OAuthClient }) {
   }
 
   function handleRotateSecret() {
-    Modal.warning({
-      title: "轮换 Client Secret",
-      content: (
-        <div>
-          <p>轮换后旧密钥将在 <strong>24 小时</strong>内保持有效，到期后自动失效。</p>
-          <p>新密钥仅在此页面展示一次，离开后无法再次查看。</p>
-          <p>此操作需要重认证。当前为 Mock 实现，不会真实校验。</p>
-        </div>
-      ),
-      okText: "确认轮换",
-      cancelText: "取消",
-      okType: "danger",
-      onOk: async () => {
-        setRotating(true);
-        try {
-          const result = await browserCommands.rotateClientSecret(client.applicationId, client.clientId);
-          setRotatedSecret(result);
-          Toast.success({ content: "密钥已轮换，请立即复制新密钥。" });
-          router.refresh();
-        } catch {
-          Toast.error({ content: "密钥轮换失败，请重试。" });
-          throw new Error("rotation failed");
-        } finally {
-          setRotating(false);
-        }
-      },
-    });
+    setRotationReauthenticationVisible(true);
+  }
+
+  function closeRotationReauthentication(): void {
+    browserOperation.current?.abort();
+    browserOperation.current = null;
+    setRotationReauthenticationVisible(false);
+  }
+
+  async function rotateSecret(
+    reauthToken: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    setRotating(true);
+    try {
+      const result = await browserCommands.rotateClientSecret(
+        client.applicationId,
+        client.clientId,
+        reauthToken,
+        { signal },
+      );
+      setRotatedSecret(result);
+      setRotationReauthenticationVisible(false);
+      Toast.success({ content: "密钥已轮换，请立即复制新密钥。" });
+      router.refresh();
+    } finally {
+      setRotating(false);
+    }
   }
 
   async function copyToClipboard(text: string) {
@@ -300,7 +304,7 @@ function ClientSecrets({ client }: { client: OAuthClient }) {
                 复制
               </Button>
             </p>
-            <p>旧密钥将在 {formatSecurityDateTime(rotatedSecret.previousSecretExpiresAt)} 后失效。</p>
+            <p>旧密钥失效时间：{formatSecurityDateTime(rotatedSecret.previousSecretExpiresAt)}。</p>
           </div>
         </div>
       )}
@@ -322,6 +326,31 @@ function ClientSecrets({ client }: { client: OAuthClient }) {
           轮换密钥
         </Button>
       </div>
+
+      <Modal
+        title="重新认证并轮换 Client Secret"
+        visible={rotationReauthenticationVisible}
+        footer={null}
+        onCancel={closeRotationReauthentication}
+        closeOnEsc={!rotating}
+        maskClosable={false}
+      >
+        <p>轮换提交后旧密钥会立即失效；新密钥仅展示一次，请先准备好安全存储位置。</p>
+        {rotationReauthenticationVisible && (
+          <AccountReauthenticationForm
+            action="client.secret.rotate"
+            target=""
+            applicationId={client.applicationId}
+            clientId={client.clientId}
+            submitLabel="验证并轮换密钥"
+            browserOperationRef={browserOperation}
+            onGranted={rotateSecret}
+            onCancel={closeRotationReauthentication}
+            operationError="密钥轮换失败；此次单次授权不会被重复使用，请重新验证后再试。"
+            destructive
+          />
+        )}
+      </Modal>
     </div>
   );
 }

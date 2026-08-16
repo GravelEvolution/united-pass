@@ -20,7 +20,7 @@ import { getClientProfileConfig } from "./types";
  * Domain validation for application and OAuth client creation.
  *
  * These pure functions encode the invariant rules that both the mock data
- * source and the future real HTTP-backed API layer must enforce. They throw
+ * source and the production HTTP-backed API layer must enforce. They throw
  * on validation failure so callers can surface a user-facing error.
  */
 

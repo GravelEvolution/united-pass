@@ -71,13 +71,23 @@ func (r *UserRepository) GetOrCreateUserByProviderSubject(
 
 	now := time.Now().UTC()
 	userID := identity.UserID(generateUserID())
+	status := identity.UserStatusActive
+	// A provider identity carrying an email must not become locally active
+	// before that provider has verified the address. Besides enforcing the
+	// public-registration invariant, this makes a failed registration
+	// compensation safe: an unverified provider-only account can never use the
+	// generic first-login path to manufacture an active local account.
+	if info.Email != "" && !info.EmailVerified {
+		status = identity.UserStatusPending
+	}
 	user := identity.User{
 		ID:            userID,
-		Status:        identity.UserStatusActive,
+		Status:        status,
 		DisplayName:   info.DisplayName,
 		Email:         info.Email,
 		EmailVerified: info.EmailVerified,
 		Phone:         info.Phone,
+		PhoneVerified: info.PhoneVerified,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		Version:       1,

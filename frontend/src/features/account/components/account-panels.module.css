@@ -183,20 +183,6 @@
 
 .contactCurrent strong { color: var(--up-ink-secondary); overflow-wrap: anywhere; }
 
-.mockCode {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 16px;
-  border: 1px solid var(--up-line);
-  border-radius: 11px;
-  background: var(--up-brand-soft);
-}
-
-.mockCode span { color: var(--up-muted); font-size: 12px; }
-.mockCode code { color: var(--up-brand); font-size: 22px; font-weight: 760; letter-spacing: 0.16em; }
-
 .factorList,
 .sessionList { display: grid; }
 .factorRow,

@@ -30,6 +30,7 @@ import type { CurrentUser, EmployeeProfile, UserPersona } from "@/types/identity
 import type {
   AuditEvent,
   AuditExportResult,
+  DashboardMetric,
   DepartmentDetail,
   DepartmentRecord,
   DirectorySyncHistoryEntry,
@@ -42,6 +43,7 @@ import type {
   SyncConflict,
   UserDetail,
 } from "@/features/admin/types";
+import type { AdminDashboard } from "@/lib/api/united-pass-data-source";
 import type {
   AuthorizationPolicy,
   PolicyCondition,
@@ -51,6 +53,22 @@ import type {
 } from "@/features/policies/types";
 import type { CursorPage } from "@/types/pagination";
 import type { PermissionCapabilities } from "@/types/permissions";
+import type {
+  AllowedScope,
+  ApplicationAuditEntry,
+  ApplicationAudience,
+  ApplicationGrantSummary,
+  ApplicationStatus,
+  ApplicationWithInitialClientResult,
+  ConsentMode,
+  OAuthApplication,
+  OAuthApplicationDetail,
+  OAuthClient,
+  OAuthClientCreationResult,
+  OAuthGrantType,
+  SecretRotationResult,
+  TokenEndpointAuthMethod,
+} from "@/features/applications/types";
 
 /**
  * Response body validators for the real HTTP seams.
@@ -71,6 +89,28 @@ export class ApiResponseShapeError extends Error {
     super(`API response does not match the ${contract} contract`);
     this.name = "ApiResponseShapeError";
   }
+}
+
+function parseDashboardMetric(value: unknown): DashboardMetric {
+  if (!isRecord(value)) throw new ApiResponseShapeError("DashboardMetric");
+  const tone = value.tone;
+  if (tone !== "neutral" && tone !== "positive" && tone !== "attention") {
+    throw new ApiResponseShapeError("DashboardMetric.tone");
+  }
+  return {
+    label: requireNonEmptyString(value, "label"),
+    value: requireString(value, "value"),
+    change: requireString(value, "change"),
+    tone,
+  };
+}
+
+export function parseAdminDashboard(value: unknown): AdminDashboard {
+  if (!isRecord(value)) throw new ApiResponseShapeError("AdminDashboard");
+  return {
+    metrics: requireArray(value, "metrics").map(parseDashboardMetric),
+    recentEvents: requireArray(value, "recentEvents").map(parseAuditEvent),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -429,6 +469,8 @@ function parseMfaMethod(value: unknown): MfaMethod {
 export function parseMfaRequiredResponse(value: unknown): {
   mfaToken: string;
   availableMethods: MfaMethod[];
+  passkeyRequestOptions?: unknown;
+  expiresAt: string;
 } {
   if (!isRecord(value)) throw new ApiResponseShapeError("MFARequiredResponse");
   if (value.status !== "mfa_required") {
@@ -438,9 +480,16 @@ export function parseMfaRequiredResponse(value: unknown): {
   if (!Array.isArray(methodsValue) || methodsValue.length === 0) {
     throw new ApiResponseShapeError("MFARequiredResponse.availableMethods");
   }
+  const availableMethods = methodsValue.map(parseMfaMethod);
+  const passkeyRequestOptions = value.passkeyRequestOptions;
+  if (availableMethods.includes("passkey") && !isRecord(passkeyRequestOptions)) {
+    throw new ApiResponseShapeError("MFARequiredResponse.passkeyRequestOptions");
+  }
   return {
     mfaToken: requireString(value, "mfaToken"),
-    availableMethods: methodsValue.map(parseMfaMethod),
+    availableMethods,
+    ...(passkeyRequestOptions !== undefined && { passkeyRequestOptions }),
+    expiresAt: requireNonEmptyString(value, "expiresAt"),
   };
 }
 
@@ -566,6 +615,211 @@ export function parseCurrentUser(value: unknown): CurrentUser {
   if (employeeProfile !== undefined) user.employeeProfile = employeeProfile;
 
   return user;
+}
+
+// --- OAuth application and client management ---
+
+function parseApplicationAudience(value: unknown): ApplicationAudience {
+  if (value === "internal" || value === "external" || value === "hybrid") return value;
+  throw new ApiResponseShapeError("Application.audience");
+}
+
+function parseApplicationStatus(value: unknown): ApplicationStatus {
+  if (value === "active" || value === "disabled") return value;
+  throw new ApiResponseShapeError("Application.status");
+}
+
+function parseOAuthGrantType(value: unknown): OAuthGrantType {
+  if (
+    value === "authorization_code" ||
+    value === "refresh_token" ||
+    value === "client_credentials"
+  ) return value;
+  throw new ApiResponseShapeError("OAuthClient.grantTypes");
+}
+
+function parseTokenEndpointAuthMethod(value: unknown): TokenEndpointAuthMethod {
+  if (
+    value === "client_secret_post" ||
+    value === "client_secret_basic" ||
+    value === "none" ||
+    value === "private_key_jwt"
+  ) return value;
+  throw new ApiResponseShapeError("OAuthClient.tokenEndpointAuthMethod");
+}
+
+function parseConsentMode(value: unknown): ConsentMode {
+  if (value === "always" || value === "first_authorization") return value;
+  throw new ApiResponseShapeError("OAuthClient.consentMode");
+}
+
+function parseAllowedScope(value: unknown): AllowedScope {
+  if (!isRecord(value)) throw new ApiResponseShapeError("AllowedScope");
+  return {
+    scope: requireNonEmptyString(value, "scope"),
+    label: requireString(value, "label"),
+    description: requireString(value, "description"),
+    required: requireBoolean(value, "required"),
+  };
+}
+
+export function parseAvailableScopes(value: unknown): AllowedScope[] {
+  if (!Array.isArray(value)) throw new ApiResponseShapeError("AllowedScope[]");
+  return value.map(parseAllowedScope);
+}
+
+export function parseOAuthClient(value: unknown): OAuthClient {
+  if (!isRecord(value)) throw new ApiResponseShapeError("OAuthClient");
+  const clientType = value.clientType;
+  if (clientType !== "public" && clientType !== "confidential") {
+    throw new ApiResponseShapeError("OAuthClient.clientType");
+  }
+
+  return {
+    clientId: requireNonEmptyString(value, "clientId"),
+    applicationId: requireNonEmptyString(value, "applicationId"),
+    name: requireString(value, "name"),
+    clientType,
+    grantTypes: requireArray(value, "grantTypes").map(parseOAuthGrantType),
+    tokenEndpointAuthMethod: parseTokenEndpointAuthMethod(value.tokenEndpointAuthMethod),
+    redirectUris: requireArray(value, "redirectUris").map((item) => {
+      if (!isRecord(item)) throw new ApiResponseShapeError("OAuthClient.redirectUris");
+      return {
+        uri: requireNonEmptyString(item, "uri"),
+        isLoopback: requireBoolean(item, "isLoopback"),
+        addedAt: requireNonEmptyString(item, "addedAt"),
+      };
+    }),
+    logoutUri: requireNullableString(value, "logoutUri"),
+    allowedScopes: requireArray(value, "allowedScopes").map(parseAllowedScope),
+    consentMode: parseConsentMode(value.consentMode),
+    status: parseApplicationStatus(value.status),
+    clientSecrets: requireArray(value, "clientSecrets").map((item) => {
+      if (!isRecord(item)) throw new ApiResponseShapeError("OAuthClient.clientSecrets");
+      return {
+        secretId: requireNonEmptyString(item, "secretId"),
+        label: requireString(item, "label"),
+        createdAt: requireNonEmptyString(item, "createdAt"),
+        lastRotatedAt: requireNullableString(item, "lastRotatedAt"),
+      };
+    }),
+    createdAt: requireNonEmptyString(value, "createdAt"),
+    updatedAt: requireNonEmptyString(value, "updatedAt"),
+  };
+}
+
+function parseOAuthApplication(value: unknown): OAuthApplication {
+  if (!isRecord(value)) throw new ApiResponseShapeError("OAuthApplication");
+  return {
+    applicationId: requireNonEmptyString(value, "applicationId"),
+    name: requireString(value, "name"),
+    audience: parseApplicationAudience(value.audience),
+    ownerId: requireNonEmptyString(value, "ownerId"),
+    ownerName: requireString(value, "ownerName"),
+    status: parseApplicationStatus(value.status),
+    clientCount: requireNonNegativeInteger(value, "clientCount"),
+    updatedAt: requireNonEmptyString(value, "updatedAt"),
+  };
+}
+
+export function parseApplications(value: unknown): CursorPage<OAuthApplication> {
+  return parseCursorPage(value, "OAuthApplicationListResponse", parseOAuthApplication);
+}
+
+function parseApplicationGrant(value: unknown): ApplicationGrantSummary {
+  if (!isRecord(value)) throw new ApiResponseShapeError("ApplicationGrantSummary");
+  const status = value.status;
+  if (status !== "active" && status !== "revoked") {
+    throw new ApiResponseShapeError("ApplicationGrantSummary.status");
+  }
+  return {
+    grantId: requireNonEmptyString(value, "grantId"),
+    userLabel: requireString(value, "userLabel"),
+    scopes: requireStringArray(value, "scopes"),
+    grantedAt: requireNonEmptyString(value, "grantedAt"),
+    lastUsedAt: requireNullableString(value, "lastUsedAt"),
+    status,
+  };
+}
+
+function parseApplicationAuditEntry(value: unknown): ApplicationAuditEntry {
+  if (!isRecord(value)) throw new ApiResponseShapeError("ApplicationAuditEntry");
+  const result = value.result;
+  if (result !== "success" && result !== "denied") {
+    throw new ApiResponseShapeError("ApplicationAuditEntry.result");
+  }
+  return {
+    eventId: requireNonEmptyString(value, "eventId"),
+    eventType: requireString(value, "eventType"),
+    actorName: requireString(value, "actorName"),
+    occurredAt: requireNonEmptyString(value, "occurredAt"),
+    result,
+  };
+}
+
+export function parseApplicationDetail(value: unknown): OAuthApplicationDetail {
+  if (!isRecord(value)) throw new ApiResponseShapeError("OAuthApplicationDetail");
+  return {
+    applicationId: requireNonEmptyString(value, "applicationId"),
+    name: requireString(value, "name"),
+    description: requireString(value, "description"),
+    logoUrl: requireNullableString(value, "logoUrl"),
+    audience: parseApplicationAudience(value.audience),
+    ownerId: requireNonEmptyString(value, "ownerId"),
+    ownerName: requireString(value, "ownerName"),
+    status: parseApplicationStatus(value.status),
+    clients: requireArray(value, "clients").map(parseOAuthClient),
+    grants: requireArray(value, "grants").map(parseApplicationGrant),
+    auditEntries: requireArray(value, "auditEntries").map(parseApplicationAuditEntry),
+    createdAt: requireNonEmptyString(value, "createdAt"),
+    updatedAt: requireNonEmptyString(value, "updatedAt"),
+  };
+}
+
+export function parseOAuthClientCreation(value: unknown): OAuthClientCreationResult {
+  if (!isRecord(value)) throw new ApiResponseShapeError("OAuthClientCreationResult");
+  const clientSecret = optionalString(value, "clientSecret");
+  return {
+    clientId: requireNonEmptyString(value, "clientId"),
+    ...(clientSecret !== undefined && { clientSecret }),
+  };
+}
+
+export function parseApplicationWithInitialClientCreation(
+  value: unknown,
+): ApplicationWithInitialClientResult {
+  if (!isRecord(value)) {
+    throw new ApiResponseShapeError("ApplicationWithInitialClientResult");
+  }
+  const clientSecret = optionalString(value, "clientSecret");
+  return {
+    applicationId: requireNonEmptyString(value, "applicationId"),
+    clientId: requireNonEmptyString(value, "clientId"),
+    ...(clientSecret !== undefined && { clientSecret }),
+  };
+}
+
+export function parseSecretRotation(value: unknown): SecretRotationResult {
+  if (!isRecord(value)) throw new ApiResponseShapeError("SecretRotationResult");
+  return {
+    secretId: requireNonEmptyString(value, "secretId"),
+    clientSecret: requireNonEmptyString(value, "clientSecret"),
+    previousSecretExpiresAt: requireNonEmptyString(value, "previousSecretExpiresAt"),
+  };
+}
+
+export function parseAvatarUpload(value: unknown): { avatarUrl: string } {
+  if (!isRecord(value)) throw new ApiResponseShapeError("AvatarUploadResponse");
+  const avatarUrl = requireNonEmptyString(value, "avatarUrl");
+  if (!avatarUrl.startsWith("/api/v1/media/avatars/")) {
+    throw new ApiResponseShapeError("AvatarUploadResponse.avatarUrl");
+  }
+  return { avatarUrl };
+}
+
+export function parseContactChangeRequest(value: unknown): { requestId: string } {
+  if (!isRecord(value)) throw new ApiResponseShapeError("ContactChangeRequestResponse");
+  return { requestId: requireNonEmptyString(value, "requestId") };
 }
 
 // --- Phase 5 identity and workforce management ---

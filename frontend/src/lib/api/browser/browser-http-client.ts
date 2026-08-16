@@ -133,9 +133,11 @@ async function normalizeError(response: Response): Promise<ApiError> {
   const challenge = parseChallenge(errorRecord?.challenge);
 
   const kind = statusToKind(response.status, errorRecord?.code);
+  const code = typeof errorRecord?.code === "string" ? errorRecord.code : undefined;
 
   const apiError: ApiError = {
     kind,
+    ...(code !== undefined && { code }),
     message,
     ...(requestId !== undefined && { requestId }),
     ...(fieldErrors !== undefined && { fieldErrors }),

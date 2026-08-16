@@ -73,6 +73,10 @@ type userService interface {
 	ListPasskeys(ctx context.Context, in *userv2.ListPasskeysRequest, opts ...grpc.CallOption) (*userv2.ListPasskeysResponse, error)
 	RemovePasskey(ctx context.Context, in *userv2.RemovePasskeyRequest, opts ...grpc.CallOption) (*userv2.RemovePasskeyResponse, error)
 	SetPassword(ctx context.Context, in *userv2.SetPasswordRequest, opts ...grpc.CallOption) (*userv2.SetPasswordResponse, error)
+	SetEmail(ctx context.Context, in *userv2.SetEmailRequest, opts ...grpc.CallOption) (*userv2.SetEmailResponse, error)
+	VerifyEmail(ctx context.Context, in *userv2.VerifyEmailRequest, opts ...grpc.CallOption) (*userv2.VerifyEmailResponse, error)
+	SetPhone(ctx context.Context, in *userv2.SetPhoneRequest, opts ...grpc.CallOption) (*userv2.SetPhoneResponse, error)
+	VerifyPhone(ctx context.Context, in *userv2.VerifyPhoneRequest, opts ...grpc.CallOption) (*userv2.VerifyPhoneResponse, error)
 }
 
 // Authenticator implements auth.Authenticator against ZITADEL's LoginV2 API.
@@ -439,6 +443,7 @@ func (a *Authenticator) providerProfile(ctx context.Context, userID string) (ide
 	}
 	if ph := human.Phone; ph != nil {
 		info.Phone = ph.Phone
+		info.PhoneVerified = ph.IsVerified
 	}
 	return info, nil
 }

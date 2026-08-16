@@ -22,8 +22,6 @@ type ContactVerificationModalProps = {
   onVerified: (nextValue: string) => void;
 };
 
-const MOCK_VERIFICATION_CODE = "246810";
-
 export function ContactVerificationModal({
   kind,
   currentValue,
@@ -72,8 +70,8 @@ export function ContactVerificationModal({
   async function handleVerifyCode(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (verificationCode.trim() !== MOCK_VERIFICATION_CODE) {
-      setFieldError("验证码错误，请输入页面显示的 Mock 验证码。");
+    if (verificationCode.trim().length < 4) {
+      setFieldError("请输入收到的验证码。");
       return;
     }
 
@@ -135,7 +133,7 @@ export function ContactVerificationModal({
             )}
           </label>
           <p className={styles.profileNotice}>
-            这是 Mock 验证流程，不会真的发送邮件或短信。后端接入后将通过安全渠道发送验证码。
+            验证码将由身份服务发送到新的{contactLabel}，请求在短时间后失效。
           </p>
           <div className={styles.profileActions}>
             <Button theme="outline" onClick={onCancel} disabled={isSubmitting}>取消</Button>
@@ -147,23 +145,19 @@ export function ContactVerificationModal({
       ) : (
         <form className={styles.contactForm} method="post" onSubmit={handleVerifyCode}>
           <p className={styles.contactCurrent}>正在验证：<strong>{normalizedContactValue}</strong></p>
-          <div className={styles.mockCode} aria-live="polite">
-            <span>本次 Mock 验证码</span>
-            <code>{MOCK_VERIFICATION_CODE}</code>
-          </div>
           <label className={styles.profileField} htmlFor={`${kind}-verification-code`}>
             <span>输入验证码</span>
             <Input
               id={`${kind}-verification-code`}
               value={verificationCode}
               onChange={(nextCode) => {
-                setVerificationCode(nextCode.replace(/\D/g, "").slice(0, 6));
+                setVerificationCode(nextCode.replace(/[^a-zA-Z0-9]/g, "").slice(0, 20));
                 setFieldError(undefined);
               }}
-              placeholder="6 位验证码"
+              placeholder="验证码"
               inputMode="numeric"
               autoComplete="one-time-code"
-              maxLength={6}
+              maxLength={20}
               validateStatus={fieldError ? "error" : "default"}
               aria-invalid={Boolean(fieldError)}
               aria-errormessage={fieldError ? `${kind}-verification-code-error` : undefined}

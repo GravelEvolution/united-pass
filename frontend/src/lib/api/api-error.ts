@@ -38,6 +38,7 @@ export type ReauthenticationChallenge = {
 
 export type ApiError = {
   kind: ApiErrorKind;
+  code?: string;
   message: string;
   requestId?: string;
   fieldErrors?: FieldError[];
@@ -83,6 +84,7 @@ export function isApiError(value: unknown): value is ApiError {
   if (typeof record.kind !== "string" || !API_ERROR_KINDS.has(record.kind)) return false;
   if (typeof record.message !== "string") return false;
 
+  if (record.code !== undefined && typeof record.code !== "string") return false;
   if (record.requestId !== undefined && typeof record.requestId !== "string") return false;
   if (record.fieldErrors !== undefined && !isFieldErrorArray(record.fieldErrors)) return false;
   if (record.retryAfter !== undefined && typeof record.retryAfter !== "number") return false;

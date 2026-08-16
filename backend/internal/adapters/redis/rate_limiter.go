@@ -34,6 +34,11 @@ const rateLimitReauthSegment = "rl:reauth:"
 // limits. The full key is: {prefix}rl:rotate:{ip}:{sha256(clientId)}.
 const rateLimitRotationSegment = "rl:rotate:"
 
+// rateLimitContactSegment is the key segment for verified email/phone change
+// requests and confirmation attempts. Both user/session and destination/code
+// material reach this seam only as SHA-256 digests.
+const rateLimitContactSegment = "rl:contact:"
+
 // rateLimitScript atomically increments a rate-limit counter and sets the TTL
 // on the first request in a window. It returns a two-element array:
 //
@@ -141,6 +146,21 @@ func (r *RateLimiter) CheckRotation(
 	window time.Duration,
 ) (allowed bool, retryAfter time.Duration, err error) {
 	key := r.client.buildKey(rateLimitRotationSegment, ip, ":", clientIDHash)
+	return r.check(ctx, key, limit, window)
+}
+
+// CheckContact checks the rate limit for account contact-change creation or
+// verification. keyHash must be a digest assembled by the HTTP boundary; raw
+// email addresses, phone numbers, codes and request capabilities never enter
+// Redis keys.
+func (r *RateLimiter) CheckContact(
+	ctx context.Context,
+	ip string,
+	keyHash string,
+	limit int,
+	window time.Duration,
+) (allowed bool, retryAfter time.Duration, err error) {
+	key := r.client.buildKey(rateLimitContactSegment, ip, ":", keyHash)
 	return r.check(ctx, key, limit, window)
 }
 

@@ -14,6 +14,7 @@ import { IconDelete, IconDownload } from "@douyinfe/semi-icons";
 import type { AccountDeletion, PersonalDataExport } from "@/features/account/types";
 import { AccountReauthenticationForm } from "@/features/account/components/security-overview";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
+import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import styles from "./privacy-rights.module.css";
 
@@ -82,7 +83,11 @@ export function PersonalDataExportPanel({ userId }: UserBoundProps) {
               下载 JSON 数据副本
             </a>
           ) : result.status === "completed" ? (
-            <p className={styles.muted}>Mock 模式不会生成真实文件；真实环境将显示一次性下载链接。</p>
+            <p className={styles.muted}>
+              {USE_MOCK_DATA_SOURCE
+                ? "开发数据模式不会生成真实文件。"
+                : "下载链接已失效或暂不可用，请重新申请数据副本。"}
+            </p>
           ) : null}
         </section>
       )}

@@ -17,8 +17,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -80,6 +82,7 @@ type AuthHandlers struct {
 	mfaWindow      time.Duration
 	sessionTTL     time.Duration
 	rememberTTL    time.Duration
+	publicOrigin   string
 	logger         *slog.Logger
 }
 
@@ -108,6 +111,7 @@ func NewAuthHandlers(
 		mfaWindow:      cfg.RateLimit.MFAWindow,
 		sessionTTL:     cfg.Session.TTL,
 		rememberTTL:    cfg.Session.RememberTTL,
+		publicOrigin:   strings.TrimRight(cfg.OAuth.PublicOrigin, "/"),
 		logger:         logger,
 	}
 }
@@ -153,6 +157,10 @@ type mfaChallengeRequest struct {
 //  6. On any failure, return a generic error that does not reveal whether the
 //     account exists.
 func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
+	if !h.allowLoginRequest(w, r) {
+		return
+	}
+
 	var req loginRequest
 	if err := decodeLoginRequest(w, r, &req); err != nil {
 		return
@@ -214,6 +222,62 @@ func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "账户名或密码错误。", nil)
 	}
+}
+
+// allowLoginRequest enforces the browser-side login CSRF boundary frozen in
+// ADR-0002. Login has no session yet, so it cannot use the double-submit CSRF
+// token. Instead it requires a JSON request from the configured public origin
+// (or, in local development without one, the request's own origin) and rejects
+// cross-site Fetch Metadata before credentials reach the rate limiter or
+// identity provider.
+func (h *AuthHandlers) allowLoginRequest(w http.ResponseWriter, r *http.Request) bool {
+	return allowSameOriginJSON(w, r, h.publicOrigin, "登录")
+}
+
+// allowSameOriginJSON is the shared logged-out credential-submission CSRF
+// boundary. These requests have no authenticated session and therefore cannot
+// use the double-submit CSRF cookie. Requiring JSON plus an exact browser
+// Origin prevents cross-site forms and scripts from initiating login,
+// registration, verification or password-reset operations.
+func allowSameOriginJSON(w http.ResponseWriter, r *http.Request, publicOrigin, operation string) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(mediaType, "application/json") {
+		writeError(w, r, http.StatusUnsupportedMediaType, CodeBadRequest, operation+"请求必须使用 JSON 格式。", nil)
+		return false
+	}
+
+	if fetchSite := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))); fetchSite != "" && fetchSite != "same-origin" {
+		WriteForbidden(w, r)
+		return false
+	}
+
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" || origin == "null" {
+		WriteForbidden(w, r)
+		return false
+	}
+	parsedOrigin, err := url.Parse(origin)
+	if err != nil || parsedOrigin.Scheme == "" || parsedOrigin.Host == "" || parsedOrigin.User != nil ||
+		(parsedOrigin.Path != "" && parsedOrigin.Path != "/") || parsedOrigin.RawQuery != "" || parsedOrigin.Fragment != "" {
+		WriteForbidden(w, r)
+		return false
+	}
+
+	expectedOrigin := publicOrigin
+	if expectedOrigin == "" {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		expectedOrigin = scheme + "://" + r.Host
+	}
+	actualOrigin := strings.ToLower(parsedOrigin.Scheme) + "://" + strings.ToLower(parsedOrigin.Host)
+	if actualOrigin != strings.ToLower(expectedOrigin) {
+		WriteForbidden(w, r)
+		return false
+	}
+
+	return true
 }
 
 // handleAuthenticated creates a session and sets cookies for a fully
@@ -333,6 +397,14 @@ func (h *AuthHandlers) handleMFARequired(w http.ResponseWriter, r *http.Request,
 //     user can retry. If max attempts is exceeded, consume the challenge.
 //  7. If the challenge is expired, consume it and return a generic error.
 func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
+	// MFA completes the same logged-out credential-submission flow as the
+	// password step. Keep it behind the identical JSON + exact-Origin boundary
+	// so a cross-site page cannot spend challenge attempts or establish a
+	// browser session on the victim's behalf.
+	if !allowSameOriginJSON(w, r, h.publicOrigin, "MFA 验证") {
+		return
+	}
+
 	var req mfaChallengeRequest
 	if err := decodeJSONBody(w, r, &req, "MFA challenge"); err != nil {
 		return
@@ -624,18 +696,12 @@ func generateClaimID() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-// clientIP extracts a caller address for rate limiting only. It prefers the
-// X-Forwarded-For header (first value) when present, falling back to
-// RemoteAddr. It must never feed persisted session metadata: proxy headers
-// are untrusted caller-controlled input (P4.0 freeze: no new proxy-header
-// trust), so persisted records use peerIP instead.
+// clientIP extracts the transport peer address for rate limiting. United Pass
+// has no trusted-proxy configuration, so caller-controlled forwarding headers
+// must not partition the limiter into attacker-selected buckets. Precise
+// original-client attribution belongs to a future explicit trusted-proxy
+// boundary; until then the reverse proxy peer is the only authoritative key.
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if idx := strings.Index(xff, ","); idx > 0 {
-			return strings.TrimSpace(xff[:idx])
-		}
-		return strings.TrimSpace(xff)
-	}
 	return peerIP(r)
 }
 

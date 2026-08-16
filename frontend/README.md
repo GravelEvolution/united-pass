@@ -28,8 +28,8 @@
 
 | 值 | 行为 |
 | --- | --- |
-| `true` | 所有 seam 使用固定 Mock，适合组件开发、单元测试和 fixture 演示 |
-| 未设置或非 `true` | 已迁移 seam 调用真实后端；未迁移 seam 继续显式使用 Mock |
+| `true` | 产品数据 seam 使用固定 fixture；认证凭据流程仍调用真实 API |
+| 未设置或非 `true` | 所有 query/command seam 调用真实后端；不会静默回落 Mock |
 
 这个开关会进入浏览器 bundle，只能保存布尔配置，绝不能放入秘密。Next.js 服务端
 使用 `API_BASE_URL` 直连 Go API，默认值为 `http://localhost:8080/api/v1`；浏览器
@@ -40,24 +40,20 @@
 非 Mock 模式已经接入：
 
 - 密码登录、TOTP MFA、飞书登录入口、退出；
+- 公开注册、邮箱验证和抗账户枚举的密码找回/重置；
 - 当前用户、权限、OAuth 授权/Consent、已授权应用和撤销；
+- 个人资料、服务端净化头像、Provider 验证的邮箱/手机号变更；
 - 密码修改、TOTP、Passkey、重认证、当前用户会话及撤销；
+- OAuth Application / Client 查询、创建、编辑、状态、删除与 Secret 轮换；
+- 按后端 capability 独立裁剪的管理仪表盘；
 - 用户、员工、部门的查询和管理操作；
 - Provider 列表/详情、目录同步、冲突处理与显式身份关联；
 - 策略草稿/模拟/发布、审计筛选与异步导出；
 - 个人数据导出、账户删除/取消，以及受控发布的隐私政策和服务条款。
 
-以下前端 seam 仍是 Mock 或产品原型，刷新后不代表真实持久化：
-
-- 注册、密码找回/重置、邮箱验证；
-- 个人资料、头像、邮箱和手机号变更；
-- 管理端仪表盘摘要；
-- OAuth Application / Client 的前端查询与增删改、Secret 轮换；
-- Recovery Codes（后端架构性 Deferred）。
-
-后端已经具有部分对应管理 API，并不意味着前端 seam 已迁移。以
-`src/lib/api/server/server-queries.ts` 和
-`src/lib/api/browser/browser-commands.ts` 的实际分支为准。
+Recovery Codes 是唯一保留的产品能力缺口：当前 ZITADEL baseline 没有满足一次性
+展示、轮换、撤销和审计要求的接口，因此 UI 明确显示 Provider 不支持，不生成伪代码
+或成功态。`src/lib/mock/` 只保留显式开发/测试 fixture，不是生产持久化实现。
 
 ## 登录态行为
 
@@ -119,22 +115,15 @@ pnpm dev
 打开 [http://localhost:3000](http://localhost:3000)，根路径会跳转 `/login`。
 已有 `.env.local` 时不要用示例文件覆盖它。
 
-Mock 配置：
+真实 API 配置：
 
 ```dotenv
-NEXT_PUBLIC_USE_MOCK=true
+NEXT_PUBLIC_USE_MOCK=false
 API_BASE_URL=http://localhost:8080/api/v1
 ```
 
-Mock 登录 fixture（只用于开发，不是秘密，也不得复用为真实密码）：
-
-| Persona | 账户 | 密码 | 目标页 |
-| --- | --- | --- | --- |
-| 外部用户 | `app.user` | `MockUser123!` | `/account` |
-| 管理员 | `zhixing.lin` | `MockAdmin123!` | `/admin` |
-
-受保护页面仍执行服务端 Cookie/权限门禁；Mock fixture 不能替代真实同源 Session 和
-权限验收。
+如需非认证页面 fixture，可显式设置 `NEXT_PUBLIC_USE_MOCK=true`。登录、注册、邮箱
+验证和密码恢复仍会调用真实后端；不存在可绕过同源 Session/权限门禁的 Mock 登录凭据。
 
 ## 完整联调与部署拓扑
 

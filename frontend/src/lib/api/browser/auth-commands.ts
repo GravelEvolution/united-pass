@@ -15,8 +15,8 @@ import { parseMfaRequiredResponse } from "@/lib/api/response-validators";
 /**
  * Login seam (P3.9 prerequisite, frontend-freeze-v1.md §5, ADR-0004).
  *
- * Real-mode `/login` submits credentials to the P1 Session API instead of
- * `authenticateMockAccount()`:
+ * `/login` always submits credentials to the P1 Session API; the product-data
+ * fixture switch cannot manufacture an authenticated browser state:
  *
  *   POST /api/v1/auth/sessions
  *     204 → session cookies set, login complete
@@ -39,7 +39,13 @@ export type LoginInput = {
 
 export type LoginOutcome =
   | { status: "authenticated" }
-  | { status: "mfa_required"; mfaToken: string; availableMethods: MfaMethod[] };
+  | {
+      status: "mfa_required";
+      mfaToken: string;
+      availableMethods: MfaMethod[];
+      passkeyRequestOptions?: unknown;
+      expiresAt: string;
+    };
 
 /**
  * Submits the password login. Resolves `{ status: "authenticated" }` on 204
@@ -91,5 +97,65 @@ export async function completeLoginMfa(input: LoginMfaInput): Promise<void> {
         passkeyAssertion: input.passkeyAssertion,
       }),
     },
+  });
+}
+
+export type RegistrationInput = {
+  username: string;
+  email: string;
+  password: string;
+  termsAccepted: true;
+};
+
+export type RegistrationOutcome = {
+  userId: string;
+  status: "email_verification_required";
+};
+
+export async function registerAccount(input: RegistrationInput): Promise<RegistrationOutcome> {
+  const value = await browserFetch<unknown>("/registrations", {
+    method: "POST",
+    body: input,
+  });
+  if (typeof value !== "object" || value === null) {
+    throw new Error("Registration response has an invalid shape");
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.userId !== "string" ||
+    record.userId.length === 0 ||
+    record.status !== "email_verification_required"
+  ) {
+    throw new Error("Registration response has an invalid shape");
+  }
+  return { userId: record.userId, status: record.status };
+}
+
+export async function requestPasswordReset(identifier: string): Promise<void> {
+  await browserFetch<unknown>("/password-reset-requests", {
+    method: "POST",
+    body: { identifier },
+  });
+}
+
+export async function resetAccountPassword(input: {
+  token: string;
+  code: string;
+  newPassword: string;
+}): Promise<void> {
+  await browserFetch<unknown>("/password-resets", {
+    method: "POST",
+    body: input,
+  });
+}
+
+export async function verifyAccountEmail(
+  input: { token: string; code: string },
+  signal?: AbortSignal,
+): Promise<void> {
+  await browserFetch<unknown>("/email-verifications", {
+    method: "POST",
+    body: input,
+    signal,
   });
 }

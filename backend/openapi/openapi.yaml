@@ -30,13 +30,16 @@ info:
     durable audit search/export jobs.
     Phase 8 scope: controlled legal-document publication, requester-owned
     personal-data exports and cancellable delayed account deletion.
+    Production-completion scope: provider-owned public registration, verified
+    credential recovery, current-user profile/avatar/contact mutation and a
+    permission-scoped administration dashboard.
     See `../docs/adr-0004.md`, `../docs/adr-0011.md` and
     `../docs/adr-0012.md` and `../docs/adr-0013.md` for the architecture decisions.
 
     Business API paths use the full `/api/v1/...` prefix explicitly rather than
     relying on a global server base path, so that root-level operational endpoints
     and versioned API endpoints can coexist accurately.
-  version: 0.8.0
+  version: 0.9.0
   contact:
     name: United Pass backend team
 
@@ -56,6 +59,8 @@ tags:
       operations require the `X-CSRF-Token` header matching the `up_csrf` cookie.
   - name: Account
     description: Current user profile and permission capabilities
+  - name: Account Lifecycle
+    description: Provider-owned registration, email verification and password recovery
   - name: Account Security
     description: Provider-authoritative account factors and passkey lifecycle
   - name: Privacy and Legal
@@ -79,6 +84,8 @@ tags:
     description: Versioned ABAC drafts, simulation and Cerbos publication
   - name: Admin Audit
     description: Durable security-event filtering and short-lived asynchronous CSV exports
+  - name: Admin Dashboard
+    description: Permission-scoped aggregate metrics and redacted recent audit events
   - name: Scope Catalog
     description: Backend-authoritative OAuth scope catalog
   - name: Admin Applications
@@ -150,6 +157,153 @@ paths:
               example:
                 status: not ready
 
+  /api/v1/registrations:
+    post:
+      tags: [Account Lifecycle]
+      summary: Register a public user account
+      description: |
+        Creates a provider-owned human credential and an atomically linked,
+        pending United Pass identity with the consumer persona. The account
+        cannot authenticate until its exact registered email is verified.
+        Requests require `application/json` and an exact same-origin `Origin`;
+        cross-site submissions are rejected before credentials reach the
+        provider. Passwords and provider verification codes are never stored.
+      operationId: registerPublicAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublicRegistrationRequest"
+      responses:
+        "201":
+          description: Pending account created and verification message requested.
+          headers:
+            Cache-Control:
+              schema: { type: string, enum: [no-store] }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicRegistrationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/password-reset-requests:
+    post:
+      tags: [Account Lifecycle]
+      summary: Request password-reset instructions
+      description: |
+        Always returns the same accepted response after syntax and rate-limit
+        checks. Account absence, unverified contact, missing local binding and
+        provider-notification failure are intentionally indistinguishable.
+        Requires JSON and an exact same-origin `Origin`.
+      operationId: requestPublicPasswordReset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetRequest"
+      responses:
+        "202":
+          description: Request accepted; no account-existence signal is returned.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /api/v1/password-resets:
+    post:
+      tags: [Account Lifecycle]
+      summary: Complete a provider-verified password reset
+      description: |
+        Opens the short-lived encrypted United Pass lifecycle token, verifies
+        the provider code, changes the provider-owned password and advances the
+        user's security epoch so all older sessions are invalidated. The local
+        token contains no email, provider subject, password or code.
+      operationId: completePublicPasswordReset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetCompletionRequest"
+      responses:
+        "204":
+          description: Password reset completed and older sessions invalidated.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/email-verifications:
+    post:
+      tags: [Account Lifecycle]
+      summary: Verify a pending registration email
+      description: |
+        Verifies the provider-issued email code for the exact provider subject
+        bound inside a short-lived encrypted lifecycle token, then activates
+        only the matching pending United Pass user. Provider readback repairs a
+        consumed-code/response-loss retry without trusting browser identity data.
+      operationId: verifyPublicRegistrationEmail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailVerificationRequest"
+      responses:
+        "204":
+          description: Email verified and pending account activated.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "410":
+          $ref: "#/components/responses/Gone"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/auth/sessions:
     post:
       tags: [Session]
@@ -172,6 +326,10 @@ paths:
 
         Authentication failures return generic errors that do not reveal whether
         the account, email or phone number exists. Passwords are never logged.
+
+        Browser clients must use `application/json`, send an `Origin` exactly
+        matching the configured public origin, and must not present cross-site
+        Fetch Metadata. This is the logged-out login-CSRF boundary.
 
         Rate limited. Repeated failures return `429` with a `Retry-After` header.
       operationId: createSession
@@ -267,6 +425,10 @@ paths:
                   code: request.too_large
                   message: "请求体过大。"
                   requestId: req_0123456789abcdef
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "429":
           description: |
             Too many login attempts. The caller must wait before retrying.
@@ -313,6 +475,9 @@ paths:
 
         On success the server issues the `up_session` and `up_csrf` cookies,
         identical to a successful password-only login.
+
+        The same `application/json`, exact-Origin and Fetch Metadata boundary as
+        the password step is enforced before the challenge is inspected.
 
         Rate limited.
       operationId: completeSessionMfa
@@ -369,6 +534,10 @@ paths:
                   code: auth.mfa_challenge_failed
                   message: "验证失败，请检查后重试。"
                   requestId: req_0123456789abcdef
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "429":
           description: |
             Too many MFA attempts. The challenge is temporarily locked.
@@ -549,6 +718,280 @@ paths:
                   code: internal.unexpected
                   message: "服务暂时无法处理该请求。"
                   requestId: req_0123456789abcdef
+    patch:
+      tags: [Account]
+      summary: Update the current user's public profile
+      description: |
+        Updates only explicitly supplied `displayName` and `nickname` fields.
+        Email, phone and avatar are separate verified or media-specific
+        workflows and are rejected as unknown fields here.
+      operationId: updateCurrentUserProfile
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProfilePatchRequest"
+      responses:
+        "204":
+          description: Profile updated.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/avatar:
+    post:
+      tags: [Account]
+      summary: Replace the current user's avatar
+      description: |
+        Accepts one PNG, JPEG or WebP file in the `avatar` multipart field,
+        capped at 2 MiB and bounded by decoded dimensions/pixels. The server
+        verifies the actual format, decodes, resizes when needed, strips
+        metadata, re-encodes PNG and stores only controlled bytes.
+      operationId: uploadCurrentUserAvatar
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [avatar]
+              additionalProperties: false
+              properties:
+                avatar:
+                  type: string
+                  format: binary
+      responses:
+        "201":
+          description: Sanitized avatar stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvatarUploadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: Multipart request or avatar file exceeds the configured limit.
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/media/avatars/{avatarFile}:
+    get:
+      tags: [Account]
+      summary: Read a sanitized avatar
+      description: |
+        Public immutable media by opaque `avt_<random>.png` identifier. Only
+        server-reencoded PNG bytes are served with `nosniff`, an ETag and a
+        one-year immutable cache policy; user IDs never appear in the URL.
+      operationId: getSanitizedAvatar
+      parameters:
+        - $ref: "#/components/parameters/AvatarFilePath"
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Sanitized PNG avatar.
+          headers:
+            ETag:
+              schema: { type: string }
+            Cache-Control:
+              schema: { type: string, example: "public, max-age=31536000, immutable" }
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "304":
+          description: The supplied ETag matches the current immutable object.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/email-change-requests:
+    post:
+      tags: [Account]
+      summary: Begin a verified email change
+      description: |
+        Persists a short-lived, session-bound request and asks the identity
+        provider to send a verification code. The returned capability is
+        stored only as a SHA-256 digest and prior active requests are superseded.
+      operationId: requestCurrentUserEmailChange
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactChangeRequest"
+      responses:
+        "201":
+          description: Verification request created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactChangeResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/email-change-requests/{requestId}/verify:
+    post:
+      tags: [Account]
+      summary: Verify and commit an email change
+      description: |
+        Claims the exact user- and session-bound request, verifies the code at
+        the provider, then mirrors the provider-verified email locally in one
+        transaction. Concurrent verification has a single live claimant.
+      operationId: verifyCurrentUserEmailChange
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ContactRequestIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactVerificationRequest"
+      responses:
+        "204":
+          description: Provider-verified email committed.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/phone-change-requests:
+    post:
+      tags: [Account]
+      summary: Begin a verified phone change
+      operationId: requestCurrentUserPhoneChange
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactChangeRequest"
+      responses:
+        "201":
+          description: Verification request created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactChangeResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/phone-change-requests/{requestId}/verify:
+    post:
+      tags: [Account]
+      summary: Verify and commit a phone change
+      operationId: verifyCurrentUserPhoneChange
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ContactRequestIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactVerificationRequest"
+      responses:
+        "204":
+          description: Provider-verified phone committed.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/me/permissions:
     get:
@@ -1747,6 +2190,37 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/dashboard:
+    get:
+      tags: [Admin Dashboard]
+      summary: Get the permission-scoped administration overview
+      description: |
+        Returns only aggregates independently authorized for the caller:
+        `user.read` unlocks user and employee counts, `application.read`
+        unlocks application counts, and `audit.read` unlocks denied-event
+        counts plus three already-redacted recent audit events. Possessing a
+        different administration capability permits the overview shell but
+        does not leak unauthorized counts.
+      operationId: getAdminDashboard
+      security:
+        - SessionCookie: []
+      responses:
+        "200":
+          description: Authorized dashboard slices.
+          headers:
+            Cache-Control:
+              schema: { type: string, enum: [no-store] }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminDashboard"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -3125,6 +3599,25 @@ components:
         type: string
         minLength: 1
 
+    AvatarFilePath:
+      name: avatarFile
+      in: path
+      required: true
+      description: Opaque avatar object name including the `.png` suffix.
+      schema:
+        type: string
+        pattern: "^avt_[0-9a-f]{32}\\.png$"
+
+    ContactRequestIdPath:
+      name: requestId
+      in: path
+      required: true
+      description: Opaque, short-lived contact-change capability returned once to this session.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+
     UserIdPath:
       name: userId
       in: path
@@ -3355,6 +3848,24 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    UnsupportedMediaType:
+      description: The credential-bearing request must use `application/json`.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Gone:
+      description: The short-lived lifecycle capability has expired.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     ProviderForbidden:
       description: |
         The provider service account lacks the required permission. This is a
@@ -3421,6 +3932,171 @@ components:
           type: string
           description: Safe, user-displayable field error message
           example: "该重定向地址未登记。"
+
+    PublicRegistrationRequest:
+      type: object
+      required: [username, email, password, termsAccepted]
+      additionalProperties: false
+      properties:
+        username:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$"
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 200
+          writeOnly: true
+        termsAccepted:
+          type: boolean
+          const: true
+
+    PublicRegistrationResponse:
+      type: object
+      required: [userId, status]
+      additionalProperties: false
+      properties:
+        userId:
+          type: string
+          pattern: "^user_[0-9a-f]{32}$"
+        status:
+          type: string
+          const: email_verification_required
+
+    PasswordResetRequest:
+      type: object
+      required: [identifier]
+      additionalProperties: false
+      properties:
+        identifier:
+          type: string
+          minLength: 1
+          maxLength: 254
+          description: Account name or email; the response never signals existence.
+
+    PasswordResetCompletionRequest:
+      type: object
+      required: [token, code, newPassword]
+      additionalProperties: false
+      properties:
+        token:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          writeOnly: true
+        code:
+          type: string
+          minLength: 4
+          maxLength: 20
+          pattern: "^[A-Za-z0-9]+$"
+          writeOnly: true
+        newPassword:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 200
+          writeOnly: true
+
+    EmailVerificationRequest:
+      type: object
+      required: [token, code]
+      additionalProperties: false
+      properties:
+        token:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          writeOnly: true
+        code:
+          type: string
+          minLength: 4
+          maxLength: 20
+          pattern: "^[A-Za-z0-9]+$"
+          writeOnly: true
+
+    ProfilePatchRequest:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 80
+        nickname:
+          type: string
+          maxLength: 40
+
+    AvatarUploadResponse:
+      type: object
+      required: [avatarUrl]
+      additionalProperties: false
+      properties:
+        avatarUrl:
+          type: string
+          pattern: "^/api/v1/media/avatars/avt_[0-9a-f]{32}\\.png$"
+
+    ContactChangeRequest:
+      type: object
+      required: [value]
+      additionalProperties: false
+      properties:
+        value:
+          type: string
+          minLength: 1
+          maxLength: 320
+          description: Email or E.164 phone selected by the endpoint.
+
+    ContactChangeResponse:
+      type: object
+      required: [requestId]
+      additionalProperties: false
+      properties:
+        requestId:
+          type: string
+          minLength: 1
+          description: Opaque capability returned once and bound to the current session.
+
+    ContactVerificationRequest:
+      type: object
+      required: [code]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          minLength: 4
+          maxLength: 20
+          pattern: "^[A-Za-z0-9]+$"
+          writeOnly: true
+
+    DashboardMetric:
+      type: object
+      required: [label, value, change, tone]
+      additionalProperties: false
+      properties:
+        label: { type: string }
+        value: { type: string }
+        change: { type: string }
+        tone: { type: string, enum: [neutral, positive, attention] }
+
+    AdminDashboard:
+      type: object
+      required: [metrics, recentEvents]
+      additionalProperties: false
+      properties:
+        metrics:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardMetric"
+        recentEvents:
+          type: array
+          maxItems: 3
+          items:
+            $ref: "#/components/schemas/AuditEvent"
 
     LoginRequest:
       type: object

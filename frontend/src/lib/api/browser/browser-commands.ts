@@ -14,20 +14,25 @@ import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import { browserFetch } from "@/lib/api/browser/browser-http-client";
 import {
   parseAccountDeletion,
+  parseApplicationWithInitialClientCreation,
+  parseAvatarUpload,
   parseDecisionResponse,
   parseAuditExport,
   parseDepartmentDetail,
   parseDirectorySyncResult,
+  parseContactChangeRequest,
   parsePasskeyEnrollment,
   parsePasskeyEnrollmentConfirmation,
   parsePersonalDataExport,
   parsePolicyMutation,
   parsePolicySimulation,
   parseProviderDetail,
+  parseOAuthClientCreation,
   parseReauthenticationGrant,
   parseReauthenticationOutcome,
   parseRevokedSessionCount,
   parseSecuritySummary,
+  parseSecretRotation,
   parseTotpEnrollment,
   parseTotpEnrollmentConfirmation,
 } from "@/lib/api/response-validators";
@@ -35,24 +40,34 @@ import {
 /**
  * Browser-side command layer.
  *
- * Client Components import mutations from this module instead of the mock
- * data source directly. Seams migrate from the mock source to real HTTP
- * one at a time (frontend-freeze-v1.md §5): migrated seams call
- * `browser-http-client.ts` (same-origin credentials; the `up_csrf` cookie
- * is attached as `X-CSRF-Token` on every write) and narrow the untrusted
- * response onto the frozen contract types; unmigrated seams keep the mock
- * source until their backend contract lands.
- *
- * Migrated seams: decideConsent, revokeGrant, account reauthentication,
- * password/TOTP/passkey security operations, own-session revocation, logout,
- * and all Phase 5 identity/workforce mutations.
+ * Client Components import mutations from this module instead of either data
+ * source directly. Production calls `browser-http-client.ts` with same-origin
+ * credentials and the `up_csrf` header, then narrows every untrusted response.
+ * `NEXT_PUBLIC_USE_MOCK=true` is an explicit fixture choice, never a fallback
+ * for a missing production implementation.
  *
  * See ADR-0004 for the full architecture.
  */
 export const browserCommands: UnitedPassCommands = {
-  createOAuthClient: (input) => mockUnitedPassDataSource.createOAuthClient(input),
-  createApplicationWithInitialClient: (input) =>
-    mockUnitedPassDataSource.createApplicationWithInitialClient(input),
+  createOAuthClient: USE_MOCK_DATA_SOURCE
+    ? (input) => mockUnitedPassDataSource.createOAuthClient(input)
+    : async (input) => {
+        const { applicationId, ...body } = input;
+        return parseOAuthClientCreation(
+          await browserFetch<unknown>(
+            `/admin/applications/${encodeURIComponent(applicationId)}/clients`,
+            { method: "POST", body },
+          ),
+        );
+      },
+  createApplicationWithInitialClient: USE_MOCK_DATA_SOURCE
+    ? (input) => mockUnitedPassDataSource.createApplicationWithInitialClient(input)
+    : async (input) => parseApplicationWithInitialClientCreation(
+        await browserFetch<unknown>("/admin/applications/with-initial-client", {
+          method: "POST",
+          body: input,
+        }),
+      ),
   decideConsent: USE_MOCK_DATA_SOURCE
     ? (requestId, decision) => mockUnitedPassDataSource.decideConsent(requestId, decision)
     : async (requestId, decision) =>
@@ -71,23 +86,91 @@ export const browserCommands: UnitedPassCommands = {
           { method: "DELETE" },
         );
       },
-  rotateClientSecret: (applicationId, clientId) =>
-    mockUnitedPassDataSource.rotateClientSecret(applicationId, clientId),
-  updateApplicationStatus: (applicationId, status) =>
-    mockUnitedPassDataSource.updateApplicationStatus(applicationId, status),
-  deleteApplication: (applicationId) =>
-    mockUnitedPassDataSource.deleteApplication(applicationId),
-  updateApplication: (applicationId, input) =>
-    mockUnitedPassDataSource.updateApplication(applicationId, input),
+  rotateClientSecret: USE_MOCK_DATA_SOURCE
+    ? (applicationId, clientId) =>
+        mockUnitedPassDataSource.rotateClientSecret(applicationId, clientId)
+    : async (applicationId, clientId, reauthToken, options) => parseSecretRotation(
+        await browserFetch<unknown>(
+          `/admin/applications/${encodeURIComponent(applicationId)}/clients/${encodeURIComponent(clientId)}/secret-rotations`,
+          { method: "POST", reauthToken, signal: options?.signal },
+        ),
+      ),
+  updateApplicationStatus: USE_MOCK_DATA_SOURCE
+    ? (applicationId, status) =>
+        mockUnitedPassDataSource.updateApplicationStatus(applicationId, status)
+    : async (applicationId, status) => {
+        await browserFetch<unknown>(
+          `/admin/applications/${encodeURIComponent(applicationId)}/${status === "active" ? "enable" : "disable"}`,
+          { method: "POST" },
+        );
+      },
+  deleteApplication: USE_MOCK_DATA_SOURCE
+    ? (applicationId) => mockUnitedPassDataSource.deleteApplication(applicationId)
+    : async (applicationId, reauthToken, options) => {
+        await browserFetch<unknown>(
+          `/admin/applications/${encodeURIComponent(applicationId)}`,
+          { method: "DELETE", reauthToken, signal: options?.signal },
+        );
+      },
+  updateApplication: USE_MOCK_DATA_SOURCE
+    ? (applicationId, input) => mockUnitedPassDataSource.updateApplication(applicationId, input)
+    : async (applicationId, input) => {
+        await browserFetch<unknown>(
+          `/admin/applications/${encodeURIComponent(applicationId)}`,
+          { method: "PATCH", body: input },
+        );
+      },
 
-  updateProfile: (input) => mockUnitedPassDataSource.updateProfile(input),
-  uploadAvatar: (file) => mockUnitedPassDataSource.uploadAvatar(file),
-  requestEmailChange: (email) => mockUnitedPassDataSource.requestEmailChange(email),
-  verifyEmailChange: (requestId, code) =>
-    mockUnitedPassDataSource.verifyEmailChange(requestId, code),
-  requestPhoneChange: (phone) => mockUnitedPassDataSource.requestPhoneChange(phone),
-  verifyPhoneChange: (requestId, code) =>
-    mockUnitedPassDataSource.verifyPhoneChange(requestId, code),
+  updateProfile: USE_MOCK_DATA_SOURCE
+    ? (input) => mockUnitedPassDataSource.updateProfile(input)
+    : async (input) => {
+        await browserFetch<unknown>("/me", { method: "PATCH", body: input });
+      },
+  uploadAvatar: USE_MOCK_DATA_SOURCE
+    ? (file) => mockUnitedPassDataSource.uploadAvatar(file)
+    : async (file) => {
+        const form = new FormData();
+        form.set("avatar", file, file.name);
+        return parseAvatarUpload(
+          await browserFetch<unknown>("/me/avatar", {
+            method: "POST",
+            body: form,
+            formData: true,
+          }),
+        );
+      },
+  requestEmailChange: USE_MOCK_DATA_SOURCE
+    ? (email) => mockUnitedPassDataSource.requestEmailChange(email)
+    : async (email) => parseContactChangeRequest(
+        await browserFetch<unknown>("/me/email-change-requests", {
+          method: "POST",
+          body: { value: email },
+        }),
+      ),
+  verifyEmailChange: USE_MOCK_DATA_SOURCE
+    ? (requestId, code) => mockUnitedPassDataSource.verifyEmailChange(requestId, code)
+    : async (requestId, code) => {
+        await browserFetch<unknown>(
+          `/me/email-change-requests/${encodeURIComponent(requestId)}/verify`,
+          { method: "POST", body: { code } },
+        );
+      },
+  requestPhoneChange: USE_MOCK_DATA_SOURCE
+    ? (phone) => mockUnitedPassDataSource.requestPhoneChange(phone)
+    : async (phone) => parseContactChangeRequest(
+        await browserFetch<unknown>("/me/phone-change-requests", {
+          method: "POST",
+          body: { value: phone },
+        }),
+      ),
+  verifyPhoneChange: USE_MOCK_DATA_SOURCE
+    ? (requestId, code) => mockUnitedPassDataSource.verifyPhoneChange(requestId, code)
+    : async (requestId, code) => {
+        await browserFetch<unknown>(
+          `/me/phone-change-requests/${encodeURIComponent(requestId)}/verify`,
+          { method: "POST", body: { code } },
+        );
+      },
   changePassword: USE_MOCK_DATA_SOURCE
     ? (newPassword, reauthToken) => mockUnitedPassDataSource.changePassword(newPassword, reauthToken)
     : async (newPassword, reauthToken, options) => {
@@ -142,8 +225,8 @@ export const browserCommands: UnitedPassCommands = {
           signal: options?.signal,
           body: {
             action: input.action,
-            applicationId: "",
-            clientId: "",
+            applicationId: input.applicationId ?? "",
+            clientId: input.clientId ?? "",
             target: input.target,
             password: input.password,
           },
@@ -204,17 +287,16 @@ export const browserCommands: UnitedPassCommands = {
           { method: "DELETE", reauthToken, signal: options?.signal },
         ),
       ),
-  generateRecoveryCodes: () => mockUnitedPassDataSource.generateRecoveryCodes(),
   revokeOtherSessions: USE_MOCK_DATA_SOURCE
     ? () => mockUnitedPassDataSource.revokeOtherSessions()
     : async () => parseRevokedSessionCount(
         await browserFetch<unknown>("/me/sessions", { method: "DELETE" }),
       ),
-  logout: USE_MOCK_DATA_SOURCE
-    ? () => mockUnitedPassDataSource.logout()
-    : async () => {
-        await browserFetch<unknown>("/auth/session", { method: "DELETE" });
-      },
+  // Authentication state is never a fixture. Even while product-data
+  // fixtures are enabled, logout must revoke the real server-side session.
+  logout: async () => {
+    await browserFetch<unknown>("/auth/session", { method: "DELETE" });
+  },
 
   requestPersonalDataExport: USE_MOCK_DATA_SOURCE
     ? (reauthToken) => mockUnitedPassDataSource.requestPersonalDataExport(reauthToken)

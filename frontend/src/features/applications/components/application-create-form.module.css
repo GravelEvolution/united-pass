@@ -197,17 +197,6 @@
   gap: 12px;
 }
 
-.mockBadge {
-  display: inline-flex;
-  padding: 4px 10px;
-  border-radius: 999px;
-  color: var(--up-brand);
-  background: var(--up-brand-soft);
-  font-size: 12px;
-  font-weight: 760;
-  letter-spacing: 0.12em;
-}
-
 @media (max-width: 640px) {
   .twoColumns {
     grid-template-columns: 1fr;

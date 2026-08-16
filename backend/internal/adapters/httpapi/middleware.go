@@ -214,9 +214,20 @@ func SecurityHeaders(next http.Handler) http.Handler {
 //	    return
 //	}
 func MaxBodyBytes(max int64) func(http.Handler) http.Handler {
+	return MaxBodyBytesByPath(max, nil)
+}
+
+// MaxBodyBytesByPath applies the configured default limit and a small set of
+// exact-path overrides for contracts such as multipart avatar upload. Exact
+// matching prevents a larger multipart allowance from weakening JSON routes.
+func MaxBodyBytesByPath(max int64, overrides map[string]int64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			r.Body = http.MaxBytesReader(w, r.Body, max)
+			limit := max
+			if override, ok := overrides[r.URL.Path]; ok && override > 0 {
+				limit = override
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 			next.ServeHTTP(w, r)
 		})
 	}

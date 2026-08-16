@@ -60,6 +60,10 @@ type fakeUserService struct {
 	listPasskeysFn    func(*userv2.ListPasskeysRequest) (*userv2.ListPasskeysResponse, error)
 	removePasskeyFn   func(*userv2.RemovePasskeyRequest) (*userv2.RemovePasskeyResponse, error)
 	setPasswordFn     func(*userv2.SetPasswordRequest) (*userv2.SetPasswordResponse, error)
+	setEmailFn        func(*userv2.SetEmailRequest) (*userv2.SetEmailResponse, error)
+	verifyEmailFn     func(*userv2.VerifyEmailRequest) (*userv2.VerifyEmailResponse, error)
+	setPhoneFn        func(*userv2.SetPhoneRequest) (*userv2.SetPhoneResponse, error)
+	verifyPhoneFn     func(*userv2.VerifyPhoneRequest) (*userv2.VerifyPhoneResponse, error)
 }
 
 func (f *fakeUserService) GetUserByID(_ context.Context, in *userv2.GetUserByIDRequest, _ ...grpc.CallOption) (*userv2.GetUserByIDResponse, error) {
@@ -94,6 +98,30 @@ func (f *fakeUserService) SetPassword(_ context.Context, in *userv2.SetPasswordR
 		return &userv2.SetPasswordResponse{}, nil
 	}
 	return f.setPasswordFn(in)
+}
+func (f *fakeUserService) SetEmail(_ context.Context, in *userv2.SetEmailRequest, _ ...grpc.CallOption) (*userv2.SetEmailResponse, error) {
+	if f.setEmailFn == nil {
+		return &userv2.SetEmailResponse{}, nil
+	}
+	return f.setEmailFn(in)
+}
+func (f *fakeUserService) VerifyEmail(_ context.Context, in *userv2.VerifyEmailRequest, _ ...grpc.CallOption) (*userv2.VerifyEmailResponse, error) {
+	if f.verifyEmailFn == nil {
+		return &userv2.VerifyEmailResponse{}, nil
+	}
+	return f.verifyEmailFn(in)
+}
+func (f *fakeUserService) SetPhone(_ context.Context, in *userv2.SetPhoneRequest, _ ...grpc.CallOption) (*userv2.SetPhoneResponse, error) {
+	if f.setPhoneFn == nil {
+		return &userv2.SetPhoneResponse{}, nil
+	}
+	return f.setPhoneFn(in)
+}
+func (f *fakeUserService) VerifyPhone(_ context.Context, in *userv2.VerifyPhoneRequest, _ ...grpc.CallOption) (*userv2.VerifyPhoneResponse, error) {
+	if f.verifyPhoneFn == nil {
+		return &userv2.VerifyPhoneResponse{}, nil
+	}
+	return f.verifyPhoneFn(in)
 }
 
 type fakeLinker struct {

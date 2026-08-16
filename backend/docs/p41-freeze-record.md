@@ -149,3 +149,14 @@ store failure 现在写一条 `result=denied` 的 durable event，携带精确
 `provider_failure_class`；零删除 failure 不伪造 durable side effect。audit attempt
 同时改为 request-cancellation detached、2 秒 bounded、best-effort。HTTP failure 与
 count-zero 契约不变。完整证据见 `p48-freeze-record.md`。
+
+---
+
+# 2026-08-16 proxy-trust amendment
+
+后续安全复审发现：上文 C2/R3 所称“`clientIP` 保留但限定 rate limiting only”仍会
+让登录限流信任调用者可伪造的 `X-Forwarded-For`。当前实现已进一步收紧：会话元数据
+与限流键都只使用 transport peer (`RemoteAddr`)；在显式可信代理 allow-list 配置落地
+前，任何 caller-controlled forwarding header 都不参与安全决策。回归由
+`TestLoginPersistsPeerIPNotForwardedHeader`、`TestPeerIPIgnoresProxyHeaders` 与
+`TestClientIPIgnoresProxyHeaders` 锁定。

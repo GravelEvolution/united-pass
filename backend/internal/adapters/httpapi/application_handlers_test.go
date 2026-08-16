@@ -490,6 +490,7 @@ func buildAppRouter(env *appEnv, injectSession bool) http.Handler {
 		})
 		r.Use(RequireCSRF())
 	}
+	r.Get("/admin/scopes", env.handlers.ListScopes)
 	r.Post("/admin/applications/with-initial-client", env.handlers.CreateWithInitialClient)
 	r.Get("/admin/applications", env.handlers.ListApplications)
 	r.Get("/admin/applications/{applicationId}", env.handlers.GetApplication)
@@ -846,6 +847,40 @@ func TestCreateApplication_PublicClientHasNoSecret(t *testing.T) {
 }
 
 // --- List ---
+
+func TestListScopes_ReturnsAuthoritativeCatalog(t *testing.T) {
+	env := newAppEnv(nil)
+	router := buildAppRouter(env, true)
+
+	rec := doAppRequest(router, http.MethodGet, "/admin/scopes", "", false)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var response []scopeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(response) != len(applications.ScopeCatalog) {
+		t.Fatalf("scope count = %d, want %d", len(response), len(applications.ScopeCatalog))
+	}
+	for i, definition := range applications.ScopeCatalog {
+		if response[i].Scope != definition.Scope || response[i].Label != definition.Label ||
+			response[i].Description != definition.Description || response[i].Required != definition.Required {
+			t.Errorf("scope[%d] = %+v, want %+v", i, response[i], definition)
+		}
+	}
+}
+
+func TestListScopes_RequiresApplicationRead(t *testing.T) {
+	env := newAppEnv(nil)
+	env.resolver.caps = permissions.Capabilities{}
+	router := buildAppRouter(env, true)
+
+	rec := doAppRequest(router, http.MethodGet, "/admin/scopes", "", false)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+}
 
 func TestListApplications_Success(t *testing.T) {
 	env := newAppEnv(nil)

@@ -448,6 +448,7 @@ func doRequest(handler http.Handler, method, path string, body string, cookies .
 	if bodyReader != nil {
 		req = httptest.NewRequest(method, path, bodyReader)
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "http://example.com")
 	} else {
 		req = httptest.NewRequest(method, path, nil)
 	}
@@ -515,6 +516,7 @@ func TestLoginPersistsPeerIPNotForwardedHeader(t *testing.T) {
 	body := `{"identifier":"testuser","password":"TestPassword123!"}`
 	req := httptest.NewRequest("POST", "/api/v1/auth/sessions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://example.com")
 	// Untrusted proxy header: it must never reach persisted session
 	// metadata (P4.0 freeze: no new proxy-header trust).
 	req.Header.Set("X-Forwarded-For", "203.0.113.66")
@@ -546,6 +548,53 @@ func TestPeerIPIgnoresProxyHeaders(t *testing.T) {
 	req.RemoteAddr = "/tmp/unix.sock"
 	if got := peerIP(req); got != "/tmp/unix.sock" {
 		t.Errorf("peerIP unix addr = %q, want /tmp/unix.sock", got)
+	}
+}
+
+func TestClientIPIgnoresProxyHeaders(t *testing.T) {
+	req := httptest.NewRequest("POST", "/api/v1/auth/sessions", nil)
+	req.RemoteAddr = "192.0.2.9:55123"
+	req.Header.Set("X-Forwarded-For", "203.0.113.66, 10.0.0.1")
+	if got := clientIP(req); got != "192.0.2.9" {
+		t.Errorf("clientIP = %q, want transport peer 192.0.2.9", got)
+	}
+}
+
+func TestLoginRequiresSameOriginJSONRequest(t *testing.T) {
+	h, _, _, _, _ := setupAuthHandlers(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+	body := `{"identifier":"testuser","password":"TestPassword123!"}`
+
+	tests := []struct {
+		name        string
+		contentType string
+		origin      string
+		fetchSite   string
+		wantStatus  int
+	}{
+		{name: "same origin", contentType: "application/json; charset=utf-8", origin: "http://example.com", fetchSite: "same-origin", wantStatus: http.StatusNoContent},
+		{name: "missing origin", contentType: "application/json", wantStatus: http.StatusForbidden},
+		{name: "cross origin", contentType: "application/json", origin: "https://evil.example", fetchSite: "cross-site", wantStatus: http.StatusForbidden},
+		{name: "wrong content type", contentType: "text/plain", origin: "http://example.com", wantStatus: http.StatusUnsupportedMediaType},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sessions", strings.NewReader(body))
+			req.Header.Set("Content-Type", tt.contentType)
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			if tt.fetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tt.fetchSite)
+			}
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -671,6 +720,43 @@ func TestLoginMultipleJSONObjects(t *testing.T) {
 }
 
 // --- MFA Tests ---
+
+func TestMFARequiresSameOriginJSONRequest(t *testing.T) {
+	h, _, _, _, _ := setupAuthHandlers(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions/mfa", h.CompleteMFA)
+	body := `{"mfaToken":"challenge","method":"totp","code":"123456"}`
+
+	tests := []struct {
+		name        string
+		contentType string
+		origin      string
+		fetchSite   string
+		wantStatus  int
+	}{
+		{name: "missing origin", contentType: "application/json", wantStatus: http.StatusForbidden},
+		{name: "cross origin", contentType: "application/json", origin: "https://evil.example", fetchSite: "cross-site", wantStatus: http.StatusForbidden},
+		{name: "wrong content type", contentType: "text/plain", origin: "http://example.com", wantStatus: http.StatusUnsupportedMediaType},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sessions/mfa", strings.NewReader(body))
+			req.Header.Set("Content-Type", tt.contentType)
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			if tt.fetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tt.fetchSite)
+			}
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
 
 func TestMFASuccess(t *testing.T) {
 	h, _, store, mfaStore, _ := setupAuthHandlers(t)

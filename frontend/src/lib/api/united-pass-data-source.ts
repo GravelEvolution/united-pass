@@ -114,8 +114,8 @@ export interface UnitedPassQueries {
 
 /**
  * Mutations that change server-side state.
- * Both the mock implementation and the future real HTTP-backed implementation
- * must satisfy this contract so pages can swap data sources without UI changes.
+ * Both the explicit development fixture and the production HTTP implementation
+ * satisfy this contract so pages retain one typed integration boundary.
  *
  * Mirrors the backend REST contract: standalone application creation is not
  * exposed (applications are always created with an initial client via
@@ -127,9 +127,18 @@ export interface UnitedPassCommands {
   createApplicationWithInitialClient(input: ApplicationWithInitialClientInput): Promise<ApplicationWithInitialClientResult>;
   decideConsent(requestId: string, decision: ConsentDecision): Promise<{ redirectUrl: string }>;
   revokeGrant(grantId: string): Promise<void>;
-  rotateClientSecret(applicationId: string, clientId: string): Promise<SecretRotationResult>;
+  rotateClientSecret(
+    applicationId: string,
+    clientId: string,
+    reauthToken?: string,
+    options?: BrowserCommandOptions,
+  ): Promise<SecretRotationResult>;
   updateApplicationStatus(applicationId: string, status: ApplicationStatus): Promise<void>;
-  deleteApplication(applicationId: string): Promise<void>;
+  deleteApplication(
+    applicationId: string,
+    reauthToken?: string,
+    options?: BrowserCommandOptions,
+  ): Promise<void>;
   updateApplication(applicationId: string, input: ApplicationUpdateInput): Promise<void>;
 
   // Account profile
@@ -165,7 +174,6 @@ export interface UnitedPassCommands {
   }, options?: BrowserCommandOptions): Promise<PasskeyEnrollmentConfirmation>;
   cancelPasskeyEnrollment(enrollmentToken: string): Promise<void>;
   removePasskey(passkeyId: string, reauthToken: string, options?: BrowserCommandOptions): Promise<SecuritySummary>;
-  generateRecoveryCodes(): Promise<{ codes: string[] }>;
   revokeOtherSessions(): Promise<{ revoked: number }>;
   logout(): Promise<void>;
 

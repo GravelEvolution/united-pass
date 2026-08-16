@@ -14,22 +14,22 @@
 
 | 路由 | 状态 | 说明 |
 | --- | --- | --- |
-| `/login` | Mock 完成 | 密码登录、MFA 挑战（TOTP / Passkey / 恢复码）、限速、challenge 过期 |
-| `/register` | Mock 完成 | 外部用户注册，不预建员工档案 |
-| `/forgot-password` | Mock 完成 | 发送重置说明，始终返回通用结果 |
-| `/reset-password` | Mock 完成 | 一次性令牌密码重置落地页 |
-| `/verify-email` | Mock 完成 | 一次性令牌邮箱验证落地页 |
-| `/logout` | Mock 完成 | 撤销当前会话 |
-| `/authorize` | Mock 完成 | OAuth 授权同意页，支持未登录跳转登录后恢复事务 |
+| `/login` | 真实 API | 密码登录、TOTP / Passkey MFA、同源保护、限速、challenge 过期；Recovery Codes Deferred |
+| `/register` | 真实 API | Provider 创建外部用户、稳定本地 `userId`、邮箱验证前保持 pending |
+| `/forgot-password` | 真实 API | 抗账户枚举的通用 202 与 Provider 重置通知 |
+| `/reset-password` | 真实 API | 加密生命周期令牌 + Provider code；成功后旧安全 epoch 会话失效 |
+| `/verify-email` | 真实 API | Provider code 验证与 pending 账户原子激活 |
+| `/logout` | 真实 API | 撤销当前会话并清理 Cookie |
+| `/authorize` | 真实 API | OAuth 授权同意页，支持未登录跳转登录后恢复事务 |
 
 ### 1.2 账户中心
 
 | 路由 | 状态 | 说明 |
 | --- | --- | --- |
-| `/account` | Mock 完成 | 个人资料编辑、头像上传 |
-| `/account/security` | Mock 完成 | 修改密码、TOTP 绑定/删除、Passkey 列表、恢复代码、撤销其他会话 |
-| `/account/sessions` | Mock 完成 | 会话列表、撤销单个会话 |
-| `/account/applications` | Mock 完成 | 已授权应用列表、撤销授权 |
+| `/account` | 真实 API | 个人资料、服务端净化头像、Provider 验证邮箱/手机号 |
+| `/account/security` | 真实 API | 修改密码、TOTP、Passkey、撤销其他会话；Recovery Codes 明确 Deferred |
+| `/account/sessions` | 真实 API | 会话列表、撤销单个会话 |
+| `/account/applications` | 真实 API | 已授权应用列表、撤销授权 |
 | `/account/data-export` | P8 真实 API | 重认证、异步生成、owner-bound 15 分钟 JSON 下载 |
 | `/account/delete` | P8 真实 API | 重认证、30 天可取消冷静期、durable 删除状态 |
 
@@ -37,18 +37,18 @@
 
 | 路由 | 状态 | 说明 |
 | --- | --- | --- |
-| `/admin` | Mock 完成 | 仪表盘、指标、最近事件 |
-| `/admin/users` | Mock 完成 | 游标分页列表、搜索 |
-| `/admin/users/[userId]` | Mock 完成 | 统一资料、Persona、外部身份关联、活跃会话、授权应用、审计、启用/停用、撤销会话 |
-| `/admin/employees` | Mock 完成 | 游标分页列表 |
-| `/admin/employees/[userId]` | Mock 完成 | 员工档案、部门、主管、入职/离职确认 |
-| `/admin/employees/link` | Mock 完成 | 搜索已有用户、为同一 userId 建立员工档案 |
-| `/admin/departments` | Mock 完成 | 部门列表 |
-| `/admin/departments/[departmentId]` | Mock 完成 | 树形结构、成员、负责人 |
-| `/admin/applications` | Mock 完成 | 游标分页列表 |
-| `/admin/applications/new` | Mock 完成 | 原子创建 Application + 初始 Client |
-| `/admin/applications/[applicationId]` | Mock 完成 | 应用详情、Client 列表、编辑 |
-| `/admin/applications/[applicationId]/clients/[clientId]` | Mock 完成 | 独立 Client 详情、Secret 轮换 |
+| `/admin` | 真实 API | 按 `user.read` / `application.read` / `audit.read` 独立裁剪指标与最近事件 |
+| `/admin/users` | 真实 API | 服务端游标分页与搜索 |
+| `/admin/users/[userId]` | 真实 API | 统一资料、Persona、外部身份、会话、授权、审计与生命周期操作 |
+| `/admin/employees` | 真实 API | 服务端游标分页 |
+| `/admin/employees/[userId]` | 真实 API | 员工档案、部门、主管、入职/离职确认 |
+| `/admin/employees/link` | 真实 API | 搜索已有用户、为同一 `userId` 建立员工档案 |
+| `/admin/departments` | 真实 API | 部门列表与变更 |
+| `/admin/departments/[departmentId]` | 真实 API | 树形结构、成员、负责人 |
+| `/admin/applications` | 真实 API | 服务端游标分页列表 |
+| `/admin/applications/new` | 真实 API | 原子创建 Application + 初始 Client |
+| `/admin/applications/[applicationId]` | 真实 API | 应用详情、Client 列表、编辑与状态变更 |
+| `/admin/applications/[applicationId]/clients/[clientId]` | 真实 API | Client 详情、更新、状态、删除与 Secret 轮换 |
 | `/admin/providers` | P6 real seam | Provider 列表 |
 | `/admin/providers/[providerId]` | P6 real seam | 飞书 Provider 详情、异步目录同步、显式冲突处理 |
 | `/admin/policies` | P7 真实 API | 策略列表 |
@@ -193,34 +193,28 @@ const CSRF_HEADER_NAME = "X-CSRF-Token";
 
 ## 5. 数据源切换机制
 
-前端使用 `UnitedPassQueries` 和 `UnitedPassCommands` 接口隔离 Mock 与真实 HTTP 实现。
+前端使用 `UnitedPassQueries` 和 `UnitedPassCommands` 接口隔离显式开发 fixture 与真实
+HTTP 实现。生产默认值为 real；不存在“接口尚未迁移时静默回落 Mock”的分支。
 
 ### 当前架构
 
 ```text
 Server Components
   └── serverQueries (src/lib/api/server/server-queries.ts)
-        └── mockUnitedPassDataSource (当前)
+        ├── NEXT_PUBLIC_USE_MOCK=true → mockUnitedPassDataSource（显式 fixture）
+        └── otherwise                → same-origin real HTTP
 
 Client Components
   └── browserCommands (src/lib/api/browser/browser-commands.ts)
-        └── mockUnitedPassDataSource (当前)
+        ├── NEXT_PUBLIC_USE_MOCK=true → mockUnitedPassDataSource（显式 fixture）
+        └── otherwise                → same-origin real HTTP + CSRF
 ```
 
-### 切换到真实后端
+### 认证边界
 
-在 `server-queries.ts` 中：
-
-```ts
-export const serverQueries =
-  process.env.USE_MOCK === "true"
-    ? mockQueries
-    : httpServerQueries;
-```
-
-在 `browser-commands.ts` 中同理。
-
-后端每完成一个接口，在前端对应方法中替换 Mock 调用为 HTTP 调用即可逐个切换，不必全量切换。
+密码登录、注册、邮箱验证和密码恢复始终调用真实认证 API，不受 fixture 开关影响。
+这避免演示凭据跳转到受保护页面却没有服务器 `up_session` 的伪登录状态。fixture
+只用于非安全产品数据的界面开发和单元测试。
 
 ### HTTP 客户端
 
@@ -239,42 +233,37 @@ export const serverQueries =
 6. **敏感数据**：Client Secret 仅在创建时显示一次，之后不可获取
 7. **权限分离**：前端权限检查仅用于 UX，后端必须独立执行 ABAC
 
-## 7. 留到后端阶段实现的内容
+## 7. 后端联调状态
 
-以下内容前端已固定页面状态和请求合同，后端实现后即可联调：
+最初冻结时预留给后端的密码校验、TOTP/WebAuthn Ceremony、飞书服务端换码、
+PostgreSQL 持久化、CSRF、fail-closed capability 判定、Provider 验证消息、净化头像
+存储与审计导出均已有真实实现。生产模式不会在这些 seam 上回落 fixture。
 
-- 真实密码校验与哈希
-- 真实 TOTP 和 WebAuthn Ceremony
-- 真实 OAuth Token 交换
-- 通用 Provider 创建/编辑、SCIM/LDAP/SAML/CAS（P6 仅固定飞书 Provider）
-- 数据库存储
-- CSRF 服务端验证
-- ABAC 实际决策引擎
-- OpenAPI 生成代码
-- 邮件和短信发送
-- 头像对象存储
-- 审计导出文件生成
+仍属后续范围的是通用 Provider 创建/编辑与 SCIM/LDAP/SAML/CAS、由 OpenAPI
+自动生成 TypeScript 客户端，以及将净化后的头像从 PostgreSQL 迁往对象存储；这些
+不影响当前已冻结接口的真实持久化和安全边界。
 
 ## 8. 验证命令
 
 ```bash
 pnpm lint        # ESLint
 pnpm typecheck   # TypeScript 严格模式
-pnpm test        # Vitest 单元测试 + Mock 生命周期
+pnpm test        # Vitest 单元测试（真实 transport 合同 + 显式 fixture）
 pnpm build       # Next.js 生产构建
 ```
 
-当前状态：全部通过，99 个测试，35 个页面路由。
+当前状态（2026-08-16 本次实现定向验证）：231 个 Vitest 测试通过；完整门禁结果以
+对应提交报告为准。
 
 ## 9. 仍需后续跟进的项目
 
 | 项目 | 说明 |
 | --- | --- |
 | Playwright E2E 测试 | 覆盖登录、授权恢复、应用创建、Client Secret 轮换、权限不足、员工升级等关键链路 |
-| ReauthenticationModal | 统一重认证组件（密码/TOTP/Passkey），供密钥轮换、策略发布等复用 |
-| 真实 API 逐个切换 | 后端完成一个接口，前端对应方法从 Mock 切换为 HTTP |
 | OpenAPI 生成类型 | 后端合同稳定后，使用 OpenAPI 生成 TypeScript 类型和客户端 |
-| CI/CD | GitHub Actions 需要 `workflow` scope 权限推送 `.github/workflows/` |
+| 真实外部系统验收 | 飞书租户、Cerbos、法律批准、生产 HTTPS/Secret Manager 与备份恢复 |
+| Recovery Codes | Provider 提供可审计 lifecycle API 后另行设计；当前不伪造生成/轮换 |
+| CI/CD | GitHub Actions 组织分钟额度恢复后重新启用远程门禁 |
 
 ## 10. P4.9 live-closure amendment — 2026-08-09
 
@@ -300,8 +289,7 @@ offboarding, and department create/update/delete. High-risk operations reuse
 the password/TOTP/passkey reauthentication flow with single-use grants bound
 to `user.disable`, `user.sessions.revoke`, or `employee.offboard` and the exact
 target `userId`. Frontend capability checks remain UX-only; backend checks are
-authoritative. The old “Mock 完成” table above is historical freeze context for
-these P5 routes.
+authoritative. The status table above incorporates the later real-seam amendments.
 
 ## 12. P7 policy/audit amendment — 2026-08-11
 
@@ -316,3 +304,20 @@ Audit export uses a grant bound to `audit.export + audit`, receives a durable
 Only a completed result exposes the backend same-origin, 15-minute CSV URL.
 Frontend capability checks remain UX-only; backend Cerbos and ownership checks
 are authoritative.
+
+## 13. Production seam completion amendment — 2026-08-16
+
+All production query and command seams now have real HTTP implementations.
+Public registration, email verification and password recovery use ZITADEL-owned
+credentials plus encrypted, short-lived local lifecycle capabilities. Password
+reset advances the security epoch and invalidates older sessions. Logged-out
+credential endpoints require JSON and an exact same-origin `Origin`; rate-limit
+keys use the authoritative transport peer rather than caller-controlled XFF.
+
+Profile edits, sanitized avatar storage, verified email/phone changes, OAuth
+Application/Client management and the administration dashboard are real. The
+dashboard independently scopes each aggregate to `user.read`,
+`application.read` or `audit.read`; an unrelated admin capability cannot reveal
+those counts. `NEXT_PUBLIC_USE_MOCK=true` remains an explicit fixture mode only,
+and production never falls back to it. Recovery Codes remain provider-deferred
+and are not represented by fake codes or success states.

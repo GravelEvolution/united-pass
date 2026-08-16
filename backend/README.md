@@ -223,7 +223,7 @@ go test -tags integration -race ./internal/adapters/postgres/... ./internal/adap
 
 Integration tests never run `FLUSHALL`, `FLUSHDB`, or `DROP DATABASE`. They only delete keys under the configured test prefix and only drop tables in the test schema.
 
-## Current Implementation Scope (through Phase 8 technical implementation)
+## Current Implementation Scope (Phase 0–8 plus production seam completion)
 
 Phase 0 established the HTTP foundation. Phase 1 adds session management, authentication, and current user endpoints. Phase 2 adds the OAuth Application and OAuth Client management plane (see [ADR-0004](docs/adr-0004.md)).
 
@@ -324,6 +324,27 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
   [Phase 8 launch runbook](docs/p8-launch-runbook.md).
 - Legal approval and real production cutover remain external Pending items.
 
+### Production seam completion (2026-08-16)
+
+- **Public account lifecycle**: ZITADEL-owned registration credentials and
+  email/password-reset codes; pending stable user + Consumer Persona + exact
+  provider identity link; compensation on local failure; anti-enumerating reset
+  request; encrypted short-lived lifecycle capabilities; password-reset security
+  epoch advancement and old-session invalidation.
+- **Account self-service**: constrained profile patch, server-decoded/resized/
+  metadata-stripped PNG avatar storage, and durable user/session-bound email or
+  phone verification with claim leases, attempt limits and provider readback.
+- **Administration overview**: real PostgreSQL aggregates independently scoped
+  to user, application and audit read capabilities.
+- **Final frontend integration**: every production data seam calls real HTTP;
+  explicit fixtures cannot manufacture a session or silently persist writes.
+- **Security closure**: logged-out credential submissions require JSON plus an
+  exact same-origin Origin, forwarding headers are not trusted for rate-limit
+  identity, Redis construction failure aborts startup, and shutdown returns
+  joined HTTP/Redis/provider close errors.
+- Architecture: [ADR-0015](docs/adr-0015.md). Machine contract:
+  [OpenAPI 0.9.0](openapi/openapi.yaml).
+
 ### Status and remaining external acceptance
 
 **Phase 1 status: implementation complete; local real-instance acceptance passed.**
@@ -373,11 +394,10 @@ ZITADEL service account must hold `PROJECT_OWNER` membership on the
 provisioning project — organization-level `ORG_OWNER` alone is not sufficient
 for `RemoveApp` on v2.71.
 
-- Passkey browser ceremony against the real instance (WebAuthn begin fails in the local dev instance; adapter unit tests cover the contract and the fail-closed path)
 - Production HTTPS instance + Secret Manager rollout (Phase 1.2 production operational sign-off)
 - gRPC error-code calibration follow-ups on the production instance (see `internal/adapters/zitadel/errors.go`; local codes are recorded in ADR-0003)
-- User registration, password reset, email verification
-- Profile updates and avatar upload
+- Destructive live acceptance for registration/email delivery, password reset
+  and email/SMS contact changes against the designated production-like ZITADEL tenant
 - Recovery Code management (provider capability remains unsupported)
 - Legal sign-off, production backup/restore exercise, real production-like
   destructive account-deletion acceptance and traffic cutover
@@ -458,6 +478,27 @@ High-risk operations additionally require a fresh reauthentication grant
 | `/api/v1/admin/applications/{applicationId}/clients/{clientId}/disable` | POST | No | Disable client |
 | `/api/v1/admin/applications/{applicationId}/clients/{clientId}/secret-rotations` | POST | Yes | Rotate confidential client secret (one-time display) |
 
+## API Endpoints (production seam completion)
+
+Logged-out credential endpoints require `application/json` and the exact public
+Origin. Session-authenticated writes require CSRF. Verification capabilities
+and provider codes are sensitive and must not be logged.
+
+| Endpoint | Method | Auth | Description |
+| --- | --- | --- | --- |
+| `/api/v1/registrations` | POST | None + same-origin | Create provider credential and pending linked user |
+| `/api/v1/password-reset-requests` | POST | None + same-origin | Enumeration-safe reset notification request |
+| `/api/v1/password-resets` | POST | None + same-origin | Provider-verified reset and old-session invalidation |
+| `/api/v1/email-verifications` | POST | None + same-origin | Verify registration email and activate pending user |
+| `/api/v1/me` | PATCH | Session + CSRF | Update display name and/or nickname |
+| `/api/v1/me/avatar` | POST multipart | Session + CSRF | Decode, sanitize and store avatar |
+| `/api/v1/media/avatars/{avatarFile}` | GET | None | Serve controlled immutable PNG media |
+| `/api/v1/me/email-change-requests` | POST | Session + CSRF | Begin Provider-verified email change |
+| `/api/v1/me/email-change-requests/{requestId}/verify` | POST | Session + CSRF | Verify and commit exact email change |
+| `/api/v1/me/phone-change-requests` | POST | Session + CSRF | Begin Provider-verified phone change |
+| `/api/v1/me/phone-change-requests/{requestId}/verify` | POST | Session + CSRF | Verify and commit exact phone change |
+| `/api/v1/admin/dashboard` | GET | Session + capability | Return only independently authorized aggregates |
+
 ## API Endpoints (Phase 8)
 
 | Endpoint | Method | Reauth | Description |
@@ -504,4 +545,9 @@ The backend must never silently implement a different API contract from the fron
 - `docs/adr-0002.md` — Session, PostgreSQL, Redis, and authentication provider architecture
 - `docs/adr-0003.md` — Authentication provider selection (Phase 1.2)
 - `docs/adr-0004.md` — OAuth Application/Client management plane (Phase 2)
+- `docs/adr-0011.md` — Stable identity and workforce administration (Phase 5)
+- `docs/adr-0012.md` — Feishu provider and directory staging (Phase 6)
+- `docs/adr-0013.md` — Cerbos policies and durable audit (Phase 7)
+- `docs/adr-0014.md` — Privacy rights and controlled legal publication (Phase 8)
+- `docs/adr-0015.md` — Public account lifecycle and final production seam replacement
 - `docs/p28-acceptance-record.md` — Phase 2 real-provider acceptance record

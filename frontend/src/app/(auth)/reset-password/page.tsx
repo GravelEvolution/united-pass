@@ -17,11 +17,11 @@ export const dynamic = "force-dynamic";
 export default async function ResetPasswordPage({
   searchParams,
 }: {
-  searchParams: Promise<{ token?: string }>;
+  searchParams: Promise<{ token?: string; code?: string }>;
 }) {
-  const { token } = await searchParams;
+  const { token, code } = await searchParams;
 
-  if (!token || token.trim().length === 0) {
+  if (!token || token.trim().length === 0 || !code || code.trim().length === 0) {
     return (
       <InvalidLinkNotice
         title="链接无效"
@@ -32,5 +32,5 @@ export default async function ResetPasswordPage({
     );
   }
 
-  return <ResetPasswordPanel token={token} />;
+  return <ResetPasswordPanel token={token} code={code} />;
 }

@@ -343,6 +343,27 @@ type scopeResponse struct {
 	Required    bool   `json:"required"`
 }
 
+// ListScopes handles GET /api/v1/admin/scopes. The catalog is defined by the
+// applications domain and is the same authority used to validate client
+// creation and updates; the UI therefore cannot present a scope that the
+// backend would silently reject later.
+func (h *ApplicationHandlers) ListScopes(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.checkCapability(w, r, false, "", "scope.list", ""); !ok {
+		return
+	}
+
+	items := make([]scopeResponse, len(applications.ScopeCatalog))
+	for i, definition := range applications.ScopeCatalog {
+		items[i] = scopeResponse{
+			Scope:       definition.Scope,
+			Label:       definition.Label,
+			Description: definition.Description,
+			Required:    definition.Required,
+		}
+	}
+	writeJSONNoStore(w, r, http.StatusOK, items)
+}
+
 type clientSecretResponse struct {
 	SecretID      string     `json:"secretId"`
 	Label         string     `json:"label"`

@@ -83,7 +83,9 @@ func (c *cerbosReadinessChecker) Check(ctx context.Context) error {
 func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	router := chi.NewRouter()
 
-	router.Use(httpapi.MaxBodyBytes(cfg.MaxRequestBodyBytes))
+	router.Use(httpapi.MaxBodyBytesByPath(cfg.MaxRequestBodyBytes, map[string]int64{
+		"/api/v1/me/avatar": httpapi.AvatarRequestBodyLimit,
+	}))
 	router.Use(httpapi.RequestID)
 	router.Use(httpapi.SecurityHeaders)
 	router.Use(httpapi.AccessLog(logger))
@@ -111,11 +113,13 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		var err error
 		redisClient, err = redis.NewClient(cfg.Redis)
 		if err != nil {
-			logger.Error("failed to create redis client", "error", err)
-		} else {
-			readinessCheckers = append(readinessCheckers,
-				httpapi.NewRedisChecker(redisClient, 3*time.Second))
+			if pool != nil {
+				pool.Close()
+			}
+			return nil, fmt.Errorf("create redis client: %w", err)
 		}
+		readinessCheckers = append(readinessCheckers,
+			httpapi.NewRedisChecker(redisClient, 3*time.Second))
 	}
 
 	// Session service. The encryption key is validated up front: an invalid
@@ -135,13 +139,15 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var providerCloser interface{ Close() error }
 	var mfaStore httpapi.MFAChallengeStore
 	var rateChecker httpapi.RateChecker
+	var contactRateChecker httpapi.ContactRateChecker
 	var sessionAuditor session.SecurityAuditor
 	var workerStops []func()
 	var cerbosClient *cerbos.Client
 	var accountDeleter privacy.ProviderAccountDeleter
+	var userRepo *postgres.UserRepository
 
 	if pool != nil {
-		userRepo := postgres.NewUserRepository(pool.PgxPool())
+		userRepo = postgres.NewUserRepository(pool.PgxPool())
 		userReader = userRepo
 		userChecker = &userStatusChecker{repo: userRepo}
 		userLinker = userRepo
@@ -213,7 +219,9 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		}
 
 		mfaStore = redis.NewMFAStore(redisClient)
-		rateChecker = redis.NewRateLimiter(redisClient)
+		limiter := redis.NewRateLimiter(redisClient)
+		rateChecker = limiter
+		contactRateChecker = limiter
 	}
 
 	// Phase 7 Cerbos boundary (ADR-0013). The REST adapter uses bounded HTTP
@@ -382,8 +390,11 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var rotationRates httpapi.RotationRateChecker
 	var policyHandlers *httpapi.PolicyHandlers
 	var auditHandlers *httpapi.AuditHandlers
+	var dashboardHandlers *httpapi.DashboardHandlers
 	var privacyHandlers *httpapi.PrivacyHandlers
 	var legalHandlers *httpapi.LegalHandlers
+	var accountMutationHandlers *httpapi.AccountMutationHandlers
+	var publicAccountHandlers *httpapi.PublicAccountHandlers
 	// Reauthentication is shared infrastructure for account, application and
 	// workforce high-risk operations. It must not disappear merely because an
 	// unrelated OAuth provisioner is unavailable (ADR-0011 §3).
@@ -453,6 +464,9 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	if auditSvc != nil {
 		auditHandlers = httpapi.NewAuditHandlers(auditSvc, permResolver, reauthVerifier)
+		dashboardHandlers = httpapi.NewDashboardHandlers(
+			postgres.NewDashboardRepository(pool.PgxPool()), permResolver, auditSvc,
+		)
 	}
 	if pool != nil {
 		privacySvc := privacy.NewService(
@@ -464,6 +478,23 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		privacyWorker := privacy.NewWorker(privacySvc, time.Second, 5)
 		privacyWorker.Start()
 		workerStops = append(workerStops, privacyWorker.Stop)
+	}
+	if userRepo != nil {
+		contactProvider, _ := authenticator.(identity.AccountContactProvider)
+		accountMutationHandlers = httpapi.NewAccountMutationHandlers(
+			userRepo, contactProvider, contactRateChecker, logger,
+		)
+		if sdkClient != nil && securitySvc != nil && contactRateChecker != nil &&
+			encryptor != nil && cfg.OAuth.PublicOrigin != "" {
+			lifecycleProvider := zitadel.NewLifecycleProvider(
+				sdkClient.UserServiceV2(), sdkClient.ManagementService(), cfg.Auth.ProjectID,
+			)
+			publicAccountHandlers = httpapi.NewPublicAccountHandlers(
+				userRepo, lifecycleProvider, contactRateChecker, securitySvc,
+				sessionAuditor, encryptor, zitadel.ProviderName, cfg.Auth.ProjectID,
+				cfg.OAuth.PublicOrigin, logger,
+			)
+		}
 	}
 
 	// Consent resolution (P3.3, ADR-0005 §2): the side-effect free
@@ -556,12 +587,24 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 
 	// API v1 routes.
 	router.Route("/api/v1", func(r chi.Router) {
+		// Sanitized avatar media is public by opaque immutable identifier. The
+		// handler serves only server-reencoded PNG bytes from PostgreSQL.
+		if accountMutationHandlers != nil {
+			r.Get("/media/avatars/{avatarFile}", accountMutationHandlers.GetAvatar)
+		}
+
 		// Auth endpoints (no session required for login/MFA; logout requires
 		// session + CSRF).
 		authHandlers := httpapi.NewAuthHandlers(
 			authenticator, sessionSvc, mfaStore, rateChecker,
 			userChecker, cfg, logger)
 
+		if publicAccountHandlers != nil {
+			r.Post("/registrations", publicAccountHandlers.Register)
+			r.Post("/password-reset-requests", publicAccountHandlers.RequestPasswordReset)
+			r.Post("/password-resets", publicAccountHandlers.ResetPassword)
+			r.Post("/email-verifications", publicAccountHandlers.VerifyEmail)
+		}
 		r.Post("/auth/sessions", authHandlers.Login)
 		r.Post("/auth/sessions/mfa", authHandlers.CompleteMFA)
 		if legalHandlers != nil {
@@ -641,6 +684,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		r.Group(func(r chi.Router) {
 			if sessionSvc != nil {
 				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
+				r.Use(httpapi.RequireCSRF())
 			}
 			if userReader != nil && permResolver != nil {
 				accountHandlers := httpapi.NewAccountHandlers(userReader, permResolver)
@@ -649,6 +693,14 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				}
 				r.Get("/me", accountHandlers.GetCurrentUser)
 				r.Get("/me/permissions", accountHandlers.GetPermissions)
+			}
+			if accountMutationHandlers != nil {
+				r.Patch("/me", accountMutationHandlers.UpdateProfile)
+				r.Post("/me/avatar", accountMutationHandlers.UploadAvatar)
+				r.Post("/me/email-change-requests", accountMutationHandlers.RequestEmailChange)
+				r.Post("/me/email-change-requests/{requestId}/verify", accountMutationHandlers.VerifyEmailChange)
+				r.Post("/me/phone-change-requests", accountMutationHandlers.RequestPhoneChange)
+				r.Post("/me/phone-change-requests/{requestId}/verify", accountMutationHandlers.VerifyPhoneChange)
 			}
 		})
 
@@ -718,6 +770,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				r.Use(httpapi.RequireCSRF())
 			}
 			if appHandlers != nil {
+				r.Get("/admin/scopes", appHandlers.ListScopes)
 				r.Post("/admin/applications/with-initial-client", appHandlers.CreateWithInitialClient)
 				r.Get("/admin/applications", appHandlers.ListApplications)
 				r.Get("/admin/applications/{applicationId}", appHandlers.GetApplication)
@@ -732,6 +785,9 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				r.Post("/admin/applications/{applicationId}/clients/{clientId}/disable", appHandlers.DisableClient)
 				r.Delete("/admin/applications/{applicationId}/clients/{clientId}", appHandlers.DeleteClient)
 				r.Post("/admin/applications/{applicationId}/clients/{clientId}/secret-rotations", appHandlers.RotateClientSecret)
+			}
+			if dashboardHandlers != nil {
+				r.Get("/admin/dashboard", dashboardHandlers.Get)
 			}
 		})
 
@@ -932,10 +988,12 @@ func (s *Server) Run() error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(ctx, s.config.ShutdownTimeout)
 	defer cancel()
+	var shutdownErrors []error
 
 	s.logger.Info("http server shutting down", "timeout", s.config.ShutdownTimeout.String())
 	if err := s.HTTP.Shutdown(shutdownCtx); err != nil {
 		s.logger.Error("graceful shutdown failed", "error", err)
+		shutdownErrors = append(shutdownErrors, fmt.Errorf("http shutdown: %w", err))
 	}
 
 	// Stop background workers before their infrastructure (Redis) closes.
@@ -946,12 +1004,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.redisClient != nil {
 		if err := s.redisClient.Close(); err != nil {
 			s.logger.Error("redis close failed", "error", err)
+			shutdownErrors = append(shutdownErrors, fmt.Errorf("redis close: %w", err))
 		}
 	}
 
 	if s.providerCloser != nil {
 		if err := s.providerCloser.Close(); err != nil {
 			s.logger.Error("authentication provider close failed", "error", err)
+			shutdownErrors = append(shutdownErrors, fmt.Errorf("authentication provider close: %w", err))
 		}
 	}
 
@@ -960,7 +1020,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	s.logger.Info("http server stopped")
-	return nil
+	return errors.Join(shutdownErrors...)
 }
 
 // Config returns the loaded configuration.

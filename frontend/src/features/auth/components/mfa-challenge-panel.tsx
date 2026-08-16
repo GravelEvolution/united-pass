@@ -2,39 +2,40 @@
 // Copyright (c) 2026 Chen Jiajie(Ariakage)
 //
 // Author: Chen Jiajie(Ariakage) <ariakage233@gmail.com>
-// Date: 2026-08-05
-// Description: MFA challenge input panel
+// Date: 2026-08-16
+// Description: Real TOTP and WebAuthn login challenge panel
 //
 
 "use client";
 
 import type { FormEvent } from "react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Banner, Button, Input } from "@douyinfe/semi-ui";
 import {
   IconAlertTriangle,
-  IconClose,
   IconHourglass,
   IconKey,
   IconLock,
   IconShield,
 } from "@douyinfe/semi-icons";
-import type { MfaMethod } from "@/features/auth/types";
+import type {
+  LoginMfaMethod,
+  LoginMfaVerification,
+} from "@/features/auth/types";
+import {
+  getPasskeyAssertion,
+  isWebAuthnSupported,
+} from "@/features/account/utils/webauthn";
 import { isApiError } from "@/lib/api/api-error";
 import styles from "./credential-panel.module.css";
 
 type MfaChallengePanelProps = {
-  mfaToken: string;
-  availableMethods: MfaMethod[];
-  onSuccess: (redirectUrl: string) => void;
+  availableMethods: LoginMfaMethod[];
+  passkeyRequestOptions?: unknown;
+  expiresAt: string;
+  onSuccess: () => void;
   onCancel: () => void;
-  /**
-   * Real-mode seam (P3.9): submits the code against the P1 Session API.
-   * When provided, verification performs a real network round-trip and the
-   * mock artifacts (demo state buttons, MOCK PREVIEW badge) are hidden;
-   * when absent, the frozen mock behavior is kept.
-   */
-  onVerify?: (method: MfaMethod, code: string) => Promise<void>;
+  onVerify: (input: LoginMfaVerification) => Promise<void>;
 };
 
 type MfaPhase =
@@ -43,183 +44,139 @@ type MfaPhase =
   | { phase: "expired" }
   | { phase: "too_many_attempts" };
 
-const METHOD_LABELS: Record<MfaMethod, string> = {
+const METHOD_LABELS: Record<LoginMfaMethod, string> = {
   totp: "验证器应用",
   passkey: "通行密钥",
-  recovery_code: "恢复代码",
 };
 
-const METHOD_ORDER: MfaMethod[] = ["totp", "passkey", "recovery_code"];
-
-const MAX_ATTEMPTS = 5;
-const MOCK_REDIRECT_URL = "/account";
-
-function pickDefaultMethod(methods: MfaMethod[]): MfaMethod {
-  for (const method of METHOD_ORDER) {
-    if (methods.includes(method)) {
-      return method;
-    }
+function verifyErrorMessage(error: unknown): string {
+  if (error instanceof DOMException && error.name === "NotAllowedError") {
+    return "未完成通行密钥验证。请重试，或选择其他验证方式。";
   }
-  return methods[0];
+  if (isApiError(error)) return error.message;
+  return "验证失败，请重试。";
 }
 
 export function MfaChallengePanel({
-  mfaToken,
   availableMethods,
+  passkeyRequestOptions,
+  expiresAt,
   onSuccess,
   onCancel,
   onVerify,
 }: MfaChallengePanelProps) {
-  const isRealMode = onVerify !== undefined;
-  const [selectedMethod, setSelectedMethod] = useState<MfaMethod>(() =>
-    pickDefaultMethod(availableMethods),
+  const [selectedMethod, setSelectedMethod] = useState<LoginMfaMethod>(
+    availableMethods[0],
   );
   const [phase, setPhase] = useState<MfaPhase>({ phase: "active" });
   const [codeValue, setCodeValue] = useState("");
-  const [recoveryValue, setRecoveryValue] = useState("");
   const [fieldError, setFieldError] = useState<string>();
-  const [attempts, setAttempts] = useState(0);
+  const passkeyController = useRef<AbortController | null>(null);
 
-  function completeChallengeSuccess() {
-    setPhase({ phase: "submitting" });
-    window.setTimeout(() => {
-      onSuccess(MOCK_REDIRECT_URL);
-    }, 600);
-  }
+  useEffect(() => {
+    const remaining = Date.parse(expiresAt) - Date.now();
+    const delay = Number.isFinite(remaining) && remaining > 0
+      ? Math.min(remaining, 2_147_483_647)
+      : 0;
+    const timer = window.setTimeout(
+      () => setPhase({ phase: "expired" }),
+      delay,
+    );
+    return () => window.clearTimeout(timer);
+  }, [expiresAt]);
 
-  function verifyErrorMessage(error: unknown): string {
-    if (isApiError(error)) {
-      if (error.kind === "rate_limited") {
-        setPhase({ phase: "too_many_attempts" });
-      }
-      return error.message;
+  useEffect(() => () => passkeyController.current?.abort(), []);
+
+  function applyVerificationError(error: unknown) {
+    if (isApiError(error) && error.kind === "rate_limited") {
+      setPhase({ phase: "too_many_attempts" });
+      return;
     }
-    return "验证失败，请重试。";
-  }
-
-  async function handleRealTotpSubmit(code: string) {
-    if (!onVerify) return;
-    setPhase({ phase: "submitting" });
-    try {
-      await onVerify("totp", code);
-      onSuccess(MOCK_REDIRECT_URL);
-    } catch (error) {
-      setPhase({ phase: "active" });
-      setFieldError(verifyErrorMessage(error));
+    if (isApiError(error) && error.code?.includes("expired")) {
+      setPhase({ phase: "expired" });
+      return;
     }
+    setPhase({ phase: "active" });
+    setFieldError(verifyErrorMessage(error));
   }
 
-  async function handleRealRecoverySubmit(code: string) {
-    if (!onVerify) return;
-    setPhase({ phase: "submitting" });
-    try {
-      await onVerify("recovery_code", code);
-      onSuccess(MOCK_REDIRECT_URL);
-    } catch (error) {
-      setPhase({ phase: "active" });
-      const nextAttempts = attempts + 1;
-      setAttempts(nextAttempts);
-      if (nextAttempts >= MAX_ATTEMPTS) {
-        setPhase({ phase: "too_many_attempts" });
-        return;
-      }
-      setFieldError(verifyErrorMessage(error));
-    }
-  }
-
-  function handleTotpSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleTotpSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const code = codeValue.trim();
-
     if (!/^\d{6}$/.test(code)) {
       setFieldError("请输入 6 位数字验证码。");
       return;
     }
-
-    if (onVerify) {
-      void handleRealTotpSubmit(code);
-      return;
+    setPhase({ phase: "submitting" });
+    setFieldError(undefined);
+    try {
+      await onVerify({ method: "totp", code });
+      onSuccess();
+    } catch (error) {
+      applyVerificationError(error);
     }
-
-    // Mock: any 6-digit code from an authenticator app is accepted.
-    completeChallengeSuccess();
   }
 
-  function handleRecoverySubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const code = recoveryValue.trim();
-
-    if (code.length < 8) {
-      const nextAttempts = attempts + 1;
-      setAttempts(nextAttempts);
-      if (nextAttempts >= MAX_ATTEMPTS) {
-        setPhase({ phase: "too_many_attempts" });
-        return;
+  async function handlePasskey() {
+    if (passkeyRequestOptions === undefined) {
+      setFieldError("服务端未返回通行密钥挑战，请返回登录后重试。");
+      return;
+    }
+    if (!isWebAuthnSupported()) {
+      setFieldError("当前浏览器不支持通行密钥，请使用受支持的浏览器或选择验证器应用。");
+      return;
+    }
+    passkeyController.current?.abort();
+    const controller = new AbortController();
+    passkeyController.current = controller;
+    setPhase({ phase: "submitting" });
+    setFieldError(undefined);
+    try {
+      const passkeyAssertion = await getPasskeyAssertion(
+        passkeyRequestOptions,
+        controller.signal,
+      );
+      await onVerify({ method: "passkey", passkeyAssertion });
+      onSuccess();
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      applyVerificationError(error);
+    } finally {
+      if (passkeyController.current === controller) {
+        passkeyController.current = null;
       }
-      setFieldError(`恢复代码无效。剩余尝试次数 ${MAX_ATTEMPTS - nextAttempts} 次。`);
-      return;
     }
-
-    if (onVerify) {
-      void handleRealRecoverySubmit(code);
-      return;
-    }
-
-    completeChallengeSuccess();
   }
 
-  function handlePasskey() {
-    // Mock: a real passkey flow would call the WebAuthn API here. This
-    // simulates a successful assertion without touching any credential.
-    completeChallengeSuccess();
+  function cancel() {
+    passkeyController.current?.abort();
+    onCancel();
   }
 
-  if (phase.phase === "expired") {
+  if (phase.phase === "expired" || phase.phase === "too_many_attempts") {
+    const expired = phase.phase === "expired";
     return (
       <div className={styles.panel}>
         <div className={styles.heading}>
-          {!isRealMode && <span className={styles.mockBadge}>MOCK PREVIEW</span>}
-          <h1>验证已过期</h1>
-          <p>多因素验证挑战已超时，请返回登录重新发起。</p>
+          <h1>{expired ? "验证已过期" : "尝试次数过多"}</h1>
+          <p>
+            {expired
+              ? "多因素验证挑战已超时，请返回登录重新发起。"
+              : "为保护账户安全，多因素验证已被暂时限制。"}
+          </p>
         </div>
         <div role="alert">
           <Banner
-            type="warning"
-            icon={<IconHourglass />}
-            description="出于安全考虑，验证挑战有效时间较短。请重新登录以获取新的验证挑战。"
+            type={expired ? "warning" : "danger"}
+            icon={expired ? <IconHourglass /> : <IconAlertTriangle />}
+            description={expired
+              ? "出于安全考虑，验证挑战有效时间较短。请重新登录以获取新的验证挑战。"
+              : "请求频率已达上限，请按服务端提示稍后重新登录。"}
           />
         </div>
         <div className={styles.actions}>
-          <Button theme="outline" size="large" onClick={onCancel}>返回登录</Button>
+          <Button theme="outline" size="large" onClick={cancel}>返回登录</Button>
         </div>
-        {!isRealMode && (
-          <p className={styles.notice}>当前为界面 mock，不会执行真实的多因素验证。</p>
-        )}
-      </div>
-    );
-  }
-
-  if (phase.phase === "too_many_attempts") {
-    return (
-      <div className={styles.panel}>
-        <div className={styles.heading}>
-          {!isRealMode && <span className={styles.mockBadge}>MOCK PREVIEW</span>}
-          <h1>尝试次数过多</h1>
-          <p>为保护账户安全，多因素验证已被暂时锁定。</p>
-        </div>
-        <div role="alert">
-          <Banner
-            type="danger"
-            icon={<IconAlertTriangle />}
-            description="连续验证失败次数已达上限。请稍后再试，或使用其他已绑定的验证方式。"
-          />
-        </div>
-        <div className={styles.actions}>
-          <Button theme="outline" size="large" onClick={onCancel}>返回登录</Button>
-        </div>
-        {!isRealMode && (
-          <p className={styles.notice}>当前为界面 mock，不会执行真实的多因素验证。</p>
-        )}
       </div>
     );
   }
@@ -229,9 +186,8 @@ export function MfaChallengePanel({
   return (
     <div className={styles.panel}>
       <div className={styles.heading}>
-        {!isRealMode && <span className={styles.mockBadge}>MOCK PREVIEW</span>}
         <h1>二次验证</h1>
-        <p>请完成多因素验证以继续登录。{!isRealMode && <>验证令牌：<code>{mfaToken}</code></>}</p>
+        <p>请使用账户已绑定的安全方式继续登录。</p>
       </div>
 
       {availableMethods.length > 1 && (
@@ -242,6 +198,7 @@ export function MfaChallengePanel({
               type="button"
               className={`${styles.methodChip} ${selectedMethod === method ? styles.methodChipActive : ""}`}
               aria-pressed={selectedMethod === method}
+              disabled={isSubmitting}
               onClick={() => {
                 setSelectedMethod(method);
                 setFieldError(undefined);
@@ -271,30 +228,17 @@ export function MfaChallengePanel({
               maxLength={6}
               validateStatus={fieldError ? "error" : "default"}
               aria-invalid={Boolean(fieldError)}
-              aria-errormessage={fieldError ? "totp-code-error" : undefined}
+              aria-errormessage={fieldError ? "mfa-error" : undefined}
               disabled={isSubmitting}
               required
             />
             <small>打开验证器应用，输入当前显示的 6 位动态验证码。</small>
-            {fieldError && (
-              <small id="totp-code-error" className={styles.fieldError} role="alert">
-                {fieldError}
-              </small>
-            )}
+            {fieldError && <small id="mfa-error" className={styles.fieldError} role="alert">{fieldError}</small>}
           </label>
           <div className={styles.actions}>
-            <Button theme="outline" size="large" onClick={onCancel} disabled={isSubmitting}>
-              取消
-            </Button>
-            <Button
-              htmlType="submit"
-              type="primary"
-              theme="solid"
-              size="large"
-              loading={isSubmitting}
-              disabled={isSubmitting}
-            >
-              {isSubmitting ? "正在验证…" : isRealMode ? "验证" : "验证（Mock）"}
+            <Button theme="outline" size="large" onClick={cancel} disabled={isSubmitting}>取消</Button>
+            <Button htmlType="submit" type="primary" theme="solid" size="large" loading={isSubmitting} disabled={isSubmitting}>
+              {isSubmitting ? "正在验证…" : "验证"}
             </Button>
           </div>
         </form>
@@ -306,106 +250,16 @@ export function MfaChallengePanel({
             <span>通行密钥</span>
             <div className={styles.loadingBlock}>
               <IconKey size="extra-large" style={{ color: "var(--up-brand)" }} />
-              <span>使用已绑定的通行密钥完成无密码验证。</span>
+              <span>通过系统安全提示，使用已绑定的通行密钥完成验证。</span>
             </div>
+            {fieldError && <small id="mfa-error" className={styles.fieldError} role="alert">{fieldError}</small>}
           </div>
           <div className={styles.actions}>
-            <Button theme="outline" size="large" onClick={onCancel} disabled={isSubmitting}>
-              取消
-            </Button>
-            <Button
-              type="primary"
-              theme="solid"
-              size="large"
-              icon={<IconLock />}
-              loading={isSubmitting}
-              disabled={isSubmitting}
-              onClick={handlePasskey}
-            >
-              {isSubmitting ? "正在验证…" : "使用通行密钥（Mock）"}
+            <Button theme="outline" size="large" onClick={cancel} disabled={isSubmitting}>取消</Button>
+            <Button type="primary" theme="solid" size="large" icon={<IconLock />} loading={isSubmitting} disabled={isSubmitting} onClick={() => void handlePasskey()}>
+              {isSubmitting ? "正在验证…" : "使用通行密钥"}
             </Button>
           </div>
-        </div>
-      )}
-
-      {selectedMethod === "recovery_code" && (
-        <form className={styles.form} method="post" onSubmit={handleRecoverySubmit}>
-          <label className={styles.field}>
-            <span>恢复代码</span>
-            <Input
-              value={recoveryValue}
-              onChange={(nextValue) => {
-                setRecoveryValue(nextValue);
-                setFieldError(undefined);
-              }}
-              size="large"
-              prefix={<IconKey />}
-              placeholder="输入账户安全中心生成的恢复代码"
-              autoComplete="off"
-              validateStatus={fieldError ? "error" : "default"}
-              aria-invalid={Boolean(fieldError)}
-              aria-errormessage={fieldError ? "recovery-code-error" : undefined}
-              disabled={isSubmitting}
-              required
-            />
-            <small>恢复代码在启用二次验证时生成，每个代码仅可使用一次。</small>
-            {fieldError && (
-              <small id="recovery-code-error" className={styles.fieldError} role="alert">
-                {fieldError}
-              </small>
-            )}
-          </label>
-          {attempts > 0 && (
-            <p className={styles.attemptsNote}>
-              已失败 {attempts} 次，剩余尝试次数 {MAX_ATTEMPTS - attempts} 次。
-            </p>
-          )}
-          <div className={styles.actions}>
-            <Button theme="outline" size="large" onClick={onCancel} disabled={isSubmitting}>
-              取消
-            </Button>
-            <Button
-              htmlType="submit"
-              type="primary"
-              theme="solid"
-              size="large"
-              loading={isSubmitting}
-              disabled={isSubmitting}
-            >
-              {isSubmitting ? "正在验证…" : isRealMode ? "验证" : "验证（Mock）"}
-            </Button>
-          </div>
-        </form>
-      )}
-
-      {!isRealMode && (
-        <p className={styles.notice}>当前为界面 mock，不会执行真实的多因素验证。</p>
-      )}
-      {!isRealMode && (
-        <div className={styles.demoLinks}>
-        <p>Mock 状态演示</p>
-        <ul>
-          <li>
-            <button
-              type="button"
-              className={styles.demoButton}
-              onClick={() => setPhase({ phase: "expired" })}
-            >
-              <IconHourglass aria-hidden="true" />
-              模拟挑战已过期
-            </button>
-          </li>
-          <li>
-            <button
-              type="button"
-              className={styles.demoButton}
-              onClick={() => setPhase({ phase: "too_many_attempts" })}
-            >
-              <IconClose aria-hidden="true" />
-              模拟尝试次数过多
-            </button>
-          </li>
-        </ul>
         </div>
       )}
     </div>

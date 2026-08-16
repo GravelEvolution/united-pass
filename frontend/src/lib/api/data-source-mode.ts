@@ -7,12 +7,12 @@
 //
 
 /**
- * Data source switch for the per-seam mock → real HTTP migration
- * (frontend-freeze-v1.md §5, ADR-0004).
+ * Explicit development-fixture switch (frontend-freeze-v1.md §5, ADR-0004).
  *
- * `NEXT_PUBLIC_USE_MOCK=true` keeps every seam on the mock data source.
- * Any other value routes the already-migrated seams through the real HTTP
- * clients; seams without a backend implementation stay on the mock source.
+ * `NEXT_PUBLIC_USE_MOCK=true` selects fixture implementations for product-data
+ * seams. Any other value routes every seam through the real HTTP clients;
+ * production never silently falls back to fixture writes. Credential-bearing
+ * login and public account lifecycle commands are intentionally always real.
  *
  * The flag must use the `NEXT_PUBLIC_` prefix because browser-side command
  * code reads it too: Next.js only inlines `NEXT_PUBLIC_*` variables into

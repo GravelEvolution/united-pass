@@ -111,6 +111,31 @@ describe("submitLogin", () => {
       status: "mfa_required",
       mfaToken: "opaque-mfa-token",
       availableMethods: ["totp"],
+      expiresAt: "2026-08-07T12:05:30Z",
+    });
+  });
+
+  it("preserves passkey request options for navigator.credentials.get", async () => {
+    stubFetch(jsonResponse(JSON.stringify({
+      status: "mfa_required",
+      mfaToken: "opaque-mfa-token",
+      availableMethods: ["passkey"],
+      passkeyRequestOptions: { challenge: "Y2hhbGxlbmdl" },
+      expiresAt: "2026-08-07T12:05:30Z",
+    }), 202));
+
+    const outcome = await submitLogin({
+      identifier: "zhixing.lin",
+      password: "secret",
+      remember: false,
+    });
+
+    expect(outcome).toEqual({
+      status: "mfa_required",
+      mfaToken: "opaque-mfa-token",
+      availableMethods: ["passkey"],
+      passkeyRequestOptions: { challenge: "Y2hhbGxlbmdl" },
+      expiresAt: "2026-08-07T12:05:30Z",
     });
   });
 

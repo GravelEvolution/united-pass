@@ -4,9 +4,10 @@ United Pass 是统一身份、账户安全、OAuth 2.0 / OpenID Connect 授权�
 Identity Provider、策略和审计的管理平台。仓库同时包含 Next.js 前端、Go API、
 数据库迁移、OpenAPI 合同、架构决策记录和上线运行手册。
 
-> 当前状态（2026-08-14）：Phase 0–5 已完成并冻结；Phase 6–8 的技术实现已完成，
-> 但真实飞书、真实 Cerbos、法务批准、生产 HTTPS/Secret Manager、备份恢复和正式
-> 流量切换仍有外部验收项。仓库状态不等同于生产已上线。
+> 当前状态（2026-08-16）：Phase 0–8 及原前端 Mock 对应的生产 API 已完成技术实现。
+> 真实飞书租户、真实 Cerbos、法律批准、生产 HTTPS/Secret Manager、备份恢复和正式
+> 流量切换仍有外部验收项；Recovery Codes 因当前 Provider 能力保持架构性 Deferred。
+> 仓库实现完成不等同于生产已正式上线。
 
 ## 系统架构
 
@@ -60,7 +61,7 @@ introspect 或 discovery。详细路由所有权和上线顺序见
 | --- | --- | --- |
 | P0 | 配置、HTTP server、中间件、健康检查、日志、OpenAPI | 完成 |
 | P1 | PostgreSQL 身份、Redis 会话、登录/MFA/退出、`/me`、权限 | 完成；真实 ZITADEL 本地验收通过 |
-| P2 | OAuth Application / Client、密钥轮换、补偿、重认证与审计 | 后端完成并冻结；部分前端管理界面仍为 Mock seam |
+| P2 | OAuth Application / Client、密钥轮换、补偿、重认证与审计 | Passed / Frozen；前端真实 API 已接通 |
 | P3 | OAuth 授权请求、登录恢复、Consent、Grant 与撤销、协议拓扑 | Passed / Frozen |
 | P4 | 会话清单、密码、TOTP、Passkey、step-up 与结算加固 | Passed / Frozen；Recovery Codes 架构性 Deferred |
 | P5 | 用户、员工档案、部门、离职和访问收敛 | Passed / Frozen |
@@ -79,16 +80,21 @@ introspect 或 discovery。详细路由所有权和上线顺序见
 ## 已实现的主要能力
 
 - 密码登录、TOTP MFA、飞书 OAuth 登录入口、退出与限流；
+- 公开注册、邮箱验证、抗账户枚举的密码找回/重置，以及重置后的旧会话失效；
 - HttpOnly opaque session、CSRF、会话清单、单个/批量撤销和空闲超时；
 - 密码修改、TOTP 和 WebAuthn Passkey 的 step-up 与 provider-authoritative 状态；
+- 个人资料、服务端净化头像、Provider 验证的邮箱/手机号变更；
 - OAuth/OIDC 交互登录、授权同意、可复用 Grant 和授权撤销；
+- OAuth Application / Client 的完整管理界面与权限裁剪的真实管理仪表盘；
 - 用户、员工、部门、Provider 同步与身份冲突的显式处理；
 - fail-closed 管理权限、Cerbos 策略草稿/模拟/发布、持久审计和短期导出；
 - 个人数据导出、30 天可取消的账户注销，以及带审批引用与源码哈希的法律发布门禁。
 
-目前仍保留为 Mock 或产品原型的前端面包括：注册、密码找回/重置、邮箱验证、
-个人资料/头像/联系方式修改、管理端仪表盘摘要，以及 OAuth Application / Client
-管理界面。真实模式不会把这些界面误当作已完成的持久化能力。
+`frontend/src/lib/mock/` 仍作为显式选择的开发/单元测试 fixture 保留，但生产模式下
+所有 `UnitedPassQueries` / `UnitedPassCommands` seam 均调用真实 HTTP API，不会静默
+回落或写入 Mock。登录、注册、邮箱验证和密码恢复即使在 fixture 数据模式下也不会
+伪造服务器会话或凭据成功。Recovery Codes 不提供伪实现：真实 UI 明确显示当前
+Provider 不支持，待 Provider 提供可审计 API 后再单独设计。
 
 ## 登录态与 Cookie
 
@@ -156,12 +162,12 @@ pnpm dev
 打开 [http://localhost:3000](http://localhost:3000)。`.env.local` 中：
 
 ```dotenv
-NEXT_PUBLIC_USE_MOCK=true
+NEXT_PUBLIC_USE_MOCK=false
 API_BASE_URL=http://localhost:8080/api/v1
 ```
 
-`NEXT_PUBLIC_USE_MOCK=true` 用于界面、单元测试和固定 fixture；关闭它后，已经迁移的
-seam 会调用真实 API，尚未迁移的 seam 仍显式保留 Mock。该变量进入浏览器 bundle，
+`NEXT_PUBLIC_USE_MOCK=true` 只用于显式的界面 fixture 和单元测试；任何其他值都让
+全部数据 seam 调用真实 API。认证凭据流程不受该开关伪造。该变量进入浏览器 bundle，
 不得放入任何秘密。`API_BASE_URL` 只供 Next.js 服务端读取。
 
 ### 3. 完整同源联调

@@ -17,11 +17,11 @@ export const dynamic = "force-dynamic";
 export default async function VerifyEmailPage({
   searchParams,
 }: {
-  searchParams: Promise<{ token?: string }>;
+  searchParams: Promise<{ token?: string; code?: string }>;
 }) {
-  const { token } = await searchParams;
+  const { token, code } = await searchParams;
 
-  if (!token || token.trim().length === 0) {
+  if (!token || token.trim().length === 0 || !code || code.trim().length === 0) {
     return (
       <InvalidLinkNotice
         title="链接无效"
@@ -32,5 +32,5 @@ export default async function VerifyEmailPage({
     );
   }
 
-  return <VerifyEmailPanel token={token} />;
+  return <VerifyEmailPanel token={token} code={code} />;
 }

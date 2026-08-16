@@ -1288,19 +1288,6 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
     completePasskeyEnrollment: (input) => Promise.resolve({ status: "confirmed", passkeyId: input.passkeyId }),
     cancelPasskeyEnrollment: (): Promise<void> => Promise.resolve(),
     removePasskey: () => Promise.resolve(securitySummary),
-    generateRecoveryCodes: (): Promise<{ codes: string[] }> =>
-      Promise.resolve({
-        codes: [
-          "mock-rc-01-a3f9",
-          "mock-rc-02-b7e1",
-          "mock-rc-03-c2d4",
-          "mock-rc-04-e8f6",
-          "mock-rc-05-a1b3",
-          "mock-rc-06-c5d7",
-          "mock-rc-07-e9f2",
-          "mock-rc-08-b4a8",
-        ],
-      }),
     revokeOtherSessions: (): Promise<{ revoked: number }> => {
       const revoked = sessions.filter((session) => !session.isCurrent).length;
       const currentSession = sessions.find((session) => session.isCurrent);

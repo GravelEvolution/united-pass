@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -52,6 +53,10 @@ import (
 var testSchemaMu sync.Mutex
 
 func TestMain(m *testing.M) {
+	// A killed prior package cannot run its final cleanup. Start from the same
+	// dedicated-schema baseline that TestMain restores on exit so newly added
+	// migration objects never poison the next run.
+	cleanupSharedTestSchema()
 	code := m.Run()
 	cleanupSharedTestSchema()
 	os.Exit(code)
@@ -126,9 +131,11 @@ func setupTestPool(t *testing.T, maxConns int32) *Pool {
 		t.Fatalf("set dialect: %v", err)
 	}
 
-	migrationsDir := findMigrationsDir(t)
-	if err := goose.UpContext(context.Background(), db, migrationsDir); err != nil {
-		t.Fatalf("apply migrations: %v", err)
+	if !sharedSchemaAtHead(t, db) {
+		migrationsDir := findMigrationsDir(t)
+		if err := goose.UpContext(context.Background(), db, migrationsDir); err != nil {
+			t.Fatalf("apply migrations: %v", err)
+		}
 	}
 	resetTestSchemaData(t, db)
 
@@ -157,11 +164,29 @@ func setupTestPool(t *testing.T, maxConns int32) *Pool {
 	return pool
 }
 
+// sharedSchemaAtHead avoids replaying goose's remote bookkeeping queries for
+// every serial repository test. Migration-path tests may drop the shared
+// schema between cases, so readiness requires both goose bookkeeping and the
+// first/head business tables; a missing object falls back to the full runner.
+func sharedSchemaAtHead(t *testing.T, db *sql.DB) bool {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`
+		SELECT COUNT(*)
+		  FROM information_schema.tables
+		 WHERE table_schema = current_schema()
+		   AND table_name IN ('goose_db_version', 'users', 'contact_change_requests')`).Scan(&count); err != nil {
+		t.Fatalf("inspect shared test schema: %v", err)
+	}
+	return count == 3
+}
+
 func resetTestSchemaData(t *testing.T, db *sql.DB) {
 	t.Helper()
 	statements := []string{
 		`ALTER TABLE security_events DROP CONSTRAINT IF EXISTS test_reject_consent_audit`,
 		`TRUNCATE TABLE
+			contact_change_requests, user_avatars,
 			account_deletion_requests, personal_data_export_jobs, legal_document_publications,
 			audit_export_jobs, policy_publication_jobs,
 			authorization_policy_versions, authorization_policies,
@@ -183,10 +208,11 @@ func resetTestSchemaData(t *testing.T, db *sql.DB) {
 		 VALUES
 			('provider_feishu', '飞书', 'feishu', 'OAuth 2.0 + 通讯录 OpenAPI', 'disabled', FALSE)`,
 	}
-	for _, statement := range statements {
-		if _, err := db.Exec(statement); err != nil {
-			t.Fatalf("reset test schema data: %v", err)
-		}
+	// One simple-protocol batch keeps this serial integration suite below Go's
+	// package timeout over an SSH tunnel; statement order and transaction
+	// semantics are unchanged, but four network round trips become one.
+	if _, err := db.Exec(strings.Join(statements, ";\n")); err != nil {
+		t.Fatalf("reset test schema data: %v", err)
 	}
 }
 
@@ -218,6 +244,7 @@ func dropTestSchemaObjects(t *testing.T, db *sql.DB) {
 	}
 	statements := []string{
 		`DROP TABLE IF EXISTS
+			contact_change_requests, user_avatars,
 			account_deletion_requests, personal_data_export_jobs, legal_document_publications,
 			audit_export_jobs, policy_publication_jobs,
 			authorization_policy_versions, authorization_policies,
@@ -235,10 +262,8 @@ func dropTestSchemaObjects(t *testing.T, db *sql.DB) {
 		`DROP SEQUENCE IF EXISTS password_mutation_intent_seq, employee_number_seq`,
 		`DROP TABLE IF EXISTS goose_db_version`,
 	}
-	for _, statement := range statements {
-		if _, err := db.Exec(statement); err != nil && t != nil {
-			t.Fatalf("clean test schema: %v", err)
-		}
+	if _, err := db.Exec(strings.Join(statements, ";\n")); err != nil && t != nil {
+		t.Fatalf("clean test schema: %v", err)
 	}
 }
 

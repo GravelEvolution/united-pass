@@ -1,7 +1,7 @@
 # United Pass 前端 API 接入清单
 
-- 状态：Frozen v1 + P4/P5/P6/P7/P8 Frozen Amendments
-- 日期：2026-08-11（P8 Launch privacy/legal real-seam 接入修订）
+- 状态：Frozen v1 + P4–P8 + Production Seam Completion Amendments
+- 日期：2026-08-16（注册、恢复、账户自助、应用管理与仪表盘真实接入修订）
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect
 
@@ -12,7 +12,8 @@
 ### 认证与传输
 
 - 浏览器使用 Secure、HttpOnly、SameSite 会话 Cookie；前端不持久化 Access Token、Refresh Token 或 ID Token。
-- 所有写操作需要 CSRF 防护；高风险操作应支持后端发起的重认证挑战。
+- 有会话 Cookie 的写操作需要 CSRF 防护；无登录态的凭据端点要求 JSON、精确同源
+  `Origin` 与 Fetch Metadata 校验，不能依赖可跨站提交的表单。
 - API 仅返回界面必要字段，员工内部字段由后端权限过滤。
 - 所有时间为 ISO 8601 UTC 字符串，前端展示时明确本地时区。
 - 列表使用服务端游标分页，不允许生产环境一次加载完整用户或审计集合。
@@ -123,7 +124,7 @@ type PermissionCapabilities = {
 | 页面/流程 | 方法与路径 | 用途 | 关键要求 |
 | --- | --- | --- | --- |
 | `/login` | `POST /api/v1/auth/sessions` | 使用凭据建立浏览器会话 | 限速；返回通用凭据错误；支持 MFA challenge，不记录密码 |
-| MFA 挑战 | `POST /api/v1/auth/sessions/mfa` | 提交 TOTP / Passkey / 恢复码 | challenge 限时；限速；过多尝试锁定 |
+| MFA 挑战 | `POST /api/v1/auth/sessions/mfa` | 提交 TOTP / Passkey | challenge 限时；限速；过多尝试锁定；Recovery Codes Deferred |
 | 高危操作重认证 | `POST /api/v1/auth/reauthentication` | 为删除应用/删除 Client/轮换 Secret 等高危操作重新验证密码 | 需要会话 + CSRF；返回授权（200）或 MFA 挑战（202）；限速；授权令牌一次性 |
 | 重认证 MFA 完成 | `POST /api/v1/auth/reauthentication/mfa` | 以 TOTP / Passkey 完成重认证挑战 | 与登录 MFA 相同的原子消费语义；成功后签发一次性授权令牌 |
 | `/forgot-password` | `POST /api/v1/password-reset-requests` | 请求向已验证联系方式发送重置说明 | 限速；始终返回通用结果，不能泄露账户是否存在 |
@@ -188,17 +189,29 @@ Account action 的 `applicationId` / `clientId` 必须为空；只有
 不能跨操作重放。`passkeyRequestOptions` 仅在 provider 提供 Passkey challenge
 时出现。
 
-注册请求至少包含账户名、邮箱和密码：
+注册请求包含账户名、邮箱、密码和明确条款确认：
 
 ```json
 {
   "username": "zhixing.lin",
   "email": "zhixing.lin@example.com",
-  "password": "user-entered-password"
+  "password": "user-entered-password",
+  "termsAccepted": true
 }
 ```
 
 `confirmPassword` 仅用于浏览器即时校验，不应进入传输合同或日志。后端必须独立验证账户名格式与唯一性、邮箱格式、密码强度和凭据泄露风险，并返回字段级错误；登录失败不得泄露账户名或邮箱是否存在。
+
+注册先由 ZITADEL 创建 Provider 用户，再由 PostgreSQL 在一个事务中建立 pending
+稳定用户、Consumer Persona 和精确 `(provider, tenant, subject)` identity link；本地
+事务失败必须补偿删除 Provider 用户。验证邮箱前 pending 用户不得建立本地会话。
+
+注册验证和密码重置 URL 使用加密、限时的 United Pass lifecycle token，只封装稳定
+`userId`、用途和到期时间，不包含邮箱、Provider subject、密码或验证码。验证码由
+Provider 生成和验证。密码找回只有 active、已验证且已有精确 identity link 的用户
+才会触发 Provider 通知，但外部响应始终是相同的 `202`。密码重置成功必须推进用户
+security epoch 并撤销旧 epoch 会话；Provider 已提交但响应不确定时返回明确 degraded
+错误并交由既有 mutation settlement 收敛，不能伪报成功。
 
 ## OAuth 授权与同意
 
@@ -322,7 +335,7 @@ ADR-0008 定义的 claim-aware expiry cleanup 结算 provider pending state；wo
 在删除前必须做 provider readback，active credential 永不删除。
 
 Recovery Codes 在当前 provider baseline 下为架构性 Deferred：真实模式隐藏，
-不存在 generate/rotate API；Mock mode 可继续展示原型。
+不存在 generate/rotate API；任何模式都不得生成可被误认为真实凭据的代码或成功态。
 
 `PATCH /me` 当前页面需要支持以下公开资料字段，未提供的字段保持不变：
 
@@ -339,12 +352,17 @@ Recovery Codes 在当前 provider baseline 下为架构性 Deferred：真实模�
 
 | 页面 | 方法与路径 | 权限标识建议 |
 | --- | --- | --- |
-| `/admin` | `GET /api/v1/admin/dashboard` | `admin.dashboard.read` |
+| `/admin` | `GET /api/v1/admin/dashboard` | 至少一个管理 capability；各数据切片独立授权 |
 | 管理导航/操作能力 | `GET /api/v1/me/permissions` | 后端返回显式 `PermissionCapabilities` |
 
-前端权限仅用于导航和控件可用性。以下每个请求仍须由后端执行 ABAC 决策，不能依赖角色名称或前端传入的权限结论。
+前端权限仅用于导航和控件可用性。后端分别以 `user.read` 决定用户/员工计数、
+`application.read` 决定应用计数、`audit.read` 决定近 30 天 denied 计数和最多三条
+脱敏最近事件。调用者即使拥有其他管理 capability，也不能获得未授权切片。
 
-P5 用户、员工和部门目录已接入真实 API。搜索词、游标、页容量、排序和筛选随对应 `GET /api/v1/admin/*` 请求发送，由服务端在权限过滤和字段裁剪后返回当前页；浏览器不接收完整用户或员工集合再做本地过滤。尚未迁移的管理目录仍可在 Mock mode 保留显式字段的本地原型搜索。
+用户、员工、部门、OAuth Application / Client 与仪表盘均已接入真实 API。搜索词、
+游标、页容量、排序和筛选随对应 `GET /api/v1/admin/*` 请求发送，由服务端在权限过滤
+和字段裁剪后返回当前页；浏览器不接收完整用户或员工集合再做本地过滤。显式 Mock
+模式仅保留同合同的开发 fixture，生产不存在静默回落。
 
 ## OAuth Application 与 Client
 
@@ -499,6 +517,12 @@ simulation 只预览当前 working copy，不安装到 PDP，也不参与真实�
 | `rotateClientSecret(applicationId, clientId)` | `POST /api/v1/admin/applications/{applicationId}/clients/{clientId}/secret-rotations` |
 | `decideConsent(requestId, decision)` | `POST /api/v1/authorization/requests/{requestId}/decision` |
 | `revokeGrant(grantId)` | `DELETE /api/v1/me/authorized-applications/{grantId}` |
+| `updateProfile(input)` | `PATCH /api/v1/me`；仅 displayName / nickname |
+| `uploadAvatar(file)` | `POST /api/v1/me/avatar`；multipart + 服务端解码/重编码 |
+| `requestEmailChange(email)` | `POST /api/v1/me/email-change-requests` |
+| `verifyEmailChange(requestId, code)` | `POST /api/v1/me/email-change-requests/{requestId}/verify` |
+| `requestPhoneChange(phone)` | `POST /api/v1/me/phone-change-requests` |
+| `verifyPhoneChange(requestId, code)` | `POST /api/v1/me/phone-change-requests/{requestId}/verify` |
 | `requestReauthentication(input)` | `POST /api/v1/auth/reauthentication` |
 | `completeReauthenticationMfa(input)` | `POST /api/v1/auth/reauthentication/mfa` |
 | `startPasskeyEnrollment(reauthToken)` | `POST /api/v1/me/security/passkeys/enrollment` + `X-Reauthentication-Token` |
@@ -538,3 +562,4 @@ simulation 只预览当前 working copy，不安装到 PDP，也不参与真实�
 | --- | --- |
 | `getAdminCurrentUser()` | `getCurrentUser()`；管理员能力由 `getCurrentPermissions()` 返回的 `PermissionCapabilities` 决定 |
 | `getConsentRequest()` | `getConsentResolution(requestId)`；统一为解析已校验的授权请求 |
+| `generateRecoveryCodes()` | 已移除；Provider 不支持时返回 `recoveryCodes.available=false`，不生成伪凭据 |

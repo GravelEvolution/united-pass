@@ -25,6 +25,8 @@ type ProviderUserInfo struct {
 	EmailVerified bool
 	// Phone is the user's phone number from the provider (E.164).
 	Phone string
+	// PhoneVerified reports whether the provider verified the phone number.
+	PhoneVerified bool
 }
 
 // UserLinker resolves a provider identity to a stable United Pass user,

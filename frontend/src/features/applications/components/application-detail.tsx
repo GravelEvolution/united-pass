@@ -8,7 +8,7 @@
 
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button, Empty, Modal, Tabs, Toast } from "@douyinfe/semi-ui";
@@ -19,6 +19,7 @@ import {
   type OAuthApplicationDetail,
 } from "@/features/applications/types";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
+import { AccountReauthenticationForm } from "@/features/account/components/security-overview";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import styles from "./application-detail.module.css";
 
@@ -248,7 +249,9 @@ function DangerTab({ detail }: ApplicationDetailProps) {
   const isActive = detail.status === "active";
   const [toggling, setToggling] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deleteReauthenticationVisible, setDeleteReauthenticationVisible] = useState(false);
   const [confirmDeleteName, setConfirmDeleteName] = useState("");
+  const browserOperation = useRef<AbortController | null>(null);
 
   function handleToggleStatus() {
     const warningContent = (
@@ -262,7 +265,6 @@ function DangerTab({ detail }: ApplicationDetailProps) {
               <li>已签发的 Access Token 在过期前仍然有效</li>
               <li>Refresh Token 的续签将被阻止</li>
             </ul>
-            <p>此操作需要重认证。当前为 Mock 实现。</p>
           </>
         ) : (
           <p>恢复后用户可重新发起新的授权请求。已过期的授权不会自动恢复。</p>
@@ -307,22 +309,29 @@ function DangerTab({ detail }: ApplicationDetailProps) {
     }
   }
 
-  async function handleDeleteApplication() {
-    if (confirmDeleteName !== detail.name) {
-      Toast.warning({ content: "输入的应用名称不匹配。" });
-      return;
-    }
-
+  async function handleDeleteApplication(
+    reauthToken: string,
+    signal: AbortSignal,
+  ): Promise<void> {
     setDeleting(true);
     try {
-      await browserCommands.deleteApplication(detail.applicationId);
+      await browserCommands.deleteApplication(
+        detail.applicationId,
+        reauthToken,
+        { signal },
+      );
       Toast.success({ content: "应用已删除。" });
+      setDeleteReauthenticationVisible(false);
       router.push("/admin/applications");
-    } catch {
-      Toast.error({ content: "删除失败，请重试。" });
     } finally {
       setDeleting(false);
     }
+  }
+
+  function closeDeleteReauthentication(): void {
+    browserOperation.current?.abort();
+    browserOperation.current = null;
+    setDeleteReauthenticationVisible(false);
   }
 
   return (
@@ -385,11 +394,44 @@ function DangerTab({ detail }: ApplicationDetailProps) {
           type="danger"
           loading={deleting}
           disabled={confirmDeleteName !== detail.name}
-          onClick={handleDeleteApplication}
+          onClick={() => {
+            if (confirmDeleteName !== detail.name) {
+              Toast.warning({ content: "输入的应用名称不匹配。" });
+              return;
+            }
+            setDeleteReauthenticationVisible(true);
+          }}
         >
           永久删除应用
         </Button>
       </div>
+
+      <Modal
+        title="重新认证并删除应用"
+        visible={deleteReauthenticationVisible}
+        footer={null}
+        onCancel={closeDeleteReauthentication}
+        closeOnEsc={!deleting}
+        maskClosable={false}
+      >
+        <p>
+          本次授权仅绑定到应用 <strong>{detail.name}</strong>（{detail.applicationId}），
+          且只能使用一次。
+        </p>
+        {deleteReauthenticationVisible && (
+          <AccountReauthenticationForm
+            action="application.delete"
+            target=""
+            applicationId={detail.applicationId}
+            submitLabel="验证并永久删除"
+            browserOperationRef={browserOperation}
+            onGranted={handleDeleteApplication}
+            onCancel={closeDeleteReauthentication}
+            operationError="应用删除失败；此次单次授权不会被重复使用，请重新验证后再试。"
+            destructive
+          />
+        )}
+      </Modal>
     </div>
   );
 }

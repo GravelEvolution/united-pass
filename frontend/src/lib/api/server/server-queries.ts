@@ -14,7 +14,11 @@ import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import { serverFetch } from "@/lib/api/server/server-http-client";
 import { isApiError } from "@/lib/api/api-error";
 import {
+  parseAdminDashboard,
   parseAccountDeletion,
+  parseApplicationDetail,
+  parseApplications,
+  parseAvailableScopes,
   parseAuthorizedApplications,
   parseAuditEvents,
   parseConsentResolution,
@@ -26,6 +30,7 @@ import {
   parseDirectorySyncHistory,
   parseIdentityProviders,
   parseManagedUsers,
+  parseOAuthClient,
   parsePermissionCapabilities,
   parsePolicies,
   parsePolicyDetail,
@@ -40,15 +45,11 @@ import {
 /**
  * Server-side query layer.
  *
- * Server Components import queries from this module instead of the mock
- * data source directly. Seams migrate from the mock source to real HTTP
- * one at a time (frontend-freeze-v1.md §5): migrated seams call
- * `server-http-client.ts` with session cookie forwarding and narrow the
- * untrusted response onto the frozen contract types; unmigrated seams keep
- * the mock source until their backend contract lands.
- *
- * Migrated seams: account/session/consent reads plus the complete Phase 5
- * identity and workforce plane.
+ * Server Components import queries from this module instead of either data
+ * source directly. Production calls `server-http-client.ts` with session
+ * cookie forwarding and narrows every untrusted response onto the frozen
+ * contract types. `NEXT_PUBLIC_USE_MOCK=true` is an explicit fixture choice,
+ * never a fallback for a missing production implementation.
  *
  * List endpoints accept PageQuery and return CursorPage<T> so the backend
  * can return partial results without the frontend loading all records.
@@ -128,7 +129,9 @@ export const serverQueries: UnitedPassQueries = {
     : async () => parseAccountDeletion(
         await serverFetch<unknown>("/me/account-deletion"),
       ),
-  getAdminDashboard: () => mockUnitedPassDataSource.getAdminDashboard(),
+  getAdminDashboard: USE_MOCK_DATA_SOURCE
+    ? () => mockUnitedPassDataSource.getAdminDashboard()
+    : async () => parseAdminDashboard(await serverFetch<unknown>("/admin/dashboard")),
   getUsers: USE_MOCK_DATA_SOURCE
     ? (query?: PageQuery) => mockUnitedPassDataSource.getUsers(query)
     : async (query?: PageQuery) => parseManagedUsers(
@@ -187,12 +190,27 @@ export const serverQueries: UnitedPassQueries = {
           `/admin/identity-providers/${encodeURIComponent(providerId)}/sync-conflicts`,
         ),
       ),
-  getApplications: (query?: PageQuery) => mockUnitedPassDataSource.getApplications(query),
-  getApplicationDetail: (applicationId) =>
-    mockUnitedPassDataSource.getApplicationDetail(applicationId),
-  getClientDetail: (applicationId, clientId) =>
-    mockUnitedPassDataSource.getClientDetail(applicationId, clientId),
-  getAvailableScopes: () => mockUnitedPassDataSource.getAvailableScopes(),
+  getApplications: USE_MOCK_DATA_SOURCE
+    ? (query?: PageQuery) => mockUnitedPassDataSource.getApplications(query)
+    : async (query?: PageQuery) => parseApplications(
+        await serverFetch<unknown>(withPageQuery("/admin/applications", query)),
+      ),
+  getApplicationDetail: USE_MOCK_DATA_SOURCE
+    ? (applicationId) => mockUnitedPassDataSource.getApplicationDetail(applicationId)
+    : (applicationId) => nullableServerQuery(
+        `/admin/applications/${encodeURIComponent(applicationId)}`,
+        parseApplicationDetail,
+      ),
+  getClientDetail: USE_MOCK_DATA_SOURCE
+    ? (applicationId, clientId) =>
+        mockUnitedPassDataSource.getClientDetail(applicationId, clientId)
+    : (applicationId, clientId) => nullableServerQuery(
+        `/admin/applications/${encodeURIComponent(applicationId)}/clients/${encodeURIComponent(clientId)}`,
+        parseOAuthClient,
+      ),
+  getAvailableScopes: USE_MOCK_DATA_SOURCE
+    ? () => mockUnitedPassDataSource.getAvailableScopes()
+    : async () => parseAvailableScopes(await serverFetch<unknown>("/admin/scopes")),
   getPolicies: USE_MOCK_DATA_SOURCE
     ? (query?: PageQuery) => mockUnitedPassDataSource.getPolicies(query)
     : async (query?: PageQuery) => parsePolicies(

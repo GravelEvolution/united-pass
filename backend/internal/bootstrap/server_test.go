@@ -429,6 +429,37 @@ func TestNewServerRejectsInvalidEncryptionKey(t *testing.T) {
 	}
 }
 
+func TestNewServerRejectsInvalidRedisConfiguration(t *testing.T) {
+	cfg := testConfig()
+	cfg.Redis.URL = "://not-a-redis-url"
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, err := NewServer(cfg, logger)
+	if err == nil {
+		t.Fatal("expected invalid Redis configuration to fail startup")
+	}
+	if !strings.Contains(err.Error(), "create redis client") {
+		t.Fatalf("error = %q, want sanitized Redis construction context", err)
+	}
+}
+
+type failingCloser struct {
+	err error
+}
+
+func (c failingCloser) Close() error { return c.err }
+
+func TestShutdownReturnsResourceCloseErrors(t *testing.T) {
+	sentinel := errors.New("provider close sentinel")
+	srv := newTestServer(t, testConfig())
+	srv.providerCloser = failingCloser{err: sentinel}
+
+	err := srv.Shutdown(context.Background())
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Shutdown error = %v, want wrapped provider close error", err)
+	}
+}
+
 // TestNewServerAcceptsValidEncryptionKeyInDevelopment verifies a well-formed
 // key is accepted and wired into the session service.
 func TestNewServerAcceptsValidEncryptionKeyInDevelopment(t *testing.T) {
@@ -505,6 +536,7 @@ func TestFakeProviderWithDatabaseServesCurrentUser(t *testing.T) {
 	loginRec := httptest.NewRecorder()
 	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sessions", loginBody)
 	loginReq.Header.Set("Content-Type", "application/json")
+	loginReq.Header.Set("Origin", "http://example.com")
 	srv.Router.ServeHTTP(loginRec, loginReq)
 	if loginRec.Code != http.StatusNoContent {
 		t.Fatalf("login status = %d, want 204; body=%s", loginRec.Code, loginRec.Body.String())

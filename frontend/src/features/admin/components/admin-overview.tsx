@@ -43,6 +43,9 @@ export function AdminOverview({ dashboard }: AdminOverviewProps) {
             <Link href="/admin/audit">查看全部</Link>
           </div>
           <div className={styles.eventList}>
+            {dashboard.recentEvents.length === 0 && (
+              <p>当前权限范围内暂无安全事件。</p>
+            )}
             {dashboard.recentEvents.map((event) => (
               <article key={event.eventId} className={styles.eventRow}>
                 <div className={styles.eventDot} data-result={event.result} />
@@ -60,13 +63,13 @@ export function AdminOverview({ dashboard }: AdminOverviewProps) {
         </section>
 
         <aside className={`${styles.card} ${styles.readinessCard}`}>
-          <div className={styles.cardHeading}><div><span>INTEGRATION</span><h2>后端接入准备</h2></div></div>
+          <div className={styles.cardHeading}><div><span>RUNTIME BOUNDARY</span><h2>运行安全边界</h2></div></div>
           <ol>
-            <li><StatusBadge label="已完成" tone="success" /><span>数据源接口与 mock 边界</span></li>
-            <li><StatusBadge label="待接入" tone="warning" /><span>OIDC 登录与授权请求校验</span></li>
-            <li><StatusBadge label="待接入" tone="warning" /><span>服务端会话与权限决策</span></li>
+            <li><StatusBadge label="已启用" tone="success" /><span>PostgreSQL 权威数据</span></li>
+            <li><StatusBadge label="已启用" tone="success" /><span>服务端会话与 Cerbos 权限决策</span></li>
+            <li><StatusBadge label="已启用" tone="success" /><span>管理操作安全审计</span></li>
           </ol>
-          <p>完整接口清单位于 <code>docs/api-contracts.md</code>。</p>
+          <p>卡片与事件仅展示当前账户被授权读取的真实数据。</p>
         </aside>
       </div>
     </>
