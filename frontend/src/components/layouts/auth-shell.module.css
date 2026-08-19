@@ -73,8 +73,7 @@
 .brandSlide:nth-child(3) { animation-delay: 12s; }
 
 .brandLogoLink,
-.brandCopy,
-.securityNote {
+.brandCopy {
   position: relative;
   z-index: 2;
 }
@@ -117,34 +116,17 @@
   line-height: 1.7;
 }
 
-.securityNote {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  color: rgb(255 255 255 / 76%);
-  font-size: 13px;
-  animation: auth-brand-in 680ms 180ms var(--up-ease-out) both;
-}
-
-.securityDot {
-  width: 8px;
-  height: 8px;
-  border: 2px solid rgb(255 255 255 / 75%);
-  border-radius: 50%;
-  background: #3fcf91;
-  box-shadow: 0 0 0 4px rgb(22 134 92 / 12%);
-  animation: auth-security-pulse 2.8s ease-in-out infinite;
-}
-
 .contentPanel {
   position: relative;
   isolation: isolate;
   display: flex;
+  height: 100vh;
   min-width: 0;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  overflow: hidden;
+  justify-content: safe center;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 40px 28px 48px;
   background:
     radial-gradient(circle at 88% 12%, var(--up-brand-glow), transparent 28%),
@@ -178,7 +160,6 @@
 
 .content {
   width: min(100%, 430px);
-  margin: auto;
   animation: auth-content-in 620ms 80ms var(--up-ease-out) both;
 }
 
@@ -240,10 +221,6 @@
   to { transform: rotate(-4deg) translate3d(-24px, 18px, 0); }
 }
 
-@keyframes auth-security-pulse {
-  50% { box-shadow: 0 0 0 7px rgb(63 207 145 / 4%); }
-}
-
 @keyframes auth-brand-slide {
   0% {
     opacity: 1;
@@ -266,8 +243,6 @@
   .brandPanel::after,
   .brandLogoLink,
   .brandCopy,
-  .securityNote,
-  .securityDot,
   .contentPanel::before,
   .themeToggle,
   .content,
@@ -288,14 +263,20 @@
 @media (max-width: 900px) {
   .page { grid-template-columns: 1fr; }
   .brandPanel { display: none; }
-  .contentPanel { min-height: 100vh; justify-content: flex-start; }
+  .contentPanel {
+    height: auto;
+    min-height: 100vh;
+    justify-content: flex-start;
+    padding: 24px 20px 28px;
+  }
   .mobileBrand {
     display: block;
     width: min(100%, 430px);
-    margin-bottom: 56px;
+    margin-bottom: 32px;
     animation: auth-content-in 520ms var(--up-ease-out) both;
   }
   .themeToggle { top: 20px; right: 20px; }
+  .footer { margin-top: 24px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -29,7 +29,7 @@ import { BrandMark } from "@/components/common/brand-mark";
 import { ThemeToggle } from "@/components/common/theme-toggle";
 import type { CurrentUser } from "@/types/identity";
 import type { PermissionCapabilities } from "@/types/permissions";
-import { FULL_PERMISSIONS } from "@/types/permissions";
+import { canAccessAdminConsole, FULL_PERMISSIONS } from "@/types/permissions";
 import styles from "./dashboard-shell.module.css";
 
 type ShellMode = "account" | "admin";
@@ -94,7 +94,8 @@ export function DashboardShell({ mode, currentUser, permissions, children }: Das
     : filterByPermissions(adminNavigation, effectivePermissions);
   const alternateHref = mode === "account" ? "/admin" : "/account";
   const alternateLabel = mode === "account" ? "进入管理后台" : "查看普通用户示例";
-  const canShowAlternateSurface = mode === "admin" || Boolean(currentUser.employeeProfile);
+  const canAccessAdmin = canAccessAdminConsole(effectivePermissions);
+  const canShowAlternateSurface = mode === "admin" ? true : canAccessAdmin;
   const profileDescription = mode === "admin"
     ? currentUser.email
     : currentUser.employeeProfile
@@ -149,7 +150,7 @@ export function DashboardShell({ mode, currentUser, permissions, children }: Das
             <Link className={styles.alternateLink} href={alternateHref}>{alternateLabel}</Link>
           )}
           <div className={styles.profile}>
-            <Avatar size="small" color="blue">{currentUser.displayName.slice(0, 1)}</Avatar>
+            <Avatar size="default" color="blue">{currentUser.displayName.slice(0, 1)}</Avatar>
             <div>
               <strong>{currentUser.displayName}</strong>
               <span>{profileDescription}</span>

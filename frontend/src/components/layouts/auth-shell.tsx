@@ -31,10 +31,6 @@ export function AuthShell({ children }: AuthShellProps) {
           <h1>我们始终相信老登和小登一起能迸发出最强的力量</h1>
           <p>We’ve always believed that the combination of the experienced and the young can burst forth with the strongest energy together.</p>
         </div>
-        <div className={styles.securityNote}>
-          <span className={styles.securityDot} />
-          OAuth 2.0 与 OpenID Connect
-        </div>
       </section>
       <section className={styles.contentPanel}>
         <ThemeToggle className={styles.themeToggle} />
