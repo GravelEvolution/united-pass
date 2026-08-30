@@ -11,8 +11,8 @@ import { NextRequest } from "next/server";
 import { FULL_PERMISSIONS, NO_PERMISSIONS } from "@/types/permissions";
 import { config, proxy } from "@/proxy";
 
-function adminRequest(withSession = true): NextRequest {
-  return new NextRequest("https://portal.example/admin/users", {
+function adminRequest(withSession = true, pathname = "/admin/users"): NextRequest {
+  return new NextRequest(`https://portal.example${pathname}`, {
     headers: withSession ? { Cookie: "up_session=session-token" } : undefined,
   });
 }
@@ -49,6 +49,27 @@ describe("administration proxy", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it("checks DreamUP event authorization directly for its management surface", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({
+      events: [{ eventId: "dreamup-shanghai-2026", displayName: "上海站" }],
+    }));
+    const response = await proxy(adminRequest(true, "/admin/dreamup"));
+
+    expect(response.status).toBe(200);
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain("/admin/dreamup/events");
+  });
+
+  it("returns a clear 403 for a signed-in user without DreamUP event access", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(
+      { error: { message: "forbidden" } },
+      { status: 403 },
+    ));
+    const response = await proxy(adminRequest(true, "/admin/dreamup"));
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("cache-control")).toBe("no-store");
   });
 
   it("fails closed when the permission service response is malformed", async () => {

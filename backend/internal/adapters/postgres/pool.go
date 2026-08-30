@@ -37,14 +37,22 @@ type Pool struct {
 // The pool does NOT run migrations. Callers must run migrations explicitly via
 // cmd/migrate before or after pool creation.
 func NewPool(ctx context.Context, cfg config.Config) (*Pool, error) {
-	poolConfig, err := pgxpool.ParseConfig(cfg.Database.URL)
+	return NewPoolFromConfig(ctx, cfg.Database)
+}
+
+// NewPoolFromConfig creates a pool for an explicitly selected PostgreSQL
+// target. The isolated DreamUP/Mini Program operational store uses this entry
+// point so it can never inherit the authority database URL or search path by
+// accident.
+func NewPoolFromConfig(ctx context.Context, database config.DatabaseConfig) (*Pool, error) {
+	poolConfig, err := pgxpool.ParseConfig(database.URL)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: parse database URL: %w", err)
 	}
 
-	poolConfig.MaxConns = cfg.Database.MaxConns
-	poolConfig.MinConns = cfg.Database.MinConns
-	poolConfig.ConnConfig.ConnectTimeout = cfg.Database.ConnectTimeout
+	poolConfig.MaxConns = database.MaxConns
+	poolConfig.MinConns = database.MinConns
+	poolConfig.ConnConfig.ConnectTimeout = database.ConnectTimeout
 
 	// Set search_path so all queries operate in the configured schema by
 	// default. This mirrors the migration tool's search_path behaviour and
@@ -52,7 +60,7 @@ func NewPool(ctx context.Context, cfg config.Config) (*Pool, error) {
 	if poolConfig.ConnConfig.RuntimeParams == nil {
 		poolConfig.ConnConfig.RuntimeParams = make(map[string]string)
 	}
-	poolConfig.ConnConfig.RuntimeParams["search_path"] = cfg.Database.Schema
+	poolConfig.ConnConfig.RuntimeParams["search_path"] = database.Schema
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {

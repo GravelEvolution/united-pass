@@ -254,7 +254,11 @@ func NewService(store Store, clock Clock, ttl, rememberTTL, idleTTL, touchInterv
 
 // CreateSessionInput carries the data needed to create a new session.
 type CreateSessionInput struct {
-	UserID                   identity.UserID
+	UserID identity.UserID
+	// ClientKind is empty for browser cookie sessions. The only accepted
+	// native value is ClientKindMiniProgram; it selects the fixed short TTL
+	// and is persisted in the record to prevent cross-transport replay.
+	ClientKind               string
 	Provider                 string
 	ProviderSessionReference string
 	// ProviderSessionToken is the provider session token returned by the
@@ -304,8 +308,18 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 
 	now := s.clock.Now()
 	ttl := s.ttl
-	if input.Remember {
-		ttl = s.rememberTTL
+	switch input.ClientKind {
+	case "":
+		if input.Remember {
+			ttl = s.rememberTTL
+		}
+	case ClientKindMiniProgram:
+		if input.Remember {
+			return CreateSessionResult{}, errors.New("session: native mini-program sessions cannot be remembered")
+		}
+		ttl = MiniProgramSessionTTL
+	default:
+		return CreateSessionResult{}, errors.New("session: unsupported client kind")
 	}
 
 	// Encrypt the provider session reference before it reaches Redis.
@@ -359,6 +373,7 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		Version:                   1,
 		SessionID:                 sessionID,
 		UserID:                    input.UserID,
+		ClientKind:                input.ClientKind,
 		Provider:                  input.Provider,
 		ProviderSessionReference:  providerRef,
 		ProviderSessionCredential: sealedCredential,
@@ -847,6 +862,9 @@ func ValidateCSRF(cookieValue, headerValue string, record SessionRecord) bool {
 		return false
 	}
 	if !ConstantTimeEqual(cookieValue, headerValue) {
+		return false
+	}
+	if record.CSRFTokenHash == "" {
 		return false
 	}
 	expectedHash := HashToken(cookieValue)

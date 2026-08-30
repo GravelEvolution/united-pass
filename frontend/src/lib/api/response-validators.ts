@@ -510,12 +510,17 @@ function parseAuthorizedApplication(value: unknown): AuthorizedApplication {
   if (lastUsedAt !== null && typeof lastUsedAt !== "string") {
     throw new ApiResponseShapeError("AuthorizedApplication.lastUsedAt");
   }
+  const logoUrl = value.logoUrl;
+  if (logoUrl !== null && logoUrl !== undefined && typeof logoUrl !== "string") {
+    throw new ApiResponseShapeError("AuthorizedApplication.logoUrl");
+  }
 
   return {
     grantId: requireString(value, "grantId"),
     applicationId: requireString(value, "applicationId"),
     applicationName: requireString(value, "applicationName"),
     applicationOwner: requireString(value, "applicationOwner"),
+    logoUrl: logoUrl ?? null,
     clientType,
     grantedAt: requireString(value, "grantedAt"),
     lastUsedAt,

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/GravelEvolution/united-pass/backend/internal/adminroles"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/workforce"
@@ -56,6 +57,23 @@ func AllCapabilities() Capabilities {
 		ProviderRead:            true,
 		ProviderManage:          true,
 	}
+}
+
+// GlobalPrincipalRoles appends the sole role that is safe to expose to the
+// existing flat United Pass permission resolver. Event roles are intentionally
+// absent: their authority exists only inside an exact DreamUP event check.
+func GlobalPrincipalRoles(base []string, activeSystemSuper bool) []string {
+	roles := append([]string(nil), base...)
+	if !activeSystemSuper {
+		return roles
+	}
+	super := string(adminroles.RoleSuperAdmin)
+	for _, role := range roles {
+		if role == super {
+			return roles
+		}
+	}
+	return append(roles, super)
 }
 
 // DevOverrideResolver wraps a base resolver and grants all capabilities to

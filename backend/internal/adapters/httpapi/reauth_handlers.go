@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
@@ -80,7 +81,7 @@ type ReauthRateChecker interface {
 // ReauthEventRecorder records reauthentication audit rows. The applications
 // Service satisfies this interface; audit payloads never contain secrets.
 type ReauthEventRecorder interface {
-	RecordEvent(ctx context.Context, eventType string, actor identity.UserID, appID applications.ApplicationID, clientID applications.OAuthClientID, requestID, operation string, result applications.SecurityEventResult, failureClass string)
+	RecordEvent(ctx context.Context, eventType string, actor identity.UserID, appID applications.ApplicationID, clientID applications.OAuthClientID, requestID, operation string, result applications.SecurityEventResult, failureClass string) error
 }
 
 // SensitiveConsumptionGate validates the consumption of a sensitive
@@ -185,6 +186,7 @@ func isValidReauthAction(action string) bool {
 		auth.ReauthActionClientDelete,
 		auth.ReauthActionClientSecretRotate,
 		auth.ReauthActionPasswordChange,
+		auth.ReauthActionEmailChange,
 		auth.ReauthActionTOTPEnroll,
 		auth.ReauthActionTOTPRemove,
 		auth.ReauthActionPasskeyEnroll,
@@ -197,6 +199,7 @@ func isValidReauthAction(action string) bool {
 		auth.ReauthActionProviderIdentityLink,
 		auth.ReauthActionPolicyPublish,
 		auth.ReauthActionAuditExport,
+		auth.ReauthActionRegistrationAbuseUnblock,
 		auth.ReauthActionPersonalDataExport,
 		auth.ReauthActionAccountDelete:
 		return true
@@ -269,6 +272,10 @@ func (h *ReauthHandlers) Request(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "该管理操作需要且仅支持精确目标绑定。", nil)
 			return
 		}
+		if req.Action == auth.ReauthActionRegistrationAbuseUnblock && !validRegistrationBlockReauthTarget(req.Target) {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "注册防护恢复目标格式不正确。", nil)
+			return
+		}
 		if (req.Action == auth.ReauthActionPersonalDataExport || req.Action == auth.ReauthActionAccountDelete) &&
 			req.Target != string(principal.UserID) {
 			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "隐私权利操作只能绑定当前账户。", nil)
@@ -296,8 +303,16 @@ func (h *ReauthHandlers) Request(w http.ResponseWriter, r *http.Request) {
 
 	appID := applications.ApplicationID(req.ApplicationID)
 	clientID := applications.OAuthClientID(req.ClientID)
-	h.auditor.RecordEvent(r.Context(), applications.EventReauthenticationRequested, principal.UserID,
-		appID, clientID, request.ID(r.Context()), req.Action, applications.SecurityEventSuccess, "")
+	if h.auditor == nil {
+		WriteInternalError(w, r)
+		return
+	}
+	if err := h.auditor.RecordEvent(r.Context(), applications.EventReauthenticationRequested, principal.UserID,
+		appID, clientID, request.ID(r.Context()), req.Action, applications.SecurityEventSuccess, ""); err != nil {
+		h.logger.Error("reauthentication request audit failed", "requestId", requestID(r), "errorClass", observability.ClassifyError(err))
+		WriteInternalError(w, r)
+		return
+	}
 
 	result, err := h.authenticator.VerifyUserPassword(r.Context(), principal.UserID, req.Password)
 	if err != nil {
@@ -332,6 +347,15 @@ func (h *ReauthHandlers) Request(w http.ResponseWriter, r *http.Request) {
 		h.recordReauthFailure(r, principal.UserID, appID, clientID, req.Action, "internal")
 		WriteInternalError(w, r)
 	}
+}
+
+func validRegistrationBlockReauthTarget(target string) bool {
+	for _, prefix := range []string{"ip_", "device_"} {
+		if strings.HasPrefix(target, prefix) {
+			return validRegistrationBlockSHA256(strings.TrimPrefix(target, prefix))
+		}
+	}
+	return false
 }
 
 // CompleteMFA handles POST /api/v1/auth/reauthentication/mfa using the same
@@ -407,18 +431,28 @@ func (h *ReauthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Binding check: a challenge issued to one user or session can never be
-	// completed from another. Any mismatch consumes the challenge fail closed
-	// and revokes the challenge's temporary provider session.
-	if challenge.UserID != principal.UserID || challenge.SessionID != string(principal.SessionID) {
+	// Binding check: a challenge issued to one user, session, or security
+	// generation can never be completed from another. Checking the live
+	// session epoch here prevents a factor/security mutation that happened
+	// after challenge issuance from being bypassed by completing stale MFA.
+	record, hasRecord := SessionRecordFromContext(r.Context())
+	bindingMismatch := challenge.UserID != principal.UserID ||
+		challenge.SessionID != string(principal.SessionID) ||
+		!hasRecord || record.UserID != principal.UserID || record.SessionID != principal.SessionID
+	epochMismatch := !hasRecord || challenge.SecurityEpoch < 1 || record.SecurityEpoch < 1 || challenge.SecurityEpoch != record.SecurityEpoch
+	if bindingMismatch || epochMismatch {
 		_ = h.challenges.ConsumeChallenge(r.Context(), tokenHash, claimID)
 		h.revokeProviderSession(r, challenge.ProviderSessionID, principal.UserID,
 			applications.ApplicationID(challenge.ApplicationID),
 			applications.OAuthClientID(challenge.ClientID), challenge.Action)
+		failureClass := "binding_mismatch"
+		if !bindingMismatch && epochMismatch {
+			failureClass = "security_epoch_mismatch"
+		}
 		h.recordReauthFailure(r, principal.UserID,
 			applications.ApplicationID(challenge.ApplicationID),
 			applications.OAuthClientID(challenge.ClientID),
-			challenge.Action, "binding_mismatch")
+			challenge.Action, failureClass)
 		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "验证失败，请重试。", nil)
 		return
 	}
@@ -475,13 +509,25 @@ func (h *ReauthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 				writeError(w, r, http.StatusTooManyRequests, CodeRateLimited, "验证尝试次数过多，请稍后重新发起操作。", nil)
 				return
 			}
-			if !errors.Is(incErr, auth.ErrReauthChallengeNotFound) {
-				h.logger.Error("reauth attempt increment failed",
-					"requestId", requestID(r),
-					"errorClass", observability.ClassifyError(incErr),
-					"errorDetail", observability.RedactedError(incErr, 256),
-				)
-			}
+			// The attempt counter is part of the authorization decision. Consume
+			// the challenge and never release its claim when persistence fails,
+			// otherwise a partial Redis outage resets the effective budget.
+			consumeErr := h.challenges.ConsumeChallenge(r.Context(), tokenHash, claimID)
+			h.revokeProviderSession(r, challenge.ProviderSessionID, principal.UserID,
+				applications.ApplicationID(challenge.ApplicationID),
+				applications.OAuthClientID(challenge.ClientID), challenge.Action)
+			h.recordReauthFailure(r, principal.UserID,
+				applications.ApplicationID(challenge.ApplicationID),
+				applications.OAuthClientID(challenge.ClientID),
+				challenge.Action, "attempt_counter_unavailable")
+			h.logger.Error("reauth attempt increment failed closed",
+				"requestId", requestID(r),
+				"errorClass", observability.ClassifyError(incErr),
+				"errorDetail", observability.RedactedError(incErr, 256),
+				"challengeCleanupErrorClass", observability.ClassifyError(consumeErr),
+			)
+			WriteInternalError(w, r)
+			return
 		}
 		_ = h.challenges.ReleaseChallenge(r.Context(), tokenHash, claimID)
 		h.recordReauthFailure(r, principal.UserID,
@@ -577,9 +623,22 @@ func (h *ReauthHandlers) issueGrant(w http.ResponseWriter, r *http.Request, prin
 		WriteInternalError(w, r)
 		return
 	}
-	h.auditor.RecordEvent(r.Context(), applications.EventReauthenticationSucceeded, principal.UserID,
+	if h.auditor == nil {
+		_, _ = h.grants.ConsumeGrant(r.Context(), session.HashToken(token))
+		WriteInternalError(w, r)
+		return
+	}
+	if err := h.auditor.RecordEvent(r.Context(), applications.EventReauthenticationSucceeded, principal.UserID,
 		applications.ApplicationID(applicationID), applications.OAuthClientID(clientID),
-		request.ID(r.Context()), action, applications.SecurityEventSuccess, "")
+		request.ID(r.Context()), action, applications.SecurityEventSuccess, ""); err != nil {
+		// The raw token has not been returned. Consume the just-created grant
+		// and fail closed so a privileged capability is never issued without
+		// its durable success audit row.
+		_, cleanupErr := h.grants.ConsumeGrant(r.Context(), session.HashToken(token))
+		h.logger.Error("reauthentication success audit failed", "requestId", requestID(r), "errorClass", observability.ClassifyError(err), "grantCleanupErrorClass", observability.ClassifyError(cleanupErr))
+		WriteInternalError(w, r)
+		return
+	}
 	writeJSONNoStore(w, r, http.StatusOK, reauthGrantResponse{
 		Status:      "granted",
 		ReauthToken: token,
@@ -710,7 +769,7 @@ func (h *ReauthHandlers) revokeProviderSession(r *http.Request, sessionReference
 	// "revocation failed" security event must get its own fresh deadline.
 	auditCtx, auditCancel := context.WithTimeout(baseCtx, h.auditTimeout)
 	defer auditCancel()
-	h.auditor.RecordEvent(auditCtx, applications.EventProviderSessionRevokeFailed, actor,
+	_ = h.auditor.RecordEvent(auditCtx, applications.EventProviderSessionRevokeFailed, actor,
 		appID, clientID, request.ID(r.Context()), action, applications.SecurityEventDenied,
 		string(observability.ClassifyError(err)))
 }
@@ -718,7 +777,7 @@ func (h *ReauthHandlers) revokeProviderSession(r *http.Request, sessionReference
 // recordReauthFailure records a denied reauthentication audit row. Audit
 // recording is best-effort and never contains credentials.
 func (h *ReauthHandlers) recordReauthFailure(r *http.Request, actor identity.UserID, appID applications.ApplicationID, clientID applications.OAuthClientID, action, failureClass string) {
-	h.auditor.RecordEvent(r.Context(), applications.EventReauthenticationFailed, actor,
+	_ = h.auditor.RecordEvent(r.Context(), applications.EventReauthenticationFailed, actor,
 		appID, clientID, request.ID(r.Context()), action, applications.SecurityEventDenied, failureClass)
 }
 
@@ -747,19 +806,28 @@ func NewReauthGrants(grants ReauthGrantStore, security SensitiveConsumptionGate)
 // account.passkey.remove, empty everywhere else; any mismatch — including a
 // grant minted for a different passkey — fails closed.
 func (g *ReauthGrants) VerifyAndConsume(ctx context.Context, token, action, sessionID, target string, appID applications.ApplicationID, clientID applications.OAuthClientID) error {
+	_, err := g.VerifyAndConsumeData(ctx, token, action, sessionID, target, appID, clientID)
+	return err
+}
+
+// VerifyAndConsumeData is the atomic data-returning consumption seam used by
+// DreamUP BFF/OA callers. It returns the server-generated stable grant ID and
+// credential generation exactly once; the legacy wrapper above deliberately
+// discards them. No caller derives either value from the bearer token.
+func (g *ReauthGrants) VerifyAndConsumeData(ctx context.Context, token, action, sessionID, target string, appID applications.ApplicationID, clientID applications.OAuthClientID) (auth.ReauthGrantData, error) {
 	if token == "" || action == "" || sessionID == "" {
-		return errors.New("httpapi: reauthentication grant unavailable")
+		return auth.ReauthGrantData{}, errors.New("httpapi: reauthentication grant unavailable")
 	}
 	data, err := g.grants.ConsumeGrant(ctx, session.HashToken(token))
 	if err != nil {
-		return err
+		return auth.ReauthGrantData{}, err
 	}
 	if data.Action != action ||
 		data.SessionID != sessionID ||
 		data.Target != target ||
 		data.ApplicationID != string(appID) ||
 		data.ClientID != string(clientID) {
-		return errors.New("httpapi: reauthentication grant binding mismatch")
+		return auth.ReauthGrantData{}, errors.New("httpapi: reauthentication grant binding mismatch")
 	}
 	// Authoritative security-state gate (ADR-0007 Decision 5): the grant is
 	// already consumed (single-use, no replay even on denial). A stale epoch
@@ -767,8 +835,8 @@ func (g *ReauthGrants) VerifyAndConsume(ctx context.Context, token, action, sess
 	// consumption fail closed.
 	if g.security != nil {
 		if err := g.security.AllowSensitiveConsumption(ctx, data.UserID, data.SecurityEpoch); err != nil {
-			return fmt.Errorf("httpapi: reauthentication grant security gate: %w", err)
+			return auth.ReauthGrantData{}, fmt.Errorf("httpapi: reauthentication grant security gate: %w", err)
 		}
 	}
-	return nil
+	return data, nil
 }

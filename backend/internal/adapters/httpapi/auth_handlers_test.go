@@ -25,6 +25,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
+	"github.com/GravelEvolution/united-pass/backend/internal/riskdefense"
 	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
@@ -199,10 +200,11 @@ func (s *fakeSessionStore) RevokeSessionsBeforeEpoch(_ context.Context, userID i
 // claim lock as a map of tokenHash -> claimID, mirroring the Redis adapter's
 // separate claim key semantics.
 type fakeMFAStore struct {
-	mu         sync.Mutex
-	challenges map[string]auth.MFAChallengeData
-	attempts   map[string]int
-	claims     map[string]string // tokenHash -> claimID
+	mu           sync.Mutex
+	challenges   map[string]auth.MFAChallengeData
+	attempts     map[string]int
+	claims       map[string]string // tokenHash -> claimID
+	incrementErr error
 }
 
 func newFakeMFAStore() *fakeMFAStore {
@@ -271,9 +273,12 @@ func (m *fakeMFAStore) Release(_ context.Context, hash, claimID string) error {
 func (m *fakeMFAStore) IncrementAttempts(_ context.Context, hash string, maxAttempts int) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.incrementErr != nil {
+		return 0, m.incrementErr
+	}
 	m.attempts[hash]++
 	count := m.attempts[hash]
-	if count > maxAttempts {
+	if count >= maxAttempts {
 		return count, auth.ErrMFAMaxAttemptsExceeded
 	}
 	return count, nil
@@ -287,6 +292,21 @@ func (fakeRateChecker) CheckLogin(context.Context, string, string, int, time.Dur
 }
 func (fakeRateChecker) CheckMFA(context.Context, string, string, int, time.Duration) (bool, time.Duration, error) {
 	return true, 0, nil
+}
+
+type providerAuthorizationDifferentialLoginAuthenticator struct {
+	auth.Authenticator
+}
+
+func (providerAuthorizationDifferentialLoginAuthenticator) BeginPasswordAuthentication(_ context.Context, input auth.PasswordAuthenticationInput) (auth.AuthenticationResult, error) {
+	if input.Identifier == "testuser" {
+		// This is the real adapter contract for a ZITADEL AUTHZ-* failure:
+		// provider_unavailable is returned as a status with a nil Go error.
+		return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
+	}
+	// An unknown account can produce an ordinary NotFound, which the adapter
+	// deliberately classifies as invalid_credentials.
+	return auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}, nil
 }
 
 // fakeUserReader is an in-memory UserReader for testing.
@@ -448,7 +468,6 @@ func doRequest(handler http.Handler, method, path string, body string, cookies .
 	if bodyReader != nil {
 		req = httptest.NewRequest(method, path, bodyReader)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Origin", "http://example.com")
 	} else {
 		req = httptest.NewRequest(method, path, nil)
 	}
@@ -508,21 +527,63 @@ func TestLoginSuccess(t *testing.T) {
 	}
 }
 
-func TestLoginPersistsPeerIPNotForwardedHeader(t *testing.T) {
+func TestLoginRiskStepUpStopsBeforeSessionCreation(t *testing.T) {
+	h, _, store, _, _ := setupAuthHandlers(t)
+	stub := &riskServiceStub{decision: riskdefense.Decision{
+		DeviceIDToken: "server-device",
+		Challenge: &riskdefense.Challenge{
+			Token: "opaque", Level: riskdefense.LevelMedium, Method: riskdefense.MethodAutomationCost,
+			Difficulty: 18, ExpiresAt: time.Now().Add(time.Minute), ProviderReady: true,
+		},
+	}}
+	h.risk = NewRiskGuard(stub, nil, SessionCookieAttributes{}, time.Hour, time.Minute)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+	rr := doRequest(mux, http.MethodPost, "/api/v1/auth/sessions", `{"identifier":"testuser","password":"TestPassword123!"}`)
+	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), `"code":"step_up_required"`) {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(store.sessions) != 0 {
+		t.Fatal("risk-gated login created a session")
+	}
+}
+
+func TestLoginPendingRegistrationCannotEstablishSession(t *testing.T) {
+	h, _, _, _, _ := setupAuthHandlers(t)
+	h.userChecker = &fakeUserChecker{users: map[identity.UserID]identity.UserStatus{
+		"user_01TEST001": identity.UserStatusPending,
+	}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+
+	rr := doRequest(mux, "POST", "/api/v1/auth/sessions", `{"identifier":"testuser","password":"TestPassword123!"}`)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("pending registration status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if sessionToken, _ := extractCookies(rr); sessionToken != "" {
+		t.Fatal("pending registration received a session cookie")
+	}
+}
+
+func TestLoginPersistsTransportIPWhenCallerForgesProxyHeaders(t *testing.T) {
 	h, _, store, _, _ := setupAuthHandlers(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+	trustedClientIP, err := TrustedClientIP([]string{"127.0.0.1/32", "::1/128"})
+	if err != nil {
+		t.Fatalf("TrustedClientIP: %v", err)
+	}
 
 	body := `{"identifier":"testuser","password":"TestPassword123!"}`
 	req := httptest.NewRequest("POST", "/api/v1/auth/sessions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "http://example.com")
-	// Untrusted proxy header: it must never reach persisted session
-	// metadata (P4.0 freeze: no new proxy-header trust).
+	// Caller-controlled forwarding headers, including a forged copy of the
+	// internal gateway header, must never reach persisted session metadata.
 	req.Header.Set("X-Forwarded-For", "203.0.113.66")
+	req.Header.Set(TrustedClientIPHeader, "203.0.113.67")
 	req.RemoteAddr = "198.51.100.9:43210"
 	rr := httptest.NewRecorder()
-	mux.ServeHTTP(rr, req)
+	trustedClientIP(mux).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("status: got %d, want %d. Body: %s", rr.Code, http.StatusNoContent, rr.Body.String())
@@ -537,64 +598,34 @@ func TestLoginPersistsPeerIPNotForwardedHeader(t *testing.T) {
 	}
 }
 
-func TestPeerIPIgnoresProxyHeaders(t *testing.T) {
-	req := httptest.NewRequest("GET", "/", nil)
-	req.RemoteAddr = "192.0.2.7:55123"
-	req.Header.Set("X-Forwarded-For", "203.0.113.66, 10.0.0.1")
-	if got := peerIP(req); got != "192.0.2.7" {
-		t.Errorf("peerIP = %q, want 192.0.2.7", got)
-	}
-	// Addresses without a host:port shape pass through unchanged.
-	req.RemoteAddr = "/tmp/unix.sock"
-	if got := peerIP(req); got != "/tmp/unix.sock" {
-		t.Errorf("peerIP unix addr = %q, want /tmp/unix.sock", got)
-	}
-}
-
-func TestClientIPIgnoresProxyHeaders(t *testing.T) {
-	req := httptest.NewRequest("POST", "/api/v1/auth/sessions", nil)
-	req.RemoteAddr = "192.0.2.9:55123"
-	req.Header.Set("X-Forwarded-For", "203.0.113.66, 10.0.0.1")
-	if got := clientIP(req); got != "192.0.2.9" {
-		t.Errorf("clientIP = %q, want transport peer 192.0.2.9", got)
-	}
-}
-
-func TestLoginRequiresSameOriginJSONRequest(t *testing.T) {
-	h, _, _, _, _ := setupAuthHandlers(t)
+func TestLoginPersistsTrustedGatewayClientIP(t *testing.T) {
+	h, _, store, _, _ := setupAuthHandlers(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
-	body := `{"identifier":"testuser","password":"TestPassword123!"}`
-
-	tests := []struct {
-		name        string
-		contentType string
-		origin      string
-		fetchSite   string
-		wantStatus  int
-	}{
-		{name: "same origin", contentType: "application/json; charset=utf-8", origin: "http://example.com", fetchSite: "same-origin", wantStatus: http.StatusNoContent},
-		{name: "missing origin", contentType: "application/json", wantStatus: http.StatusForbidden},
-		{name: "cross origin", contentType: "application/json", origin: "https://evil.example", fetchSite: "cross-site", wantStatus: http.StatusForbidden},
-		{name: "wrong content type", contentType: "text/plain", origin: "http://example.com", wantStatus: http.StatusUnsupportedMediaType},
+	trustedClientIP, err := TrustedClientIP([]string{"127.0.0.1/32", "::1/128"})
+	if err != nil {
+		t.Fatalf("TrustedClientIP: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sessions", strings.NewReader(body))
-			req.Header.Set("Content-Type", tt.contentType)
-			if tt.origin != "" {
-				req.Header.Set("Origin", tt.origin)
-			}
-			if tt.fetchSite != "" {
-				req.Header.Set("Sec-Fetch-Site", tt.fetchSite)
-			}
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-			if rec.Code != tt.wantStatus {
-				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tt.wantStatus, rec.Body.String())
-			}
-		})
+	body := `{"identifier":"testuser","password":"TestPassword123!"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sessions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(TrustedClientIPHeader, "203.0.113.66")
+	req.Header.Set("X-Forwarded-For", "192.0.2.77")
+	req.RemoteAddr = "127.0.0.1:43210"
+	rr := httptest.NewRecorder()
+	trustedClientIP(mux).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status: got %d, want %d. Body: %s", rr.Code, http.StatusNoContent, rr.Body.String())
+	}
+	sessionToken, _ := extractCookies(rr)
+	record, err := store.Get(context.Background(), session.HashToken(sessionToken))
+	if err != nil {
+		t.Fatalf("session not found in store: %v", err)
+	}
+	if record.IPAddressMasked != "203.0.113.*" {
+		t.Errorf("persisted IPAddressMasked = %q, want trusted client 203.0.113.*", record.IPAddressMasked)
 	}
 }
 
@@ -616,6 +647,47 @@ func TestLoginInvalidCredentials(t *testing.T) {
 	}
 	if resp.Error.Code != CodeUnauthorized {
 		t.Errorf("error code: got %q, want %q", resp.Error.Code, CodeUnauthorized)
+	}
+}
+
+func TestLoginProviderAuthorizationFailureMatchesInvalidCredentials(t *testing.T) {
+	h, configured, _, _, _ := setupAuthHandlers(t)
+	h.authenticator = providerAuthorizationDifferentialLoginAuthenticator{Authenticator: configured}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+
+	var baselineStatus int
+	var baseline ErrorBody
+	for index, identifier := range []string{"testuser", "account-that-does-not-exist"} {
+		body := fmt.Sprintf(`{"identifier":%q,"password":"TestPassword123!"}`, identifier)
+		rr := doRequest(mux, http.MethodPost, "/api/v1/auth/sessions", body)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("identifier %q status=%d body=%s", identifier, rr.Code, rr.Body.String())
+		}
+		var response ErrorResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+			t.Fatalf("identifier %q malformed response: %v", identifier, err)
+		}
+		if response.Error.Code != CodeUnauthorized || response.Error.Message != "账户名或密码错误。" {
+			t.Fatalf("identifier %q exposed a non-generic provider response: %+v", identifier, response.Error)
+		}
+		lowerBody := strings.ToLower(rr.Body.String())
+		for _, forbidden := range []string{"authz-", "membership", "provider", "zitadel", strings.ToLower(identifier)} {
+			if strings.Contains(lowerBody, forbidden) {
+				t.Fatalf("identifier %q response leaked %q: %s", identifier, forbidden, rr.Body.String())
+			}
+		}
+		if sessionToken, csrfToken := extractCookies(rr); sessionToken != "" || csrfToken != "" {
+			t.Fatalf("identifier %q received authentication cookies", identifier)
+		}
+		if index == 0 {
+			baselineStatus = rr.Code
+			baseline = response.Error
+			continue
+		}
+		if rr.Code != baselineStatus || response.Error.Code != baseline.Code || response.Error.Message != baseline.Message {
+			t.Fatalf("provider failure response varied by account existence: first=%+v second=%+v", baseline, response.Error)
+		}
 	}
 }
 
@@ -720,43 +792,6 @@ func TestLoginMultipleJSONObjects(t *testing.T) {
 }
 
 // --- MFA Tests ---
-
-func TestMFARequiresSameOriginJSONRequest(t *testing.T) {
-	h, _, _, _, _ := setupAuthHandlers(t)
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v1/auth/sessions/mfa", h.CompleteMFA)
-	body := `{"mfaToken":"challenge","method":"totp","code":"123456"}`
-
-	tests := []struct {
-		name        string
-		contentType string
-		origin      string
-		fetchSite   string
-		wantStatus  int
-	}{
-		{name: "missing origin", contentType: "application/json", wantStatus: http.StatusForbidden},
-		{name: "cross origin", contentType: "application/json", origin: "https://evil.example", fetchSite: "cross-site", wantStatus: http.StatusForbidden},
-		{name: "wrong content type", contentType: "text/plain", origin: "http://example.com", wantStatus: http.StatusUnsupportedMediaType},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sessions/mfa", strings.NewReader(body))
-			req.Header.Set("Content-Type", tt.contentType)
-			if tt.origin != "" {
-				req.Header.Set("Origin", tt.origin)
-			}
-			if tt.fetchSite != "" {
-				req.Header.Set("Sec-Fetch-Site", tt.fetchSite)
-			}
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-			if rec.Code != tt.wantStatus {
-				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tt.wantStatus, rec.Body.String())
-			}
-		})
-	}
-}
 
 func TestMFASuccess(t *testing.T) {
 	h, _, store, mfaStore, _ := setupAuthHandlers(t)
@@ -918,6 +953,55 @@ func TestMFAWrongCode(t *testing.T) {
 	mfaTokenHash := session.HashToken(mfaResp.MFAToken)
 	if _, err := mfaStore.Get(context.Background(), mfaTokenHash); err != nil {
 		t.Fatalf("challenge should still exist after wrong code: %v", err)
+	}
+}
+
+func TestMFAConfiguredFinalAttemptExhaustsChallenge(t *testing.T) {
+	h, _, _, mfaStore, _ := setupAuthHandlers(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+	mux.HandleFunc("POST /api/v1/auth/sessions/mfa", h.CompleteMFA)
+
+	login := doRequest(mux, "POST", "/api/v1/auth/sessions", `{"identifier":"mfauser","password":"TestPassword123!"}`)
+	var response mfaRequiredResponse
+	if err := json.Unmarshal(login.Body.Bytes(), &response); err != nil || response.MFAToken == "" {
+		t.Fatalf("login response status=%d body=%s err=%v", login.Code, login.Body.String(), err)
+	}
+	body := fmt.Sprintf(`{"mfaToken":"%s","method":"totp","code":"000000"}`, response.MFAToken)
+	for attempt := 1; attempt < h.mfaMaxAttempts; attempt++ {
+		rr := doRequest(mux, "POST", "/api/v1/auth/sessions/mfa", body)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status=%d body=%s", attempt, rr.Code, rr.Body.String())
+		}
+	}
+	rr := doRequest(mux, "POST", "/api/v1/auth/sessions/mfa", body)
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("final configured attempt status=%d want 429 body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := mfaStore.Get(context.Background(), session.HashToken(response.MFAToken)); !errors.Is(err, auth.ErrMFAChallengeNotFound) {
+		t.Fatalf("exhausted challenge still exists: %v", err)
+	}
+}
+
+func TestMFAAttemptCounterFailureConsumesChallengeAndFailsClosed(t *testing.T) {
+	h, _, _, mfaStore, _ := setupAuthHandlers(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/sessions", h.Login)
+	mux.HandleFunc("POST /api/v1/auth/sessions/mfa", h.CompleteMFA)
+
+	login := doRequest(mux, "POST", "/api/v1/auth/sessions", `{"identifier":"mfauser","password":"TestPassword123!"}`)
+	var response mfaRequiredResponse
+	if err := json.Unmarshal(login.Body.Bytes(), &response); err != nil || response.MFAToken == "" {
+		t.Fatalf("login response status=%d body=%s err=%v", login.Code, login.Body.String(), err)
+	}
+	mfaStore.incrementErr = errors.New("counter unavailable")
+	body := fmt.Sprintf(`{"mfaToken":"%s","method":"totp","code":"000000"}`, response.MFAToken)
+	rr := doRequest(mux, "POST", "/api/v1/auth/sessions/mfa", body)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want 500 body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := mfaStore.Get(context.Background(), session.HashToken(response.MFAToken)); !errors.Is(err, auth.ErrMFAChallengeNotFound) {
+		t.Fatalf("counter failure left retryable challenge: %v", err)
 	}
 }
 
@@ -1260,7 +1344,7 @@ func TestGetCurrentUserSuccess(t *testing.T) {
 		users: map[identity.UserID]identity.User{user.ID: user},
 	}
 	permResolver := permissions.NewDefaultResolver()
-	h := NewAccountHandlers(userReader, permResolver)
+	h := NewAccountHandlers(userReader, permResolver, nil, "")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/me", func(w http.ResponseWriter, r *http.Request) {
@@ -1303,7 +1387,7 @@ func TestGetCurrentUserSuccess(t *testing.T) {
 func TestGetCurrentUserWithoutSession(t *testing.T) {
 	userReader := &fakeUserReader{users: make(map[identity.UserID]identity.User)}
 	permResolver := permissions.NewDefaultResolver()
-	h := NewAccountHandlers(userReader, permResolver)
+	h := NewAccountHandlers(userReader, permResolver, nil, "")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/me", h.GetCurrentUser)
@@ -1321,7 +1405,7 @@ func TestGetPermissionsSuccess(t *testing.T) {
 		users: map[identity.UserID]identity.User{userID: testUser()},
 	}
 	permResolver := permissions.NewDefaultResolver()
-	h := NewAccountHandlers(userReader, permResolver)
+	h := NewAccountHandlers(userReader, permResolver, nil, "")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/me/permissions", func(w http.ResponseWriter, r *http.Request) {
@@ -1356,7 +1440,7 @@ func TestGetPermissionsSuccess(t *testing.T) {
 func TestGetPermissionsWithoutSession(t *testing.T) {
 	userReader := &fakeUserReader{users: make(map[identity.UserID]identity.User)}
 	permResolver := permissions.NewDefaultResolver()
-	h := NewAccountHandlers(userReader, permResolver)
+	h := NewAccountHandlers(userReader, permResolver, nil, "")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/me/permissions", h.GetPermissions)

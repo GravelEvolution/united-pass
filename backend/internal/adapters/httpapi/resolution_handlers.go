@@ -66,6 +66,7 @@ type (
 		ApplicationName        string             `json:"applicationName"`
 		ApplicationDescription string             `json:"applicationDescription"`
 		ApplicationOwner       string             `json:"applicationOwner"`
+		ApplicationLogoURL     *string            `json:"logoUrl"`
 		RedirectHost           string             `json:"redirectHost"`
 		Scopes                 []consentScopeJSON `json:"scopes"`
 	}
@@ -104,10 +105,11 @@ type (
 	}
 
 	consentAlreadyAuthorizedJSON struct {
-		Status          string `json:"status"`
-		RequestID       string `json:"requestId"`
-		ApplicationName string `json:"applicationName"`
-		RedirectHost    string `json:"redirectHost"`
+		Status             string  `json:"status"`
+		RequestID          string  `json:"requestId"`
+		ApplicationName    string  `json:"applicationName"`
+		ApplicationLogoURL *string `json:"logoUrl"`
+		RedirectHost       string  `json:"redirectHost"`
 	}
 )
 
@@ -167,6 +169,7 @@ func consentResolutionJSON(res consent.Resolution) (any, bool) {
 				ApplicationName:        res.ApplicationName,
 				ApplicationDescription: res.ApplicationDescription,
 				ApplicationOwner:       res.ApplicationOwner,
+				ApplicationLogoURL:     nullableString(res.ApplicationLogoURL),
 				RedirectHost:           res.RedirectHost,
 				Scopes:                 scopes,
 			},
@@ -199,10 +202,11 @@ func consentResolutionJSON(res consent.Resolution) (any, bool) {
 		}, true
 	case consent.ResolutionAlreadyAuthorized:
 		return consentAlreadyAuthorizedJSON{
-			Status:          string(res.Status),
-			RequestID:       res.AuthRequestID,
-			ApplicationName: res.ApplicationName,
-			RedirectHost:    res.RedirectHost,
+			Status:             string(res.Status),
+			RequestID:          res.AuthRequestID,
+			ApplicationName:    res.ApplicationName,
+			ApplicationLogoURL: nullableString(res.ApplicationLogoURL),
+			RedirectHost:       res.RedirectHost,
 		}, true
 	default:
 		return nil, false

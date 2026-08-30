@@ -59,16 +59,17 @@ func NewAuthorizedApplicationHandlers(svc AuthorizedApplicationService, logger *
 // true signal on provider v2.71 and serializes as null (ADR-0005 §6);
 // status is always "active" because the list is the live consent surface.
 type authorizedApplicationJSON struct {
-	GrantID          string   `json:"grantId"`
-	ApplicationID    string   `json:"applicationId"`
-	ApplicationName  string   `json:"applicationName"`
-	ApplicationOwner string   `json:"applicationOwner"`
-	ClientType       string   `json:"clientType"`
-	GrantedAt        string   `json:"grantedAt"`
-	LastUsedAt       *string  `json:"lastUsedAt"`
-	Scopes           []string `json:"scopes"`
-	HasOfflineAccess bool     `json:"hasOfflineAccess"`
-	Status           string   `json:"status"`
+	GrantID            string   `json:"grantId"`
+	ApplicationID      string   `json:"applicationId"`
+	ApplicationName    string   `json:"applicationName"`
+	ApplicationOwner   string   `json:"applicationOwner"`
+	ApplicationLogoURL *string  `json:"logoUrl"`
+	ClientType         string   `json:"clientType"`
+	GrantedAt          string   `json:"grantedAt"`
+	LastUsedAt         *string  `json:"lastUsedAt"`
+	Scopes             []string `json:"scopes"`
+	HasOfflineAccess   bool     `json:"hasOfflineAccess"`
+	Status             string   `json:"status"`
 }
 
 // ListAuthorizedApplications handles GET /api/v1/me/authorized-applications.
@@ -91,16 +92,17 @@ func (h *AuthorizedApplicationHandlers) ListAuthorizedApplications(w http.Respon
 	out := make([]authorizedApplicationJSON, 0, len(apps))
 	for _, app := range apps {
 		out = append(out, authorizedApplicationJSON{
-			GrantID:          string(app.GrantID),
-			ApplicationID:    string(app.ApplicationID),
-			ApplicationName:  app.ApplicationName,
-			ApplicationOwner: app.ApplicationOwner,
-			ClientType:       string(app.ClientType),
-			GrantedAt:        app.GrantedAt.UTC().Format(time.RFC3339),
-			LastUsedAt:       nil, // no true usage signal on provider v2.71 (ADR-0005 §6)
-			Scopes:           app.Scopes,
-			HasOfflineAccess: app.HasOfflineAccess,
-			Status:           string(consent.GrantActive),
+			GrantID:            string(app.GrantID),
+			ApplicationID:      string(app.ApplicationID),
+			ApplicationName:    app.ApplicationName,
+			ApplicationOwner:   app.ApplicationOwner,
+			ApplicationLogoURL: nullableString(app.ApplicationLogoURL),
+			ClientType:         string(app.ClientType),
+			GrantedAt:          app.GrantedAt.UTC().Format(time.RFC3339),
+			LastUsedAt:         nil, // no true usage signal on provider v2.71 (ADR-0005 §6)
+			Scopes:             app.Scopes,
+			HasOfflineAccess:   app.HasOfflineAccess,
+			Status:             string(consent.GrantActive),
 		})
 	}
 	writeJSONNoStore(w, r, http.StatusOK, out)

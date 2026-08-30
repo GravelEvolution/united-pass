@@ -23,8 +23,9 @@ import (
 const maxCerbosChecksPerRequest = 50
 
 type PrincipalContext struct {
-	Roles      []string
-	Attributes map[string]any
+	Roles            []string
+	Attributes       map[string]any
+	ChallengeVersion int64
 }
 
 type PrincipalContextReader interface {

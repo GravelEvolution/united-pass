@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "description": "Deterministic TEST-ONLY Go ParticipantSigner outputs consumed by the DreamUP TypeScript verifier.",
+  "canonicalHeadersAlgorithm": "sha256(utf8('if-match\\0' + ifMatch + '\\0idempotency-key\\0' + idempotencyKey)) as lowercase hex",
+  "subject": "zitadel-subject-golden-01",
+  "verification": {
+    "issuer": "https://auth.moonstone.org.cn",
+    "audience": "dreamup-mobile-api",
+    "algorithm": "EdDSA",
+    "keyId": "participant-golden-v1",
+    "ttlSeconds": 15,
+    "clockSkewSeconds": 2,
+    "now": "2026-08-27T12:34:56Z",
+    "jwks": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "kid": "participant-golden-v1",
+          "x": "2sDDJ1BhpPXm7XCtocRQ66w_YFOgauIL08AYepAVIQo",
+          "use": "sig",
+          "alg": "EdDSA"
+        }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "name": "get-application-empty-body",
+      "jti": "req_golden_get_application",
+      "method": "GET",
+      "pathAndQuery": "/api/v1/events/dreamup-shanghai/me/application",
+      "bodyUtf8": "",
+      "bodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ifMatch": "",
+      "idempotencyKey": "",
+      "canonicalHeaders": "if-match\u0000\u0000idempotency-key\u0000",
+      "headersSha256": "f5bd13ced6ee5ee0df7a6fb7851e8354c8f12e03d26892622891b2f3e4cca69a",
+      "compactJws": "eyJhbGciOiJFZERTQSIsImtpZCI6InBhcnRpY2lwYW50LWdvbGRlbi12MSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL2F1dGgubW9vbnN0b25lLm9yZy5jbiIsImF1ZCI6ImRyZWFtdXAtbW9iaWxlLWFwaSIsInN1YiI6InppdGFkZWwtc3ViamVjdC1nb2xkZW4tMDEiLCJpYXQiOjE3ODc4MzQwOTYsIm5iZiI6MTc4NzgzNDA5NCwiZXhwIjoxNzg3ODM0MTExLCJqdGkiOiJyZXFfZ29sZGVuX2dldF9hcHBsaWNhdGlvbiIsImFjdG9yX2tpbmQiOiJwYXJ0aWNpcGFudCIsImh0bSI6IkdFVCIsImh0dSI6Ii9hcGkvdjEvZXZlbnRzL2RyZWFtdXAtc2hhbmdoYWkvbWUvYXBwbGljYXRpb24iLCJib2R5X3NoYTI1NiI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJoZWFkZXJzX3NoYTI1NiI6ImY1YmQxM2NlZDZlZTVlZTBkZjdhNmZiNzg1MWU4MzU0YzhmMTJlMDNkMjY4OTI2MjI4OTFiMmYzZTRjY2E2OWEifQ.K7INXqLKakLqbdhYo7Ek_SUJQo0kht4u2CLls-C6iPGrnXBHjrlEs4w_ycwGn5bVBC3t8JLiNWpHjmbmiQmeAg"
+    },
+    {
+      "name": "contact-feedback",
+      "jti": "req_golden_contact_feedback",
+      "method": "POST",
+      "pathAndQuery": "/api/v1/events/dreamup-shanghai/me/feedback",
+      "bodyUtf8": "{\"content\":\"The application form cannot be submitted.\"}",
+      "bodySha256": "5eabcf6a455ab96edf0adece2c1e242f09eab41116362d5d27513bdeca0a2595",
+      "ifMatch": "",
+      "idempotencyKey": "idem_contact_0123456789abcdefghijkl",
+      "canonicalHeaders": "if-match\u0000\u0000idempotency-key\u0000idem_contact_0123456789abcdefghijkl",
+      "headersSha256": "f4c8712d559a09e7871e50e190dd3e41c7a7681f8e0b8ff3250e5decd8576d65",
+      "compactJws": "eyJhbGciOiJFZERTQSIsImtpZCI6InBhcnRpY2lwYW50LWdvbGRlbi12MSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL2F1dGgubW9vbnN0b25lLm9yZy5jbiIsImF1ZCI6ImRyZWFtdXAtbW9iaWxlLWFwaSIsInN1YiI6InppdGFkZWwtc3ViamVjdC1nb2xkZW4tMDEiLCJpYXQiOjE3ODc4MzQwOTYsIm5iZiI6MTc4NzgzNDA5NCwiZXhwIjoxNzg3ODM0MTExLCJqdGkiOiJyZXFfZ29sZGVuX2NvbnRhY3RfZmVlZGJhY2siLCJhY3Rvcl9raW5kIjoicGFydGljaXBhbnQiLCJodG0iOiJQT1NUIiwiaHR1IjoiL2FwaS92MS9ldmVudHMvZHJlYW11cC1zaGFuZ2hhaS9tZS9mZWVkYmFjayIsImJvZHlfc2hhMjU2IjoiNWVhYmNmNmE0NTVhYjk2ZWRmMGFkZWNlMmMxZTI0MmYwOWVhYjQxMTE2MzYyZDVkMjc1MTNiZGVjYTBhMjU5NSIsImhlYWRlcnNfc2hhMjU2IjoiZjRjODcxMmQ1NTlhMDllNzg3MWU1MGUxOTBkZDNlNDFjN2E3NjgxZjhlMGI4ZmYzMjUwZTVkZWNkODU3NmQ2NSJ9.PgEojYIWDtdc0Qz65gHY2HkX9ERYIgiy1o-bHH1PwC8nrXSioYkIPQaeQXfjOENRvaigSueLkdxW6XrzCE6cAw"
+    },
+    {
+      "name": "team-patch",
+      "jti": "req_golden_team_patch",
+      "method": "PATCH",
+      "pathAndQuery": "/api/v1/events/dreamup-shanghai/me/team",
+      "bodyUtf8": "{\"name\":\"Moonstone Builders\",\"description\":\"Cross-language fixture\"}",
+      "bodySha256": "691ebe613329a60ff4d21007d6daa44a7ecc8927352f1362a1edec4ca5349bdf",
+      "ifMatch": "\"7\"",
+      "idempotencyKey": "idem_team_0123456789abcdefghijklmno",
+      "canonicalHeaders": "if-match\u0000\"7\"\u0000idempotency-key\u0000idem_team_0123456789abcdefghijklmno",
+      "headersSha256": "9e76441ac903d80fa35badc94c6a8d83f1f38fc54954a06a5ae31c7625b312e3",
+      "compactJws": "eyJhbGciOiJFZERTQSIsImtpZCI6InBhcnRpY2lwYW50LWdvbGRlbi12MSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL2F1dGgubW9vbnN0b25lLm9yZy5jbiIsImF1ZCI6ImRyZWFtdXAtbW9iaWxlLWFwaSIsInN1YiI6InppdGFkZWwtc3ViamVjdC1nb2xkZW4tMDEiLCJpYXQiOjE3ODc4MzQwOTYsIm5iZiI6MTc4NzgzNDA5NCwiZXhwIjoxNzg3ODM0MTExLCJqdGkiOiJyZXFfZ29sZGVuX3RlYW1fcGF0Y2giLCJhY3Rvcl9raW5kIjoicGFydGljaXBhbnQiLCJodG0iOiJQQVRDSCIsImh0dSI6Ii9hcGkvdjEvZXZlbnRzL2RyZWFtdXAtc2hhbmdoYWkvbWUvdGVhbSIsImJvZHlfc2hhMjU2IjoiNjkxZWJlNjEzMzI5YTYwZmY0ZDIxMDA3ZDZkYWE0NGE3ZWNjODkyNzM1MmYxMzYyYTFlZGVjNGNhNTM0OWJkZiIsImhlYWRlcnNfc2hhMjU2IjoiOWU3NjQ0MWFjOTAzZDgwZmEzNWJhZGM5NGM2YThkODNmMWYzOGZjNTQ5NTRhMDZhNWFlMzFjNzYyNWIzMTJlMyJ9.IVGO2590elaCKqXgbbD8Mbfewg8E0a9PnJrAYcw21WJk7WyJkN0gvp9CSNQ94c8zSdW4oBlaqS5ZibcnVDFjDQ"
+    },
+    {
+      "name": "resume-upload-metadata",
+      "jti": "req_golden_resume_upload",
+      "method": "PUT",
+      "pathAndQuery": "/api/v1/events/dreamup-shanghai/me/application/resume",
+      "bodyUtf8": "fixture resume bytes\n",
+      "bodySha256": "9a4c7b9203e838fe02e19e12591e9154997d6f2ae360aebd57bc85d3d36a020b",
+      "ifMatch": "",
+      "idempotencyKey": "",
+      "canonicalHeaders": "if-match\u0000\u0000idempotency-key\u0000",
+      "headersSha256": "f5bd13ced6ee5ee0df7a6fb7851e8354c8f12e03d26892622891b2f3e4cca69a",
+      "resumeUpload": {
+        "fileName": "简历-fixture.pdf",
+        "contentType": "application/pdf",
+        "byteSize": 21
+      },
+      "compactJws": "eyJhbGciOiJFZERTQSIsImtpZCI6InBhcnRpY2lwYW50LWdvbGRlbi12MSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL2F1dGgubW9vbnN0b25lLm9yZy5jbiIsImF1ZCI6ImRyZWFtdXAtbW9iaWxlLWFwaSIsInN1YiI6InppdGFkZWwtc3ViamVjdC1nb2xkZW4tMDEiLCJpYXQiOjE3ODc4MzQwOTYsIm5iZiI6MTc4NzgzNDA5NCwiZXhwIjoxNzg3ODM0MTExLCJqdGkiOiJyZXFfZ29sZGVuX3Jlc3VtZV91cGxvYWQiLCJhY3Rvcl9raW5kIjoicGFydGljaXBhbnQiLCJodG0iOiJQVVQiLCJodHUiOiIvYXBpL3YxL2V2ZW50cy9kcmVhbXVwLXNoYW5naGFpL21lL2FwcGxpY2F0aW9uL3Jlc3VtZSIsImJvZHlfc2hhMjU2IjoiOWE0YzdiOTIwM2U4MzhmZTAyZTE5ZTEyNTkxZTkxNTQ5OTdkNmYyYWUzNjBhZWJkNTdiYzg1ZDNkMzZhMDIwYiIsImhlYWRlcnNfc2hhMjU2IjoiZjViZDEzY2VkNmVlNWVlMGRmN2E2ZmI3ODUxZTgzNTRjOGYxMmUwM2QyNjg5MjYyMjg5MWIyZjNlNGNjYTY5YSIsInJlc3VtZV9maWxlX25hbWUiOiLnroDljoYtZml4dHVyZS5wZGYiLCJyZXN1bWVfY29udGVudF90eXBlIjoiYXBwbGljYXRpb24vcGRmIiwicmVzdW1lX2J5dGVfc2l6ZSI6MjF9.0l1H_D3Q6Ix3lgZW-QFYc93zvpzs9HQydcduLuAj_2m8NHYTi0I9xb_5DCJPHS7x4YeJV66LkFYd7taHpTtqDQ"
+    },
+    {
+      "name": "admission-entry-code",
+      "jti": "req_golden_entry_code",
+      "method": "POST",
+      "pathAndQuery": "/api/v1/events/dreamup-shanghai/me/admission/entry-code",
+      "bodyUtf8": "{\"code\":\"ENTRY-2026\"}",
+      "bodySha256": "40360abed68b7d5678734537c9061ef5ec459070fa3343bd9a21a80f13f22c41",
+      "ifMatch": "",
+      "idempotencyKey": "idem_entry_0123456789abcdefghijklmn",
+      "canonicalHeaders": "if-match\u0000\u0000idempotency-key\u0000idem_entry_0123456789abcdefghijklmn",
+      "headersSha256": "5957c0ece2b7d6a40ec4b4dca0538196ecd2487c1ec40f10016508fb438c578c",
+      "compactJws": "eyJhbGciOiJFZERTQSIsImtpZCI6InBhcnRpY2lwYW50LWdvbGRlbi12MSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL2F1dGgubW9vbnN0b25lLm9yZy5jbiIsImF1ZCI6ImRyZWFtdXAtbW9iaWxlLWFwaSIsInN1YiI6InppdGFkZWwtc3ViamVjdC1nb2xkZW4tMDEiLCJpYXQiOjE3ODc4MzQwOTYsIm5iZiI6MTc4NzgzNDA5NCwiZXhwIjoxNzg3ODM0MTExLCJqdGkiOiJyZXFfZ29sZGVuX2VudHJ5X2NvZGUiLCJhY3Rvcl9raW5kIjoicGFydGljaXBhbnQiLCJodG0iOiJQT1NUIiwiaHR1IjoiL2FwaS92MS9ldmVudHMvZHJlYW11cC1zaGFuZ2hhaS9tZS9hZG1pc3Npb24vZW50cnktY29kZSIsImJvZHlfc2hhMjU2IjoiNDAzNjBhYmVkNjhiN2Q1Njc4NzM0NTM3YzkwNjFlZjVlYzQ1OTA3MGZhMzM0M2JkOWEyMWE4MGYxM2YyMmM0MSIsImhlYWRlcnNfc2hhMjU2IjoiNTk1N2MwZWNlMmI3ZDZhNDBlYzRiNGRjYTA1MzgxOTZlY2QyNDg3YzFlYzQwZjEwMDE2NTA4ZmI0MzhjNTc4YyJ9.XkWpBVyPn7CI5-zgX7vSCYvK5WY_odWwh_1gUw4YwML6JDi4vwFo5fDDaR20kXetVlCPdeKPBcIB8rUbS3WaDQ"
+    },
+    {
+      "name": "admission-group-qr",
+      "jti": "req_golden_group_qr",
+      "method": "GET",
+      "pathAndQuery": "/api/v1/events/dreamup-shanghai/me/admission/group-qr",
+      "bodyUtf8": "",
+      "bodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ifMatch": "",
+      "idempotencyKey": "",
+      "canonicalHeaders": "if-match\u0000\u0000idempotency-key\u0000",
+      "headersSha256": "f5bd13ced6ee5ee0df7a6fb7851e8354c8f12e03d26892622891b2f3e4cca69a",
+      "compactJws": "eyJhbGciOiJFZERTQSIsImtpZCI6InBhcnRpY2lwYW50LWdvbGRlbi12MSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL2F1dGgubW9vbnN0b25lLm9yZy5jbiIsImF1ZCI6ImRyZWFtdXAtbW9iaWxlLWFwaSIsInN1YiI6InppdGFkZWwtc3ViamVjdC1nb2xkZW4tMDEiLCJpYXQiOjE3ODc4MzQwOTYsIm5iZiI6MTc4NzgzNDA5NCwiZXhwIjoxNzg3ODM0MTExLCJqdGkiOiJyZXFfZ29sZGVuX2dyb3VwX3FyIiwiYWN0b3Jfa2luZCI6InBhcnRpY2lwYW50IiwiaHRtIjoiR0VUIiwiaHR1IjoiL2FwaS92MS9ldmVudHMvZHJlYW11cC1zaGFuZ2hhaS9tZS9hZG1pc3Npb24vZ3JvdXAtcXIiLCJib2R5X3NoYTI1NiI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJoZWFkZXJzX3NoYTI1NiI6ImY1YmQxM2NlZDZlZTVlZTBkZjdhNmZiNzg1MWU4MzU0YzhmMTJlMDNkMjY4OTI2MjI4OTFiMmYzZTRjY2E2OWEifQ.U8VCzII17WjUqT7Bow54FMJHDjdrXJc3xakVWCWpkNEhl6jbISDzzszmT66T5zPSJ0yFjP8Yw12KOa5VotaFCg"
+    }
+  ]
+}

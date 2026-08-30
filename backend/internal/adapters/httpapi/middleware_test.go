@@ -22,6 +22,7 @@ import (
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
+	"github.com/GravelEvolution/united-pass/backend/internal/dreamupbootstrap"
 )
 
 func TestRequestIDGeneratedWhenAbsent(t *testing.T) {
@@ -57,6 +58,12 @@ func TestRequestIDPassthroughWhenValid(t *testing.T) {
 
 	if got := rec.Header().Get(RequestIDHeader); got != upstream {
 		t.Errorf("response header id = %q, want %q", got, upstream)
+	}
+}
+
+func TestRequestIDRejectsOfflineDreamUPBootstrapNamespace(t *testing.T) {
+	if isValidRequestID(dreamupbootstrap.BootstrapRequestPrefix + "fixture") {
+		t.Fatal("public request-ID validation accepted the offline DreamUP bootstrap namespace")
 	}
 }
 
@@ -320,6 +327,52 @@ func TestSecurityHeaders(t *testing.T) {
 		if got := rec.Header().Get(header); got != want {
 			t.Errorf("header %q = %q, want %q", header, got, want)
 		}
+	}
+}
+
+func TestRequireTrustedBrowserMutation(t *testing.T) {
+	const origin = "https://auth.moonstone.org.cn"
+	tests := []struct {
+		name          string
+		requestOrigin string
+		contentType   string
+		fetchSite     string
+		wantStatus    int
+	}{
+		{name: "same origin JSON", requestOrigin: origin, contentType: "application/json", fetchSite: "same-origin", wantStatus: http.StatusNoContent},
+		{name: "same origin JSON with charset", requestOrigin: origin, contentType: "application/json; charset=utf-8", wantStatus: http.StatusNoContent},
+		{name: "missing origin", contentType: "application/json", wantStatus: http.StatusForbidden},
+		{name: "foreign origin", requestOrigin: "https://evil.example", contentType: "application/json", wantStatus: http.StatusForbidden},
+		{name: "cross site fetch metadata", requestOrigin: origin, contentType: "application/json", fetchSite: "cross-site", wantStatus: http.StatusForbidden},
+		{name: "simple cross site content type", requestOrigin: origin, contentType: "text/plain", wantStatus: http.StatusUnsupportedMediaType},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			handler := RequireTrustedBrowserMutation(origin)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sessions", strings.NewReader(`{}`))
+			if test.requestOrigin != "" {
+				request.Header.Set("Origin", test.requestOrigin)
+			}
+			if test.contentType != "" {
+				request.Header.Set("Content-Type", test.contentType)
+			}
+			if test.fetchSite != "" {
+				request.Header.Set("Sec-Fetch-Site", test.fetchSite)
+			}
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.wantStatus, recorder.Body.String())
+			}
+			if called != (test.wantStatus == http.StatusNoContent) {
+				t.Fatalf("downstream called = %v for status %d", called, recorder.Code)
+			}
+		})
 	}
 }
 

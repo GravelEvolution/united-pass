@@ -46,6 +46,7 @@ type ActiveModal =
   | { type: "totp_remove" }
   | { type: "passkey_enroll" }
   | { type: "passkey_remove"; passkeyId: string }
+  | { type: "recovery_codes" }
   | null;
 
 const PASSWORD_MIN_LENGTH = 12;
@@ -168,13 +169,20 @@ export function SecurityOverview({ securitySummary }: SecurityOverviewProps) {
         </Popconfirm>
       </section>
 
-      <section className={`${styles.card} ${styles.dangerCard}`}>
+      {USE_MOCK_DATA_SOURCE && <section className={`${styles.card} ${styles.dangerCard}`}>
         <div>
           <h2>恢复代码</h2>
-          <p>当前身份提供方尚未提供可由 United Pass 安全管理的一次性恢复代码能力。</p>
+          <p>生成一次性恢复代码，在无法使用常规验证方式时用于恢复账户访问。每个代码仅可使用一次。</p>
         </div>
-        <StatusBadge label="提供方暂不支持" tone="neutral" />
-      </section>
+        <Button
+          type="primary"
+          theme="outline"
+          icon={<IconKey />}
+          onClick={() => setActiveModal({ type: "recovery_codes" })}
+        >
+          生成恢复代码
+        </Button>
+      </section>}
 
       {activeModal?.type === "password" && (
         <PasswordChangeModal
@@ -248,6 +256,12 @@ export function SecurityOverview({ securitySummary }: SecurityOverviewProps) {
         />
       )}
 
+      {activeModal?.type === "recovery_codes" && (
+        <RecoveryCodesModal
+          onCancel={() => setActiveModal(null)}
+          onComplete={() => setActiveModal(null)}
+        />
+      )}
     </>
   );
 }
@@ -970,5 +984,102 @@ export function AccountReauthenticationForm({
         </Button>
       </div>
     </form>
+  );
+}
+
+// --- Recovery Codes Modal ---
+
+type RecoveryCodesModalProps = {
+  onCancel: () => void;
+  onComplete: () => void;
+};
+
+function RecoveryCodesModal({ onCancel, onComplete }: RecoveryCodesModalProps) {
+  const [phase, setPhase] = useState<"generate" | "display">("generate");
+  const [codes, setCodes] = useState<string[]>([]);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [hasCopied, setHasCopied] = useState(false);
+
+  async function handleGenerate() {
+    setIsGenerating(true);
+    try {
+      const result = await browserCommands.generateRecoveryCodes();
+      setCodes(result.codes);
+      setPhase("display");
+    } catch {
+      Toast.error({ content: "生成恢复代码失败，请稍后重试。" });
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
+  function handleCopy() {
+    const text = codes.join("\n");
+    navigator.clipboard.writeText(text).then(() => {
+      setHasCopied(true);
+      Toast.success({ content: "恢复代码已复制到剪贴板。" });
+    }).catch(() => {
+      Toast.error({ content: "复制失败，请手动抄写。" });
+    });
+  }
+
+  if (phase === "generate") {
+    return (
+      <Modal
+        title="生成恢复代码"
+        visible
+        footer={null}
+        width={480}
+        maskClosable={false}
+        onCancel={onCancel}
+      >
+        <div className={styles.profileForm}>
+          <p className={styles.profileNotice}>
+            恢复代码用于在无法使用常规验证方式时恢复账户访问。每个代码仅可使用一次。
+            生成后请妥善保存，关闭此窗口后将无法再次查看。
+          </p>
+          <div className={styles.profileActions}>
+            <Button theme="outline" onClick={onCancel} disabled={isGenerating}>取消</Button>
+            <Button type="primary" theme="solid" loading={isGenerating} disabled={isGenerating} onClick={handleGenerate}>
+              生成恢复代码
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal
+      title="恢复代码"
+      visible
+      width={520}
+      maskClosable={false}
+      onCancel={onComplete}
+      footer={
+        <>
+          <Button theme="outline" onClick={handleCopy} disabled={!codes.length}>
+            {hasCopied ? "已复制" : "复制全部"}
+          </Button>
+          <Button type="primary" theme="solid" onClick={onComplete}>
+            已保存，关闭
+          </Button>
+        </>
+      }
+    >
+      <Banner
+        type="info"
+        fullMode={false}
+        bordered
+        closeIcon={null}
+        description="请将恢复代码保存到安全位置。每个代码仅可使用一次。关闭此窗口后将无法再次查看这些代码。"
+      />
+      <div className={styles.recoveryCodesGrid}>
+        {codes.map((code, index) => (
+          <code key={index}>{code}</code>
+        ))}
+      </div>
+      <p className={styles.profileNotice}>当前为 Mock 流程，生成的代码不会持久化。</p>
+    </Modal>
   );
 }

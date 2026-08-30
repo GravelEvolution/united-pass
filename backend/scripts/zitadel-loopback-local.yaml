@@ -1,0 +1,68 @@
+Log:
+  Level: info
+  Formatter:
+    Format: json
+
+Metrics:
+  Type: none
+
+Tracing:
+  Type: none
+
+Profiler:
+  Type: none
+
+Telemetry:
+  Enabled: false
+
+Port: 18185
+ExternalPort: 18185
+ExternalDomain: localhost
+ExternalSecure: false
+
+TLS:
+  Enabled: false
+
+Database:
+  postgres:
+    Host: 127.0.0.1
+    Port: 15433
+    Database: zitadel_dreamup_e2e
+    MaxOpenConns: 10
+    MaxIdleConns: 2
+    User:
+      Username: zitadel_dreamup_e2e
+      SSL:
+        Mode: disable
+Machine:
+  Identification:
+    PrivateIp:
+      Enabled: false
+    Hostname:
+      Enabled: true
+    Webhook:
+      Enabled: false
+
+Notifications:
+  LegacyEnabled: true
+
+SystemDefaults:
+  Notifications:
+    FileSystemPath: .zitadel/native/notifications/
+
+DefaultInstance:
+  InstanceName: DreamUP Local E2E
+  DefaultLanguage: zh
+  Org:
+    Name: DreamUP Local E2E
+  DomainPolicy:
+    SMTPSenderAddressMatchesInstanceDomain: false
+  LoginPolicy:
+    AllowRegister: false
+  SMTPConfiguration:
+    SMTP:
+      Host: 127.0.0.1:11026
+    TLS: false
+    From: no-reply@dreamup.local
+    FromName: DreamUP Local
+    ReplyToAddress: no-reply@dreamup.local

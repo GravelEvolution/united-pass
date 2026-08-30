@@ -461,6 +461,7 @@ describe("parseAuthorizedApplications", () => {
     applicationId: "app_001",
     applicationName: "United Workspace",
     applicationOwner: "United",
+    logoUrl: null,
     clientType: "confidential",
     grantedAt: "2026-08-01T00:00:00Z",
     lastUsedAt: null,

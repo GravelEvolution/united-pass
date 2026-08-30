@@ -56,6 +56,9 @@ type MFAChallengeData struct {
 	// (ADR-0006 §1 remember repair). Without it every MFA completion would
 	// silently downgrade to the short session TTL.
 	Remember bool `json:"remember,omitempty"`
+	// ClientKind binds the second factor to the transport that created the
+	// challenge so browser and native credentials cannot cross-complete.
+	ClientKind string `json:"clientKind,omitempty"`
 	// CreatedAt is when the challenge was issued.
 	CreatedAt time.Time `json:"createdAt"`
 }

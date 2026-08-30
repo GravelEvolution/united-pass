@@ -9,6 +9,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { browserFetch } from "./browser-http-client";
 import { isApiError } from "@/lib/api/api-error";
+import { hasLeadingZeroBits } from "@/lib/security/automation-cost";
+import {
+  registerRiskStepUpHandler,
+  RiskStepUpUnavailableError,
+} from "@/lib/security/risk-step-up-runtime";
 
 // The suite runs in vitest's node environment: `fetch` and the CSRF cookie
 // surface (`document.cookie`) are stubbed explicitly, so every assertion
@@ -25,6 +30,20 @@ function stubFetch(response: Response): { calls: FetchCall[] } {
     "fetch",
     vi.fn(async (url: string, init: RequestInit) => {
       calls.push({ url, init });
+      return response;
+    }),
+  );
+  return { calls };
+}
+
+function stubFetchSequence(responses: Response[]): { calls: FetchCall[] } {
+  const calls: FetchCall[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      const response = responses[calls.length - 1];
+      if (!response) throw new Error("Unexpected fetch call");
       return response;
     }),
   );
@@ -162,6 +181,7 @@ describe("browserFetch error normalization", () => {
     expect(isApiError(error)).toBe(true);
     if (isApiError(error)) {
       expect(error.kind).toBe("reauthentication_required");
+      expect(error.code).toBe("session.reauthentication_required");
     }
   });
 
@@ -236,5 +256,160 @@ describe("browserFetch error normalization", () => {
     if (isApiError(error)) {
       expect(error.kind).toBe("server_error");
     }
+  });
+});
+
+describe("browserFetch objective risk step-up", () => {
+  function stepUpResponse(stepUp: Record<string, unknown>): Response {
+    return jsonResponse(JSON.stringify({
+      error: {
+        code: "step_up_required",
+        message: "需要完成额外验证后继续。",
+        stepUp,
+      },
+    }), 403);
+  }
+
+  it("silently solves automation cost, completes it, and retries the exact mutation once", async () => {
+    vi.stubGlobal("document", { cookie: "up_csrf=csrf-token-1" });
+    const challengeToken = "pow-challenge";
+    const { calls } = stubFetchSequence([
+      stepUpResponse({
+        challengeToken,
+        level: "medium",
+        method: "automation_cost",
+        algorithm: "sha256_leading_zero_bits",
+        difficulty: 8,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        providerReady: true,
+        completionPath: "/api/v1/auth/step-up",
+      }),
+      new Response(null, { status: 204 }),
+      jsonResponse(JSON.stringify({ status: "ok" })),
+    ]);
+    const requestBody = { identifier: "account", password: "not-a-real-password" };
+    const idempotencyKey = "12345678901234567890123456789012";
+
+    await expect(browserFetch("/auth/sessions", {
+      method: "POST",
+      body: requestBody,
+      idempotencyKey,
+    })).resolves.toEqual({ status: "ok" });
+
+    expect(calls.map((call) => call.url)).toEqual([
+      "/api/v1/auth/sessions",
+      "/api/v1/auth/step-up",
+      "/api/v1/auth/sessions",
+    ]);
+    expect(calls[0].init.body).toBe(calls[2].init.body);
+    expect(headerOf(calls[0], "Idempotency-Key")).toBe(idempotencyKey);
+    expect(headerOf(calls[2], "Idempotency-Key")).toBe(idempotencyKey);
+    const completion = JSON.parse(String(calls[1].init.body)) as {
+      challengeToken: string;
+      nonce: string;
+    };
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(`${completion.challengeToken}:${completion.nonce}`),
+    );
+    expect(completion.challengeToken).toBe(challengeToken);
+    expect(hasLeadingZeroBits(new Uint8Array(digest), 8)).toBe(true);
+    expect(headerOf(calls[1], "X-CSRF-Token")).toBe("csrf-token-1");
+  });
+
+  it("never loops when the one allowed retry receives another challenge", async () => {
+    vi.stubGlobal("document", { cookie: "up_csrf=csrf-token-1" });
+    const challenge = {
+      challengeToken: "first",
+      level: "medium",
+      method: "automation_cost",
+      algorithm: "sha256_leading_zero_bits",
+      difficulty: 1,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      providerReady: true,
+      completionPath: "/api/v1/auth/step-up",
+    };
+    const { calls } = stubFetchSequence([
+      stepUpResponse(challenge),
+      new Response(null, { status: 204 }),
+      stepUpResponse({ ...challenge, challengeToken: "second" }),
+    ]);
+
+    const error = await browserFetch("/registrations", {
+      method: "POST",
+      body: { username: "test" },
+    }).catch((caught: unknown) => caught);
+
+    expect(calls).toHaveLength(3);
+    expect(isApiError(error)).toBe(true);
+    if (isApiError(error)) expect(error.code).toBe("step_up_required");
+  });
+
+  it("passes an opaque CAPTCHA proof to the backend before retrying", async () => {
+    vi.stubGlobal("document", { cookie: "up_csrf=csrf-token-1" });
+    const unregister = registerRiskStepUpHandler(async () => ({
+      status: "provider_proof",
+      providerProof: "opaque-provider-proof",
+    }));
+    const { calls } = stubFetchSequence([
+      stepUpResponse({
+        challengeToken: "captcha-challenge",
+        level: "high",
+        method: "interactive_captcha",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        providerReady: true,
+        provider: "configured-provider",
+        providerPayload: { scene: "registration" },
+        completionPath: "/api/v1/auth/step-up",
+      }),
+      new Response(null, { status: 204 }),
+      new Response(null, { status: 204 }),
+    ]);
+
+    try {
+      await expect(browserFetch("/registrations", {
+        method: "POST",
+        body: { username: "test" },
+      })).resolves.toBeUndefined();
+    } finally {
+      unregister();
+    }
+
+    const completion = JSON.parse(String(calls[1].init.body)) as Record<string, unknown>;
+    expect(completion).toEqual({
+      challengeToken: "captcha-challenge",
+      providerProof: "opaque-provider-proof",
+    });
+  });
+
+  it("fails closed without posting fake proof when the provider is unavailable", async () => {
+    vi.stubGlobal("document", { cookie: "up_csrf=csrf-token-1" });
+    const unregister = registerRiskStepUpHandler(async () => {
+      throw new RiskStepUpUnavailableError("互动验证服务尚未启用，本次请求无法继续。");
+    });
+    const { calls } = stubFetchSequence([
+      stepUpResponse({
+        challengeToken: "captcha-unavailable",
+        level: "high",
+        method: "interactive_captcha",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        providerReady: false,
+        completionPath: "/api/v1/auth/step-up",
+      }),
+    ]);
+
+    let error: unknown;
+    try {
+      error = await browserFetch("/auth/sessions", {
+        method: "POST",
+        body: { identifier: "test" },
+      }).catch((caught: unknown) => caught);
+    } finally {
+      unregister();
+    }
+
+    expect(calls).toHaveLength(1);
+    expect(isApiError(error)).toBe(true);
+    if (isApiError(error)) expect(error.message).toContain("尚未启用");
   });
 });

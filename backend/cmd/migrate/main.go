@@ -13,7 +13,7 @@
 //	go run ./cmd/migrate up          # Apply all pending migrations
 //	go run ./cmd/migrate status       # Show migration status
 //	go run ./cmd/migrate version      # Show current migration version
-//	go run ./cmd/migrate reset        # Roll back all migrations (requires --confirm)
+//	go run ./cmd/migrate reset        # Roll back to the first forward-only barrier (requires --confirm)
 //
 // Migrations are NOT executed automatically at API server startup.
 // This command must be run explicitly.
@@ -42,7 +42,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  up       Apply all pending migrations\n")
 		fmt.Fprintf(os.Stderr, "  status   Show migration status\n")
 		fmt.Fprintf(os.Stderr, "  version  Show current migration version\n")
-		fmt.Fprintf(os.Stderr, "  reset    Roll back all migrations (requires --confirm)\n")
+		fmt.Fprintf(os.Stderr, "  reset    Roll back until a forward-only migration refuses (requires --confirm)\n")
 		fmt.Fprintf(os.Stderr, "\nFlags:\n")
 		flag.PrintDefaults()
 	}

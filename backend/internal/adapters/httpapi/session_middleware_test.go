@@ -338,3 +338,41 @@ func TestValidateAndPromote_ValidationFailureKeepsFrozenSemantics(t *testing.T) 
 		t.Fatal("an invalid session must never reach the security gate")
 	}
 }
+
+func TestNativeMiniProgramBearerScopeIncludesExactDreamUPContentContracts(t *testing.T) {
+	allowed := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/admin/dreamup/eligibility"},
+		{http.MethodGet, "/api/v1/admin/dreamup/step-up/challenge"},
+		{http.MethodPost, "/api/v1/admin/dreamup/step-up/enroll"},
+		{http.MethodPost, "/api/v1/admin/dreamup/step-up/verify"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/content"},
+		{http.MethodPut, "/api/v1/admin/dreamup/events/evt_shanghai/content/intro"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/announcements"},
+		{http.MethodPatch, "/api/v1/admin/dreamup/events/evt_shanghai/announcements/content_1"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/contact-submissions/contact_1"},
+	}
+	for _, test := range allowed {
+		req := httptest.NewRequest(test.method, test.path, nil)
+		if !nativeMiniProgramBearerRouteAllowed(req) {
+			t.Errorf("native route rejected: %s %s", test.method, test.path)
+		}
+	}
+	for _, test := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/v1/admin/dreamup/eligibility"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/content/intro"},
+		{http.MethodPut, "/api/v1/admin/dreamup/events/evt_shanghai/announcements"},
+		{http.MethodPatch, "/api/v1/admin/dreamup/events/evt_shanghai/announcements"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/contact-submissions/contact_1/extra"},
+	} {
+		req := httptest.NewRequest(test.method, test.path, nil)
+		if nativeMiniProgramBearerRouteAllowed(req) {
+			t.Errorf("native route over-broadened: %s %s", test.method, test.path)
+		}
+	}
+}

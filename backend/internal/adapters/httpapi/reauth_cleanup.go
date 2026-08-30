@@ -117,7 +117,7 @@ func (w *ReauthCleanupWorker) sweep(ctx context.Context) int {
 				"errorClass", observability.ClassifyError(err),
 				"errorDetail", observability.RedactedError(err, 256),
 			)
-			w.auditor.RecordEvent(ctx, applications.EventProviderSessionRevokeFailed, entry.UserID,
+			_ = w.auditor.RecordEvent(ctx, applications.EventProviderSessionRevokeFailed, entry.UserID,
 				applications.ApplicationID(entry.ApplicationID), applications.OAuthClientID(entry.ClientID),
 				"", entry.Action, applications.SecurityEventDenied,
 				string(observability.ClassifyError(err)))

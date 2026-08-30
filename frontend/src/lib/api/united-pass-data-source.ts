@@ -53,6 +53,7 @@ import type {
   OAuthClient,
   OAuthClientCreateInput,
   OAuthClientCreationResult,
+  OAuthClientUpdateInput,
   SecretRotationResult,
 } from "@/features/applications/types";
 import type { ConsentResolution, ConsentDecision } from "@/features/authorization/types";
@@ -124,6 +125,22 @@ export interface UnitedPassQueries {
  */
 export interface UnitedPassCommands {
   createOAuthClient(input: OAuthClientCreateInput): Promise<OAuthClientCreationResult>;
+  updateOAuthClient(
+    applicationId: string,
+    clientId: string,
+    input: OAuthClientUpdateInput,
+  ): Promise<OAuthClient>;
+  updateOAuthClientStatus(
+    applicationId: string,
+    clientId: string,
+    status: ApplicationStatus,
+  ): Promise<OAuthClient>;
+  deleteOAuthClient(
+    applicationId: string,
+    clientId: string,
+    reauthToken?: string,
+    options?: BrowserCommandOptions,
+  ): Promise<void>;
   createApplicationWithInitialClient(input: ApplicationWithInitialClientInput): Promise<ApplicationWithInitialClientResult>;
   decideConsent(requestId: string, decision: ConsentDecision): Promise<{ redirectUrl: string }>;
   revokeGrant(grantId: string): Promise<void>;
@@ -133,20 +150,26 @@ export interface UnitedPassCommands {
     reauthToken?: string,
     options?: BrowserCommandOptions,
   ): Promise<SecretRotationResult>;
-  updateApplicationStatus(applicationId: string, status: ApplicationStatus): Promise<void>;
+  updateApplicationStatus(
+    applicationId: string,
+    status: ApplicationStatus,
+  ): Promise<OAuthApplicationDetail>;
   deleteApplication(
     applicationId: string,
     reauthToken?: string,
     options?: BrowserCommandOptions,
   ): Promise<void>;
-  updateApplication(applicationId: string, input: ApplicationUpdateInput): Promise<void>;
+  updateApplication(
+    applicationId: string,
+    input: ApplicationUpdateInput,
+  ): Promise<OAuthApplicationDetail>;
 
   // Account profile
   updateProfile(input: { displayName?: string; nickname?: string }): Promise<void>;
   uploadAvatar(file: File): Promise<{ avatarUrl: string }>;
-  requestEmailChange(email: string): Promise<{ requestId: string }>;
+  requestEmailChange(email: string, captchaVerifyParam?: string): Promise<{ requestId: string }>;
   verifyEmailChange(requestId: string, code: string): Promise<void>;
-  requestPhoneChange(phone: string): Promise<{ requestId: string }>;
+  requestPhoneChange(phone: string, captchaVerifyParam?: string): Promise<{ requestId: string }>;
   verifyPhoneChange(requestId: string, code: string): Promise<void>;
 
   // Security
@@ -174,6 +197,7 @@ export interface UnitedPassCommands {
   }, options?: BrowserCommandOptions): Promise<PasskeyEnrollmentConfirmation>;
   cancelPasskeyEnrollment(enrollmentToken: string): Promise<void>;
   removePasskey(passkeyId: string, reauthToken: string, options?: BrowserCommandOptions): Promise<SecuritySummary>;
+  generateRecoveryCodes(): Promise<{ codes: string[] }>;
   revokeOtherSessions(): Promise<{ revoked: number }>;
   logout(): Promise<void>;
 

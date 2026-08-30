@@ -17,16 +17,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"mime"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/platform/observability"
+	"github.com/GravelEvolution/united-pass/backend/internal/riskdefense"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
@@ -82,8 +80,14 @@ type AuthHandlers struct {
 	mfaWindow      time.Duration
 	sessionTTL     time.Duration
 	rememberTTL    time.Duration
-	publicOrigin   string
 	logger         *slog.Logger
+	risk           *RiskGuard
+}
+
+type AuthHandlerOption func(*AuthHandlers)
+
+func WithAuthRiskGuard(guard *RiskGuard) AuthHandlerOption {
+	return func(h *AuthHandlers) { h.risk = guard }
 }
 
 // NewAuthHandlers builds AuthHandlers from the given dependencies and configuration.
@@ -95,8 +99,9 @@ func NewAuthHandlers(
 	userChecker UserStatusChecker,
 	cfg config.Config,
 	logger *slog.Logger,
+	options ...AuthHandlerOption,
 ) *AuthHandlers {
-	return &AuthHandlers{
+	h := &AuthHandlers{
 		authenticator:  authenticator,
 		sessionSvc:     sessionSvc,
 		mfaStore:       mfaStore,
@@ -111,9 +116,14 @@ func NewAuthHandlers(
 		mfaWindow:      cfg.RateLimit.MFAWindow,
 		sessionTTL:     cfg.Session.TTL,
 		rememberTTL:    cfg.Session.RememberTTL,
-		publicOrigin:   strings.TrimRight(cfg.OAuth.PublicOrigin, "/"),
 		logger:         logger,
 	}
+	for _, option := range options {
+		if option != nil {
+			option(h)
+		}
+	}
+	return h
 }
 
 // loginRequest is the JSON body for POST /api/v1/auth/sessions.
@@ -146,6 +156,17 @@ type mfaChallengeRequest struct {
 	PasskeyAssertion json.RawMessage `json:"passkeyAssertion,omitempty"`
 }
 
+const (
+	authClientBrowser     = "browser"
+	authClientMiniProgram = session.ClientKindMiniProgram
+)
+
+type authenticatedResponse struct {
+	Status        string    `json:"status"`
+	SessionBearer string    `json:"sessionBearer"`
+	ExpiresAt     time.Time `json:"expiresAt"`
+}
+
 // Login handles POST /api/v1/auth/sessions.
 //
 // Flow:
@@ -157,17 +178,31 @@ type mfaChallengeRequest struct {
 //  6. On any failure, return a generic error that does not reveal whether the
 //     account exists.
 func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
-	if !h.allowLoginRequest(w, r) {
-		return
-	}
+	h.login(w, r, authClientBrowser)
+}
 
+// LoginMiniProgram uses the same credential, rate-limit and risk pipeline as
+// browser login but returns a short-lived transport-bound native bearer.
+func (h *AuthHandlers) LoginMiniProgram(w http.ResponseWriter, r *http.Request) {
+	h.login(w, r, authClientMiniProgram)
+}
+
+func (h *AuthHandlers) login(w http.ResponseWriter, r *http.Request, clientKind string) {
 	var req loginRequest
 	if err := decodeLoginRequest(w, r, &req); err != nil {
 		return
 	}
+	if clientKind == authClientMiniProgram && req.Remember {
+		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "小程序登录不支持长期记住设备。", nil)
+		return
+	}
+	if clientKind == authClientMiniProgram && req.ResumeRequestID != "" {
+		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "小程序登录不能恢复浏览器授权流程。", nil)
+		return
+	}
 
 	ip := clientIP(r)
-	identifierHash := hashIdentifier(req.Identifier)
+	identifierHash := hashLoginIdentifier(req.Identifier)
 
 	// Rate limit check. Fail closed: if Redis is unavailable, deny the attempt.
 	allowed, retryAfter, err := h.rateChecker.CheckLogin(r.Context(), ip, identifierHash, h.loginLimit, h.loginWindow)
@@ -183,6 +218,9 @@ func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	if !allowed {
 		WriteRateLimited(w, r, int(retryAfter.Seconds()))
+		return
+	}
+	if h.risk != nil && !h.risk.Require(w, r, riskdefense.OperationLogin, hashRiskValue(strings.ToLower(strings.TrimSpace(req.Identifier)))) {
 		return
 	}
 
@@ -204,10 +242,10 @@ func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 
 	switch result.Status {
 	case auth.StatusAuthenticated:
-		h.handleAuthenticated(w, r, result, req.Remember)
+		h.handleAuthenticated(w, r, result, req.Remember, clientKind)
 
 	case auth.StatusMFARequired:
-		h.handleMFARequired(w, r, result, req.Remember)
+		h.handleMFARequired(w, r, result, req.Remember, clientKind)
 
 	case auth.StatusInvalidCredentials, auth.StatusLocked:
 		// Generic error: do not reveal whether the account exists or is locked.
@@ -217,72 +255,49 @@ func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("authentication provider unavailable",
 			"requestId", requestID(r),
 		)
-		WriteInternalError(w, r)
+		// ZITADEL can disguise a service-account authorization failure as
+		// NotFound only after it has resolved an existing account. Returning a
+		// different public status for that provider fault would therefore turn
+		// the login endpoint into an account-existence oracle. Keep the
+		// server-side signal in structured logs, but expose the same response as
+		// every other rejected password login.
+		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "账户名或密码错误。", nil)
 
 	default:
 		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "账户名或密码错误。", nil)
 	}
 }
 
-// allowLoginRequest enforces the browser-side login CSRF boundary frozen in
-// ADR-0002. Login has no session yet, so it cannot use the double-submit CSRF
-// token. Instead it requires a JSON request from the configured public origin
-// (or, in local development without one, the request's own origin) and rejects
-// cross-site Fetch Metadata before credentials reach the rate limiter or
-// identity provider.
-func (h *AuthHandlers) allowLoginRequest(w http.ResponseWriter, r *http.Request) bool {
-	return allowSameOriginJSON(w, r, h.publicOrigin, "登录")
-}
-
-// allowSameOriginJSON is the shared logged-out credential-submission CSRF
-// boundary. These requests have no authenticated session and therefore cannot
-// use the double-submit CSRF cookie. Requiring JSON plus an exact browser
-// Origin prevents cross-site forms and scripts from initiating login,
-// registration, verification or password-reset operations.
-func allowSameOriginJSON(w http.ResponseWriter, r *http.Request, publicOrigin, operation string) bool {
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || !strings.EqualFold(mediaType, "application/json") {
-		writeError(w, r, http.StatusUnsupportedMediaType, CodeBadRequest, operation+"请求必须使用 JSON 格式。", nil)
-		return false
+// BeginPasskeyLogin handles POST /api/v1/auth/passkey/begin. It issues a
+// WebAuthn challenge for a passwordless passkey login and stores an MFA
+// challenge bound to the provider session, returning the same mfa_required
+// contract so the browser can run navigator.credentials.get and complete via
+// POST /api/v1/auth/sessions/mfa.
+func (h *AuthHandlers) BeginPasskeyLogin(w http.ResponseWriter, r *http.Request) {
+	result, err := h.authenticator.BeginPasskeyAuthentication(r.Context())
+	if err != nil {
+		h.logger.Error("passkey login begin failed",
+			"requestId", requestID(r),
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
+		)
+		WriteInternalError(w, r)
+		return
 	}
-
-	if fetchSite := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))); fetchSite != "" && fetchSite != "same-origin" {
-		WriteForbidden(w, r)
-		return false
+	if result.Status != auth.StatusMFARequired {
+		h.logger.Warn("passkey login begin did not produce a challenge",
+			"requestId", requestID(r),
+			"status", result.Status,
+		)
+		WriteProviderUnavailable(w, r)
+		return
 	}
-
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
-	if origin == "" || origin == "null" {
-		WriteForbidden(w, r)
-		return false
-	}
-	parsedOrigin, err := url.Parse(origin)
-	if err != nil || parsedOrigin.Scheme == "" || parsedOrigin.Host == "" || parsedOrigin.User != nil ||
-		(parsedOrigin.Path != "" && parsedOrigin.Path != "/") || parsedOrigin.RawQuery != "" || parsedOrigin.Fragment != "" {
-		WriteForbidden(w, r)
-		return false
-	}
-
-	expectedOrigin := publicOrigin
-	if expectedOrigin == "" {
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		expectedOrigin = scheme + "://" + r.Host
-	}
-	actualOrigin := strings.ToLower(parsedOrigin.Scheme) + "://" + strings.ToLower(parsedOrigin.Host)
-	if actualOrigin != strings.ToLower(expectedOrigin) {
-		WriteForbidden(w, r)
-		return false
-	}
-
-	return true
+	h.handleMFARequired(w, r, result, false, authClientBrowser)
 }
 
 // handleAuthenticated creates a session and sets cookies for a fully
 // authenticated user.
-func (h *AuthHandlers) handleAuthenticated(w http.ResponseWriter, r *http.Request, result auth.AuthenticationResult, remember bool) {
+func (h *AuthHandlers) handleAuthenticated(w http.ResponseWriter, r *http.Request, result auth.AuthenticationResult, remember bool, clientKind string) {
 	// Verify the user is still permitted to authenticate.
 	if h.userChecker != nil {
 		if err := h.userChecker.CanUseSession(r.Context(), result.UserID); err != nil {
@@ -291,15 +306,20 @@ func (h *AuthHandlers) handleAuthenticated(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	storedClientKind := ""
+	if clientKind == authClientMiniProgram {
+		storedClientKind = session.ClientKindMiniProgram
+	}
 	sessionResult, err := h.sessionSvc.CreateSession(r.Context(), session.CreateSessionInput{
 		UserID:                   result.UserID,
+		ClientKind:               storedClientKind,
 		Provider:                 result.Provider,
 		ProviderSessionReference: result.ProviderSessionReference,
 		ProviderSessionToken:     result.ProviderSessionToken,
 		AuthenticationMethods:    result.AuthenticationMethods,
 		Remember:                 remember,
 		UserAgent:                r.UserAgent(),
-		ClientIP:                 peerIP(r),
+		ClientIP:                 clientIP(r),
 	})
 	if err != nil {
 		h.logger.Error("session creation failed",
@@ -308,6 +328,15 @@ func (h *AuthHandlers) handleAuthenticated(w http.ResponseWriter, r *http.Reques
 			"errorDetail", observability.RedactedError(err, 256),
 		)
 		WriteInternalError(w, r)
+		return
+	}
+
+	if clientKind == authClientMiniProgram {
+		writeJSONNoStore(w, r, http.StatusOK, authenticatedResponse{
+			Status:        "authenticated",
+			SessionBearer: sessionResult.SessionToken,
+			ExpiresAt:     sessionResult.Record.ExpiresAt,
+		})
 		return
 	}
 
@@ -327,7 +356,7 @@ func (h *AuthHandlers) handleAuthenticated(w http.ResponseWriter, r *http.Reques
 // client. The mfaToken is a fresh opaque token generated here with crypto/rand;
 // provider session credentials never leave the server. The provider session
 // ID (needed to complete the second factor) is stored in the challenge.
-func (h *AuthHandlers) handleMFARequired(w http.ResponseWriter, r *http.Request, result auth.AuthenticationResult, remember bool) {
+func (h *AuthHandlers) handleMFARequired(w http.ResponseWriter, r *http.Request, result auth.AuthenticationResult, remember bool, clientKind string) {
 	mfaToken, err := session.GenerateMFAToken()
 	if err != nil {
 		h.logger.Error("mfa token generation failed",
@@ -349,6 +378,7 @@ func (h *AuthHandlers) handleMFARequired(w http.ResponseWriter, r *http.Request,
 		PasskeyRequestOptions: result.PasskeyRequestOptions,
 		Attempts:              0,
 		Remember:              remember,
+		ClientKind:            clientKind,
 		CreatedAt:             time.Now().UTC(),
 	}
 
@@ -397,14 +427,16 @@ func (h *AuthHandlers) handleMFARequired(w http.ResponseWriter, r *http.Request,
 //     user can retry. If max attempts is exceeded, consume the challenge.
 //  7. If the challenge is expired, consume it and return a generic error.
 func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
-	// MFA completes the same logged-out credential-submission flow as the
-	// password step. Keep it behind the identical JSON + exact-Origin boundary
-	// so a cross-site page cannot spend challenge attempts or establish a
-	// browser session on the victim's behalf.
-	if !allowSameOriginJSON(w, r, h.publicOrigin, "MFA 验证") {
-		return
-	}
+	h.completeMFA(w, r, authClientBrowser)
+}
 
+// CompleteMFAMiniProgram completes only a native challenge. Native clients
+// support TOTP here; passkey ceremonies remain browser-bound.
+func (h *AuthHandlers) CompleteMFAMiniProgram(w http.ResponseWriter, r *http.Request) {
+	h.completeMFA(w, r, authClientMiniProgram)
+}
+
+func (h *AuthHandlers) completeMFA(w http.ResponseWriter, r *http.Request, clientKind string) {
 	var req mfaChallengeRequest
 	if err := decodeJSONBody(w, r, &req, "MFA challenge"); err != nil {
 		return
@@ -420,11 +452,15 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "不支持的验证方式。", nil)
 		return
 	}
+	if clientKind == authClientMiniProgram && method != auth.MFAMethodTOTP {
+		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "当前验证方式需要前往统一门户网页完成。", nil)
+		return
+	}
 
 	// Per-method payload validation before any provider call.
 	switch method {
 	case auth.MFAMethodTOTP:
-		if req.Code == "" {
+		if req.Code == "" || (clientKind == authClientMiniProgram && !isSixDigitCode(req.Code)) {
 			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "totp 验证需要提供 code。", nil)
 			return
 		}
@@ -493,6 +529,11 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if challenge.ClientKind != clientKind {
+		_ = h.mfaStore.Consume(r.Context(), mfaTokenHash, claimID)
+		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "验证挑战已失效，请重新登录。", nil)
+		return
+	}
 
 	// Attempt MFA verification via the provider adapter. The provider session
 	// ID comes from the stored challenge; the browser-supplied mfaToken is
@@ -534,7 +575,7 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 
 		// Create session. The remember choice made at login time travels with
 		// the challenge (ADR-0006 §1): MFA completion must not downgrade it.
-		h.handleAuthenticated(w, r, result, challenge.Remember)
+		h.handleAuthenticated(w, r, result, challenge.Remember, clientKind)
 
 	case auth.StatusInvalidCredentials:
 		// Increment the attempt counter. The claim lock is still held by this
@@ -546,13 +587,18 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 				writeError(w, r, http.StatusTooManyRequests, CodeRateLimited, "验证尝试次数过多，请稍后重新登录。", nil)
 				return
 			}
-			if !errors.Is(incErr, auth.ErrMFAChallengeNotFound) {
-				h.logger.Error("mfa attempt increment failed",
-					"requestId", requestID(r),
-					"errorClass", observability.ClassifyError(incErr),
-					"errorDetail", observability.RedactedError(incErr, 256),
-				)
-			}
+			// Attempt persistence is part of the authentication decision. Never
+			// release a claim after a counter failure: doing so would allow a
+			// degraded Redis path to bypass the maximum-attempt budget.
+			consumeErr := h.mfaStore.Consume(r.Context(), mfaTokenHash, claimID)
+			h.logger.Error("mfa attempt increment failed closed",
+				"requestId", requestID(r),
+				"errorClass", observability.ClassifyError(incErr),
+				"errorDetail", observability.RedactedError(incErr, 256),
+				"challengeCleanupErrorClass", observability.ClassifyError(consumeErr),
+			)
+			WriteInternalError(w, r)
+			return
 		}
 		// Release the claim so the user can retry within the remaining
 		// attempt budget.
@@ -587,7 +633,10 @@ func (h *AuthHandlers) CompleteMFA(w http.ResponseWriter, r *http.Request) {
 // 204 and clears the cookies. Provider unavailability does not prevent local
 // session invalidation.
 func (h *AuthHandlers) Logout(w http.ResponseWriter, r *http.Request) {
-	token := ReadSessionCookie(r)
+	token, _ := SessionTokenFromContext(r.Context())
+	if token == "" {
+		token = ReadSessionCookie(r)
+	}
 	record, _ := SessionRecordFromContext(r.Context())
 
 	// Delete the local session.
@@ -617,8 +666,10 @@ func (h *AuthHandlers) Logout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ClearSessionCookie(w, h.cookieAttrs)
-	ClearCSRFCookie(w, h.cookieAttrs)
+	if !IsNativeBearerSession(r.Context()) {
+		ClearSessionCookie(w, h.cookieAttrs)
+		ClearCSRFCookie(w, h.cookieAttrs)
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -674,12 +725,30 @@ func isValidMFAMethod(m auth.MFAMethod) bool {
 	}
 }
 
+func isSixDigitCode(value string) bool {
+	if len(value) != 6 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // hashIdentifier returns the hex-encoded SHA-256 hash of the login identifier.
 // The hash is used as the rate-limit key component so the raw identifier (which
 // may be an email or username) never appears in Redis keys.
 func hashIdentifier(identifier string) string {
 	h := sha256.Sum256([]byte(identifier))
 	return hex.EncodeToString(h[:])
+}
+
+// hashLoginIdentifier normalizes provider-equivalent casing and surrounding
+// whitespace so aliases cannot split the Redis attempt budget.
+func hashLoginIdentifier(identifier string) string {
+	return hashIdentifier(strings.ToLower(strings.TrimSpace(identifier)))
 }
 
 // generateClaimID returns a random hex string used as the MFA claim lock
@@ -694,28 +763,6 @@ func generateClaimID() (string, error) {
 		return "", fmt.Errorf("httpapi: generate mfa claim id: %w", err)
 	}
 	return hex.EncodeToString(buf), nil
-}
-
-// clientIP extracts the transport peer address for rate limiting. United Pass
-// has no trusted-proxy configuration, so caller-controlled forwarding headers
-// must not partition the limiter into attacker-selected buckets. Precise
-// original-client attribution belongs to a future explicit trusted-proxy
-// boundary; until then the reverse proxy peer is the only authoritative key.
-func clientIP(r *http.Request) string {
-	return peerIP(r)
-}
-
-// peerIP returns the transport-layer peer host of the request (RemoteAddr
-// only). It never consults X-Forwarded-For or any other proxy-supplied
-// header, so a caller cannot spoof the address persisted in session
-// metadata (P4.0 freeze: no new proxy-header trust; precise client IP
-// determination belongs to a future trusted-proxy design).
-func peerIP(r *http.Request) string {
-	addr := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(addr); err == nil {
-		return host
-	}
-	return addr
 }
 
 // requestID extracts the request ID from the context for logging.

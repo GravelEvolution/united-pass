@@ -94,6 +94,9 @@ func (s UserStatus) CanAuthenticate() bool {
 // responses. It masks all but the last 4 digits. If the number is too short
 // to mask safely, it returns a fully masked placeholder.
 func MaskPhone(phone string) string {
+	if phone == "" {
+		return ""
+	}
 	if len(phone) <= 4 {
 		return "****"
 	}

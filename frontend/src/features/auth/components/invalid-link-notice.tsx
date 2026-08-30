@@ -29,6 +29,7 @@ export function InvalidLinkNotice({
   return (
     <div className={styles.panel}>
       <div className={styles.heading}>
+        <span className={styles.mockBadge}>MOCK PREVIEW</span>
         <h1>{title}</h1>
         <p>{description}</p>
       </div>
@@ -41,6 +42,7 @@ export function InvalidLinkNotice({
           <Button theme="solid" type="primary" size="large" block>{actionLabel}</Button>
         </Link>
       </div>
+      <p className={styles.notice}>当前为界面 mock，不会校验任何真实令牌。</p>
     </div>
   );
 }

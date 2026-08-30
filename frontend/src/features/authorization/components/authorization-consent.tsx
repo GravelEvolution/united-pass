@@ -14,7 +14,6 @@ import { useRouter } from "next/navigation";
 import { Avatar, Button, Toast } from "@douyinfe/semi-ui";
 import {
   IconAlertTriangle,
-  IconKey,
   IconLock,
   IconTick,
   IconClose,
@@ -32,6 +31,9 @@ import {
   type CompletionFailure,
 } from "@/features/authorization/consent-completion";
 import styles from "./authorization-consent.module.css";
+
+const DEFAULT_AVATAR_URL =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='50' fill='%23eef1f6'/%3E%3Ccircle cx='50' cy='38' r='16' fill='%23b6bfcc'/%3E%3Cpath d='M50 58c-15 0-26 9-26 21v4h52v-4c0-12-11-21-26-21z' fill='%23b6bfcc'/%3E%3C/svg%3E";
 
 type AuthorizationConsentProps = {
   currentUser?: CurrentUser;
@@ -248,7 +250,7 @@ function ConsentCard({
     <div className={styles.card}>
       {showMockIndicators && <div className={styles.mockBadge}>授权请求 · MOCK</div>}
       <div className={styles.application}>
-        <div className={styles.applicationIcon}><IconKey size="extra-large" /></div>
+        <div className={styles.applicationIcon}><img className={styles.applicationLogo} src="https://moonstone.org.cn/image/logo.png" alt="MoonStone" /></div>
         <div>
           <h1>{request.applicationName}</h1>
           <p>{request.applicationDescription}</p>
@@ -257,7 +259,7 @@ function ConsentCard({
       </div>
 
       <section className={styles.identity} aria-labelledby="current-identity-title">
-        <Avatar color="blue">{currentUser.displayName.slice(0, 1)}</Avatar>
+        <Avatar src={currentUser?.avatarUrl ?? DEFAULT_AVATAR_URL} />
         <div>
           <span id="current-identity-title">当前身份</span>
           <strong>{currentUser.displayName}</strong>
@@ -462,7 +464,7 @@ function CompletionFailedCard({
       </div>
       <h1>无法继续此授权请求</h1>
       <p>{failure.message}</p>
-      <p>授权请求只能完成一次，United Pass 无法确认决定是否已提交，因此不会对同一请求再次提交。</p>
+      <p>授权请求只能完成一次，统一登陆门户无法确认决定是否已提交，因此不会对同一请求再次提交。</p>
       <div className={styles.stateActions}>
         <Link href="/account"><Button theme="solid" type="primary">返回账户中心</Button></Link>
       </div>

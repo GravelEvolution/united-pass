@@ -30,16 +30,15 @@ info:
     durable audit search/export jobs.
     Phase 8 scope: controlled legal-document publication, requester-owned
     personal-data exports and cancellable delayed account deletion.
-    Production-completion scope: provider-owned public registration, verified
-    credential recovery, current-user profile/avatar/contact mutation and a
-    permission-scoped administration dashboard.
+    DreamUP administration scope: event-scoped roles, administrator step-up,
+    admission review and restricted identity-access approvals.
     See `../docs/adr-0004.md`, `../docs/adr-0011.md` and
     `../docs/adr-0012.md` and `../docs/adr-0013.md` for the architecture decisions.
 
     Business API paths use the full `/api/v1/...` prefix explicitly rather than
     relying on a global server base path, so that root-level operational endpoints
     and versioned API endpoints can coexist accurately.
-  version: 0.9.0
+  version: 0.10.0
   contact:
     name: United Pass backend team
 
@@ -57,10 +56,20 @@ tags:
       Browser session establishment, MFA challenge completion and logout.
       Sessions are carried by the `up_session` HttpOnly cookie; state-changing
       operations require the `X-CSRF-Token` header matching the `up_csrf` cookie.
+  - name: WeChat Mini Program
+    description: |
+      Default-off server-side verification of one-time Mini Program codes.
+      The client never sends an openId, unionId, session_key, AppSecret or a
+      claimed phone number. Legacy login restores only a pre-existing explicit
+      binding; the separately gated onboarding routes can create or link an
+      account after password/MFA and email controls.
+  - name: Registration
+    description: |
+      Default-off public account creation and email verification. Every
+      mutation requires an exact same-origin `Origin` header, JSON, a bounded
+      body, and an independent Redis rate-limit namespace.
   - name: Account
     description: Current user profile and permission capabilities
-  - name: Account Lifecycle
-    description: Provider-owned registration, email verification and password recovery
   - name: Account Security
     description: Provider-authoritative account factors and passkey lifecycle
   - name: Privacy and Legal
@@ -70,6 +79,16 @@ tags:
       High-risk operation reauthentication. A completed grant is required
       (single-use, action-bound, session-bound) before delete or secret
       rotation operations execute.
+  - name: Administrator Step-up
+    description: |
+      Owner-only DreamUP administrator question-and-answer step-up. The entire
+      namespace is absent unless the server-side DreamUP administration gate is
+      explicitly enabled. Challenge secrets are never returned by mutations.
+  - name: Restricted Identity Access
+    description: |
+      Event-scoped, time-limited access to an allowlisted set of identity fields.
+      Requests never include legal documents and responses never expose the
+      encrypted reason, internal authorization stamp, or one-time claim nonce.
   - name: Admin Users
     description: Stable identity administration and target user session lifecycle
   - name: Admin Employees
@@ -84,8 +103,8 @@ tags:
     description: Versioned ABAC drafts, simulation and Cerbos publication
   - name: Admin Audit
     description: Durable security-event filtering and short-lived asynchronous CSV exports
-  - name: Admin Dashboard
-    description: Permission-scoped aggregate metrics and redacted recent audit events
+  - name: Admin Registration Defense
+    description: Audited system-administrator recovery for false-positive registration blocks
   - name: Scope Catalog
     description: Backend-authoritative OAuth scope catalog
   - name: Admin Applications
@@ -103,6 +122,775 @@ tags:
       the new secret is returned exactly once with `Cache-Control: no-store`.
 
 paths:
+  /.well-known/dreamup-admin-jwks.json:
+    get:
+      tags: [Administrator Step-up]
+      summary: DreamUP delegation verification keys
+      operationId: getDreamUPAdminJWKS
+      responses:
+        "200":
+          description: Public Ed25519 JWK set
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    items: { type: object }
+    head:
+      tags: [Administrator Step-up]
+      summary: Check DreamUP administrator delegation verification keys
+      operationId: headDreamUPAdminJWKS
+      responses:
+        "200":
+          description: Verification-key representation metadata without a response body
+
+  /.well-known/dreamup-mobile-jwks.json:
+    get:
+      tags: [WeChat Mini Program]
+      summary: DreamUP participant delegation verification keys
+      operationId: getDreamUPMobileJWKS
+      responses:
+        "200":
+          description: Public Ed25519 JWK set for request-bound Mini Program assertions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    items: { type: object }
+    head:
+      tags: [WeChat Mini Program]
+      summary: Check DreamUP participant delegation verification keys
+      operationId: headDreamUPMobileJWKS
+      responses:
+        "200":
+          description: Verification-key representation metadata without a response body
+
+  /api/v1/admin/dreamup/events:
+    get:
+      tags: [Administrator Step-up]
+      summary: List authorized DreamUP events
+      operationId: listAuthorizedDreamUPEvents
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      responses:
+        "200":
+          description: Authorized event summaries
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/admin/dreamup/session:
+    get:
+      tags: [Administrator Step-up]
+      summary: Bootstrap the first-party DreamUP administrator session
+      operationId: getDreamUPAdminBrowserSession
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      responses:
+        "200":
+          description: Authenticated user; browser-cookie callers also receive their CSRF value in the body.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/admin/dreamup/eligibility:
+    get:
+      tags: [Administrator Step-up]
+      summary: Check whether the current account may enter DreamUP administration
+      operationId: getDreamUPAdminEligibility
+      description: |
+        Low-disclosure authenticated bootstrap check. Returns true only when the
+        caller has at least one active event binding authorized for
+        `event.dashboard.read`. Generic account personas are not authority. This
+        operation deliberately returns no event, role, count or step-up data and
+        does not require administrator step-up.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      responses:
+        "200":
+          description: Eligibility result containing one boolean only.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPAdminEligibilityResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/admin/dreamup/step-up/challenge:
+    get:
+      tags: [Administrator Step-up]
+      summary: Read the DreamUP administrator step-up challenge
+      operationId: getDreamUPAdminStepUpChallenge
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUPEventIdQuery"
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      responses:
+        "200":
+          description: Current administrator step-up state and public question.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminStepUpChallengeResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/admin/dreamup/step-up/enroll:
+    post:
+      tags: [Administrator Step-up]
+      summary: Enroll the DreamUP administrator step-up answer
+      operationId: enrollDreamUPAdminStepUp
+      description: Cookie callers provide CSRF; native bearer callers provide the Mini Program marker instead. A fresh provider-backed primary login is always required. Existing TOTP, passkey, or recovery MFA is accepted; only an active system-scoped super_admin or top_admin with no existing challenge may use the initial-enrollment bootstrap exception without existing MFA. A federated session lacking provider session proof receives session.reauthentication_required.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+        - $ref: "#/components/parameters/Idempotency-Key"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminStepUpEnrollRequest" }
+      responses:
+        "201":
+          description: Step-up answer enrolled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminStepUpMutationResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/admin/dreamup/step-up/verify:
+    post:
+      tags: [Administrator Step-up]
+      summary: Verify the DreamUP administrator step-up answer
+      operationId: verifyDreamUPAdminStepUp
+      description: |
+        Cookie callers provide CSRF; native bearer callers provide the Mini
+        Program marker instead. The provider-backed primary login must be no
+        older than 30 minutes. Every mutation, including application review
+        and check-in scan, is high risk. Verification returns a five-minute,
+        action-and-target-bound single-use token, which a native Mini Program
+        client must hold in memory and send exactly once as
+        `X-Reauthentication-Token`. Verification also refreshes the durable
+        session-bound proof used by the existing cookie website; that website
+        may omit the header only while this proof is no more than five minutes
+        old. A cookie request that supplies a token gets strict single-use
+        semantics and cannot fall back after token rejection.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+        - $ref: "#/components/parameters/Idempotency-Key"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminStepUpVerifyRequest" }
+      responses:
+        "200":
+          description: Step-up grant established for the current session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminStepUpMutationResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "423": { $ref: "#/components/responses/Locked" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/admin/dreamup/events/{eventId}/operations/status:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    get:
+      tags: [Administrator Step-up]
+      summary: Read the durable outcome of a DreamUP administration mutation
+      operationId: getDreamUPAdminMutationStatus
+      description: |
+        Returns only the authoritative United Pass mutation-ledger status for
+        the supplied idempotency key. Access requires the initiating account,
+        a current event dashboard binding, and active administrator step-up.
+        This endpoint never reissues the mutation and never returns the private
+        DreamUP receipt hash or the original request/response body. After a
+        succeeded result, refetch the authoritative DreamUP resource state.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Idempotency-Key"
+      responses:
+        "200":
+          description: Durable mutation outcome metadata.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPMutationStatusResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502":
+          description: The durable outcome ledger is temporarily unavailable or internally inconsistent.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/v1/admin/dreamup/events/{eventId}/teams:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    get:
+      tags: [Administrator Step-up]
+      summary: List review-safe DreamUP team summaries
+      operationId: listDreamUPAdminTeams
+      description: Requires the event dashboard-read capability and an active administrator session. Participant contact details and application answers are not disclosed.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      responses:
+        "200":
+          description: Review-safe team summaries for the selected event
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/admin/dreamup/events/{eventId}/content:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    get:
+      tags: [Administrator Step-up]
+      summary: Read DreamUP introduction and announcement drafts
+      operationId: getDreamUPAdminContent
+      description: Requires the high-risk `event.content.manage` capability and a fresh five-minute administrator proof. Native Mini Program bearer callers require an action-and-target-bound one-shot token; the existing cookie website may use its session-bound durable proof. Draft content is private and no-store.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+      responses:
+        "200":
+          description: Current introduction and announcement administration state.
+          headers:
+            ETag: { $ref: "#/components/headers/ETag" }
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPContentResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/admin/dreamup/events/{eventId}/content/intro:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    put:
+      tags: [Administrator Step-up]
+      summary: Save or publish the DreamUP event introduction
+      operationId: putDreamUPAdminIntroduction
+      description: Requires `event.content.manage`, a fresh five-minute administrator proof, CSRF for cookie callers, `If-Match`, and an idempotency key. Native Mini Program bearer callers require an action-and-target-bound one-shot token; the existing cookie website may use its session-bound durable proof. The JSON object is passed through unchanged to the private DreamUP data plane.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DreamUPIntroMutationRequest" }
+      responses:
+        "200":
+          description: Persisted content state.
+          headers:
+            ETag: { $ref: "#/components/headers/ETag" }
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPContentResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+
+  /api/v1/admin/dreamup/events/{eventId}/announcements:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    post:
+      tags: [Administrator Step-up]
+      summary: Create a DreamUP announcement draft or publication
+      operationId: postDreamUPAdminAnnouncement
+      description: Requires `event.content.manage`, a fresh five-minute administrator proof, CSRF for cookie callers, `If-Match`, and an idempotency key. Native Mini Program bearer callers require an action-and-target-bound one-shot token; the existing cookie website may use its session-bound durable proof. The JSON object is passed through unchanged to the private DreamUP data plane.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DreamUPAnnouncementMutationRequest" }
+      responses:
+        "200":
+          description: Created announcement state.
+          headers:
+            ETag: { $ref: "#/components/headers/ETag" }
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPContentResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+
+  /api/v1/admin/dreamup/events/{eventId}/announcements/{contentId}:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - $ref: "#/components/parameters/DreamUPContentIdPath"
+    patch:
+      tags: [Administrator Step-up]
+      summary: Save, publish or archive an existing DreamUP announcement
+      operationId: patchDreamUPAdminAnnouncement
+      description: Requires `event.content.manage`, a fresh five-minute administrator proof, CSRF for cookie callers, `If-Match`, and an idempotency key. Native Mini Program bearer callers require an action-and-target-bound one-shot token; the existing cookie website may use its session-bound durable proof. The JSON object is passed through unchanged to the private DreamUP data plane.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DreamUPAnnouncementMutationRequest" }
+      responses:
+        "200":
+          description: Persisted announcement state.
+          headers:
+            ETag: { $ref: "#/components/headers/ETag" }
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPContentResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+
+  /api/v1/admin/dreamup/events/{eventId}/contact-submissions:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    get:
+      tags: [Administrator Step-up]
+      summary: List audited DreamUP feedback and sponsorship submissions
+      operationId: listDreamUPContactSubmissions
+      description: Requires the high-risk `event.contact_submission.manage` capability and a fresh five-minute administrator proof. Native Mini Program bearer callers require an action-and-target-bound one-shot token; the existing cookie website may use its session-bound durable proof. Generic audit-read authority is insufficient. Results are audit-logged before disclosure.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - name: kind
+          in: query
+          schema: { type: string, enum: [feedback, sponsorship] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: cursor
+          in: query
+          description: Opaque base64url cursor returned by the previous page.
+          schema: { type: string, minLength: 1, maxLength: 512, pattern: "^[A-Za-z0-9_-]+$" }
+      responses:
+        "200":
+          description: Audited contact submissions with the latest immutable handling state. Participant-provided contact data is private and no-store.
+          x-data-classification: participant_contact
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [submissions, nextCursor]
+                properties:
+                  submissions:
+                    type: array
+                    maxItems: 100
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [id, kind, category, payload, createdAt, resolution]
+                      properties:
+                        id: { type: string }
+                        kind: { type: string, enum: [feedback, sponsorship] }
+                        category: { type: string, enum: [feedback, emergency, sponsorship] }
+                        payload:
+                          oneOf:
+                            - type: object
+                              additionalProperties: false
+                              required: [content]
+                              properties:
+                                content: { type: string, minLength: 10, maxLength: 4000 }
+                            - type: object
+                              additionalProperties: false
+                              required: [category, eventType, location, contact, details]
+                              properties:
+                                category: { type: string, const: emergency }
+                                eventType: { type: string }
+                                location: { type: string }
+                                contact: { type: string }
+                                details: { type: string }
+                            - type: object
+                              additionalProperties: false
+                              required: [organization, contact, intent]
+                              properties:
+                                organization: { type: string, minLength: 2, maxLength: 160 }
+                                contact: { type: string, minLength: 3, maxLength: 254 }
+                                intent: { type: string, minLength: 10, maxLength: 2000 }
+                        createdAt: { type: string, format: date-time }
+                        resolution:
+                          oneOf:
+                            - type: object
+                              additionalProperties: false
+                              required: [status, version, note, updatedAt]
+                              properties:
+                                status: { type: string, enum: [acknowledged, closed] }
+                                version: { type: integer, minimum: 1 }
+                                note: { type: string, minLength: 2, maxLength: 1000 }
+                                updatedAt: { type: string, format: date-time }
+                            - type: "null"
+                  nextCursor:
+                    type: [string, "null"]
+                    maxLength: 512
+                    pattern: "^[A-Za-z0-9_-]+$"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/admin/dreamup/events/{eventId}/contact-submissions/{submissionId}:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - $ref: "#/components/parameters/DreamUPContactSubmissionIdPath"
+    get:
+      tags: [Administrator Step-up]
+      summary: Read one audited DreamUP contact submission
+      operationId: getDreamUPContactSubmission
+      description: Requires the high-risk `event.contact_submission.manage` capability and a fresh five-minute administrator proof. Native Mini Program bearer callers require an action-and-target-bound one-shot token; the existing cookie website may use its session-bound durable proof. Generic audit-read authority is insufficient.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+      responses:
+        "200":
+          description: One private contact submission and its latest immutable handling state.
+          x-data-classification: participant_contact
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [submission]
+                properties:
+                  submission: { $ref: "#/components/schemas/DreamUPContactSubmission" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/admin/dreamup/events/{eventId}/contact-submissions/{submissionId}/resolution:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - $ref: "#/components/parameters/DreamUPContactSubmissionIdPath"
+    post:
+      tags: [Administrator Step-up]
+      summary: Append a DreamUP contact-submission handling state
+      operationId: postDreamUPContactSubmissionResolution
+      description: Requires the dedicated high-risk `event.contact_submission.manage` capability, a fresh five-minute administrator proof, CSRF for cookie callers, `If-Match`, and an idempotency key. Native Mini Program bearer callers require an action-and-target-bound one-shot token; the existing cookie website may use its session-bound durable proof. The signed delegation binds both state-control headers.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status, note]
+              properties:
+                status: { type: string, enum: [acknowledged, closed] }
+                note: { type: string, minLength: 2, maxLength: 1000 }
+      responses:
+        "200":
+          description: Persisted append-only handling state. Support notes are private and no-store.
+          x-data-classification: participant_contact_resolution
+          headers:
+            ETag: { $ref: "#/components/headers/ETag" }
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [resolution]
+                properties:
+                  resolution:
+                    type: object
+                    additionalProperties: false
+                    required: [status, version, note, updatedAt]
+                    properties:
+                      status: { type: string, enum: [acknowledged, closed] }
+                      version: { type: integer, minimum: 1 }
+                      note: { type: string, minLength: 2, maxLength: 1000 }
+                      updatedAt: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/admin/dreamup/events/{eventId}/applications:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    get:
+      tags: [Administrator Step-up]
+      summary: List review-safe DreamUP applications
+      operationId: listDreamUPReviewApplications
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      responses:
+        "200":
+          description: Review-safe applications
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: applicationId
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 160 }
+    get:
+      tags: [Administrator Step-up]
+      summary: Read one review-safe DreamUP application
+      operationId: getDreamUPReviewApplication
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      responses:
+        "200":
+          description: Review-safe application and caller review
+          content:
+            application/json:
+              schema: { type: object }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/reviews/me:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: applicationId
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 160 }
+    put:
+      tags: [Administrator Step-up]
+      summary: Save the caller's application review
+      operationId: putDreamUPOwnReview
+      description: Requires the high-risk `event.application.review` capability and a fresh five-minute administrator proof. Native Mini Program bearer callers require an application-target-bound one-shot token; the existing cookie website may use its session-bound durable proof.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        "200":
+          description: Saved own review
+          content:
+            application/json:
+              schema: { type: object }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: applicationId
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 160 }
+    get:
+      tags: [Administrator Step-up]
+      summary: Read three-administrator admission consensus
+      operationId: getDreamUPAdmissionConsensus
+      description: Requires the high-risk `event.application.approve_admission` capability and a fresh five-minute administrator proof. Native Mini Program bearer callers require an application-target-bound one-shot token; the existing cookie website may use its session-bound durable proof.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+      responses:
+        "200":
+          description: Admission consensus
+          content:
+            application/json:
+              schema: { type: object }
+
+  /api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus/approval:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: applicationId
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 160 }
+    put:
+      tags: [Administrator Step-up]
+      summary: Add the caller's admission approval
+      operationId: putDreamUPAdmissionApproval
+      description: Requires the high-risk `event.application.approve_admission` capability and a fresh five-minute administrator proof. Native Mini Program bearer callers require an application-target-bound one-shot token; the existing cookie website may use its session-bound durable proof.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        "200":
+          description: Updated consensus
+          content:
+            application/json:
+              schema: { type: object }
+    delete:
+      tags: [Administrator Step-up]
+      summary: Withdraw the caller's admission approval
+      operationId: deleteDreamUPAdmissionApproval
+      description: Requires the high-risk `event.application.approve_admission` capability and a fresh five-minute administrator proof. Native Mini Program bearer callers require an application-target-bound one-shot token; the existing cookie website may use its session-bound durable proof.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      responses:
+        "200":
+          description: Updated consensus
+          content:
+            application/json:
+              schema: { type: object }
+
+  /api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/decision:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: applicationId
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 160 }
+    post:
+      tags: [Administrator Step-up]
+      summary: Record a non-accept admission decision
+      operationId: postDreamUPApplicationDecision
+      description: Requires the high-risk `event.application.decide` capability and a fresh five-minute administrator proof. Native Mini Program bearer callers require an application-target-bound one-shot token; the existing cookie website may use its session-bound durable proof.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        "200":
+          description: Updated application
+          content:
+            application/json:
+              schema: { type: object }
+
+  /api/v1/admin/dreamup/events/{eventId}/checkins/scan:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    post:
+      tags: [Administrator Step-up]
+      summary: Validate and consume a participant entry code
+      operationId: postDreamUPCheckinScan
+      description: Requires the high-risk `event.checkin.scan` capability and a fresh five-minute administrator proof. Native Mini Program bearer callers require an event-target-bound one-shot token; the existing cookie website may use its session-bound durable proof.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+              additionalProperties: false
+      responses:
+        "200":
+          description: Check-in result without participant identity data
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
   /healthz:
     get:
       tags: [Operational]
@@ -157,152 +945,223 @@ paths:
               example:
                 status: not ready
 
-  /api/v1/registrations:
+  /api/v1/registrations/form-intents:
     post:
-      tags: [Account Lifecycle]
-      summary: Register a public user account
+      tags: [Registration]
+      summary: Issue a short-lived registration form intent
       description: |
-        Creates a provider-owned human credential and an atomically linked,
-        pending United Pass identity with the consumer persona. The account
-        cannot authenticate until its exact registered email is verified.
-        Requests require `application/json` and an exact same-origin `Origin`;
-        cross-site submissions are rejected before credentials reach the
-        provider. Passwords and provider verification codes are never stored.
-      operationId: registerPublicAccount
+        Creates a one-use, server-timed intent bound to digests of the current
+        user agent, trusted client network, and optional server-issued risk
+        device. The registration mutation rejects missing, expired, replayed,
+        or implausibly immediate intents before provisioning an identity.
+      operationId: issueRegistrationFormIntent
+      parameters:
+        - $ref: "#/components/parameters/RegistrationOrigin"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/PublicRegistrationRequest"
+              type: object
+              additionalProperties: false
       responses:
         "201":
-          description: Pending account created and verification message requested.
-          headers:
-            Cache-Control:
-              schema: { type: string, enum: [no-store] }
+          description: Short-lived form intent issued.
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/PublicRegistrationResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "409":
-          $ref: "#/components/responses/Conflict"
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "502":
-          $ref: "#/components/responses/ProviderUnavailable"
-        "500":
-          $ref: "#/components/responses/InternalError"
+              schema: {$ref: "#/components/schemas/RegistrationFormIntentResponse"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "413": {$ref: "#/components/responses/BadRequest"}
+        "415": {$ref: "#/components/responses/BadRequest"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "502": {$ref: "#/components/responses/ProviderUnavailable"}
 
-  /api/v1/password-reset-requests:
+  /api/v1/registrations:
     post:
-      tags: [Account Lifecycle]
-      summary: Request password-reset instructions
+      tags: [Registration]
+      summary: Create a pending public account registration
       description: |
-        Always returns the same accepted response after syntax and rate-limit
-        checks. Account absence, unverified contact, missing local binding and
-        provider-notification failure are intentionally indistinguishable.
-        Requires JSON and an exact same-origin `Origin`.
-      operationId: requestPublicPasswordReset
+        Creates a ZITADEL human user with a United Pass-controlled user ID and
+        transactionally pre-creates the matching local pending identity link
+        and consumer persona. The account cannot authenticate until its email
+        is verified. Passwords are write-only and never logged. Duplicate
+        account names and emails share one generic conflict response. This
+        legacy browser surface is absent unless
+        `UP_PUBLIC_REGISTRATION_ENABLED=true`; enabling Mini Program
+        registration does not expose it.
+      operationId: createRegistration
+      parameters:
+        - $ref: "#/components/parameters/RegistrationOrigin"
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              $ref: "#/components/schemas/PasswordResetRequest"
+            schema: {$ref: "#/components/schemas/RegistrationCreateRequest"}
+      responses:
+        "201":
+          description: Pending account created and verification email requested.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RegistrationCreateResponse"}
+        "403":
+          description: Origin rejected, or objective abuse signals require step-up.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "413": {$ref: "#/components/responses/BadRequest"}
+        "415": {$ref: "#/components/responses/BadRequest"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "502": {$ref: "#/components/responses/ProviderUnavailable"}
+
+  /api/v1/registrations/email/verify:
+    post:
+      tags: [Registration]
+      summary: Verify a pending account email and activate the account
+      description: |
+        The browser reads userId, code and requestId from the URL fragment,
+        erases the fragment from history, and sends them in this JSON body.
+        Verification codes therefore never enter HTTP or reverse-proxy access
+        logs. Provider verification precedes the transactional local activation.
+        This shared pending-account lifecycle is present when either legacy
+        browser registration or Mini Program registration is enabled. It
+        cannot create an account and does not expose the legacy create route.
+      operationId: verifyRegistrationEmail
+      parameters:
+        - $ref: "#/components/parameters/RegistrationOrigin"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RegistrationVerifyRequest"}
+      responses:
+        "200":
+          description: Email verified and local account activated.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RegistrationVerifyResponse"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "413": {$ref: "#/components/responses/BadRequest"}
+        "415": {$ref: "#/components/responses/BadRequest"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "502": {$ref: "#/components/responses/ProviderUnavailable"}
+
+  /api/v1/registrations/email/resend:
+    post:
+      tags: [Registration]
+      summary: Resend the pending registration email verification
+      description: |
+        Accepts only the short-lived opaque registration token. Redis stores
+        only its SHA-256 hash mapped to the provider user ID and validated
+        authorization request ID; callers cannot submit or select a user ID.
+        This shared pending-account lifecycle is present when either legacy
+        browser registration or Mini Program registration is enabled. The
+        opaque token cannot create or select an arbitrary account.
+      operationId: resendRegistrationEmail
+      parameters:
+        - $ref: "#/components/parameters/RegistrationOrigin"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RegistrationResendRequest"}
       responses:
         "202":
-          description: Request accepted; no account-existence signal is returned.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
+          description: A fresh verification email was requested.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RegistrationResendResponse"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "413": {$ref: "#/components/responses/BadRequest"}
+        "415": {$ref: "#/components/responses/BadRequest"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "502": {$ref: "#/components/responses/ProviderUnavailable"}
 
-  /api/v1/password-resets:
+  /api/v1/registrations/wechat:
     post:
-      tags: [Account Lifecycle]
-      summary: Complete a provider-verified password reset
+      tags: [WeChat Mini Program, Registration]
+      summary: Create a pending account with mandatory verified WeChat identity and phone binding
       description: |
-        Opens the short-lived encrypted United Pass lifecycle token, verifies
-        the provider code, changes the provider-owned password and advances the
-        user's security epoch so all older sessions are invalidated. The local
-        token contains no email, provider subject, password or code.
-      operationId: completePublicPasswordReset
+        This Mini Program-only registration flow accepts only fresh one-time
+        `wx.login` and `getPhoneNumber` codes. The API verifies them server-side
+        and durably reserves a retryable pending identity before provider
+        creation. Activation remains fail-closed until the verified phone,
+        primary provider link, WeChat identity link and consumer persona are
+        all complete. The route is absent unless both
+        `UP_WECHAT_MINIPROGRAM_ENABLED=true` and the independent
+        `UP_WECHAT_MINIPROGRAM_REGISTRATION_ENABLED=true` gate are set. It does
+        not depend on, or enable, the legacy `UP_PUBLIC_REGISTRATION_ENABLED`
+        browser surface. Requests must carry the exact
+        `X-UnitedPass-Client: dreamup-miniprogram` transport marker; the marker
+        grants no authority and a missing or incorrect value fails closed.
+      operationId: createWeChatRegistration
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client"
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              $ref: "#/components/schemas/PasswordResetCompletionRequest"
+            schema: {$ref: "#/components/schemas/WeChatRegistrationCreateRequest"}
       responses:
-        "204":
-          description: Password reset completed and older sessions invalidated.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "409":
-          $ref: "#/components/responses/Conflict"
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "502":
-          $ref: "#/components/responses/ProviderUnavailable"
-        "500":
-          $ref: "#/components/responses/InternalError"
+        "201":
+          description: Pending account reserved and provider verification requested; email verification is still required.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RegistrationCreateResponse"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "413": {$ref: "#/components/responses/BadRequest"}
+        "415": {$ref: "#/components/responses/BadRequest"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "502": {$ref: "#/components/responses/ProviderUnavailable"}
 
-  /api/v1/email-verifications:
+  /api/v1/admin/registration-defense/blocks/revoke:
     post:
-      tags: [Account Lifecycle]
-      summary: Verify a pending registration email
+      tags: [Admin Registration Defense]
+      summary: Revoke one false-positive registration abuse block
       description: |
-        Verifies the provider-issued email code for the exact provider subject
-        bound inside a short-lived encrypted lifecycle token, then activates
-        only the matching pending United Pass user. Provider readback repairs a
-        consumed-code/response-loss retry without trusting browser identity data.
-      operationId: verifyPublicRegistrationEmail
+        Requires a browser session, matching CSRF token, an active system
+        `super_admin` or `top_admin` binding, an active/non-offboarding
+        principal, and authoritative `policy.manage` plus `audit.read`
+        capabilities. It also consumes a single-use reauthentication grant
+        for `registration.abuse.unblock`, bound to `<dimension>_<sha256>`, and
+        is rate limited per administrator. The request accepts one explicit
+        raw IP address or a server-issued risk-device token. Because that token
+        is HttpOnly, device recovery may instead use the exact lowercase SHA-256
+        digest already present in the abuse audit. IP recovery always
+        canonicalizes and hashes the raw address at the HTTP boundary. Redis
+        prefixes and arbitrary keys are never accepted. The authorized request
+        and terminal outcome are written to the durable security audit log.
+        Audit targets use a purpose-separated HMAC, so neither the raw
+        fingerprint nor the enumerable SHA-256 of an IPv4 address is stored.
+      operationId: revokeRegistrationAbuseBlock
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              $ref: "#/components/schemas/EmailVerificationRequest"
+            schema: {$ref: "#/components/schemas/RegistrationAbuseBlockRevokeRequest"}
       responses:
-        "204":
-          description: Email verified and pending account activated.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "410":
-          $ref: "#/components/responses/Gone"
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "502":
-          $ref: "#/components/responses/ProviderUnavailable"
-        "500":
-          $ref: "#/components/responses/InternalError"
+        "204": {description: The selected block dimension and associated strike state were revoked.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "413": {$ref: "#/components/responses/BadRequest"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "500": {$ref: "#/components/responses/InternalError"}
 
   /api/v1/auth/sessions:
     post:
@@ -327,11 +1186,10 @@ paths:
         Authentication failures return generic errors that do not reveal whether
         the account, email or phone number exists. Passwords are never logged.
 
-        Browser clients must use `application/json`, send an `Origin` exactly
-        matching the configured public origin, and must not present cross-site
-        Fetch Metadata. This is the logged-out login-CSRF boundary.
-
         Rate limited. Repeated failures return `429` with a `Retry-After` header.
+        Objective, server-observed abuse signals may instead return `403` with
+        `error.code=step_up_required`. No name, display name, writing style, or
+        other subjective content participates in that decision.
       operationId: createSession
       requestBody:
         required: true
@@ -397,8 +1255,10 @@ paths:
                       message: "该字段不能为空。"
         "401":
           description: |
-            Invalid credentials. The response is generic and does not reveal
-            whether the identifier corresponds to an existing account.
+            Authentication was rejected. Invalid credentials and provider-side
+            authorization faults use the same generic response so the result
+            does not reveal whether the identifier corresponds to an existing
+            account.
           headers:
             X-Request-ID:
               $ref: "#/components/headers/X-Request-ID"
@@ -408,9 +1268,14 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
               example:
                 error:
-                  code: auth.invalid_credentials
-                  message: "账户名、邮箱或密码错误。"
+                  code: session.unauthenticated
+                  message: "账户名或密码错误。"
                   requestId: req_0123456789abcdef
+        "403":
+          description: Objective abuse signals require a single-use step-up challenge.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
         "413":
           description: Request body exceeds the configured maximum size.
           headers:
@@ -425,10 +1290,6 @@ paths:
                   code: request.too_large
                   message: "请求体过大。"
                   requestId: req_0123456789abcdef
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
         "429":
           description: |
             Too many login attempts. The caller must wait before retrying.
@@ -461,6 +1322,292 @@ paths:
                   message: "服务暂时无法处理该请求。"
                   requestId: req_0123456789abcdef
 
+  /api/v1/auth/step-up:
+    post:
+      tags: [Session]
+      summary: Complete an objective registration/login abuse step-up
+      description: |
+        Completes the single-use challenge returned as
+        `error.stepUp.challengeToken`. `automation_cost` is a computational
+        anti-automation cost only and is not human verification. High-risk
+        `interactive_captcha` requires a configured interactive provider; the
+        server fails closed with `503` when no provider is configured. Success
+        sets a short-lived HttpOnly `up_device_trust` cookie. Tokens are stored
+        only by SHA-256 hash and cannot be replayed.
+      operationId: completeAuthRiskStepUp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/StepUpCompletionRequest"}
+      responses:
+        "204":
+          description: Challenge consumed and short-lived device trust issued.
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "503":
+          description: Interactive step-up provider or challenge store unavailable; fail closed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+
+  /api/v1/auth/miniprogram/sessions:
+    post:
+      tags: [WeChat Mini Program]
+      summary: Establish a native Mini Program session with United Pass credentials
+      description: |
+        Native-only password login. Browser-shaped requests are rejected and
+        the exact `X-UnitedPass-Client: dreamup-miniprogram` marker is required;
+        the marker is transport routing only and grants no authority. Successful
+        authentication returns a 256-bit opaque bearer for process memory only.
+        The server persists only its SHA-256 hash and binds the record to the
+        native client kind and the user's security epoch. No cookie is read or
+        written, the fixed lifetime is 30 minutes, and remember mode is rejected.
+        An MFA challenge is bound to this native channel.
+      operationId: createMiniProgramPasswordSession
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/MiniProgramLoginRequest"}
+      responses:
+        "200":
+          description: Short-lived native bearer established; no Set-Cookie header is emitted.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MiniProgramSessionResponse"}
+        "202":
+          description: MFA is required; complete only through the matching native MFA route.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MFARequiredResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "415": {$ref: "#/components/responses/BadRequest"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+
+  /api/v1/auth/miniprogram/sessions/mfa:
+    post:
+      tags: [WeChat Mini Program]
+      summary: Complete a native Mini Program password-login TOTP challenge
+      description: |
+        Completes only an MFA challenge minted by the native password-login
+        route. Challenges from browser login fail closed. Only TOTP is accepted;
+        passkey-only or recovery-only accounts must use the trusted browser flow.
+      operationId: completeMiniProgramPasswordSessionMfa
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/MiniProgramMFAChallengeRequest"}
+      responses:
+        "200":
+          description: Short-lived native bearer established; no Set-Cookie header is emitted.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MiniProgramSessionResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "415": {$ref: "#/components/responses/BadRequest"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+
+  /api/v1/auth/wechat/onboarding:
+    post:
+      tags: [WeChat Mini Program]
+      summary: Begin explicit WeChat account onboarding or restore an existing link
+      description: |
+        Exchanges a fresh `wx.login` code only on the server. A
+        `getPhoneNumber` code may accompany the same Mini Program action; it is
+        best effort and its absence or rejection does not create another client
+        flow. An already-linked active account receives a normal short-lived
+        native bearer. An unlinked WeChat identity receives only a restricted,
+        single-use onboarding token, never an account session. An exact linked
+        pending reservation may re-enter only to reconcile that same pending
+        user after a prior provider/token-store interruption. OpenID, UnionID,
+        `session_key`, decoded phone data and provider credentials are never
+        returned to the Mini Program. All three onboarding routes are absent
+        unless `UP_WECHAT_MINIPROGRAM_ENABLED`,
+        `UP_WECHAT_MINIPROGRAM_REGISTRATION_ENABLED` and the independent,
+        default-off `UP_WECHAT_MINIPROGRAM_ONBOARDING_ENABLED` gate are true.
+      operationId: beginWeChatMiniProgramOnboarding
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/WeChatOnboardingBeginRequest"}
+      responses:
+        "200":
+          description: The WeChat identity was already linked and a native bearer was established.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MiniProgramSessionResponse"}
+        "202":
+          description: Account details must be completed before any normal session is issued.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WeChatOnboardingRequiredResponse"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "413": {$ref: "#/components/responses/BadRequest"}
+        "415": {$ref: "#/components/responses/BadRequest"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "502": {$ref: "#/components/responses/ProviderUnavailable"}
+
+  /api/v1/auth/wechat/onboarding/complete:
+    post:
+      tags: [WeChat Mini Program]
+      summary: Complete United Pass account details for a verified WeChat identity
+      description: |
+        Consumes a restricted onboarding challenge. A new email creates a
+        pending account through the existing provider and email-verification
+        lifecycle. An email already owned by exactly one active account treats
+        `password` only as that account's current credential proof; it never
+        changes the password or copies provisional profile data. Accounts with
+        MFA receive a dedicated onboarding MFA challenge before the WeChat link
+        can be committed. Global registration buckets are consumed only after
+        the restricted challenge is claimed. The exact existing-email password
+        error is available only inside this rate-limited, verified WeChat workflow.
+      operationId: completeWeChatMiniProgramOnboarding
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/WeChatOnboardingCompleteRequest"}
+      responses:
+        "200":
+          description: Existing account authentication and binding completed; a native bearer was established.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MiniProgramSessionResponse"}
+        "201":
+          description: A pending new account was created and email verification is required.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WeChatOnboardingVerificationRequiredResponse"}
+        "202":
+          description: The existing account requires its registered second factor.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WeChatOnboardingMFARequiredResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/WeChatOnboardingCompleteUnauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/WeChatOnboardingConflict"}
+        "413": {$ref: "#/components/responses/BadRequest"}
+        "415": {$ref: "#/components/responses/BadRequest"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "502": {$ref: "#/components/responses/ProviderUnavailable"}
+
+  /api/v1/auth/wechat/onboarding/mfa:
+    post:
+      tags: [WeChat Mini Program]
+      summary: Complete the existing account's MFA before linking WeChat
+      description: |
+        Accepts only the dedicated single-use onboarding MFA token. Successful
+        provider MFA is followed by the allowlisted identity-link transaction;
+        no provisional display, email, role or permission field overwrites the
+        existing account.
+      operationId: completeWeChatMiniProgramOnboardingMFA
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/WeChatOnboardingMFARequest"}
+      responses:
+        "200":
+          description: MFA and account binding completed; a native bearer was established.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MiniProgramSessionResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/WeChatOnboardingMFAUnauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/WeChatOnboardingConflict"}
+        "413": {$ref: "#/components/responses/BadRequest"}
+        "415": {$ref: "#/components/responses/BadRequest"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "502": {$ref: "#/components/responses/ProviderUnavailable"}
+
+  /api/v1/auth/wechat/sessions:
+    post:
+      tags: [WeChat Mini Program]
+      summary: Establish a United Pass session from a verified WeChat Mini Program code
+      description: |
+        Exchanges a fresh `wx.login` one-time code only on the server and
+        resolves it to an existing explicit WeChat identity link. It is also
+        the only cold-start recovery path: success mints a new short-lived
+        native bearer and failure leaves the client logged out. No cookie or
+        provider credential is returned. This route is absent unless the
+        server-side WeChat Mini Program switch is enabled.
+      operationId: createWeChatMiniProgramSession
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/WeChatLoginRequest"}
+      responses:
+        "200":
+          description: Short-lived native bearer established; no Set-Cookie header is emitted.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MiniProgramSessionResponse"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "413": {$ref: "#/components/responses/BadRequest"}
+        "415": {$ref: "#/components/responses/BadRequest"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "502": {$ref: "#/components/responses/ProviderUnavailable"}
+
+  /api/v1/me/wechat/phone:
+    post:
+      tags: [WeChat Mini Program]
+      summary: Verify and bind the current user's WeChat-authorized phone
+      description: |
+        Requires the current native bearer and exact Mini Program marker. Both
+        one-time codes are independently exchanged by the server; the resolved
+        WeChat identity must already link to the current user, preventing a
+        cross-account phone bind.
+      operationId: bindWeChatMiniProgramPhone
+      security: [{MiniProgramBearer: []}]
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/WeChatPhoneBindRequest"}
+      responses:
+        "200":
+          description: Phone proof verified and reflected on the current account.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WeChatPhoneBindResponse"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "413": {$ref: "#/components/responses/BadRequest"}
+        "415": {$ref: "#/components/responses/BadRequest"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "502": {$ref: "#/components/responses/ProviderUnavailable"}
+
   /api/v1/auth/sessions/mfa:
     post:
       tags: [Session]
@@ -475,9 +1622,6 @@ paths:
 
         On success the server issues the `up_session` and `up_csrf` cookies,
         identical to a successful password-only login.
-
-        The same `application/json`, exact-Origin and Fetch Metadata boundary as
-        the password step is enforced before the challenge is inspected.
 
         Rate limited.
       operationId: completeSessionMfa
@@ -534,10 +1678,6 @@ paths:
                   code: auth.mfa_challenge_failed
                   message: "验证失败，请检查后重试。"
                   requestId: req_0123456789abcdef
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
         "429":
           description: |
             Too many MFA attempts. The challenge is temporarily locked.
@@ -570,22 +1710,197 @@ paths:
                   message: "服务暂时无法处理该请求。"
                   requestId: req_0123456789abcdef
 
+  /api/v1/dreamup/mobile/assertions:
+    post:
+      tags: [Account]
+      summary: Mint one request-bound DreamUP participant assertion
+      operationId: createDreamUPMobileAssertion
+      description: |
+        Requires the explicit native bearer and Mini Program marker. The
+        returned assertion is short-lived and bound to the exact method, path,
+        body digest and selected concurrency/idempotency headers. It is not a
+        United Pass session credential.
+      security: [{ MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [method, path, body, ifMatch, idempotencyKey]
+              properties:
+                method: { type: string, enum: [GET, PUT, POST, PATCH, DELETE] }
+                path: { type: string, minLength: 1, maxLength: 2048 }
+                body:
+                  type: string
+                  maxLength: 65536
+                  description: >-
+                    UTF-8 request payload. Limits use encoded UTF-8 bytes: 8 KiB
+                    for feedback/sponsorship, seat confirmation and admission
+                    entry-code routes; 16 KiB for team routes; and 64 KiB for
+                    other allowlisted routes.
+                ifMatch: { type: string, maxLength: 128 }
+                idempotencyKey: { type: string, maxLength: 128 }
+      responses:
+        "201":
+          description: One request-bound assertion.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPMobileAssertionResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/BadRequest" }
+        "415": { $ref: "#/components/responses/BadRequest" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/dreamup/mobile/resume-upload-assertions:
+    post:
+      tags: [Account]
+      summary: Mint one request-bound DreamUP resume-upload assertion
+      operationId: createDreamUPResumeUploadAssertion
+      description: The file bytes stay outside United Pass; the assertion binds bounded metadata and the caller-supplied SHA-256 digest.
+      security: [{ MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [method, path, fileName, contentType, byteSize, bodySha256]
+              properties:
+                method: { type: string, const: PUT }
+                path: { type: string, minLength: 1, maxLength: 2048 }
+                fileName:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+                  x-max-utf8-bytes: 255
+                  description: Resume filename encoded as valid UTF-8, limited to 255 UTF-8 bytes (not characters).
+                contentType:
+                  type: string
+                  enum: [application/pdf, application/msword, application/vnd.openxmlformats-officedocument.wordprocessingml.document]
+                byteSize: { type: integer, format: int64, minimum: 1, maximum: 5242880 }
+                bodySha256:
+                  type: string
+                  pattern: "^[0-9a-f]{64}$"
+                  description: Canonical lowercase SHA-256 hex digest of the bytes uploaded directly to DreamUP.
+      responses:
+        "201":
+          description: One request-bound resume upload assertion.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPMobileAssertionResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/BadRequest" }
+        "415": { $ref: "#/components/responses/BadRequest" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/auth/qr/challenges:
+    post:
+      tags: [Session]
+      summary: Begin a browser QR-login handoff
+      operationId: beginQRLoginChallenge
+      description: Browser-only same-origin mutation. The receiver proof is returned only as a scoped HttpOnly cookie; the JSON challenge ID is safe to render as a QR code.
+      responses:
+        "201":
+          description: QR-login challenge created.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [challengeId, expiresInSeconds]
+                properties:
+                  challengeId: { type: string, pattern: "^[A-Za-z0-9_-]{20,255}$" }
+                  expiresInSeconds: { type: integer, minimum: 1, maximum: 600 }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/auth/qr/challenges/{challengeId}/consume:
+    post:
+      tags: [Session]
+      summary: Consume a browser QR-login handoff
+      operationId: consumeQRLoginChallenge
+      description: Browser-only same-origin mutation requiring the independent scoped HttpOnly receiver cookie.
+      parameters:
+        - $ref: "#/components/parameters/QRChallengeIdPath"
+      responses:
+        "200":
+          description: Browser session established; normal session and CSRF cookies are emitted.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status, csrfToken]
+                properties:
+                  status: { type: string, const: authenticated }
+                  csrfToken: { type: string, minLength: 1 }
+        "202":
+          description: Challenge remains pending.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: { type: string, const: pending }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/auth/qr/challenges/{challengeId}/approve:
+    post:
+      tags: [Session]
+      summary: Approve a scanned QR-login handoff from the Mini Program
+      operationId: approveQRLoginChallenge
+      description: Native bearer and marker only. No browser session cookie, receiver proof or CSRF token is accepted as the Mini Program credential.
+      security: [{ MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/QRChallengeIdPath"
+        - $ref: "#/components/parameters/X-MiniProgram-Client"
+      responses:
+        "200":
+          description: Challenge approved for its waiting browser receiver.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties: { status: { type: string, const: approved } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
+
   /api/v1/auth/session:
     delete:
       tags: [Session]
-      summary: Revoke the current browser session (logout)
+      summary: Revoke the current session (logout)
       description: |
-        Revokes the server-side session bound to the `up_session` cookie and
-        instructs the browser to discard both the `up_session` and `up_csrf`
-        cookies by setting them with `Max-Age=0`.
-
-        Requires a valid session cookie and a matching `X-CSRF-Token` header.
-        The CSRF token must equal the value of the `up_csrf` cookie.
+        Browser callers authenticate with `up_session` plus matching CSRF and
+        receive clearing cookies. Native callers authenticate with the explicit
+        Mini Program bearer and marker; no cookie or CSRF value participates.
       operationId: deleteSession
       security:
         - SessionCookie: []
+        - MiniProgramBearer: []
       parameters:
         - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
       responses:
         "204":
           description: |
@@ -646,8 +1961,8 @@ paths:
       tags: [Account]
       summary: Get the current user
       description: |
-        Returns the profile of the authenticated user bound to the `up_session`
-        cookie.
+        Returns the profile of the authenticated browser-cookie or native
+        Mini Program bearer session.
 
         The stable United Pass `userId` is the identity primary key. It is not
         an email, phone number or external Provider identifier, and it does not
@@ -662,6 +1977,9 @@ paths:
       operationId: getCurrentUser
       security:
         - SessionCookie: []
+        - MiniProgramBearer: []
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
       responses:
         "200":
           description: Current user profile.
@@ -718,280 +2036,97 @@ paths:
                   code: internal.unexpected
                   message: "服务暂时无法处理该请求。"
                   requestId: req_0123456789abcdef
-    patch:
+
+  /api/v1/me/miniprogram/profile:
+    post:
       tags: [Account]
-      summary: Update the current user's public profile
+      summary: Update self-service profile from the DreamUP Mini Program
       description: |
-        Updates only explicitly supplied `displayName` and `nickname` fields.
-        Email, phone and avatar are separate verified or media-specific
-        workflows and are rejected as unknown fields here.
-      operationId: updateCurrentUserProfile
-      security:
-        - SessionCookie: []
+        Transport adaptation for `wx.request`, which does not support PATCH.
+        This operation has the same self-service semantics as profile update,
+        but requires an explicit native bearer, no `Origin` header and the
+        exact `X-UnitedPass-Client: dreamup-miniprogram` marker. The marker
+        does not authorize the request; it only selects the native transport.
+      operationId: updateCurrentProfileFromMiniProgram
+      security: [{ MiniProgramBearer: [] }]
       parameters:
-        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-MiniProgram-Client"
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              $ref: "#/components/schemas/ProfilePatchRequest"
-      responses:
-        "204":
-          description: Profile updated.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/me/avatar:
-    post:
-      tags: [Account]
-      summary: Replace the current user's avatar
-      description: |
-        Accepts one PNG, JPEG or WebP file in the `avatar` multipart field,
-        capped at 2 MiB and bounded by decoded dimensions/pixels. The server
-        verifies the actual format, decodes, resizes when needed, strips
-        metadata, re-encodes PNG and stores only controlled bytes.
-      operationId: uploadCurrentUserAvatar
-      security:
-        - SessionCookie: []
-      parameters:
-        - $ref: "#/components/parameters/X-CSRF-Token"
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
             schema:
               type: object
-              required: [avatar]
               additionalProperties: false
+              required: [displayName]
               properties:
-                avatar:
+                displayName: {type: string, minLength: 1, maxLength: 64}
+                nickname: {type: string, maxLength: 64}
+      responses:
+        "204": {description: Profile updated}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/me/email-change:
+    post:
+      tags: [Account]
+      summary: Send a verification code to a new primary login email
+      description: Requires a single-use, current-session `account.email.change` reauthentication grant before any provider or mail side effect.
+      operationId: beginAccountEmailChange
+      security: [{ SessionCookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties: { email: { type: string, format: email, maxLength: 254 } }
+              additionalProperties: false
+      responses:
+        "202": { description: Verification sent }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/me/email-change/verify:
+    post:
+      tags: [Account]
+      summary: Verify and activate a new primary login email
+      operationId: verifyAccountEmailChange
+      security: [{ SessionCookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [requestId, code]
+              properties:
+                requestId: { type: string, pattern: "^email_change_[0-9a-f]{32}$" }
+                code:
                   type: string
-                  format: binary
+                  minLength: 6
+                  maxLength: 6
+                  pattern: "^[A-Z0-9]{6}$"
+                  description: Case-sensitive email verification code containing uppercase ASCII letters and digits.
+                  example: A1B2C3
+              additionalProperties: false
       responses:
-        "201":
-          description: Sanitized avatar stored.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AvatarUploadResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "413":
-          description: Multipart request or avatar file exceeds the configured limit.
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/media/avatars/{avatarFile}:
-    get:
-      tags: [Account]
-      summary: Read a sanitized avatar
-      description: |
-        Public immutable media by opaque `avt_<random>.png` identifier. Only
-        server-reencoded PNG bytes are served with `nosniff`, an ETag and a
-        one-year immutable cache policy; user IDs never appear in the URL.
-      operationId: getSanitizedAvatar
-      parameters:
-        - $ref: "#/components/parameters/AvatarFilePath"
-        - name: If-None-Match
-          in: header
-          required: false
-          schema: { type: string }
-      responses:
-        "200":
-          description: Sanitized PNG avatar.
-          headers:
-            ETag:
-              schema: { type: string }
-            Cache-Control:
-              schema: { type: string, example: "public, max-age=31536000, immutable" }
-          content:
-            image/png:
-              schema:
-                type: string
-                format: binary
-        "304":
-          description: The supplied ETag matches the current immutable object.
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/me/email-change-requests:
-    post:
-      tags: [Account]
-      summary: Begin a verified email change
-      description: |
-        Persists a short-lived, session-bound request and asks the identity
-        provider to send a verification code. The returned capability is
-        stored only as a SHA-256 digest and prior active requests are superseded.
-      operationId: requestCurrentUserEmailChange
-      security:
-        - SessionCookie: []
-      parameters:
-        - $ref: "#/components/parameters/X-CSRF-Token"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ContactChangeRequest"
-      responses:
-        "201":
-          description: Verification request created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ContactChangeResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "502":
-          $ref: "#/components/responses/ProviderUnavailable"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/me/email-change-requests/{requestId}/verify:
-    post:
-      tags: [Account]
-      summary: Verify and commit an email change
-      description: |
-        Claims the exact user- and session-bound request, verifies the code at
-        the provider, then mirrors the provider-verified email locally in one
-        transaction. Concurrent verification has a single live claimant.
-      operationId: verifyCurrentUserEmailChange
-      security:
-        - SessionCookie: []
-      parameters:
-        - $ref: "#/components/parameters/ContactRequestIdPath"
-        - $ref: "#/components/parameters/X-CSRF-Token"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ContactVerificationRequest"
-      responses:
-        "204":
-          description: Provider-verified email committed.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "502":
-          $ref: "#/components/responses/ProviderUnavailable"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/me/phone-change-requests:
-    post:
-      tags: [Account]
-      summary: Begin a verified phone change
-      operationId: requestCurrentUserPhoneChange
-      security:
-        - SessionCookie: []
-      parameters:
-        - $ref: "#/components/parameters/X-CSRF-Token"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ContactChangeRequest"
-      responses:
-        "201":
-          description: Verification request created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ContactChangeResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "502":
-          $ref: "#/components/responses/ProviderUnavailable"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/me/phone-change-requests/{requestId}/verify:
-    post:
-      tags: [Account]
-      summary: Verify and commit a phone change
-      operationId: verifyCurrentUserPhoneChange
-      security:
-        - SessionCookie: []
-      parameters:
-        - $ref: "#/components/parameters/ContactRequestIdPath"
-        - $ref: "#/components/parameters/X-CSRF-Token"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ContactVerificationRequest"
-      responses:
-        "204":
-          description: Provider-verified phone committed.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "502":
-          $ref: "#/components/responses/ProviderUnavailable"
-        "500":
-          $ref: "#/components/responses/InternalError"
+        "200": { description: New primary login email activated }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /api/v1/me/permissions:
     get:
@@ -1226,8 +2361,10 @@ paths:
       operationId: requestReauthentication
       security:
         - SessionCookie: []
+        - MiniProgramBearer: []
       parameters:
         - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
       requestBody:
         required: true
         content:
@@ -1292,13 +2429,17 @@ paths:
       description: |
         Consumes an `account.password.change` grant. The reauthentication
         request is the sole current-password proof; this body accepts only
-        `newPassword`. On success the current session cookies are rotated and
-        all older-generation sessions are revoked (ADR-0007).
+        `newPassword`. On success the current credential is rotated and all
+        older-generation sessions are revoked (ADR-0007). Browser callers get
+        rotated HttpOnly cookies and `204`; native bearer callers get the fresh
+        bearer once in a `200` response.
       operationId: changeOwnPassword
       security:
         - SessionCookie: []
+        - MiniProgramBearer: []
       parameters:
         - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
         - $ref: "#/components/parameters/X-Reauthentication-Token"
       requestBody:
         required: true
@@ -1307,6 +2448,11 @@ paths:
             schema:
               $ref: "#/components/schemas/PasswordChangeRequest"
       responses:
+        "200":
+          description: Password changed and the native bearer was rotated; no cookie is emitted.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MiniProgramSessionResponse"}
         "204":
           description: Password changed and the current session was rotated.
           headers:
@@ -1475,6 +2621,9 @@ paths:
       operationId: listOwnSessions
       security:
         - SessionCookie: []
+        - MiniProgramBearer: []
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
       responses:
         "200":
           description: Provider-independent United Pass session inventory.
@@ -1495,8 +2644,10 @@ paths:
       operationId: revokeAllOtherOwnSessions
       security:
         - SessionCookie: []
+        - MiniProgramBearer: []
       parameters:
         - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
       responses:
         "200":
           description: Number of other sessions revoked.
@@ -1519,9 +2670,11 @@ paths:
       operationId: revokeOwnSession
       security:
         - SessionCookie: []
+        - MiniProgramBearer: []
       parameters:
         - $ref: "#/components/parameters/SessionIdPath"
         - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
       responses:
         "204":
           description: Session revoked.
@@ -1682,8 +2835,10 @@ paths:
       operationId: completeReauthenticationMfa
       security:
         - SessionCookie: []
+        - MiniProgramBearer: []
       parameters:
         - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
       requestBody:
         required: true
         content:
@@ -2190,37 +3345,6 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/admin/dashboard:
-    get:
-      tags: [Admin Dashboard]
-      summary: Get the permission-scoped administration overview
-      description: |
-        Returns only aggregates independently authorized for the caller:
-        `user.read` unlocks user and employee counts, `application.read`
-        unlocks application counts, and `audit.read` unlocks denied-event
-        counts plus three already-redacted recent audit events. Possessing a
-        different administration capability permits the overview shell but
-        does not leak unauthorized counts.
-      operationId: getAdminDashboard
-      security:
-        - SessionCookie: []
-      responses:
-        "200":
-          description: Authorized dashboard slices.
-          headers:
-            Cache-Control:
-              schema: { type: string, enum: [no-store] }
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AdminDashboard"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -3272,6 +4396,7 @@ paths:
         "401": {$ref: "#/components/responses/Unauthorized"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
         "500": {$ref: "#/components/responses/InternalError"}
     patch:
       tags: [Admin Policies]
@@ -3482,6 +4607,770 @@ paths:
         "409": {$ref: "#/components/responses/Conflict"}
         "500": {$ref: "#/components/responses/InternalError"}
 
+  /api/v1/admin/events/{eventId}/identity-access/requests:
+    post:
+      tags: [Restricted Identity Access]
+      summary: Request time-limited access to restricted identity fields
+      description: |
+        A senior administrator may request only the fixed allowlist of identity
+        fields for a target in the same event. The normalized reason is encrypted
+        server-side and is never returned by this API. Legal documents cannot be
+        requested through this workflow.
+      operationId: createIdentityAccessRequest
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/DreamUPEventIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/IdentityAccessCreateRequest"}
+      responses:
+        "201":
+          description: Request created or safely replayed.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/X-Request-ID"}
+            ETag:
+              description: Strong request-row version.
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IdentityAccessRequest"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "500": {$ref: "#/components/responses/InternalError"}
+    get:
+      tags: [Restricted Identity Access]
+      summary: List the current administrator's requests in one event
+      operationId: listOwnIdentityAccessRequests
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/DreamUPEventIdPath"
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+        - $ref: "#/components/parameters/SortQuery"
+        - $ref: "#/components/parameters/IdentityAccessStatusQuery"
+      responses:
+        "200":
+          description: Requester-owned page with an actor- and event-bound cursor.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IdentityAccessRequestPage"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/events/{eventId}/identity-access/requests/{requestId}:
+    get:
+      tags: [Restricted Identity Access]
+      summary: Read one requester-owned identity-access request
+      operationId: getOwnIdentityAccessRequest
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/DreamUPEventIdPath"
+        - $ref: "#/components/parameters/IdentityAccessRequestIdPath"
+      responses:
+        "200":
+          description: Request metadata without the protected reason.
+          headers:
+            ETag:
+              description: Strong request-row version.
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IdentityAccessRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/events/{eventId}/identity-access/approval-queue:
+    get:
+      tags: [Restricted Identity Access]
+      summary: List pending identity-access requests for super-administrator approval
+      operationId: listIdentityAccessApprovalQueue
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/DreamUPEventIdPath"
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+        - $ref: "#/components/parameters/SortQuery"
+        - $ref: "#/components/parameters/IdentityAccessStatusQuery"
+      responses:
+        "200":
+          description: Event-scoped approval page with a signed filter-bound cursor.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IdentityAccessRequestPage"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/events/{eventId}/identity-access/approval-queue/{requestId}:
+    get:
+      tags: [Restricted Identity Access]
+      summary: Read one event-scoped request for approval
+      operationId: getIdentityAccessRequestForApproval
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/DreamUPEventIdPath"
+        - $ref: "#/components/parameters/IdentityAccessRequestIdPath"
+      responses:
+        "200":
+          description: Approval metadata without the protected reason.
+          headers:
+            ETag:
+              description: Strong request-row version.
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IdentityAccessRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/events/{eventId}/identity-access/requests/{requestId}/approve:
+    post:
+      tags: [Restricted Identity Access]
+      summary: Approve a request after fresh administrator step-up
+      description: |
+        The super administrator may reduce, but never broaden, the requested
+        field set. The requester, approver and target subject must be distinct.
+      operationId: approveIdentityAccessRequest
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/DreamUPEventIdPath"
+        - $ref: "#/components/parameters/IdentityAccessRequestIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/If-Match"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/IdentityAccessDecisionRequest"}
+      responses:
+        "200":
+          description: Approved, or an identical terminal mutation safely replayed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IdentityAccessDecisionResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "428": {$ref: "#/components/responses/PreconditionRequired"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/events/{eventId}/identity-access/requests/{requestId}/reject:
+    post:
+      tags: [Restricted Identity Access]
+      summary: Reject a request after fresh administrator step-up
+      operationId: rejectIdentityAccessRequest
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/DreamUPEventIdPath"
+        - $ref: "#/components/parameters/IdentityAccessRequestIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/If-Match"
+        - $ref: "#/components/parameters/X-Reauthentication-Token"
+      responses:
+        "200":
+          description: Rejected, or an identical terminal mutation safely replayed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IdentityAccessDecisionResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "428": {$ref: "#/components/responses/PreconditionRequired"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/events/{eventId}/identity-access/grants/{grantId}/claim:
+    post:
+      tags: [Restricted Identity Access]
+      summary: Claim an approved identity-access grant for internal delegation
+      description: |
+        Creates a one-minute internal claim lease. The browser response contains
+        only opaque metadata; the one-time nonce and restricted values remain in
+        the trusted server boundary for delegation-token issuance.
+      operationId: claimIdentityAccessGrant
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/DreamUPEventIdPath"
+        - $ref: "#/components/parameters/IdentityAccessGrantIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/If-Match"
+      responses:
+        "202":
+          description: The internal claim is ready for the trusted BFF signer.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IdentityAccessClaimResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "428": {$ref: "#/components/responses/PreconditionRequired"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/step-up/challenge:
+    get:
+      tags: [Administrator Step-up]
+      summary: Read the current administrator challenge state and question
+      operationId: getAdminStepUpChallenge
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/DreamUPEventIdQuery"
+      responses:
+        "200":
+          description: Owner-only challenge state. The answer hash and encryption metadata are never returned.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/X-Request-ID"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AdminStepUpChallengeResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/step-up/enroll:
+    post:
+      tags: [Administrator Step-up]
+      summary: Enroll an administrator challenge after fresh provider login
+      description: A fresh provider-backed primary login is always required. Existing TOTP, passkey, or recovery MFA is accepted; only an active system-scoped super_admin or top_admin with no existing challenge may use the initial-enrollment bootstrap exception without existing MFA. A federated session lacking provider session proof receives session.reauthentication_required.
+      operationId: enrollAdminStepUpChallenge
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/AdminStepUpEnrollRequest"}
+      responses:
+        "201":
+          description: Challenge enrolled. No question or answer material is echoed.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/X-Request-ID"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AdminStepUpMutationResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/step-up/verify:
+    post:
+      tags: [Administrator Step-up]
+      summary: Verify the administrator challenge for one fixed action and target
+      operationId: verifyAdminStepUpChallenge
+      description: |
+        Requires a provider-backed primary login no older than 30 minutes.
+        Stale or implausibly future authentication timestamps fail before the
+        answer verifier with `session.reauthentication_required`. Sensitive
+        DreamUP actions mint a five-minute action-and-target-bound one-shot
+        token; application review and check-in scan are high-risk mutations too.
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/AdminStepUpVerifyRequest"}
+      responses:
+        "200":
+          description: |
+            Verification receipt. A high-risk action may include one new
+            single-use reauthentication bearer; an idempotent replay never
+            returns or re-mints that bearer.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/X-Request-ID"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AdminStepUpMutationResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "423": {$ref: "#/components/responses/Locked"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/admin/step-up/rotate:
+    post:
+      tags: [Administrator Step-up]
+      summary: Prove the old answer and atomically rotate the challenge
+      operationId: rotateAdminStepUpChallenge
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/If-Match"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/AdminStepUpRotateRequest"}
+      responses:
+        "200":
+          description: Challenge rotated and prior freshness and approval state revoked.
+          headers:
+            X-Request-ID: {$ref: "#/components/headers/X-Request-ID"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AdminStepUpMutationResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "423": {$ref: "#/components/responses/Locked"}
+        "428": {$ref: "#/components/responses/PreconditionRequired"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/password-reset-requests:
+    post:
+      tags: [Account Lifecycle]
+      summary: Request password-reset instructions
+      description: |
+        Always returns the same accepted response after syntax and rate-limit
+        checks. Account absence, unverified contact, missing local binding and
+        provider-notification failure are intentionally indistinguishable.
+        Requires JSON and an exact same-origin `Origin`.
+      operationId: requestPublicPasswordReset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetRequest"
+      responses:
+        "202":
+          description: Request accepted; no account-existence signal is returned.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /api/v1/password-resets:
+    post:
+      tags: [Account Lifecycle]
+      summary: Complete a provider-verified password reset
+      description: |
+        Opens the short-lived encrypted United Pass lifecycle token, verifies
+        the provider code, changes the provider-owned password and advances the
+        user's security epoch so all older sessions are invalidated. The local
+        token contains no email, provider subject, password or code.
+      operationId: completePublicPasswordReset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetCompletionRequest"
+      responses:
+        "204":
+          description: Password reset completed and older sessions invalidated.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/email-verifications:
+    post:
+      tags: [Account Lifecycle]
+      summary: Verify a pending registration email
+      description: |
+        Verifies the provider-issued email code for the exact provider subject
+        bound inside a short-lived encrypted lifecycle token, then activates
+        only the matching pending United Pass user. Provider readback repairs a
+        consumed-code/response-loss retry without trusting browser identity data.
+      operationId: verifyPublicRegistrationEmail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailVerificationRequest"
+      responses:
+        "204":
+          description: Email verified and pending account activated.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "410":
+          $ref: "#/components/responses/Gone"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/avatar:
+    post:
+      tags: [Account]
+      summary: Replace the current user's avatar
+      description: |
+        Accepts exactly one multipart file, capped at 2 MiB. Current clients
+        use the `file` field and receive a versioned, session-protected JPEG
+        URL; earlier clients may use `avatar` and receive an immutable public
+        PNG URL. Both paths decode, bound and re-encode the image before it is
+        stored. Supplying both fields is rejected.
+      operationId: uploadCurrentUserAvatar
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              oneOf:
+                - type: object
+                  required: [file]
+                  additionalProperties: false
+                  properties:
+                    file:
+                      type: string
+                      format: binary
+                - type: object
+                  required: [avatar]
+                  additionalProperties: false
+                  properties:
+                    avatar:
+                      type: string
+                      format: binary
+      responses:
+        "200":
+          description: Filesystem-backed avatar stored for a current client.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvatarUploadResponse"
+        "201":
+          description: Immutable PostgreSQL-backed avatar stored for an earlier client.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvatarUploadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: Multipart request or avatar file exceeds the configured limit.
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/media/avatars/{avatarFile}:
+    get:
+      tags: [Account]
+      summary: Read a sanitized avatar
+      description: |
+        An opaque `avt_<random>.png` identifier reads the earlier public,
+        immutable PNG object. A stable user identifier reads the current
+        private JPEG object and requires a valid session. Both forms serve
+        only server-reencoded bytes.
+      operationId: getSanitizedAvatar
+      security:
+        - {}
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/AvatarFilePath"
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Sanitized PNG avatar.
+          headers:
+            ETag:
+              schema: { type: string }
+            Cache-Control:
+              schema: { type: string, example: "public, max-age=31536000, immutable" }
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        "304":
+          description: The supplied ETag matches the current immutable object.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/email-change-requests:
+    post:
+      tags: [Account]
+      summary: Begin a verified email change
+      description: |
+        Persists a short-lived, session-bound request and asks the identity
+        provider to send a verification code. The returned capability is
+        stored only as a SHA-256 digest and prior active requests are superseded.
+      operationId: requestCurrentUserEmailChange
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactChangeRequest"
+      responses:
+        "201":
+          description: Verification request created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactChangeResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/email-change-requests/{requestId}/verify:
+    post:
+      tags: [Account]
+      summary: Verify and commit an email change
+      description: |
+        Claims the exact user- and session-bound request, verifies the code at
+        the provider, then mirrors the provider-verified email locally in one
+        transaction. Concurrent verification has a single live claimant.
+      operationId: verifyCurrentUserEmailChange
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ContactRequestIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactVerificationRequest"
+      responses:
+        "204":
+          description: Provider-verified email committed.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/phone-change-requests:
+    post:
+      tags: [Account]
+      summary: Begin a verified phone change
+      operationId: requestCurrentUserPhoneChange
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactChangeRequest"
+      responses:
+        "201":
+          description: Verification request created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactChangeResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/me/phone-change-requests/{requestId}/verify:
+    post:
+      tags: [Account]
+      summary: Verify and commit a phone change
+      operationId: verifyCurrentUserPhoneChange
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ContactRequestIdPath"
+        - $ref: "#/components/parameters/X-CSRF-Token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactVerificationRequest"
+      responses:
+        "204":
+          description: Provider-verified phone committed.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/dashboard:
+    get:
+      tags: [Admin Dashboard]
+      summary: Get the permission-scoped administration overview
+      description: |
+        Returns only aggregates independently authorized for the caller:
+        `user.read` unlocks user and employee counts, `application.read`
+        unlocks application counts, and `audit.read` unlocks denied-event
+        counts plus three already-redacted recent audit events. Possessing a
+        different administration capability permits the overview shell but
+        does not leak unauthorized counts.
+      operationId: getAdminDashboard
+      security:
+        - SessionCookie: []
+      responses:
+        "200":
+          description: Authorized dashboard slices.
+          headers:
+            Cache-Control:
+              schema: { type: string, enum: [no-store] }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminDashboard"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   securitySchemes:
     SessionCookie:
@@ -3493,6 +5382,19 @@ components:
         is HttpOnly, Secure and carries an explicit SameSite policy. The browser
         must not receive raw authentication-provider Refresh Tokens or
         long-lived tokens.
+
+    MiniProgramBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-256-bit-base64url
+      description: |
+        Short-lived opaque DreamUP Mini Program credential returned by a
+        native password, TOTP or verified WeChat login. The raw 43-character
+        base64url value is held only in module memory; only its SHA-256 hash is
+        stored server-side. Requests must also carry the exact
+        `X-UnitedPass-Client: dreamup-miniprogram` marker and no browser Origin
+        or Fetch Metadata headers. Native bearer requests are not subject to
+        ambient-cookie CSRF because no cookie participates in authentication.
 
   headers:
     X-Request-ID:
@@ -3548,6 +5450,56 @@ components:
         example: up_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax
 
   parameters:
+    AvatarFilePath:
+      name: avatarFile
+      in: path
+      required: true
+      description: Immutable avatar object name or current stable user identifier.
+      schema:
+        oneOf:
+          - type: string
+            pattern: "^avt_[0-9a-f]{32}\\.png$"
+          - type: string
+            pattern: "^[A-Za-z0-9_-]{1,80}$"
+
+    ContactRequestIdPath:
+      name: requestId
+      in: path
+      required: true
+      description: Opaque, short-lived contact-change capability returned once to this session.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+
+    RegistrationOrigin:
+      name: Origin
+      in: header
+      required: true
+      description: Exact configured browser origin; cross-origin and missing values are rejected.
+      schema: {type: string, format: uri}
+
+    X-MiniProgram-Client:
+      name: X-UnitedPass-Client
+      in: header
+      required: true
+      description: Native transport marker only; it is not authentication and grants no authority.
+      schema:
+        type: string
+        const: dreamup-miniprogram
+
+    X-MiniProgram-Client-When-Bearer:
+      name: X-UnitedPass-Client
+      in: header
+      required: false
+      description: |
+        Required and fixed to `dreamup-miniprogram` whenever the
+        `MiniProgramBearer` security alternative is selected. Browser-cookie
+        callers omit this transport marker.
+      schema:
+        type: string
+        const: dreamup-miniprogram
+
     X-CSRF-Token:
       name: X-CSRF-Token
       in: header
@@ -3599,24 +5551,14 @@ components:
         type: string
         minLength: 1
 
-    AvatarFilePath:
-      name: avatarFile
+    QRChallengeIdPath:
+      name: challengeId
       in: path
       required: true
-      description: Opaque avatar object name including the `.png` suffix.
+      description: Opaque short-lived QR handoff identifier; never a session or receiver credential.
       schema:
         type: string
-        pattern: "^avt_[0-9a-f]{32}\\.png$"
-
-    ContactRequestIdPath:
-      name: requestId
-      in: path
-      required: true
-      description: Opaque, short-lived contact-change capability returned once to this session.
-      schema:
-        type: string
-        minLength: 1
-        maxLength: 4096
+        pattern: "^[A-Za-z0-9_-]{20,255}$"
 
     UserIdPath:
       name: userId
@@ -3756,10 +5698,149 @@ components:
         atomically before the operation executes.
       schema:
         type: string
-        minLength: 1
+        minLength: 43
+        maxLength: 43
+        pattern: "^[A-Za-z0-9_-]{43}$"
         example: reauth_grant_opaque_token
 
+    DreamUP-X-Reauthentication-Token:
+      name: X-Reauthentication-Token
+      in: header
+      required: false
+      description: |
+        Required for every high-risk request authenticated with the native Mini
+        Program bearer. It is a five-minute, single-use grant bound to the exact
+        action and target and is consumed atomically before the operation. The
+        existing first-party cookie website may omit this header only while its
+        durable proof is bound to the same authenticated session and user,
+        matches the current account security epoch, and was verified no more
+        than five minutes ago. If a cookie request supplies this header, token
+        rejection fails closed and never falls back to the durable proof.
+      schema:
+        type: string
+        minLength: 43
+        maxLength: 43
+        pattern: "^[A-Za-z0-9_-]{43}$"
+        example: reauth_grant_opaque_token
+
+    DreamUPEventIdQuery:
+      name: eventId
+      in: query
+      required: true
+      description: Exact DreamUP event scope for the active administrator binding.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+
+    DreamUPEventIdPath:
+      name: eventId
+      in: path
+      required: true
+      description: Exact DreamUP event scope for the active administrator binding.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+
+    DreamUPContentIdPath:
+      name: contentId
+      in: path
+      required: true
+      description: Opaque DreamUP announcement content identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 160
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+
+    DreamUPContactSubmissionIdPath:
+      name: submissionId
+      in: path
+      required: true
+      description: Opaque DreamUP contact-submission identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 160
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+
+    IdentityAccessRequestIdPath:
+      name: requestId
+      in: path
+      required: true
+      description: Opaque restricted identity-access request ID.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 160
+
+    IdentityAccessGrantIdPath:
+      name: grantId
+      in: path
+      required: true
+      description: Opaque time-limited restricted identity-access grant ID.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 160
+
+    IdentityAccessStatusQuery:
+      name: status
+      in: query
+      required: false
+      description: Exact request-status filter bound into the signed cursor.
+      schema:
+        $ref: "#/components/schemas/IdentityAccessStatus"
+
+    Idempotency-Key:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Globally random mutation key. Same key and different normalized input conflicts.
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{32,160}$"
+
+    If-Match:
+      name: If-Match
+      in: header
+      required: true
+      description: Strong ETag containing the current challenge row version.
+      schema:
+        type: string
+        pattern: '^"[1-9][0-9]*"$'
+
+    DreamUP-If-Match:
+      name: If-Match
+      in: header
+      required: true
+      description: Strong DreamUP BFF resource-version ETag; use `"0"` when the resource has no prior version.
+      schema:
+        type: string
+        pattern: '^"(0|[1-9][0-9]*)"$'
+
   responses:
+    Gone:
+      description: The short-lived lifecycle capability has expired.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    RateLimited:
+      $ref: "#/components/responses/TooManyRequests"
+    UnsupportedMediaType:
+      description: The credential-bearing request must use `application/json`.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     BadRequest:
       description: Malformed request, unknown JSON field, or invalid cursor.
       headers:
@@ -3827,6 +5908,24 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    Locked:
+      description: The challenge is temporarily locked after repeated failed verification.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    PreconditionRequired:
+      description: A strong If-Match challenge version is required.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     InternalError:
       description: Unexpected server failure. No internal detail is leaked.
       headers:
@@ -3848,24 +5947,6 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
-    UnsupportedMediaType:
-      description: The credential-bearing request must use `application/json`.
-      headers:
-        X-Request-ID:
-          $ref: "#/components/headers/X-Request-ID"
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorResponse"
-    Gone:
-      description: The short-lived lifecycle capability has expired.
-      headers:
-        X-Request-ID:
-          $ref: "#/components/headers/X-Request-ID"
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorResponse"
     ProviderForbidden:
       description: |
         The provider service account lacks the required permission. This is a
@@ -3877,96 +5958,76 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    WeChatOnboardingCompleteUnauthorized:
+      description: |
+        The restricted onboarding challenge expired, the existing-account
+        credential was wrong, or the resolved account could not authenticate.
+        The password-specific code is returned only after a valid, claimed and
+        rate-limited WeChat onboarding challenge.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            expired:
+              value:
+                error:
+                  code: wechat.onboarding_expired
+                  message: "微信登录流程已过期，请重新发起。"
+                  requestId: req_0123456789abcdef
+            existingEmailPasswordMismatch:
+              value:
+                error:
+                  code: wechat.onboarding_email_password_mismatch
+                  message: "此邮箱已存在账号，请设定原始密码以进行绑定"
+                  requestId: req_0123456789abcdef
+            accountValidationFailed:
+              value:
+                error:
+                  code: session.unauthenticated
+                  message: "账户验证失败，请重试。"
+                  requestId: req_0123456789abcdef
+    WeChatOnboardingMFAUnauthorized:
+      description: The onboarding MFA challenge expired or MFA/account verification failed.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            expired:
+              value:
+                error:
+                  code: wechat.onboarding_expired
+                  message: "微信登录流程已过期，请重新发起。"
+                  requestId: req_0123456789abcdef
+            accountValidationFailed:
+              value:
+                error:
+                  code: session.unauthenticated
+                  message: "账户验证失败，请重试。"
+                  requestId: req_0123456789abcdef
+    WeChatOnboardingConflict:
+      description: The WeChat identity, normalized email, target account, or optional verified phone cannot be linked safely.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: wechat.onboarding_conflict
+              message: "无法安全绑定该账户，请检查信息或联系支持。"
+              requestId: req_0123456789abcdef
 
   schemas:
-    HealthStatus:
-      type: object
-      required: [status]
-      properties:
-        status:
-          type: string
-          enum: [ok, ready, "not ready"]
-          description: Liveness or readiness status
-
-    ErrorResponse:
-      type: object
-      required: [error]
-      properties:
-        error:
-          $ref: "#/components/schemas/ErrorBody"
-
-    ErrorBody:
-      type: object
-      required: [code, message]
-      properties:
-        code:
-          type: string
-          description: Stable, machine-readable error code
-          examples:
-            internal: internal.unexpected
-            validation: validation.failed
-            reauth: session.reauthentication_required
-        message:
-          type: string
-          description: Safe, user-displayable message
-          example: "服务暂时无法处理该请求。"
-        requestId:
-          type: string
-          description: Request ID for troubleshooting and audit correlation
-          example: req_0123456789abcdef
-        fieldErrors:
-          type: array
-          description: Field-level validation errors (array format)
-          items:
-            $ref: "#/components/schemas/FieldError"
-
-    FieldError:
-      type: object
-      required: [field, message]
-      properties:
-        field:
-          type: string
-          description: The field that failed validation
-          example: redirectUris[0]
-        message:
-          type: string
-          description: Safe, user-displayable field error message
-          example: "该重定向地址未登记。"
-
-    PublicRegistrationRequest:
-      type: object
-      required: [username, email, password, termsAccepted]
-      additionalProperties: false
-      properties:
-        username:
-          type: string
-          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$"
-        email:
-          type: string
-          format: email
-          maxLength: 254
-        password:
-          type: string
-          format: password
-          minLength: 12
-          maxLength: 200
-          writeOnly: true
-        termsAccepted:
-          type: boolean
-          const: true
-
-    PublicRegistrationResponse:
-      type: object
-      required: [userId, status]
-      additionalProperties: false
-      properties:
-        userId:
-          type: string
-          pattern: "^user_[0-9a-f]{32}$"
-        status:
-          type: string
-          const: email_verification_required
-
     PasswordResetRequest:
       type: object
       required: [identifier]
@@ -4018,19 +6079,6 @@ components:
           pattern: "^[A-Za-z0-9]+$"
           writeOnly: true
 
-    ProfilePatchRequest:
-      type: object
-      minProperties: 1
-      additionalProperties: false
-      properties:
-        displayName:
-          type: string
-          minLength: 1
-          maxLength: 80
-        nickname:
-          type: string
-          maxLength: 40
-
     AvatarUploadResponse:
       type: object
       required: [avatarUrl]
@@ -4038,7 +6086,7 @@ components:
       properties:
         avatarUrl:
           type: string
-          pattern: "^/api/v1/media/avatars/avt_[0-9a-f]{32}\\.png$"
+          pattern: "^/api/v1/media/avatars/(?:avt_[0-9a-f]{32}\\.png|[A-Za-z0-9_-]{1,80}(?:\\?v=[0-9]+)?)$"
 
     ContactChangeRequest:
       type: object
@@ -4098,6 +6146,801 @@ components:
           items:
             $ref: "#/components/schemas/AuditEvent"
 
+    DreamUPAdminEligibilityResponse:
+      type: object
+      additionalProperties: false
+      required: [eligible]
+      properties:
+        eligible: { type: boolean }
+
+    DreamUPMutationStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [operation]
+      properties:
+        operation:
+          type: object
+          additionalProperties: false
+          required: [status, requestId, responseStatus, resultVersion, updatedAt]
+          properties:
+            status:
+              type: string
+              enum: [pending, succeeded, failed, needs_operator]
+            requestId:
+              type: string
+              pattern: "^[A-Za-z0-9._:-]{8,128}$"
+            responseStatus:
+              type: [integer, "null"]
+              minimum: 200
+              maximum: 599
+            resultVersion:
+              type: [integer, "null"]
+              minimum: 1
+            updatedAt:
+              type: string
+              format: date-time
+
+    DreamUPIntroMutationRequest:
+      type: object
+      additionalProperties: false
+      required: [title, summary, blocks, action]
+      properties:
+        title: { type: string }
+        summary: { type: string }
+        blocks:
+          type: array
+          items: { $ref: "#/components/schemas/DreamUPContentBlock" }
+        action:
+          type: string
+          enum: [save_draft, publish]
+
+    DreamUPAnnouncementMutationRequest:
+      type: object
+      additionalProperties: false
+      required: [title, summary, blocks, action]
+      properties:
+        title: { type: string }
+        summary: { type: string }
+        blocks:
+          type: array
+          items: { $ref: "#/components/schemas/DreamUPContentBlock" }
+        action:
+          type: string
+          enum: [save_draft, publish, archive]
+
+    DreamUPContentBlock:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [id, type, text]
+          properties:
+            id: { type: string }
+            type: { type: string, enum: [heading, paragraph, quote] }
+            text: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [id, type, items]
+          properties:
+            id: { type: string }
+            type: { type: string, const: bullets }
+            items:
+              type: array
+              items: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [id, type, label, value]
+          properties:
+            id: { type: string }
+            type: { type: string, const: stat }
+            label: { type: string }
+            value: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [id, type, label, action]
+          properties:
+            id: { type: string }
+            type: { type: string, const: cta }
+            label: { type: string }
+            action: { type: string, enum: [apply, team, feedback, sponsor] }
+
+    DreamUPContentResponse:
+      type: object
+      additionalProperties: false
+      required: [intro, announcements]
+      properties:
+        intro:
+          oneOf:
+            - $ref: "#/components/schemas/DreamUPContentDocument"
+            - type: "null"
+        announcements:
+          type: array
+          items:
+            $ref: "#/components/schemas/DreamUPContentDocument"
+
+    DreamUPContentDocument:
+      type: object
+      additionalProperties: false
+      required: [id, kind, status, title, summary, blocks, version, revision, publishedAt, updatedAt]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [intro, announcement] }
+        status: { type: string, enum: [draft, published, archived] }
+        title: { type: string }
+        summary: { type: string }
+        blocks:
+          type: array
+          items: { $ref: "#/components/schemas/DreamUPContentBlock" }
+        version: { type: integer, minimum: 1 }
+        revision: { type: integer, minimum: 1 }
+        publishedAt: { type: [string, "null"], format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    DreamUPContactSubmission:
+      type: object
+      additionalProperties: false
+      required: [id, kind, category, payload, createdAt, resolution]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [feedback, sponsorship] }
+        category: { type: string, enum: [feedback, emergency, sponsorship] }
+        payload:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [content]
+              properties:
+                content: { type: string, minLength: 10, maxLength: 4000 }
+            - type: object
+              additionalProperties: false
+              required: [category, eventType, location, contact, details]
+              properties:
+                category: { type: string, const: emergency }
+                eventType: { type: string }
+                location: { type: string }
+                contact: { type: string }
+                details: { type: string }
+            - type: object
+              additionalProperties: false
+              required: [organization, contact, intent]
+              properties:
+                organization: { type: string, minLength: 2, maxLength: 160 }
+                contact: { type: string, minLength: 3, maxLength: 254 }
+                intent: { type: string, minLength: 10, maxLength: 2000 }
+        createdAt: { type: string, format: date-time }
+        resolution:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [status, version, note, updatedAt]
+              properties:
+                status: { type: string, enum: [acknowledged, closed] }
+                version: { type: integer, minimum: 1 }
+                note: { type: string, minLength: 2, maxLength: 1000 }
+                updatedAt: { type: string, format: date-time }
+            - type: "null"
+
+    IdentityAccessField:
+      type: string
+      description: |
+        Fixed restricted-field allowlist. Legal-document contents and legal-file
+        identifiers are deliberately absent from this enum.
+      enum: [legal_name, identity_number, identity_photo, contact_email, contact_mobile]
+
+    IdentityAccessStatus:
+      type: string
+      enum: [pending, approved, rejected, revoked, expired]
+
+    IdentityAccessCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [targetType, targetId, fields, reason]
+      properties:
+        targetType:
+          type: string
+          enum: [application, check_in]
+        targetId:
+          type: string
+          minLength: 1
+          maxLength: 160
+          description: Opaque same-event application or check-in target.
+        fields:
+          type: array
+          minItems: 1
+          maxItems: 5
+          uniqueItems: true
+          items: {$ref: "#/components/schemas/IdentityAccessField"}
+        reason:
+          type: string
+          writeOnly: true
+          description: |
+            NFKC-normalized business reason containing 20–500 UAX #29
+            grapheme clusters. Stored encrypted and never returned.
+
+    IdentityAccessDecisionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        fields:
+          type: array
+          minItems: 1
+          maxItems: 5
+          uniqueItems: true
+          description: Optional strict subset used to reduce an approval.
+          items: {$ref: "#/components/schemas/IdentityAccessField"}
+
+    IdentityAccessRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, eventId, targetType, targetId, fields, status, version]
+      properties:
+        requestId: {type: string}
+        eventId: {type: string}
+        targetType:
+          type: string
+          enum: [application, check_in]
+        targetId: {type: string}
+        fields:
+          type: array
+          items: {$ref: "#/components/schemas/IdentityAccessField"}
+        status: {$ref: "#/components/schemas/IdentityAccessStatus"}
+        version: {type: integer, format: int64, minimum: 1}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+
+    IdentityAccessRequestPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/IdentityAccessRequest"}
+        page: {$ref: "#/components/schemas/CursorPageMetadata"}
+
+    IdentityAccessDecisionResponse:
+      type: object
+      additionalProperties: false
+      required: [requestId, status, version]
+      properties:
+        requestId: {type: string}
+        status: {$ref: "#/components/schemas/IdentityAccessStatus"}
+        version: {type: integer, format: int64, minimum: 1}
+        replayed: {type: boolean, default: false}
+
+    IdentityAccessClaimResponse:
+      type: object
+      additionalProperties: false
+      required: [grantId, status, version]
+      properties:
+        grantId: {type: string}
+        status:
+          type: string
+          enum: [claimed]
+        version: {type: integer, format: int64, minimum: 1}
+        replayed: {type: boolean, default: false}
+
+    AdminStepUpState:
+      type: string
+      enum: [pending_enrollment, recovery_pending, active, must_rotate, disabled]
+
+    AdminStepUpChallengeResponse:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties:
+        state: {$ref: "#/components/schemas/AdminStepUpState"}
+        question:
+          type: string
+          description: NFKC-normalized owner-only challenge question; absent while enrollment is pending.
+        version: {type: integer, format: int64, minimum: 1}
+        credentialVersion: {type: integer, format: int64, minimum: 1}
+        lockedUntil: {type: string, format: date-time}
+
+    AdminStepUpEnrollRequest:
+      type: object
+      additionalProperties: false
+      required: [eventId, question, answer]
+      properties:
+        eventId: {type: string, minLength: 1, maxLength: 128}
+        question:
+          type: string
+          description: NFKC-normalized question containing 5–200 UAX #29 grapheme clusters.
+        answer:
+          type: string
+          writeOnly: true
+          description: NFKC-normalized answer containing 7–256 UAX #29 grapheme clusters after outer trim.
+
+    AdminStepUpVerifyRequest:
+      type: object
+      additionalProperties: false
+      required: [eventId, answer, action, target]
+      properties:
+        eventId: {type: string, minLength: 1, maxLength: 128}
+        answer: {type: string, writeOnly: true}
+        action:
+          type: string
+          enum:
+            - event.dashboard.read
+            - event.application.read_basic
+            - event.application.review
+            - event.application.approve_admission
+            - event.application.decide
+            - event.registration.manage
+            - event.checkin.scan
+            - event.checkin.manage_window
+            - event.identity_access.request
+            - event.identity_access.validate_target
+            - event.identity_access.consume
+            - event.identity.read_restricted
+            - event.legal.read
+            - event.application.export
+            - event.audit.read
+            - event.contact_submission.manage
+            - event.content.manage
+            - system.role_migration.read
+            - dreamup.admin.role.manage
+            - dreamup.admin.event_registry.manage
+            - dreamup.admin.oa.approve
+            - dreamup.admin.restricted.view
+            - dreamup.admin.legal.view
+            - dreamup.admin.export
+            - dreamup.admin.challenge.rotate
+            - dreamup.admin.checkin_window.manage
+        target:
+          type: string
+          maxLength: 900
+          description: For high-risk DreamUP BFF actions, the exact server-defined canonical JSON tuple `["dreamup-admin-target/v1", eventId, resourceKind, resourceId]`; alternate JSON spellings, cross-event tuples and action/resource-kind mismatches are rejected. Ordinary and legacy actions use their documented stable target.
+
+    AdminStepUpRotateRequest:
+      type: object
+      additionalProperties: false
+      required: [eventId, oldAnswer, question, answer]
+      properties:
+        eventId: {type: string, minLength: 1, maxLength: 128}
+        oldAnswer: {type: string, writeOnly: true}
+        question:
+          type: string
+          description: Replacement question containing 5–200 UAX #29 grapheme clusters after NFKC.
+        answer:
+          type: string
+          writeOnly: true
+          description: Replacement answer containing 7–256 UAX #29 grapheme clusters after normalization and outer trim.
+
+    AdminStepUpMutationResponse:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties:
+        state: {$ref: "#/components/schemas/AdminStepUpState"}
+        version: {type: integer, format: int64, minimum: 1}
+        challengeVersion: {type: integer, format: int64, minimum: 1}
+        verifiedAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+        reauthenticationToken:
+          type: string
+          writeOnly: true
+          minLength: 43
+          maxLength: 43
+          pattern: "^[A-Za-z0-9_-]{43}$"
+          description: Newly minted action-and-target-bound single-use bearer for high-risk verification. Never returned by an idempotent replay.
+        grantId:
+          type: string
+          description: Stable random grant identifier stored with the bearer data; it is not derived from the bearer.
+        replayed: {type: boolean, default: false}
+
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, ready, "not ready"]
+          description: Liveness or readiness status
+
+    WeChatRegistrationCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [username, displayName, email, password, acceptedTerms, loginCode, phoneCode]
+      properties:
+        username: {type: string, minLength: 3, maxLength: 64}
+        displayName: {type: string, minLength: 1, maxLength: 100}
+        email: {type: string, format: email, maxLength: 254}
+        password: {type: string, writeOnly: true, minLength: 12, maxLength: 128}
+        acceptedTerms: {type: boolean, enum: [true]}
+        requestId:
+          type: string
+          maxLength: 200
+          description: Optional correlation value copied into the email-verification return link; it is not an idempotency key or replay receipt.
+        loginCode:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 2048
+        phoneCode:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 2048
+
+    WeChatLoginRequest:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 2048
+          description: Fresh `wx.login` one-time code. Never stored or returned.
+
+    WeChatOnboardingBeginRequest:
+      type: object
+      additionalProperties: false
+      required: [loginCode]
+      properties:
+        loginCode:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 2048
+          description: Fresh `wx.login` one-time code; the server derives the AppID-scoped subject.
+        phoneCode:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 2048
+          description: Optional code supplied by the same `getPhoneNumber` action. Absence or provider rejection continues without a phone.
+
+    WeChatOnboardingRequiredResponse:
+      type: object
+      additionalProperties: false
+      required: [status, onboardingToken, expiresAt]
+      properties:
+        status: {type: string, enum: [onboarding_required]}
+        onboardingToken:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{43}$"
+          description: Restricted, single-use account-setup challenge. It is not a United Pass session bearer.
+        expiresAt: {type: string, format: date-time}
+
+    WeChatOnboardingCompleteRequest:
+      type: object
+      additionalProperties: false
+      required: [onboardingToken, username, displayName, email, password, acceptedTerms]
+      properties:
+        onboardingToken:
+          type: string
+          writeOnly: true
+          pattern: "^[A-Za-z0-9_-]{43}$"
+        username:
+          type: string
+          minLength: 3
+          maxLength: 64
+          description: Used only when a new account is created; never overwrites an existing account.
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Used only when a new account is created; never overwrites an existing account.
+        email: {type: string, format: email, maxLength: 254}
+        password:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 128
+          description: New credential for a new email, or current credential proof for an existing account. It is never persisted by United Pass.
+        acceptedTerms: {type: boolean, enum: [true]}
+        requestId:
+          type: string
+          maxLength: 200
+          description: Optional correlation value copied into a new account's email-verification return link; it is not an idempotency key or replay receipt.
+
+    WeChatOnboardingVerificationRequiredResponse:
+      type: object
+      additionalProperties: false
+      required: [status, registrationToken, expiresAt]
+      properties:
+        status: {type: string, enum: [verification_required]}
+        registrationToken:
+          type: string
+          description: Short-lived opaque capability for the existing registration email lifecycle; not an account session.
+        expiresAt: {type: string, format: date-time}
+
+    WeChatOnboardingMFARequiredResponse:
+      type: object
+      additionalProperties: false
+      description: |
+        The existing account requires its registered second factor before the
+        verified WeChat identity can be linked. `mfaToken` is a dedicated,
+        single-use onboarding token and must be submitted only to
+        `POST /api/v1/auth/wechat/onboarding/mfa`. The current DreamUP Mini
+        Program UI completes TOTP and fails closed for unsupported methods.
+      required: [status, mfaToken, availableMethods, expiresAt]
+      properties:
+        status: {type: string, enum: [mfa_required]}
+        mfaToken:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{43}$"
+          description: Opaque five-minute onboarding MFA token; it contains no provider credential.
+        availableMethods:
+          type: array
+          minItems: 1
+          items: {type: string, enum: [totp, passkey, recovery_code]}
+        passkeyRequestOptions:
+          type: object
+          additionalProperties: true
+          description: Provider WebAuthn request options when passkey is available; absent for TOTP-only accounts.
+        expiresAt: {type: string, format: date-time}
+
+    WeChatOnboardingMFARequest:
+      type: object
+      additionalProperties: false
+      required: [mfaToken, method]
+      properties:
+        mfaToken:
+          type: string
+          writeOnly: true
+          pattern: "^[A-Za-z0-9_-]{43}$"
+        method:
+          type: string
+          enum: [totp, passkey, recovery_code]
+        code:
+          type: string
+          writeOnly: true
+          maxLength: 256
+        passkeyAssertion:
+          type: object
+          writeOnly: true
+          additionalProperties: true
+
+    WeChatPhoneBindRequest:
+      type: object
+      additionalProperties: false
+      required: [loginCode, phoneCode]
+      properties:
+        loginCode:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 2048
+          description: Fresh `wx.login` code proving the linked WeChat identity.
+        phoneCode:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 2048
+          description: Fresh `getPhoneNumber` code. Never treated as a phone number.
+
+    WeChatPhoneBindResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {type: string, enum: [verified]}
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorBody"
+
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable, machine-readable error code
+          examples:
+            internal: internal.unexpected
+            validation: validation.failed
+            reauth: session.reauthentication_required
+        message:
+          type: string
+          description: Safe, user-displayable message
+          example: "服务暂时无法处理该请求。"
+        requestId:
+          type: string
+          description: Request ID for troubleshooting and audit correlation
+          example: req_0123456789abcdef
+        fieldErrors:
+          type: array
+          description: Field-level validation errors (array format)
+          items:
+            $ref: "#/components/schemas/FieldError"
+        stepUp:
+          $ref: "#/components/schemas/StepUpDetails"
+
+    StepUpDetails:
+      type: object
+      additionalProperties: false
+      required: [challengeToken, level, method, expiresAt, providerReady, completionPath]
+      properties:
+        challengeToken: {type: string, minLength: 1}
+        level: {type: string, enum: [medium, high]}
+        method: {type: string, enum: [automation_cost, interactive_captcha, mfa, reauth]}
+        expiresAt: {type: string, format: date-time}
+        algorithm:
+          type: string
+          enum: [sha256_leading_zero_bits]
+          description: Present only for automation_cost; this is not human verification.
+        difficulty: {type: integer, minimum: 1, maximum: 30}
+        provider:
+          type: string
+          description: |
+            Server-selected identifier. Current interactive values are
+            `cloudflare_turnstile` and `google_recaptcha`; clients cannot
+            choose or override this value.
+        providerReady:
+          type: boolean
+          description: False means high-risk verification is fail-closed until a provider is configured.
+        providerPayload:
+          type: object
+          additionalProperties: true
+          description: |
+            Server-issued public SDK parameters. Turnstile uses exactly
+            `siteKey`, `action`, and `cdata`; reCAPTCHA uses exactly `siteKey`
+            and the unique per-challenge `action`. No provider secret or URL
+            is returned.
+        completionPath:
+          type: string
+          enum: [/api/v1/auth/step-up, /api/v1/auth/sessions/mfa, /api/v1/auth/reauthentication]
+          description: Exact same-origin endpoint that completes the selected method.
+
+    StepUpCompletionRequest:
+      type: object
+      additionalProperties: false
+      required: [challengeToken]
+      properties:
+        challengeToken: {type: string, minLength: 1, maxLength: 512, writeOnly: true}
+        nonce:
+          type: string
+          maxLength: 256
+          description: automation_cost nonce; omitted for interactive_captcha.
+        providerProof:
+          type: string
+          maxLength: 8192
+          writeOnly: true
+          description: Opaque interactive-provider proof; omitted for automation_cost.
+
+    FieldError:
+      type: object
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          description: The field that failed validation
+          example: redirectUris[0]
+        message:
+          type: string
+          description: Safe, user-displayable field error message
+          example: "该重定向地址未登记。"
+
+    RegistrationCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [username, displayName, email, password, acceptedTerms, formIntentToken, automationBrief]
+      properties:
+        username:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$"
+        displayName: {type: string, minLength: 1, maxLength: 100}
+        email: {type: string, format: email, maxLength: 254}
+        password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 128
+          writeOnly: true
+        acceptedTerms: {type: boolean, const: true}
+        requestId: {type: string, maxLength: 200}
+        formIntentToken:
+          type: string
+          minLength: 1
+          maxLength: 512
+          writeOnly: true
+          description: One-use server-issued registration form intent.
+        automationBrief:
+          type: string
+          maxLength: 0
+          writeOnly: true
+          description: Must be present and empty in the supported browser client.
+
+    RegistrationFormIntentResponse:
+      type: object
+      additionalProperties: false
+      required: [formIntentToken, expiresAt]
+      properties:
+        formIntentToken: {type: string, minLength: 1, maxLength: 512}
+        expiresAt: {type: string, format: date-time}
+
+    RegistrationCreateResponse:
+      type: object
+      additionalProperties: false
+      required: [status, registrationToken, expiresAt]
+      properties:
+        status: {type: string, const: verification_required}
+        registrationToken:
+          type: string
+          minLength: 1
+          description: Short-lived opaque token usable only to resend this registration's email.
+        expiresAt: {type: string, format: date-time}
+
+    RegistrationVerifyRequest:
+      type: object
+      additionalProperties: false
+      required: [userId, code]
+      properties:
+        userId: {type: string, pattern: "^user_[0-9a-f]{32}$"}
+        code: {type: string, minLength: 1, maxLength: 256, writeOnly: true}
+        requestId: {type: string, maxLength: 200}
+
+    RegistrationVerifyResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {type: string, const: verified}
+        requestId:
+          type: string
+          maxLength: 200
+          description: Validated authorization request ID to restore through `/login?requestId=`.
+
+    RegistrationResendRequest:
+      type: object
+      additionalProperties: false
+      required: [registrationToken]
+      properties:
+        registrationToken: {type: string, minLength: 1, maxLength: 512, writeOnly: true}
+
+    RegistrationResendResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {type: string, const: verification_sent}
+
+    RegistrationAbuseBlockRevokeRequest:
+      type: object
+      additionalProperties: false
+      required: [dimension, value, valueEncoding, reasonCode]
+      properties:
+        dimension:
+          type: string
+          enum: [device, ip]
+        value:
+          type: string
+          minLength: 1
+          maxLength: 64
+          writeOnly: true
+          description: Canonical IP address, exact server-issued 256-bit base64url risk-device token, or its audited digest when allowed by valueEncoding.
+        valueEncoding:
+          type: string
+          enum: [raw, sha256]
+          description: sha256 is accepted only with dimension=device; IP always uses raw canonicalization and boundary hashing.
+        reasonCode:
+          type: string
+          enum: [false_positive, support_verified, test_cleanup, incident_response]
+      allOf:
+        - if:
+            required: [dimension]
+            properties:
+              dimension: {const: ip}
+          then:
+            properties:
+              valueEncoding: {const: raw}
+        - if:
+            required: [valueEncoding]
+            properties:
+              valueEncoding: {const: sha256}
+          then:
+            properties:
+              dimension: {const: device}
+              value: {type: string, pattern: "^[0-9a-f]{64}$"}
+
     LoginRequest:
       type: object
       description: |
@@ -4135,6 +6978,77 @@ components:
             raw return URL.
           pattern: "^[a-zA-Z0-9_:-]{8,128}$"
           example: req_01ABCdefGHIjkl
+
+    MiniProgramLoginRequest:
+      type: object
+      additionalProperties: false
+      required: [identifier, password]
+      properties:
+        identifier:
+          type: string
+          minLength: 1
+          description: Account name or email address.
+        password:
+          type: string
+          minLength: 1
+          format: password
+          writeOnly: true
+        remember:
+          type: boolean
+          const: false
+          default: false
+          description: Native Mini Program sessions cannot opt into the extended remember lifetime.
+
+    MiniProgramSessionResponse:
+      type: object
+      additionalProperties: false
+      required: [status, sessionBearer, expiresAt]
+      properties:
+        status:
+          type: string
+          const: authenticated
+        sessionBearer:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{43}$"
+          readOnly: true
+          description: Short-lived opaque native bearer. Keep only in process memory and never persist it.
+        expiresAt:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Fixed server-side absolute expiry, no later than 30 minutes after issuance.
+
+    DreamUPMobileAssertionResponse:
+      type: object
+      additionalProperties: false
+      required: [assertion, expiresAt]
+      properties:
+        assertion:
+          type: string
+          minLength: 1
+          readOnly: true
+          description: One short-lived request-bound DreamUP assertion; it is not a United Pass session credential.
+        expiresAt:
+          type: string
+          format: date-time
+          readOnly: true
+
+    MiniProgramMFAChallengeRequest:
+      type: object
+      additionalProperties: false
+      required: [mfaToken, method, code]
+      properties:
+        mfaToken:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{43}$"
+          writeOnly: true
+        method:
+          type: string
+          const: totp
+        code:
+          type: string
+          pattern: "^[0-9]{6}$"
+          writeOnly: true
 
     MFARequiredResponse:
       type: object
@@ -4849,6 +7763,7 @@ components:
             - client.delete
             - client.secret.rotate
             - account.password.change
+            - account.email.change
             - account.totp.enroll
             - account.totp.remove
             - account.passkey.enroll
@@ -4856,6 +7771,7 @@ components:
             - user.disable
             - user.sessions.revoke
             - employee.offboard
+            - registration.abuse.unblock
           description: The high-risk action the grant will authorize.
         applicationId:
           type: string
@@ -4867,7 +7783,11 @@ components:
           type: string
           description: |
             Required for `account.passkey.remove` (passkey ID) and for the
-            Phase 5 target-user actions (stable user ID); forbidden otherwise.
+            Phase 5 target-user actions (stable user ID). For
+            `registration.abuse.unblock`, use the exact server-defined binding
+            `<dimension>_<sha256>` returned or derived by the operator tool;
+            the revoke request must present a grant bound to the same target.
+            Forbidden for actions that do not define a target.
         password:
           type: string
           minLength: 1

@@ -206,7 +206,7 @@ func TestResolveRequestUnionShapes(t *testing.T) {
 			},
 			want: map[string]any{
 				"status": "already_authorized", "requestId": "req-1",
-				"applicationName": "Example App", "redirectHost": "rp.example",
+				"applicationName": "Example App", "redirectHost": "rp.example", "logoUrl": nil,
 			},
 		},
 	}

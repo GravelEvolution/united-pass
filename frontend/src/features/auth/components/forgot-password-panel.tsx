@@ -9,36 +9,52 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Button, Input } from "@douyinfe/semi-ui";
 import { IconMail } from "@douyinfe/semi-icons";
-import { isApiError } from "@/lib/api/api-error";
-import { requestPasswordReset } from "@/lib/api/browser/auth-commands";
+import { browserFetch } from "@/lib/api/browser/browser-http-client";
+import { preloadAliyunCaptcha, verifyAliyunCaptcha } from "@/lib/security/aliyun-captcha";
 import styles from "./credential-panel.module.css";
 
 export function ForgotPasswordPanel() {
+  useEffect(() => {
+    void preloadAliyunCaptcha();
+  }, []);
+
   const [requestSubmitted, setRequestSubmitted] = useState(false);
+  const [identifier, setIdentifier] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string>();
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const identifier = new FormData(event.currentTarget).get("identifier");
-    if (typeof identifier !== "string") return;
+    const normalized = identifier.trim();
+    if (!normalized) return;
+
     setIsSubmitting(true);
     setErrorMessage(undefined);
+
+    let captchaVerifyParam: string;
     try {
-      await requestPasswordReset(identifier);
+      captchaVerifyParam = await verifyAliyunCaptcha();
+    } catch {
+      setIsSubmitting(false);
+      setErrorMessage("人机验证未通过，请重试。");
+      return;
+    }
+
+    try {
+      // The endpoint answers 202 for any well-formed identifier (anti-
+      // enumeration); the reset link is only emailed when an account exists.
+      await browserFetch<{ status: string }>("/auth/password-reset", {
+        method: "POST",
+        body: { identifier: normalized },
+        captchaVerifyParam,
+      });
       setRequestSubmitted(true);
-    } catch (error) {
-      if (isApiError(error) && error.kind === "rate_limited") {
-        setErrorMessage(error.message);
-      } else if (isApiError(error) && error.kind === "network") {
-        setErrorMessage("网络异常，请检查连接后重试。");
-      } else {
-        setErrorMessage("暂时无法提交请求，请稍后重试。");
-      }
+    } catch {
+      setErrorMessage("发送失败，请稍后重试。");
     } finally {
       setIsSubmitting(false);
     }
@@ -61,6 +77,9 @@ export function ForgotPasswordPanel() {
             prefix={<IconMail />}
             placeholder="账户名或 name@example.com"
             autoComplete="username"
+            value={identifier}
+            onChange={(nextValue) => setIdentifier(nextValue)}
+            disabled={isSubmitting}
             required
           />
         </label>
@@ -72,21 +91,24 @@ export function ForgotPasswordPanel() {
           size="large"
           block
           loading={isSubmitting}
-          disabled={isSubmitting || requestSubmitted}
+          disabled={isSubmitting}
         >
-          {isSubmitting ? "正在提交…" : requestSubmitted ? "重置说明已请求" : "发送重置说明"}
+          发送重置说明
         </Button>
       </form>
 
-      {errorMessage && <p className={styles.fieldError} role="alert">{errorMessage}</p>}
+      {errorMessage && (
+        <p className={styles.notice} role="alert">
+          {errorMessage}
+        </p>
+      )}
 
       {requestSubmitted && (
-        <p className={styles.statusResult} role="status">
+        <p className={styles.mockResult} role="status">
           如果该账户存在，我们会向已验证的联系方式发送重置说明。
         </p>
       )}
 
-      <p className={styles.notice}>为保护账户隐私，无论账户是否存在，页面都会显示相同结果。</p>
       <p className={styles.switchMode}>
         已想起密码？<Link href="/login">返回登录</Link>
       </p>

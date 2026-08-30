@@ -163,6 +163,15 @@ type Authenticator interface {
 		input PasswordAuthenticationInput,
 	) (AuthenticationResult, error)
 
+	// BeginPasskeyAuthentication starts a passwordless passkey login. It asks
+	// the provider to issue a WebAuthn challenge for the caller's discoverable
+	// credentials; the result is MFARequired carrying PasskeyRequestOptions so
+	// the browser can run navigator.credentials.get and finish via
+	// CompleteMFA.
+	BeginPasskeyAuthentication(
+		ctx context.Context,
+	) (AuthenticationResult, error)
+
 	// CompleteMFA completes an MFA challenge using the provided method.
 	CompleteMFA(
 		ctx context.Context,

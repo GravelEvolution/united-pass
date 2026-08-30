@@ -103,9 +103,9 @@ func (s *accountContactProviderStub) VerifyPhoneChange(_ context.Context, _ iden
 	return nil
 }
 
-type accountContactRateStub struct{}
+type legacyAccountContactRateStub struct{}
 
-func (accountContactRateStub) CheckContact(context.Context, string, string, int, time.Duration) (bool, time.Duration, error) {
+func (legacyAccountContactRateStub) CheckContact(context.Context, string, string, int, time.Duration) (bool, time.Duration, error) {
 	return true, 0, nil
 }
 
@@ -131,7 +131,7 @@ func withContactRequestID(req *http.Request, value string) *http.Request {
 
 func TestUpdateOwnProfileTrimsOnlyAllowedFields(t *testing.T) {
 	store := &accountMutationStoreStub{}
-	handler := NewAccountMutationHandlers(store, nil, accountContactRateStub{}, nil)
+	handler := NewAccountMutationHandlers(store, nil, legacyAccountContactRateStub{}, nil)
 	recorder := httptest.NewRecorder()
 	handler.UpdateProfile(recorder, accountMutationRequest(
 		http.MethodPatch, "/api/v1/me", `{"displayName":"  New Name  ","nickname":" nick "}`,
@@ -144,7 +144,7 @@ func TestUpdateOwnProfileTrimsOnlyAllowedFields(t *testing.T) {
 
 func TestAvatarRouteRequiresCanonicalPNGSuffixAndReturnsCacheValidator(t *testing.T) {
 	store := &accountMutationStoreStub{avatar: []byte("controlled-png"), etag: strings.Repeat("a", 64)}
-	handler := NewAccountMutationHandlers(store, nil, accountContactRateStub{}, nil)
+	handler := NewAccountMutationHandlers(store, nil, legacyAccountContactRateStub{}, nil)
 	avatarID := "avt_00000000000000000000000000000000"
 
 	nonCanonical := httptest.NewRecorder()
@@ -170,7 +170,7 @@ func TestAvatarRouteRequiresCanonicalPNGSuffixAndReturnsCacheValidator(t *testin
 func TestVerifiedEmailChangeIsBoundToUserAndSession(t *testing.T) {
 	store := &accountMutationStoreStub{}
 	provider := &accountContactProviderStub{}
-	handler := NewAccountMutationHandlers(store, provider, accountContactRateStub{}, nil)
+	handler := NewAccountMutationHandlers(store, provider, legacyAccountContactRateStub{}, nil)
 
 	begin := httptest.NewRecorder()
 	handler.RequestEmailChange(begin, accountMutationRequest(

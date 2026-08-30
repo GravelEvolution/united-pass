@@ -63,6 +63,10 @@ const (
 	// (ADR-0005 §6). Exactly one event is written per revoking transaction,
 	// constructed by the grant store from the locked grant row alone.
 	EventConsentGrantRevoked = "consent.grant_revoked"
+
+	EventQRLoginApprovalRequested = "qr_login.approval_requested"
+	EventQRLoginReceiverVerified  = "qr_login.receiver_verified"
+	EventQRLoginReceiverRejected  = "qr_login.receiver_rejected"
 )
 
 // SecurityEvent is one durable audit row. This is a real persistence

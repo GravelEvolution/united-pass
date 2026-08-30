@@ -54,6 +54,16 @@ const (
 	ProvisioningStatusDeleteFailed       ProvisioningStatus = "delete_failed"
 )
 
+// SecretRotationStatus is the durable gate around non-idempotent provider
+// secret rotation. Bootstrap verification accepts only the quiescent state.
+type SecretRotationStatus string
+
+const (
+	SecretRotationIdle           SecretRotationStatus = "idle"
+	SecretRotationInProgress     SecretRotationStatus = "in_progress"
+	SecretRotationOutcomeUnknown SecretRotationStatus = "outcome_unknown"
+)
+
 // ClientProfile bundles the security-relevant OAuth client configuration.
 // The profile is immutable after creation and is the stored authority; the
 // frontend profile config is advisory only (ADR-0004 §3).
@@ -85,6 +95,31 @@ const (
 	GrantTypeAuthorizationCode OAuthGrantType = "authorization_code"
 	GrantTypeRefreshToken      OAuthGrantType = "refresh_token"
 	GrantTypeClientCredentials OAuthGrantType = "client_credentials"
+)
+
+// OAuthResponseType is the provider-independent response-type view used by
+// read-back verification. Unknown provider values are never coerced into a
+// supported response type, so configuration drift fails closed.
+type OAuthResponseType string
+
+const (
+	ResponseTypeCode OAuthResponseType = "code"
+)
+
+// OAuthOIDCVersion is the provider-independent OIDC protocol version used by
+// read-back verification.
+type OAuthOIDCVersion string
+
+const (
+	OIDCVersion10 OAuthOIDCVersion = "1.0"
+)
+
+// OAuthAccessTokenType is the provider-independent access-token format.
+type OAuthAccessTokenType string
+
+const (
+	AccessTokenTypeBearer OAuthAccessTokenType = "bearer"
+	AccessTokenTypeJWT    OAuthAccessTokenType = "jwt"
 )
 
 // TokenEndpointAuthMethod is the client authentication method at the token

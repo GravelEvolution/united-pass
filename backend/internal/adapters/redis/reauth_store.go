@@ -312,7 +312,7 @@ return count
 	if result < 0 {
 		return 0, auth.ErrReauthChallengeNotFound
 	}
-	if result > maxAttempts {
+	if result >= maxAttempts {
 		return result, auth.ErrReauthMaxAttemptsExceeded
 	}
 	return result, nil

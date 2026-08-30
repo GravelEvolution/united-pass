@@ -56,6 +56,9 @@ type Application struct {
 	Version      int
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	// DeletedAt is populated only by authoritative provisioning read-back.
+	// Public management projections continue to hide soft-deleted rows.
+	DeletedAt *time.Time
 }
 
 // ApplicationSummary is the list-view projection: the application plus the
@@ -69,27 +72,31 @@ type ApplicationSummary struct {
 // identifiers are mapping columns only and never act as United Pass
 // identities (ADR-0004 §1).
 type OAuthClient struct {
-	ID                    OAuthClientID
-	ApplicationID         ApplicationID
-	Name                  string
-	Profile               ClientProfile
-	ClientType            ClientType
-	TokenEndpointAuth     TokenEndpointAuthMethod
-	ConsentMode           ConsentMode
-	Status                Status
-	RedirectURIs          []RedirectURI
-	LogoutURI             string
-	Scopes                []string
-	Provider              string
-	ProviderProjectID     string
-	ProviderApplicationID string
-	ProviderClientID      string
-	Provisioning          ProvisioningStatus
+	ID                             OAuthClientID
+	ApplicationID                  ApplicationID
+	Name                           string
+	Profile                        ClientProfile
+	ClientType                     ClientType
+	TokenEndpointAuth              TokenEndpointAuthMethod
+	ConsentMode                    ConsentMode
+	Status                         Status
+	RedirectURIs                   []RedirectURI
+	LogoutURI                      string
+	Scopes                         []string
+	Provider                       string
+	ProviderProjectID              string
+	ProviderApplicationID          string
+	ProviderClientID               string
+	Provisioning                   ProvisioningStatus
+	ProviderReconciliationRequired bool
+	SecretRotationStatus           SecretRotationStatus
 	// SecretRecords is secret metadata only; never secret values.
 	SecretRecords []ClientSecretRecord
 	Version       int
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+	// DeletedAt is populated only by authoritative provisioning read-back.
+	DeletedAt *time.Time
 }
 
 // RedirectURI is a registered redirect URI, stored exactly as submitted.

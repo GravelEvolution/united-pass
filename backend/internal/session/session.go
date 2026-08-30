@@ -31,6 +31,16 @@ type SessionID string
 // TokenBytes is the number of random bytes in a session token (256 bits).
 const TokenBytes = 32
 
+// ClientKindMiniProgram marks a native DreamUP Mini Program bearer session.
+// Browser sessions deliberately keep an empty client kind so a token can
+// never be replayed across the ambient-cookie and explicit-bearer transports.
+const ClientKindMiniProgram = "dreamup-miniprogram"
+
+// MiniProgramSessionTTL is intentionally short because the native bearer is
+// held in Mini Program process memory. A cold start obtains a fresh bearer
+// from a newly verified wx.login code instead of persisting this credential.
+const MiniProgramSessionTTL = 30 * time.Minute
+
 // CSRFTokenBytes is the number of random bytes in a CSRF token (256 bits).
 const CSRFTokenBytes = 32
 
@@ -41,11 +51,15 @@ const MFATokenBytes = 32
 // with a TTL. The raw session token and CSRF token are never stored here —
 // only their hashes.
 type SessionRecord struct {
-	Version                  int             `json:"version"`
-	SessionID                SessionID       `json:"sessionId"`
-	UserID                   identity.UserID `json:"userId"`
-	Provider                 string          `json:"provider"`
-	ProviderSessionReference string          `json:"providerSessionReference,omitempty"`
+	Version   int             `json:"version"`
+	SessionID SessionID       `json:"sessionId"`
+	UserID    identity.UserID `json:"userId"`
+	// ClientKind binds this credential to its transport. Empty means the
+	// browser HttpOnly-cookie contract; ClientKindMiniProgram means the
+	// explicit native Authorization bearer contract.
+	ClientKind               string `json:"clientKind,omitempty"`
+	Provider                 string `json:"provider"`
+	ProviderSessionReference string `json:"providerSessionReference,omitempty"`
 	// ProviderSessionCredential is the sealed (AES-256-GCM) versioned
 	// provider session handle (ADR-0005 §3). Sessions created before the
 	// ADR-0003 revision carry none — they cannot finalize OAuth

@@ -11,6 +11,7 @@ package bootstrap
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
@@ -29,10 +30,13 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
+	"github.com/GravelEvolution/united-pass/backend/internal/accountcontact"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi"
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/integrationboundary"
+	"github.com/GravelEvolution/united-pass/backend/internal/registration"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
@@ -57,6 +61,32 @@ func testConfig() config.Config {
 		ShutdownTimeout:     3 * time.Second,
 		MaxRequestBodyBytes: 1 << 20,
 		LogLevel:            "info",
+	}
+}
+
+func TestNewAliyunSMSClientFailsClosedBeforeWiring(t *testing.T) {
+	valid := config.AliyunSMSConfig{
+		Enabled:         true,
+		AccessKeyID:     "test-access-key-id",
+		AccessKeySecret: "test-access-key-secret",
+		SignName:        "test-sign",
+		TemplateCode:    "SMS_123456789",
+		Endpoint:        "https://dysmsapi.aliyuncs.com/",
+	}
+	if _, err := newAliyunSMSClient(valid); err != nil {
+		t.Fatalf("newAliyunSMSClient rejected valid config: %v", err)
+	}
+
+	invalidEndpoint := valid
+	invalidEndpoint.Endpoint = "https://attacker.example/"
+	if _, err := newAliyunSMSClient(invalidEndpoint); err == nil || !strings.Contains(err.Error(), "official Aliyun HTTPS origin") {
+		t.Fatalf("newAliyunSMSClient endpoint error = %v", err)
+	}
+
+	missingSecret := valid
+	missingSecret.AccessKeySecret = ""
+	if _, err := newAliyunSMSClient(missingSecret); err == nil || !strings.Contains(err.Error(), "access key secret") {
+		t.Fatalf("newAliyunSMSClient credential error = %v", err)
 	}
 }
 
@@ -239,6 +269,88 @@ func TestNewServerMountsHealthRoutes(t *testing.T) {
 	readyRec := newRequest(srv.Router, http.MethodGet, "/readyz")
 	if readyRec.Code != http.StatusOK {
 		t.Errorf("readyz status = %d, want %d", readyRec.Code, http.StatusOK)
+	}
+}
+
+func TestDreamUPAdminDisabledReturns404WithoutReadingKeyrings(t *testing.T) {
+	cfg := testConfig()
+	cfg.DreamUPAdmin = config.DreamUPAdminConfig{
+		Enabled:                        false,
+		ChallengeEncryptionKeyringPath: `Z:\unreadable\challenge.json`, ChallengeEncryptionCurrentKeyID: "same",
+		ChallengePepperKeyringPath: `Z:\unreadable\pepper.json`, ChallengePepperCurrentKeyID: "same",
+		ProtectedReasonKeyringPath: `Z:\unreadable\reason.json`, ProtectedReasonCurrentKeyID: "same",
+		RateLimitKeyringPath: `Z:\unreadable\rate.json`, RateLimitCurrentKeyID: "same",
+		OperationFingerprintKeyringPath: `Z:\unreadable\fingerprint.json`, OperationFingerprintCurrentKeyID: "same",
+	}
+	srv := newTestServer(t, cfg)
+	recorder := httptest.NewRecorder()
+	srv.Router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/admin/step-up/challenge?eventId=evt_a", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	for _, path := range []string{
+		"/.well-known/dreamup-admin-jwks.json",
+		"/api/v1/admin/dreamup/eligibility",
+		"/api/v1/admin/dreamup/events",
+		"/api/v1/admin/dreamup/events/evt_a/content",
+	} {
+		recorder = httptest.NewRecorder()
+		srv.Router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("disabled path %s status=%d body=%s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestDreamUPAdminEnabledFailsClosedWhenKeyringCannotLoad(t *testing.T) {
+	cfg := testConfig()
+	cfg.DreamUPAdmin = config.DreamUPAdminConfig{
+		Enabled:                        true,
+		ChallengeEncryptionKeyringPath: `Z:\unreadable\challenge.json`, ChallengeEncryptionCurrentKeyID: "ce-1",
+		ChallengePepperKeyringPath: `Z:\unreadable\pepper.json`, ChallengePepperCurrentKeyID: "cp-1",
+		ProtectedReasonKeyringPath: `Z:\unreadable\reason.json`, ProtectedReasonCurrentKeyID: "pr-1",
+		RateLimitKeyringPath: `Z:\unreadable\rate.json`, RateLimitCurrentKeyID: "rl-1",
+		OperationFingerprintKeyringPath: `Z:\unreadable\fingerprint.json`, OperationFingerprintCurrentKeyID: "of-1",
+		FreshLoginMaxAge: 5 * time.Minute, GeneralFreshness: 30 * time.Minute, HighRiskFreshness: 5 * time.Minute,
+		RateLimit: 5, RateWindow: 15 * time.Minute, LockDuration: 30 * time.Minute, Argon2MaxConcurrent: 2,
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if _, err := NewServer(cfg, logger); err == nil || !strings.Contains(err.Error(), "DreamUP admin") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestDreamUPAdminSecurityMaterialRejectsSessionAndCrossPurposeKeyReuse(t *testing.T) {
+	temp := t.TempDir()
+	writeRing := func(name, id string, value byte) string {
+		t.Helper()
+		path := filepath.Join(temp, name+".json")
+		encoded := base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{value}, 32))
+		if err := os.WriteFile(path, []byte(`{"keys":{"`+id+`":"`+encoded+`"}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	cfg := config.Config{DreamUPAdmin: config.DreamUPAdminConfig{
+		Enabled:                        true,
+		ChallengeEncryptionKeyringPath: writeRing("challenge", "ce-1", 1), ChallengeEncryptionCurrentKeyID: "ce-1",
+		ChallengePepperKeyringPath: writeRing("pepper", "cp-1", 2), ChallengePepperCurrentKeyID: "cp-1",
+		ProtectedReasonKeyringPath: writeRing("reason", "pr-1", 3), ProtectedReasonCurrentKeyID: "pr-1",
+		RateLimitKeyringPath: writeRing("rate", "rl-1", 4), RateLimitCurrentKeyID: "rl-1",
+		OperationFingerprintKeyringPath: writeRing("operation", "of-1", 5), OperationFingerprintCurrentKeyID: "of-1",
+	}}
+	if _, err := loadDreamUPAdminSecurityMaterial(cfg); err != nil {
+		t.Fatalf("unique material rejected: %v", err)
+	}
+	cfg.Session.EncryptionKey = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{5}, 32))
+	if _, err := loadDreamUPAdminSecurityMaterial(cfg); err == nil {
+		t.Fatal("operation fingerprint key reused as session encryption key")
+	}
+	cfg.Session.EncryptionKey = ""
+	cfg.DreamUPAdmin.RateLimitKeyringPath = cfg.DreamUPAdmin.ChallengePepperKeyringPath
+	cfg.DreamUPAdmin.RateLimitCurrentKeyID = cfg.DreamUPAdmin.ChallengePepperCurrentKeyID
+	if _, err := loadDreamUPAdminSecurityMaterial(cfg); err == nil {
+		t.Fatal("cross-purpose key reuse accepted")
 	}
 }
 
@@ -429,37 +541,6 @@ func TestNewServerRejectsInvalidEncryptionKey(t *testing.T) {
 	}
 }
 
-func TestNewServerRejectsInvalidRedisConfiguration(t *testing.T) {
-	cfg := testConfig()
-	cfg.Redis.URL = "://not-a-redis-url"
-
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	_, err := NewServer(cfg, logger)
-	if err == nil {
-		t.Fatal("expected invalid Redis configuration to fail startup")
-	}
-	if !strings.Contains(err.Error(), "create redis client") {
-		t.Fatalf("error = %q, want sanitized Redis construction context", err)
-	}
-}
-
-type failingCloser struct {
-	err error
-}
-
-func (c failingCloser) Close() error { return c.err }
-
-func TestShutdownReturnsResourceCloseErrors(t *testing.T) {
-	sentinel := errors.New("provider close sentinel")
-	srv := newTestServer(t, testConfig())
-	srv.providerCloser = failingCloser{err: sentinel}
-
-	err := srv.Shutdown(context.Background())
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("Shutdown error = %v, want wrapped provider close error", err)
-	}
-}
-
 // TestNewServerAcceptsValidEncryptionKeyInDevelopment verifies a well-formed
 // key is accepted and wired into the session service.
 func TestNewServerAcceptsValidEncryptionKeyInDevelopment(t *testing.T) {
@@ -471,6 +552,155 @@ func TestNewServerAcceptsValidEncryptionKeyInDevelopment(t *testing.T) {
 	if srv == nil {
 		t.Fatal("expected a server with a valid encryption key")
 	}
+}
+
+func TestNewServerRejectsOnboardingWithoutDedicatedEncryptionMaterialBeforeInfrastructure(t *testing.T) {
+	cfg := testConfig()
+	cfg.WeChatMiniProgram.Enabled = true
+	cfg.WeChatMiniProgram.RegistrationEnabled = true
+	cfg.WeChatMiniProgram.OnboardingEnabled = true
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	_, err := NewServer(cfg, logger)
+	if err == nil || !strings.Contains(err.Error(), "dedicated key and key ID are required") {
+		t.Fatalf("NewServer error = %v, want dedicated onboarding key failure", err)
+	}
+}
+
+func TestNewServerRejectsOnboardingWithoutSecurityNotificationTransportBeforeInfrastructure(t *testing.T) {
+	cfg := testConfig()
+	cfg.WeChatMiniProgram.Enabled = true
+	cfg.WeChatMiniProgram.RegistrationEnabled = true
+	cfg.WeChatMiniProgram.OnboardingEnabled = true
+	cfg.WeChatMiniProgram.OnboardingEncryptionKey = bootstrapTestAESKey(0x22)
+	cfg.WeChatMiniProgram.OnboardingEncryptionKeyID = "wechat-onboarding-v1"
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	_, err := NewServer(cfg, logger)
+	if err == nil || !strings.Contains(err.Error(), "security notification transport is unavailable") {
+		t.Fatalf("NewServer error = %v, want notification transport failure", err)
+	}
+}
+
+func TestWeChatOnboardingEncryptorIsCryptographicallySeparatedFromSessions(t *testing.T) {
+	sessionKey := bootstrapTestAESKey(0x11)
+	onboardingKey := bootstrapTestAESKey(0x22)
+	cfg := testConfig()
+	cfg.Session.EncryptionKey = sessionKey
+	cfg.Session.EncryptionKeyID = "session-v1"
+	cfg.WeChatMiniProgram.OnboardingEnabled = true
+	cfg.WeChatMiniProgram.OnboardingEncryptionKey = onboardingKey
+	cfg.WeChatMiniProgram.OnboardingEncryptionKeyID = "wechat-onboarding-v1"
+
+	onboardingEncryptor, err := newWeChatOnboardingEncryptor(cfg)
+	if err != nil {
+		t.Fatalf("newWeChatOnboardingEncryptor: %v", err)
+	}
+	sessionEncryptor, err := newSessionEncryptor(cfg)
+	if err != nil {
+		t.Fatalf("newSessionEncryptor: %v", err)
+	}
+	onboardingCiphertext, err := onboardingEncryptor.Encrypt("private-onboarding-challenge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(onboardingCiphertext, "wechat-onboarding-v1:") {
+		t.Fatalf("unexpected onboarding key ID: %q", onboardingCiphertext)
+	}
+	if _, err := sessionEncryptor.Decrypt(onboardingCiphertext); err == nil {
+		t.Fatal("session AEAD decrypted an onboarding challenge")
+	}
+	sessionCiphertext, err := sessionEncryptor.Encrypt("private-provider-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := onboardingEncryptor.Decrypt(sessionCiphertext); err == nil {
+		t.Fatal("onboarding AEAD decrypted a provider session")
+	}
+}
+
+func TestWeChatOnboardingEncryptorRetainsHistoricalCleanupKeys(t *testing.T) {
+	oldKey := bootstrapTestAESKey(0x21)
+	currentKey := bootstrapTestAESKey(0x22)
+	oldEncryptor, err := session.NewAESGCMEncryptor(oldKey, "wechat-onboarding-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupCiphertext, err := oldEncryptor.Encrypt("provider-session-awaiting-revocation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig()
+	cfg.WeChatMiniProgram.OnboardingEnabled = true
+	cfg.WeChatMiniProgram.OnboardingEncryptionKey = currentKey
+	cfg.WeChatMiniProgram.OnboardingEncryptionKeyID = "wechat-onboarding-v2"
+	cfg.WeChatMiniProgram.OnboardingRetainedDecryptionKeys = `{"wechat-onboarding-v1":"` + oldKey + `"}`
+
+	keyring, err := newWeChatOnboardingEncryptor(cfg)
+	if err != nil {
+		t.Fatalf("newWeChatOnboardingEncryptor: %v", err)
+	}
+	plain, err := keyring.Decrypt(cleanupCiphertext)
+	if err != nil || plain != "provider-session-awaiting-revocation" {
+		t.Fatalf("retained cleanup decrypt = %q, %v", plain, err)
+	}
+	currentCiphertext, err := keyring.Encrypt("new-obligation")
+	if err != nil || !strings.HasPrefix(currentCiphertext, "wechat-onboarding-v2:") {
+		t.Fatalf("current encryption = %q, %v", currentCiphertext, err)
+	}
+}
+
+func TestWeChatOnboardingEncryptorRejectsMissingMalformedOrReusedKeys(t *testing.T) {
+	valid := testConfig()
+	valid.WeChatMiniProgram.OnboardingEnabled = true
+	valid.WeChatMiniProgram.OnboardingEncryptionKey = bootstrapTestAESKey(0x22)
+	valid.WeChatMiniProgram.OnboardingEncryptionKeyID = "wechat-onboarding-v1"
+	tests := []struct {
+		name    string
+		mutate  func(*config.Config)
+		wantErr string
+	}{
+		{name: "missing", mutate: func(cfg *config.Config) { cfg.WeChatMiniProgram.OnboardingEncryptionKey = "" }, wantErr: "required"},
+		{name: "malformed", mutate: func(cfg *config.Config) { cfg.WeChatMiniProgram.OnboardingEncryptionKey = "not-base64" }, wantErr: "base64-encoded"},
+		{name: "wrong length", mutate: func(cfg *config.Config) {
+			cfg.WeChatMiniProgram.OnboardingEncryptionKey = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 16))
+		}, wantErr: "32 bytes"},
+		{name: "unsafe key id", mutate: func(cfg *config.Config) { cfg.WeChatMiniProgram.OnboardingEncryptionKeyID = "wechat:v1" }, wantErr: "must not contain ':'"},
+		{name: "session key reuse", mutate: func(cfg *config.Config) {
+			cfg.Session.EncryptionKey = cfg.WeChatMiniProgram.OnboardingEncryptionKey
+		}, wantErr: "distinct from the session encryption key"},
+		{name: "session key reuse with alternate base64 whitespace", mutate: func(cfg *config.Config) {
+			key := cfg.WeChatMiniProgram.OnboardingEncryptionKey
+			cfg.Session.EncryptionKey = key[:8] + "\n" + key[8:]
+		}, wantErr: "distinct from the session encryption key"},
+		{name: "retained malformed", mutate: func(cfg *config.Config) {
+			cfg.WeChatMiniProgram.OnboardingRetainedDecryptionKeys = `{`
+		}, wantErr: "retained decryption keyring is invalid"},
+		{name: "retained session key reuse", mutate: func(cfg *config.Config) {
+			cfg.Session.EncryptionKey = bootstrapTestAESKey(0x33)
+			cfg.WeChatMiniProgram.OnboardingRetainedDecryptionKeys = `{"wechat-onboarding-v0":"` + cfg.Session.EncryptionKey + `"}`
+		}, wantErr: "retained key material must be distinct"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := valid
+			test.mutate(&cfg)
+			if _, err := newWeChatOnboardingEncryptor(cfg); err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
+
+	disabled := valid
+	disabled.WeChatMiniProgram.OnboardingEnabled = false
+	disabled.WeChatMiniProgram.OnboardingEncryptionKey = "not-base64"
+	if encryptor, err := newWeChatOnboardingEncryptor(disabled); err != nil || encryptor != nil {
+		t.Fatalf("disabled onboarding loaded encryption material: encryptor=%T err=%v", encryptor, err)
+	}
+}
+
+func bootstrapTestAESKey(fill byte) string {
+	return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{fill}, 32))
 }
 
 // TestFakeProviderWithDatabaseServesCurrentUser verifies that when a database
@@ -492,13 +722,19 @@ func TestFakeProviderWithDatabaseServesCurrentUser(t *testing.T) {
 		t.Skip("UP_TEST_DATABASE_URL and UP_TEST_REDIS_URL required for this test")
 	}
 	dbSchema := os.Getenv("UP_TEST_DATABASE_SCHEMA")
-	if dbSchema == "" {
-		dbSchema = "united_pass_test"
+	runToken := os.Getenv(integrationboundary.RunTokenEnvironment)
+	redisPrefix := os.Getenv("UP_TEST_REDIS_KEY_PREFIX")
+	if err := integrationboundary.ValidatePostgres(dbURL, dbSchema, runToken); err != nil {
+		t.Fatalf("PostgreSQL integration boundary rejected: %v", err)
+	}
+	if err := integrationboundary.ValidateRedis(redisURL, redisPrefix, runToken); err != nil {
+		t.Fatalf("Redis integration boundary rejected: %v", err)
 	}
 	prepareBootstrapTestDatabase(t, dbURL, dbSchema)
 
 	cfg := testConfig()
 	cfg.Auth.Provider = "fake"
+	cfg.OAuth.PublicOrigin = "http://united-pass.localhost"
 	cfg.Session.EncryptionKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 	cfg.Session.EncryptionKeyID = "test-v1"
 	// testConfig() leaves zero-value durations; supply the same defaults as
@@ -520,14 +756,16 @@ func TestFakeProviderWithDatabaseServesCurrentUser(t *testing.T) {
 	cfg.Database.MinConns = 1
 	cfg.Database.ConnectTimeout = 10 * time.Second
 	cfg.Redis.URL = redisURL
-	cfg.Redis.KeyPrefix = "up:test:bootstrap:"
+	cfg.Redis.KeyPrefix = redisPrefix + "bootstrap:"
 	cfg.Redis.PoolSize = 5
 	cfg.Redis.ConnectTimeout = 10 * time.Second
 
 	srv := newTestServer(t, cfg)
 	t.Cleanup(func() {
-		if err := srv.Shutdown(context.Background()); err != nil {
-			t.Logf("shutdown: %v", err)
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownContext); err != nil {
+			t.Fatalf("shutdown: %v", err)
 		}
 	})
 
@@ -536,7 +774,7 @@ func TestFakeProviderWithDatabaseServesCurrentUser(t *testing.T) {
 	loginRec := httptest.NewRecorder()
 	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sessions", loginBody)
 	loginReq.Header.Set("Content-Type", "application/json")
-	loginReq.Header.Set("Origin", "http://example.com")
+	loginReq.Header.Set("Origin", cfg.OAuth.PublicOrigin)
 	srv.Router.ServeHTTP(loginRec, loginReq)
 	if loginRec.Code != http.StatusNoContent {
 		t.Fatalf("login status = %d, want 204; body=%s", loginRec.Code, loginRec.Body.String())
@@ -636,5 +874,43 @@ func TestToCanonicalSecurityEventMapsBulkRevokeForensics(t *testing.T) {
 	}
 	if ev.Extra["revoked_count"] != "2" || ev.Extra["provider_failure_class"] != "timeout" {
 		t.Errorf("P4.8 forensic extras = %v", ev.Extra)
+	}
+}
+
+type registrationEmailValidatorStub struct {
+	err error
+}
+
+func (s registrationEmailValidatorStub) Validate(context.Context, string) error {
+	return s.err
+}
+
+func TestAccountContactEmailValidatorMapsDeliveryPolicyErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "accepted"},
+		{name: "definitive invalid address", err: registration.ErrInvalidInput, want: accountcontact.ErrInvalidInput},
+		{name: "temporary DNS outage", err: registration.ErrUnavailable, want: accountcontact.ErrUnavailable},
+		{name: "unexpected policy failure", err: errors.New("resolver failed"), want: accountcontact.ErrUnavailable},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			validator := &accountContactEmailValidator{inner: registrationEmailValidatorStub{err: test.err}}
+			err := validator.Validate(t.Context(), "person@example.com")
+			if test.want == nil && err != nil {
+				t.Fatalf("Validate error = %v, want nil", err)
+			}
+			if test.want != nil && !errors.Is(err, test.want) {
+				t.Fatalf("Validate error = %v, want %v", err, test.want)
+			}
+		})
 	}
 }

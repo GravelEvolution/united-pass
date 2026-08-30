@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -27,17 +28,31 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--build-info" {
+		if err := writeBuildInformation(os.Stdout); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "build metadata invalid")
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		os.Exit(1)
 	}
 }
 
 func run() error {
+	if err := loadLocalEnvironment(); err != nil {
+		return err
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		// Logging is not yet configured; write to stderr so startup failures
 		// are visible before the structured logger exists.
 		slog.New(slog.NewTextHandler(os.Stderr, nil)).Error("configuration invalid", "error", err)
+		return err
+	}
+	if err := validateBuildInformation(string(cfg.Environment)); err != nil {
+		slog.New(slog.NewTextHandler(os.Stderr, nil)).Error("build metadata invalid")
 		return err
 	}
 
@@ -85,5 +100,24 @@ func run() error {
 		return err
 	}
 
+	return nil
+}
+
+func loadLocalEnvironment() error {
+	// Local-only credentials live in ignored files. A production process must
+	// receive every value from its process manager and must never fall back to
+	// files in its working directory. The explicit environment selector is
+	// supplied by production process management before this program starts.
+	if os.Getenv("UP_ENVIRONMENT") == "production" {
+		return nil
+	}
+	// Load the more specific override first so it wins over shared local
+	// development defaults. Process environment values still take priority.
+	if _, err := config.LoadDotEnv(".env.local"); err != nil {
+		return err
+	}
+	if _, err := config.LoadDotEnv(".env"); err != nil {
+		return err
+	}
 	return nil
 }

@@ -9,6 +9,7 @@
 "use client";
 
 import type { UnitedPassCommands } from "@/lib/api/united-pass-data-source";
+import type { ApiError } from "@/lib/api/api-error";
 import { mockUnitedPassDataSource } from "@/lib/mock/united-pass-data-source";
 import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import { browserFetch } from "@/lib/api/browser/browser-http-client";
@@ -27,6 +28,8 @@ import {
   parsePolicyMutation,
   parsePolicySimulation,
   parseProviderDetail,
+  parseApplicationDetail,
+  parseOAuthClient,
   parseOAuthClientCreation,
   parseReauthenticationGrant,
   parseReauthenticationOutcome,
@@ -58,6 +61,33 @@ export const browserCommands: UnitedPassCommands = {
             `/admin/applications/${encodeURIComponent(applicationId)}/clients`,
             { method: "POST", body },
           ),
+        );
+      },
+  updateOAuthClient: USE_MOCK_DATA_SOURCE
+    ? (applicationId, clientId, input) =>
+        mockUnitedPassDataSource.updateOAuthClient(applicationId, clientId, input)
+    : async (applicationId, clientId, input) => parseOAuthClient(
+        await browserFetch<unknown>(
+          `/admin/applications/${encodeURIComponent(applicationId)}/clients/${encodeURIComponent(clientId)}`,
+          { method: "PATCH", body: input },
+        ),
+      ),
+  updateOAuthClientStatus: USE_MOCK_DATA_SOURCE
+    ? (applicationId, clientId, status) =>
+        mockUnitedPassDataSource.updateOAuthClientStatus(applicationId, clientId, status)
+    : async (applicationId, clientId, status) => parseOAuthClient(
+        await browserFetch<unknown>(
+          `/admin/applications/${encodeURIComponent(applicationId)}/clients/${encodeURIComponent(clientId)}/${status === "active" ? "enable" : "disable"}`,
+          { method: "POST" },
+        ),
+      ),
+  deleteOAuthClient: USE_MOCK_DATA_SOURCE
+    ? (applicationId, clientId) =>
+        mockUnitedPassDataSource.deleteOAuthClient(applicationId, clientId)
+    : async (applicationId, clientId, reauthToken, options) => {
+        await browserFetch<unknown>(
+          `/admin/applications/${encodeURIComponent(applicationId)}/clients/${encodeURIComponent(clientId)}`,
+          { method: "DELETE", reauthToken, signal: options?.signal },
         );
       },
   createApplicationWithInitialClient: USE_MOCK_DATA_SOURCE
@@ -98,12 +128,12 @@ export const browserCommands: UnitedPassCommands = {
   updateApplicationStatus: USE_MOCK_DATA_SOURCE
     ? (applicationId, status) =>
         mockUnitedPassDataSource.updateApplicationStatus(applicationId, status)
-    : async (applicationId, status) => {
+    : async (applicationId, status) => parseApplicationDetail(
         await browserFetch<unknown>(
           `/admin/applications/${encodeURIComponent(applicationId)}/${status === "active" ? "enable" : "disable"}`,
           { method: "POST" },
-        );
-      },
+        ),
+      ),
   deleteApplication: USE_MOCK_DATA_SOURCE
     ? (applicationId) => mockUnitedPassDataSource.deleteApplication(applicationId)
     : async (applicationId, reauthToken, options) => {
@@ -114,23 +144,23 @@ export const browserCommands: UnitedPassCommands = {
       },
   updateApplication: USE_MOCK_DATA_SOURCE
     ? (applicationId, input) => mockUnitedPassDataSource.updateApplication(applicationId, input)
-    : async (applicationId, input) => {
+    : async (applicationId, input) => parseApplicationDetail(
         await browserFetch<unknown>(
           `/admin/applications/${encodeURIComponent(applicationId)}`,
           { method: "PATCH", body: input },
-        );
-      },
+        ),
+      ),
 
   updateProfile: USE_MOCK_DATA_SOURCE
     ? (input) => mockUnitedPassDataSource.updateProfile(input)
     : async (input) => {
-        await browserFetch<unknown>("/me", { method: "PATCH", body: input });
+        await browserFetch<unknown>("/me/profile", { method: "PATCH", body: input });
       },
   uploadAvatar: USE_MOCK_DATA_SOURCE
     ? (file) => mockUnitedPassDataSource.uploadAvatar(file)
     : async (file) => {
         const form = new FormData();
-        form.set("avatar", file, file.name);
+        form.set("file", file, file.name);
         return parseAvatarUpload(
           await browserFetch<unknown>("/me/avatar", {
             method: "POST",
@@ -141,35 +171,37 @@ export const browserCommands: UnitedPassCommands = {
       },
   requestEmailChange: USE_MOCK_DATA_SOURCE
     ? (email) => mockUnitedPassDataSource.requestEmailChange(email)
-    : async (email) => parseContactChangeRequest(
-        await browserFetch<unknown>("/me/email-change-requests", {
+    : async (email, captchaVerifyParam) => parseContactChangeRequest(
+        await browserFetch<unknown>("/me/email-change", {
           method: "POST",
-          body: { value: email },
+          body: { email },
+          captchaVerifyParam,
         }),
       ),
   verifyEmailChange: USE_MOCK_DATA_SOURCE
     ? (requestId, code) => mockUnitedPassDataSource.verifyEmailChange(requestId, code)
     : async (requestId, code) => {
-        await browserFetch<unknown>(
-          `/me/email-change-requests/${encodeURIComponent(requestId)}/verify`,
-          { method: "POST", body: { code } },
-        );
+        await browserFetch<unknown>("/me/email-change/verify", {
+          method: "POST",
+          body: { requestId, code },
+        });
       },
   requestPhoneChange: USE_MOCK_DATA_SOURCE
     ? (phone) => mockUnitedPassDataSource.requestPhoneChange(phone)
-    : async (phone) => parseContactChangeRequest(
-        await browserFetch<unknown>("/me/phone-change-requests", {
+    : async (phone, captchaVerifyParam) => parseContactChangeRequest(
+        await browserFetch<unknown>("/me/phone-change", {
           method: "POST",
-          body: { value: phone },
+          body: { phone },
+          captchaVerifyParam,
         }),
       ),
   verifyPhoneChange: USE_MOCK_DATA_SOURCE
     ? (requestId, code) => mockUnitedPassDataSource.verifyPhoneChange(requestId, code)
     : async (requestId, code) => {
-        await browserFetch<unknown>(
-          `/me/phone-change-requests/${encodeURIComponent(requestId)}/verify`,
-          { method: "POST", body: { code } },
-        );
+        await browserFetch<unknown>("/me/phone-change/verify", {
+          method: "POST",
+          body: { requestId, code },
+        });
       },
   changePassword: USE_MOCK_DATA_SOURCE
     ? (newPassword, reauthToken) => mockUnitedPassDataSource.changePassword(newPassword, reauthToken)
@@ -287,6 +319,15 @@ export const browserCommands: UnitedPassCommands = {
           { method: "DELETE", reauthToken, signal: options?.signal },
         ),
       ),
+  generateRecoveryCodes: USE_MOCK_DATA_SOURCE
+    ? () => mockUnitedPassDataSource.generateRecoveryCodes()
+    : async () => {
+        throw {
+          kind: "server_error",
+          code: "recovery_codes_unavailable",
+          message: "当前身份提供方暂不支持由统一门户管理恢复代码。",
+        } satisfies ApiError;
+      },
   revokeOtherSessions: USE_MOCK_DATA_SOURCE
     ? () => mockUnitedPassDataSource.revokeOtherSessions()
     : async () => parseRevokedSessionCount(

@@ -16,11 +16,14 @@ import { StatusBadge } from "@/components/common/status-badge";
 import { PageHeader } from "@/components/common/page-header";
 import {
   CONSENT_MODE_LABELS,
+  type AllowedScope,
+  type ApplicationAudience,
   type ApplicationStatus,
   type OAuthClient,
   type OAuthGrantType,
   type SecretRotationResult,
 } from "@/features/applications/types";
+import { OAuthClientEditor } from "@/features/applications/components/oauth-client-editor";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
 import { AccountReauthenticationForm } from "@/features/account/components/security-overview";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
@@ -31,6 +34,10 @@ type ClientDetailProps = {
   applicationId: string;
   applicationName: string;
   applicationStatus: ApplicationStatus;
+  applicationAudience: ApplicationAudience;
+  availableScopes: AllowedScope[];
+  canManage: boolean;
+  canRotateSecret: boolean;
   client: OAuthClient;
 };
 
@@ -54,6 +61,10 @@ export function ClientDetail({
   applicationId,
   applicationName,
   applicationStatus,
+  applicationAudience,
+  availableScopes,
+  canManage,
+  canRotateSecret,
   client,
 }: ClientDetailProps) {
   return (
@@ -91,6 +102,14 @@ export function ClientDetail({
       </div>
 
       <div className={clientStyles.contentLayout}>
+        {canManage && (
+          <ClientManagementActions
+            applicationId={applicationId}
+            applicationAudience={applicationAudience}
+            availableScopes={availableScopes}
+            client={client}
+          />
+        )}
         <section className={styles.section}>
           <h3>客户端基本信息</h3>
           <dl className={styles.descriptionList}>
@@ -143,10 +162,135 @@ export function ClientDetail({
 
         <section className={styles.section}>
           <h3>Client Secret</h3>
-          <ClientSecrets client={client} />
+          <ClientSecrets
+            client={client}
+            canRotateSecret={canRotateSecret && applicationStatus === "active"}
+          />
         </section>
       </div>
     </>
+  );
+}
+
+function ClientManagementActions({
+  applicationId,
+  applicationAudience,
+  availableScopes,
+  client,
+}: {
+  applicationId: string;
+  applicationAudience: ApplicationAudience;
+  availableScopes: AllowedScope[];
+  client: OAuthClient;
+}) {
+  const router = useRouter();
+  const [editing, setEditing] = useState(false);
+  const [toggling, setToggling] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteReauthenticationVisible, setDeleteReauthenticationVisible] = useState(false);
+  const browserOperation = useRef<AbortController | null>(null);
+
+  function toggleStatus(): void {
+    const nextStatus: ApplicationStatus = client.status === "active" ? "disabled" : "active";
+    Modal.confirm({
+      title: nextStatus === "active" ? "启用此 Client？" : "停用此 Client？",
+      content: nextStatus === "active"
+        ? "启用后可恢复新的授权或令牌请求；所属应用也必须处于启用状态。"
+        : "停用后新的授权和令牌请求将被拒绝。",
+      okText: nextStatus === "active" ? "确认启用" : "确认停用",
+      cancelText: "取消",
+      okType: nextStatus === "active" ? "primary" : "danger",
+      onOk: async () => {
+        setToggling(true);
+        try {
+          await browserCommands.updateOAuthClientStatus(applicationId, client.clientId, nextStatus);
+          Toast.success({ content: nextStatus === "active" ? "Client 已启用。" : "Client 已停用。" });
+          router.refresh();
+        } finally {
+          setToggling(false);
+        }
+      },
+    });
+  }
+
+  function closeDelete(): void {
+    browserOperation.current?.abort();
+    browserOperation.current = null;
+    setDeleteReauthenticationVisible(false);
+  }
+
+  async function deleteClient(reauthToken: string, signal: AbortSignal): Promise<void> {
+    setDeleting(true);
+    try {
+      await browserCommands.deleteOAuthClient(applicationId, client.clientId, reauthToken, { signal });
+      Toast.success({ content: "OAuth Client 已删除。" });
+      setDeleteReauthenticationVisible(false);
+      router.push(`/admin/applications/${applicationId}?tab=clients`);
+      router.refresh();
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <section className={styles.section}>
+      <h3>Client 管理</h3>
+      <div className={styles.headerMeta}>
+        <Button theme="outline" onClick={() => setEditing(true)}>编辑配置</Button>
+        <Button
+          theme="solid"
+          type={client.status === "active" ? "warning" : "primary"}
+          loading={toggling}
+          onClick={toggleStatus}
+        >
+          {client.status === "active" ? "停用 Client" : "启用 Client"}
+        </Button>
+        <Button theme="solid" type="danger" onClick={() => setDeleteReauthenticationVisible(true)}>
+          删除 Client
+        </Button>
+      </div>
+
+      <Modal title="编辑 OAuth Client" visible={editing} footer={null} width={680} maskClosable={false} onCancel={() => setEditing(false)}>
+        {editing && (
+          <OAuthClientEditor
+            applicationId={applicationId}
+            applicationAudience={applicationAudience}
+            availableScopes={availableScopes}
+            client={client}
+            onCancel={() => setEditing(false)}
+            onDone={() => {
+              setEditing(false);
+              router.refresh();
+            }}
+          />
+        )}
+      </Modal>
+
+      <Modal
+        title="重新认证并删除 OAuth Client"
+        visible={deleteReauthenticationVisible}
+        footer={null}
+        maskClosable={false}
+        closeOnEsc={!deleting}
+        onCancel={closeDelete}
+      >
+        <p>删除 <strong>{client.name}</strong> 后，Client ID、密钥与配置将不可恢复。</p>
+        {deleteReauthenticationVisible && (
+          <AccountReauthenticationForm
+            action="client.delete"
+            target=""
+            applicationId={applicationId}
+            clientId={client.clientId}
+            submitLabel="验证并永久删除"
+            browserOperationRef={browserOperation}
+            onGranted={deleteClient}
+            onCancel={closeDelete}
+            operationError="Client 删除失败；此次单次授权不会被重复使用，请重新验证后再试。"
+            destructive
+          />
+        )}
+      </Modal>
+    </section>
   );
 }
 
@@ -208,7 +352,7 @@ function ClientScopes({ client }: { client: OAuthClient }) {
   );
 }
 
-function ClientSecrets({ client }: { client: OAuthClient }) {
+function ClientSecrets({ client, canRotateSecret }: { client: OAuthClient; canRotateSecret: boolean }) {
   const router = useRouter();
   const [rotating, setRotating] = useState(false);
   const [rotationReauthenticationVisible, setRotationReauthenticationVisible] = useState(false);
@@ -316,16 +460,19 @@ function ClientSecrets({ client }: { client: OAuthClient }) {
         </div>
       </div>
 
-      <div>
-        <Button
-          theme="solid"
-          type="warning"
-          loading={rotating}
-          onClick={handleRotateSecret}
-        >
-          轮换密钥
-        </Button>
-      </div>
+      {canRotateSecret && (
+        <div>
+          <Button
+            theme="solid"
+            type="warning"
+            loading={rotating}
+            disabled={client.status !== "active"}
+            onClick={handleRotateSecret}
+          >
+            轮换密钥
+          </Button>
+        </div>
+      )}
 
       <Modal
         title="重新认证并轮换 Client Secret"

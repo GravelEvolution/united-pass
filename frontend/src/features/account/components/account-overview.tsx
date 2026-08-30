@@ -21,6 +21,9 @@ import { AvatarValidationError, sanitizeAvatarFile } from "../utils/avatar-file"
 import { browserCommands } from "@/lib/api/browser/browser-commands";
 import styles from "./account-panels.module.css";
 
+const DEFAULT_AVATAR_URL =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='50' fill='%23eef1f6'/%3E%3Ccircle cx='50' cy='38' r='16' fill='%23b6bfcc'/%3E%3Cpath d='M50 58c-15 0-26 9-26 21v4h52v-4c0-12-11-21-26-21z' fill='%23b6bfcc'/%3E%3C/svg%3E";
+
 type AccountOverviewProps = {
   currentUser: CurrentUser;
 };
@@ -198,13 +201,11 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
       <div className={styles.overviewGrid}>
         <section className={styles.heroCard}>
           <div
-            className={`${styles.avatar} ${profile.avatarPreviewUrl ? styles.avatarWithImage : ""}`}
-            style={profile.avatarPreviewUrl ? { backgroundImage: `url(${profile.avatarPreviewUrl})` } : undefined}
+            className={`${styles.avatar} ${styles.avatarWithImage}`}
+            style={{ backgroundImage: `url(${profile.avatarPreviewUrl ?? DEFAULT_AVATAR_URL})` }}
             role="img"
             aria-label={`${profile.displayName}的头像`}
-          >
-            {!profile.avatarPreviewUrl && profile.displayName.slice(0, 1)}
-          </div>
+          />
           <div className={styles.heroCopy}>
             <span className={styles.label}>统一账户</span>
             <h2>{profile.displayName}</h2>
@@ -280,12 +281,10 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
         <form className={styles.profileForm} method="post" onSubmit={handleProfileSubmit}>
           <div className={styles.profilePreview}>
             <div
-              className={`${styles.avatar} ${profileDraft.avatarPreviewUrl ? styles.avatarWithImage : ""}`}
-              style={profileDraft.avatarPreviewUrl ? { backgroundImage: `url(${profileDraft.avatarPreviewUrl})` } : undefined}
+              className={`${styles.avatar} ${styles.avatarWithImage}`}
+              style={{ backgroundImage: `url(${profileDraft.avatarPreviewUrl ?? DEFAULT_AVATAR_URL})` }}
               aria-hidden="true"
-            >
-              {!profileDraft.avatarPreviewUrl && (profileDraft.displayName.trim().slice(0, 1) || "?")}
-            </div>
+            />
             <div>
               <strong>{profileDraft.displayName.trim() || "显示名称"}</strong>
               <span>{profileDraft.nickname?.trim() || "尚未设置昵称"}</span>

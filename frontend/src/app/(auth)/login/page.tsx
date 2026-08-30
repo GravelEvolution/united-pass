@@ -29,9 +29,9 @@ export default async function LoginPage({
 
   return (
     <CredentialPanel
-      mode="login"
       resumeRequestId={requestId}
       providerError={providerError}
+      registrationEnabled={process.env.UP_PUBLIC_REGISTRATION_ENABLED === "true"}
       feishuLoginEnabled={loginProviders.some(
         (provider) => provider.providerId === "provider_feishu" && provider.loginEnabled,
       )}

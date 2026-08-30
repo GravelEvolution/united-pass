@@ -116,6 +116,12 @@ func (f *FakeAuthenticator) BeginPasswordAuthentication(
 	}, nil
 }
 
+// BeginPasskeyAuthentication is not supported by the dev fake authenticator;
+// passkey-first login only exists against the real provider.
+func (f *FakeAuthenticator) BeginPasskeyAuthentication(ctx context.Context) (AuthenticationResult, error) {
+	return AuthenticationResult{Status: StatusProviderUnavailable}, nil
+}
+
 // CompleteMFA verifies the MFA code against the configured fake user. The
 // user is located by the provider session ID supplied from the stored
 // challenge (never from the browser).

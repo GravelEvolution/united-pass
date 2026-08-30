@@ -133,7 +133,7 @@ func (m *MFAStore) Delete(ctx context.Context, mfaTokenHash string) error {
 // returns auth.ErrMFAChallengeNotFound without creating a counter, so a
 // stale counter can never linger after its challenge.
 //
-// If the count exceeds maxAttempts, the function returns
+// When the count reaches maxAttempts, the function returns
 // auth.ErrMFAMaxAttemptsExceeded along with the count. The caller should then
 // consume the challenge and redirect the user to re-authenticate.
 //
@@ -184,7 +184,7 @@ return count
 	if result < 0 {
 		return 0, auth.ErrMFAChallengeNotFound
 	}
-	if result > maxAttempts {
+	if result >= maxAttempts {
 		return result, auth.ErrMFAMaxAttemptsExceeded
 	}
 	return result, nil

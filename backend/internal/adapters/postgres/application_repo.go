@@ -455,6 +455,126 @@ func (r *ApplicationRepository) ListApplications(ctx context.Context, q Applicat
 	return result, nil
 }
 
+// FindProvisioningCandidates returns every application that matches at
+// least one frozen bootstrap identifier. It intentionally bypasses the
+// public, provisioned-only list projection and pagination: bootstrap must see
+// failed/reconciliation rows and mutable metadata drift before deciding that
+// creation is safe.
+func (r *ApplicationRepository) FindProvisioningCandidates(
+	ctx context.Context,
+	fingerprint applications.ProvisioningFingerprint,
+) ([]applications.ProvisioningState, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT a.application_id, a.name, a.description, a.logo_url, a.audience,
+		        a.owner_user_id, u.display_name, a.status, a.provisioning_status,
+		        a.version, a.created_at, a.updated_at, a.deleted_at,
+		        anchor.bootstrap_anchored
+		   FROM oauth_applications a
+		   JOIN users u ON u.id = a.owner_user_id
+		   CROSS JOIN LATERAL (
+		        SELECT EXISTS (
+		             SELECT 1
+		               FROM security_events e
+		              WHERE e.application_id = a.application_id
+		                AND $6 <> ''
+		                AND e.event_type = 'application.created'
+		                AND LEFT(e.request_id, CHAR_LENGTH($6)) = $6
+		        ) AS bootstrap_anchored
+		   ) anchor
+		  WHERE (
+		         ($1 <> '' AND a.name = $1)
+		      OR ($2 <> '' AND a.description = $2)
+		      OR EXISTS (
+		           SELECT 1
+		             FROM oauth_clients c
+		            WHERE c.application_id = a.application_id
+		              AND (($3 <> '' AND c.name = $3) OR ($5 <> '' AND c.logout_uri = $5))
+		      )
+		      OR EXISTS (
+		           SELECT 1
+		             FROM oauth_clients c
+		             JOIN oauth_client_redirect_uris r ON r.client_id = c.client_id
+		            WHERE c.application_id = a.application_id
+		              AND $4 <> ''
+		              AND r.uri = $4
+		      )
+		      OR anchor.bootstrap_anchored
+		    )
+		  ORDER BY a.created_at ASC, a.application_id ASC`,
+		fingerprint.ApplicationName,
+		fingerprint.ApplicationDescription,
+		fingerprint.ClientName,
+		fingerprint.RedirectURI,
+		fingerprint.LogoutURI,
+		fingerprint.BootstrapRequestPrefix,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: find provisioning candidates: %w", err)
+	}
+	defer rows.Close()
+
+	type candidate struct {
+		application applications.Application
+		anchored    bool
+	}
+	applicationsFound := make([]candidate, 0)
+	for rows.Next() {
+		app, anchored, err := scanProvisioningApplication(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: scan provisioning candidate: %w", err)
+		}
+		applicationsFound = append(applicationsFound, candidate{application: app, anchored: anchored})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate provisioning candidates: %w", err)
+	}
+
+	anchored := make([]candidate, 0, len(applicationsFound))
+	for _, app := range applicationsFound {
+		if app.anchored {
+			anchored = append(anchored, app)
+		}
+	}
+	if len(anchored) != 0 {
+		applicationsFound = anchored
+	}
+
+	states := make([]applications.ProvisioningState, 0, len(applicationsFound))
+	for _, found := range applicationsFound {
+		clients, err := r.listProvisioningClientsByApplication(ctx, found.application.ID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: hydrate provisioning candidate: %w", err)
+		}
+		states = append(states, applications.ProvisioningState{
+			Application:       found.application,
+			Clients:           clients,
+			BootstrapAnchored: found.anchored,
+		})
+	}
+	return states, nil
+}
+
+func scanProvisioningApplication(row pgx.Row) (applications.Application, bool, error) {
+	var (
+		appID, audience, ownerID, ownerName, status, provisioning string
+		app                                                       applications.Application
+		anchored                                                  bool
+	)
+	err := row.Scan(&appID, &app.Name, &app.Description, &app.LogoURL,
+		&audience, &ownerID, &ownerName, &status, &provisioning,
+		&app.Version, &app.CreatedAt, &app.UpdatedAt, &app.DeletedAt, &anchored)
+	if err != nil {
+		return applications.Application{}, false, err
+	}
+	app.ID = applications.ApplicationID(appID)
+	app.Audience = applications.ApplicationAudience(audience)
+	app.OwnerID = identity.UserID(ownerID)
+	app.OwnerName = ownerName
+	app.Status = applications.Status(status)
+	app.Provisioning = applications.ProvisioningStatus(provisioning)
+	return app, anchored, nil
+}
+
 // applicationOrderClause maps a sort key to the ORDER BY clause with the ID
 // tie-breaker.
 func applicationOrderClause(sort string) (string, error) {

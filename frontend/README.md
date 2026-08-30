@@ -35,6 +35,10 @@
 使用 `API_BASE_URL` 直连 Go API，默认值为 `http://localhost:8080/api/v1`；浏览器
 始终使用同源 `/api/v1`。
 
+`UP_PUBLIC_REGISTRATION_ENABLED=true` 同时打开服务端渲染的注册表单；它必须与
+Go API 进程的同名开关保持一致。未设置时注册页保持关闭，且该变量不会进入浏览器
+bundle。
+
 ## 当前真实 API 范围
 
 非 Mock 模式已经接入：
@@ -52,8 +56,9 @@
 - 个人数据导出、账户删除/取消，以及受控发布的隐私政策和服务条款。
 
 Recovery Codes 是唯一保留的产品能力缺口：当前 ZITADEL baseline 没有满足一次性
-展示、轮换、撤销和审计要求的接口，因此 UI 明确显示 Provider 不支持，不生成伪代码
-或成功态。`src/lib/mock/` 只保留显式开发/测试 fixture，不是生产持久化实现。
+展示、轮换、撤销和审计要求的接口，因此真实模式明确显示 Provider 不支持，不生成
+伪代码或成功态；只有显式 fixture 模式可展示不可用于认证的界面原型。
+`src/lib/mock/` 不是认证、授权或生产持久化实现。
 
 ## 登录态行为
 
@@ -120,6 +125,8 @@ pnpm dev
 ```dotenv
 NEXT_PUBLIC_USE_MOCK=false
 API_BASE_URL=http://localhost:8080/api/v1
+# 可选；必须与 Go API 同步开启
+UP_PUBLIC_REGISTRATION_ENABLED=true
 ```
 
 如需非认证页面 fixture，可显式设置 `NEXT_PUBLIC_USE_MOCK=true`。登录、注册、邮箱

@@ -120,7 +120,7 @@ func TestSupportedLegalManifestMatchesExactFrontendSourceBytes(t *testing.T) {
 		"privacy": "privacy-sections.ts",
 		"terms":   "terms-sections.ts",
 	} {
-		content, err := os.ReadFile(filepath.Join("..", "..", "..", "frontend", "src", "features", "legal", "data", file))
+		content, err := os.ReadFile(legalFrontendSource(t, file))
 		if err != nil {
 			t.Fatalf("read %s: %v", file, err)
 		}
@@ -130,6 +130,36 @@ func TestSupportedLegalManifestMatchesExactFrontendSourceBytes(t *testing.T) {
 			t.Fatalf("%s source changed without a reviewed manifest update", kind)
 		}
 	}
+}
+
+func legalFrontendSource(t *testing.T, file string) string {
+	t.Helper()
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("resolve backend working directory: %v", err)
+	}
+	for {
+		if _, statErr := os.Stat(filepath.Join(root, "go.mod")); statErr == nil {
+			break
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			t.Fatal("could not locate united-pass-api module root")
+		}
+		root = parent
+	}
+	candidates := []string{
+		filepath.Join(root, "..", "united-pass-web", "src", "features", "legal", "data", file),
+		filepath.Join(root, "..", "frontend", "src", "features", "legal", "data", file),
+		filepath.Join(root, "frontend", "src", "features", "legal", "data", file),
+	}
+	for _, candidate := range candidates {
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	t.Fatalf("could not locate reviewed frontend legal source %s beside module %s", file, root)
+	return ""
 }
 
 func TestGetExportIsOwnerBoundAndShortLived(t *testing.T) {

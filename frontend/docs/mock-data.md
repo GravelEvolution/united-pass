@@ -14,8 +14,8 @@
 - 页面只依赖数据源接口，不得直接导入 fixture 或在组件内维护硬编码业务记录。
 - fixture 的搜索/分页仅用于小型演示集合；生产由后端执行权限过滤、字段裁剪、
   稳定排序、游标分页和搜索。
-- Recovery Codes 因 Provider 能力保持 Deferred，任何模式都不生成可能被误认为真实
-  凭据的代码或成功态。
+- Recovery Codes 因 Provider 能力保持 Deferred；真实模式不生成代码或成功态，只有
+  显式 fixture 模式可展示不可用于认证的界面原型。
 
 ## 当前生产覆盖
 

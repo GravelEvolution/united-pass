@@ -9,6 +9,7 @@
 package session
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -159,5 +160,67 @@ func TestNewAESGCMEncryptorRejectsBadKey(t *testing.T) {
 				t.Fatal("expected error for invalid key")
 			}
 		})
+	}
+}
+
+func TestAESGCMKeyringRetainsHistoricalReadKeys(t *testing.T) {
+	oldKey := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	newKey := base64.StdEncoding.EncodeToString([]byte("fedcba9876543210fedcba9876543210"))
+	oldEncryptor, err := NewAESGCMEncryptor(oldKey, "onboarding-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCiphertext, err := oldEncryptor.Encrypt("provider-session-to-revoke")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keyring, err := NewAESGCMKeyring(newKey, "onboarding-v2", map[string]string{
+		"onboarding-v1": oldKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := keyring.Decrypt(oldCiphertext)
+	if err != nil || plain != "provider-session-to-revoke" {
+		t.Fatalf("historical ciphertext decrypt = %q, %v", plain, err)
+	}
+	currentCiphertext, err := keyring.Encrypt("current")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(currentCiphertext, "onboarding-v2:") {
+		t.Fatalf("current ciphertext used wrong key ID: %q", currentCiphertext)
+	}
+	if plain, err := keyring.Decrypt(currentCiphertext); err != nil || plain != "current" {
+		t.Fatalf("current ciphertext decrypt = %q, %v", plain, err)
+	}
+}
+
+func TestAESGCMKeyringRejectsUnknownTamperedAndAmbiguousKeys(t *testing.T) {
+	oldKey := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	newKey := base64.StdEncoding.EncodeToString([]byte("fedcba9876543210fedcba9876543210"))
+	keyring, err := NewAESGCMKeyring(newKey, "onboarding-v2", map[string]string{"onboarding-v1": oldKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keyring.Decrypt("unknown:AAAA"); err != ErrInvalidCiphertext {
+		t.Fatalf("unknown key ID error = %v", err)
+	}
+	encoded, err := keyring.Encrypt("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keyring.Decrypt(encoded + "A"); err != ErrInvalidCiphertext {
+		t.Fatalf("tampered ciphertext error = %v", err)
+	}
+	if _, err := NewAESGCMKeyring(newKey, "onboarding-v2", map[string]string{"onboarding-v2": oldKey}); err == nil {
+		t.Fatal("accepted duplicate current key ID")
+	}
+	if _, err := NewAESGCMKeyring(newKey, "onboarding-v2", map[string]string{"onboarding-v1": newKey}); err == nil {
+		t.Fatal("accepted duplicate key material")
+	}
+	if _, err := NewAESGCMKeyring(newKey, "onboarding-v2", map[string]string{"unsafe:key": oldKey}); err == nil {
+		t.Fatal("accepted unsafe retained key ID")
 	}
 }

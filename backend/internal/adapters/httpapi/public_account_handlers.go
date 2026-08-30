@@ -148,7 +148,7 @@ const (
 )
 
 func (h *PublicAccountHandlers) Register(w http.ResponseWriter, r *http.Request) {
-	if !allowSameOriginJSON(w, r, h.publicOrigin, "注册") {
+	if !validateTrustedBrowserMutation(w, r, h.publicOrigin) {
 		return
 	}
 	var input publicRegistrationRequest
@@ -225,7 +225,7 @@ func (h *PublicAccountHandlers) Register(w http.ResponseWriter, r *http.Request)
 // local binding and provider notification failures are never distinguishable
 // to the caller.
 func (h *PublicAccountHandlers) RequestPasswordReset(w http.ResponseWriter, r *http.Request) {
-	if !allowSameOriginJSON(w, r, h.publicOrigin, "密码重置") {
+	if !validateTrustedBrowserMutation(w, r, h.publicOrigin) {
 		return
 	}
 	var input passwordResetRequest
@@ -281,7 +281,7 @@ func (h *PublicAccountHandlers) beginPasswordReset(r *http.Request, identifier s
 }
 
 func (h *PublicAccountHandlers) ResetPassword(w http.ResponseWriter, r *http.Request) {
-	if !allowSameOriginJSON(w, r, h.publicOrigin, "密码重置") {
+	if !validateTrustedBrowserMutation(w, r, h.publicOrigin) {
 		return
 	}
 	var input passwordResetCompletionRequest
@@ -355,7 +355,7 @@ func (h *PublicAccountHandlers) ResetPassword(w http.ResponseWriter, r *http.Req
 }
 
 func (h *PublicAccountHandlers) VerifyEmail(w http.ResponseWriter, r *http.Request) {
-	if !allowSameOriginJSON(w, r, h.publicOrigin, "邮箱验证") {
+	if !validateTrustedBrowserMutation(w, r, h.publicOrigin) {
 		return
 	}
 	var input emailVerificationRequest

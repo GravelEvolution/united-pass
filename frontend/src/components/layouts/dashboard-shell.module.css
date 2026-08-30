@@ -169,6 +169,23 @@
 .profile strong { font-size: 13px; }
 .profile span { margin-top: 2px; color: var(--up-muted); font-size: 11px; }
 
+.logoutButton {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 0 14px;
+  border-radius: 10px;
+  color: var(--up-muted);
+  font-size: 13px;
+  font-weight: 560;
+  transition:
+    color var(--up-duration-fast) ease,
+    background-color var(--up-duration-fast) ease,
+    transform var(--up-duration-base) var(--up-ease-out);
+}
+
 .main {
   min-height: 100vh;
   margin-left: 252px;
@@ -193,6 +210,12 @@
     background: var(--up-surface);
     box-shadow: 0 10px 24px var(--up-brand-glow);
     transform: translateY(-1px);
+  }
+
+  .logoutButton:hover {
+    color: var(--up-danger);
+    background: var(--up-surface-hover);
+    transform: translateX(2px);
   }
 }
 
@@ -264,6 +287,7 @@
   .navigationItem::before,
   .navigationItem > svg,
   .profile,
+  .logoutButton,
   .sidebar {
     transition: none;
   }

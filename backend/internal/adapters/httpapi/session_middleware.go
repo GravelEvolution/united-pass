@@ -13,6 +13,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
@@ -165,7 +166,18 @@ func clearAuthCookies(w http.ResponseWriter, attrs SessionCookieAttributes) {
 func RequireSession(svc *session.Service, checker UserStatusChecker, gate SecurityStateGate, attrs SessionCookieAttributes, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token := ReadSessionCookie(r)
+			authorizationPresent := len(r.Header.Values(AuthorizationHeaderName)) > 0
+			nativeBearer := authorizationPresent
+			var token string
+			if nativeBearer {
+				if !isMiniProgramClientRequest(r) || !nativeMiniProgramBearerRouteAllowed(r) {
+					WriteUnauthorized(w, r)
+					return
+				}
+				token = ReadMiniProgramBearer(r)
+			} else {
+				token = ReadSessionCookie(r)
+			}
 			if token == "" {
 				WriteUnauthorized(w, r)
 				return
@@ -174,19 +186,116 @@ func RequireSession(svc *session.Service, checker UserStatusChecker, gate Securi
 			principal, record, outcome := validateAndPromote(r, svc, checker, gate, token, logger)
 			switch outcome {
 			case promotionEpochStale:
-				clearAuthCookies(w, attrs)
+				if !nativeBearer {
+					clearAuthCookies(w, attrs)
+				}
 				WriteUnauthorized(w, r)
 				return
 			case promotionInvalid, promotionDeniedTransient:
 				WriteUnauthorized(w, r)
 				return
 			}
+			if nativeBearer {
+				if record.ClientKind != session.ClientKindMiniProgram {
+					WriteUnauthorized(w, r)
+					return
+				}
+			} else if record.ClientKind != "" {
+				WriteUnauthorized(w, r)
+				return
+			}
 
 			ctx := WithPrincipal(r.Context(), principal)
 			ctx = WithSessionRecord(ctx, record)
+			ctx = WithSessionToken(ctx, token)
+			if nativeBearer {
+				ctx = WithNativeBearerSession(ctx)
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+type nativeMiniProgramBearerRoute struct {
+	method       string
+	pathTemplate string
+}
+
+// nativeMiniProgramBearerRoutes is the complete native credential scope.
+// Every write remains subject to the current server-side session, security
+// epoch, event-scoped authorization and object-level checks; this list grants
+// transport access only.
+var nativeMiniProgramBearerRoutes = []nativeMiniProgramBearerRoute{
+	{http.MethodGet, "/api/v1/me"},
+	{http.MethodPost, "/api/v1/me/miniprogram/profile"},
+	{http.MethodGet, "/api/v1/me/sessions"},
+	{http.MethodDelete, "/api/v1/me/sessions"},
+	{http.MethodDelete, "/api/v1/me/sessions/{sessionId}"},
+	{http.MethodDelete, "/api/v1/auth/session"},
+	{http.MethodPost, "/api/v1/auth/reauthentication"},
+	{http.MethodPost, "/api/v1/auth/reauthentication/mfa"},
+	{http.MethodPost, "/api/v1/me/security/password"},
+	{http.MethodPost, "/api/v1/me/wechat/phone"},
+	{http.MethodPost, "/api/v1/auth/qr/challenges/{challengeId}/approve"},
+	{http.MethodPost, "/api/v1/dreamup/mobile/assertions"},
+	{http.MethodPost, "/api/v1/dreamup/mobile/resume-upload-assertions"},
+	{http.MethodGet, "/api/v1/admin/dreamup/eligibility"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events"},
+	{http.MethodGet, "/api/v1/admin/dreamup/session"},
+	// Retained for one compatibility window so the already-published Mini
+	// Program does not break before the no-question client reaches users. The
+	// new client never calls these routes; browser administrator behavior is
+	// unchanged. Remove these three native entries after adoption is confirmed.
+	{http.MethodGet, "/api/v1/admin/dreamup/step-up/challenge"},
+	{http.MethodPost, "/api/v1/admin/dreamup/step-up/enroll"},
+	{http.MethodPost, "/api/v1/admin/dreamup/step-up/verify"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/applications"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/content"},
+	{http.MethodPut, "/api/v1/admin/dreamup/events/{eventId}/content/intro"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/announcements"},
+	{http.MethodPatch, "/api/v1/admin/dreamup/events/{eventId}/announcements/{contentId}"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/contact-submissions"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/contact-submissions/{submissionId}"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/teams"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/checkins/scan"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/contact-submissions/{submissionId}/resolution"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}"},
+	{http.MethodPut, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/reviews/me"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus"},
+	{http.MethodPut, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus/approval"},
+	{http.MethodDelete, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus/approval"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/decision"},
+}
+
+func nativeMiniProgramBearerRouteAllowed(r *http.Request) bool {
+	for _, allowed := range nativeMiniProgramBearerRoutes {
+		if r.Method == allowed.method && nativeMiniProgramPathMatches(r.URL.Path, allowed.pathTemplate) {
+			return true
+		}
+	}
+	return false
+}
+
+func nativeMiniProgramPathMatches(path, template string) bool {
+	pathSegments := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	templateSegments := strings.Split(strings.TrimPrefix(template, "/"), "/")
+	if len(pathSegments) != len(templateSegments) {
+		return false
+	}
+	for i, expected := range templateSegments {
+		actual := pathSegments[i]
+		parameter := strings.HasPrefix(expected, "{") && strings.HasSuffix(expected, "}")
+		if parameter {
+			if actual == "" {
+				return false
+			}
+			continue
+		}
+		if actual != expected {
+			return false
+		}
+	}
+	return true
 }
 
 // OptionalSession middleware behaves like RequireSession but does not reject
@@ -218,9 +327,14 @@ func OptionalSession(svc *session.Service, checker UserStatusChecker, gate Secur
 				next.ServeHTTP(w, r)
 				return
 			}
+			if record.ClientKind != "" {
+				next.ServeHTTP(w, r)
+				return
+			}
 
 			ctx := WithPrincipal(r.Context(), principal)
 			ctx = WithSessionRecord(ctx, record)
+			ctx = WithSessionToken(ctx, token)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -248,6 +362,14 @@ func RequireCSRF() func(http.Handler) http.Handler {
 				// request is anonymous. State-changing methods require a
 				// session, so this is an authentication failure.
 				WriteUnauthorized(w, r)
+				return
+			}
+			if IsNativeBearerSession(r.Context()) {
+				if record.ClientKind != session.ClientKindMiniProgram {
+					WriteForbidden(w, r)
+					return
+				}
+				next.ServeHTTP(w, r)
 				return
 			}
 

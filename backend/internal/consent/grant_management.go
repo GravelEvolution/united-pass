@@ -34,14 +34,15 @@ const ScopeOfflineAccess = "offline_access"
 // carried here at all; the HTTP boundary serializes it as null
 // (ADR-0005 §6).
 type AuthorizedApplication struct {
-	GrantID          GrantID
-	ApplicationID    applications.ApplicationID
-	ApplicationName  string
-	ApplicationOwner string
-	ClientType       applications.ClientType
-	GrantedAt        time.Time
-	Scopes           []string
-	HasOfflineAccess bool
+	GrantID            GrantID
+	ApplicationID      applications.ApplicationID
+	ApplicationName    string
+	ApplicationOwner   string
+	ApplicationLogoURL string
+	ClientType         applications.ClientType
+	GrantedAt          time.Time
+	Scopes             []string
+	HasOfflineAccess   bool
 }
 
 // AuthorizedGrantStore is the narrow grant-store port grant management
@@ -137,14 +138,15 @@ func (s *GrantManagementService) ListAuthorizedApplications(
 			continue
 		}
 		result = append(result, AuthorizedApplication{
-			GrantID:          grant.ID,
-			ApplicationID:    facts.Application.ID,
-			ApplicationName:  facts.Application.Name,
-			ApplicationOwner: facts.Application.OwnerName,
-			ClientType:       facts.Client.ClientType,
-			GrantedAt:        grant.GrantedAt,
-			Scopes:           append([]string(nil), grant.Scopes...),
-			HasOfflineAccess: containsScope(grant.Scopes, ScopeOfflineAccess),
+			GrantID:            grant.ID,
+			ApplicationID:      facts.Application.ID,
+			ApplicationName:    facts.Application.Name,
+			ApplicationOwner:   facts.Application.OwnerName,
+			ApplicationLogoURL: facts.Application.LogoURL,
+			ClientType:         facts.Client.ClientType,
+			GrantedAt:          grant.GrantedAt,
+			Scopes:             append([]string(nil), grant.Scopes...),
+			HasOfflineAccess:   containsScope(grant.Scopes, ScopeOfflineAccess),
 		})
 	}
 

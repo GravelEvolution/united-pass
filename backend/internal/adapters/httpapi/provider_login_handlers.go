@@ -113,7 +113,7 @@ func (h *ProviderLoginHandlers) FeishuCallback(w http.ResponseWriter, r *http.Re
 		h.redirectLoginError(w, r, "provider_login_failed")
 		return
 	}
-	created, err := h.sessions.CreateSession(r.Context(), session.CreateSessionInput{UserID: user.ID, Provider: string(providers.FeishuProviderID), AuthenticationMethods: []auth.AuthenticationMethod{auth.MethodFederated}, Remember: stored.Remember, UserAgent: r.UserAgent(), ClientIP: peerIP(r)})
+	created, err := h.sessions.CreateSession(r.Context(), session.CreateSessionInput{UserID: user.ID, Provider: string(providers.FeishuProviderID), AuthenticationMethods: []auth.AuthenticationMethod{auth.MethodFederated}, Remember: stored.Remember, UserAgent: r.UserAgent(), ClientIP: clientIP(r)})
 	if err != nil {
 		WriteInternalError(w, r)
 		return

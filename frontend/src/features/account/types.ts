@@ -173,6 +173,7 @@ export type AuthorizedApplication = {
   applicationId: string;
   applicationName: string;
   applicationOwner: string;
+  logoUrl: string | null;
   clientType: "public" | "confidential";
   grantedAt: string;
   lastUsedAt: string | null;

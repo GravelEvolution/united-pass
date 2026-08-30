@@ -6,7 +6,7 @@ This directory contains the Go backend API service.
 
 ## Development Environment Requirements
 
-- Go 1.26.5 (the version declared in `go.mod`)
+- Go 1.26.6 or newer patch release in the 1.26 line (the minimum declared in `go.mod`)
 - macOS / Linux
 - PostgreSQL 16+ (Phase 1 onwards)
 - Redis 7+ (Phase 1 onwards)
@@ -89,11 +89,44 @@ go run ./cmd/migrate status
 # Show current migration version
 go run ./cmd/migrate version
 
-# Roll back all migrations (requires --confirm, destructive)
+# Attempt destructive rollback; forward-only migrations (currently v16) refuse
 go run ./cmd/migrate reset --confirm
 ```
 
 Migrations live in `migrations/` and are managed by [goose](https://github.com/pressly/goose).
+The published repository and the original production rollout assigned different
+schemas to versions 12 and 13. Migration 00013 is the public/fresh lineage
+bridge; production databases that already record v13 skip it because they
+already contain the DreamUP and identity-access objects. Migration 00016 then
+creates the missing account self-service tables on that production lineage and
+validates the already-present public lineage without rewriting its data.
+
+Migrations 00013, 00015, and 00016 are intentionally forward-only. Their Down
+sections abort, so `reset` exits before Goose can record a lower version while
+leaving the irreversible schema in place. Rollback across any barrier requires
+a separately reviewed forward migration. Because Goose records version numbers
+rather than migration-file checksums, do not use the displayed v12/v13 filename
+alone as lineage evidence; version 16 is the converged schema boundary.
+
+WeChat Mini Program retry verifiers and DreamUP cross-system mutation receipts
+use a separate operational store. Its command reads only
+`UP_ISOLATED_DATABASE_URL`; it never falls back to `UP_DATABASE_URL`:
+
+```bash
+# Apply the forward-only isolated operational migration
+go run ./cmd/migrate-isolated up
+
+# Read-only inspection (these commands do not create the schema)
+go run ./cmd/migrate-isolated status
+go run ./cmd/migrate-isolated version
+```
+
+The API fails startup unless this isolated schema has migration version 1 and
+contains exactly `goose_db_version`, `wechat_registration_provider_intents`
+and `admin_operation_outbox`. Authority, role and permission tables are
+rejected from the isolated schema. The isolated migration has no rollback
+command; recovery requires a separately reviewed backup restore or forward
+migration.
 
 ## Environment Variables
 
@@ -115,6 +148,11 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_DATABASE_MAX_CONNS` | `10` | Maximum pool connections. |
 | `UP_DATABASE_MIN_CONNS` | `1` | Minimum pool connections. |
 | `UP_DATABASE_CONNECT_TIMEOUT` | `10s` | Connection timeout. |
+| `UP_ISOLATED_DATABASE_URL` | | Dedicated DreamUP/Mini Program operational PostgreSQL URL. Required when WeChat registration or DreamUP administration is enabled. It must select a database distinct from the authority target; a second schema in the authority database is rejected. |
+| `UP_ISOLATED_DATABASE_SCHEMA` | `dreamup_isolated` | Schema containing only the isolated operational migration. |
+| `UP_ISOLATED_DATABASE_MAX_CONNS` | `10` | Maximum isolated-store pool connections. |
+| `UP_ISOLATED_DATABASE_MIN_CONNS` | `1` | Minimum isolated-store pool connections. |
+| `UP_ISOLATED_DATABASE_CONNECT_TIMEOUT` | `10s` | Isolated-store connection and startup-contract timeout. |
 | `UP_REDIS_URL` | | Redis connection URL. Use `rediss://` for TLS. Password must be URL-encoded. |
 | `UP_REDIS_KEY_PREFIX` | `up:development:` | Key prefix for Redis namespace isolation. |
 | `UP_REDIS_POOL_SIZE` | `10` | Redis connection pool size. |
@@ -135,6 +173,15 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_LOGIN_RATE_WINDOW` | `15m` | Login rate limit window. |
 | `UP_MFA_RATE_LIMIT` | `10` | Maximum MFA attempts per window. |
 | `UP_MFA_RATE_WINDOW` | `15m` | MFA rate limit window. |
+| `UP_RISK_DEFENSE_ENABLED` | `false` | Enables the objective login/registration risk gate and its configured interactive-provider pool. |
+| `UP_RISK_CAPTCHA_REGION` | `mainland_china` | Server-owned provider pool region: `mainland_china` or `global`. Turnstile is excluded from the mainland pool. |
+| `UP_RISK_TURNSTILE_SITE_KEY` | | Public Turnstile site key. Must be configured atomically with its secret and hostname. |
+| `UP_RISK_TURNSTILE_SECRET_KEY` | | Server-only Turnstile secret. Never expose it to the browser or logs. |
+| `UP_RISK_TURNSTILE_HOSTNAME` | | Exact hostname accepted from Turnstile Siteverify. |
+| `UP_RISK_RECAPTCHA_SITE_KEY` | | Public reCAPTCHA v3 site key. Must be configured atomically with its secret and hostname. |
+| `UP_RISK_RECAPTCHA_SECRET_KEY` | | Server-only reCAPTCHA secret. Never expose it to the browser or logs. |
+| `UP_RISK_RECAPTCHA_HOSTNAME` | | Exact hostname accepted from reCAPTCHA Siteverify. |
+| `UP_RISK_RECAPTCHA_MIN_SCORE` | `0.7` | Minimum accepted v3 score in `(0,1]`; success responses with provider warnings still fail closed. |
 | `UP_REAUTH_CHALLENGE_TTL` | `5m` | Reauthentication challenge token TTL. |
 | `UP_REAUTH_GRANT_TTL` | `5m` | Reauthentication grant (single-use token) TTL. |
 | `UP_REAUTH_MAX_ATTEMPTS` | `5` | Maximum reauthentication MFA attempts per challenge. |
@@ -148,11 +195,13 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_AUTH_PROVIDER` | | Authentication provider name: `fake` (development only) or `zitadel`. Unknown values fail startup in all environments. |
 | `UP_AUTH_PROVIDER_BASE_URL` | | Authentication provider base URL. HTTPS required in production; local dev may use `http://localhost:8080`. |
 | `UP_AUTH_PROVIDER_PROJECT_ID` | | Authentication provider project ID (tenant scope for identity links). |
+| `UP_AUTH_PROVIDER_ORGANIZATION_ID` | | ZITADEL organization ID used to create public-registration users. This is not the project ID. Required when public registration is enabled. |
 | `UP_AUTH_PROVIDER_CLIENT_ID` | | Authentication provider client ID. |
 | `UP_AUTH_PROVIDER_CLIENT_SECRET` | | Authentication provider client secret. |
 | `UP_AUTH_PROVIDER_SERVICE_ACCOUNT_KEY_FILE` | | Path to the ZITADEL service account key.json (JWT profile auth). Required for `zitadel`. |
 | `UP_AUTH_PROVIDER_DOMAIN` | | WebAuthn relying-party domain for passkey challenges. Empty disables passkey challenges. |
 | `UP_OAUTH_PUBLIC_ORIGIN` | | Public OAuth origin the reverse proxy serves the protocol endpoints on (browser-visible issuer origin), e.g. `https://id.example.com`. Strict origin syntax: scheme + host (+ port) only — no path, userinfo, query or fragment. HTTPS required in production, where the variable is mandatory. The ZITADEL LoginV2 Interaction Base URI is derived as `<origin>/_interaction`. Do not reuse `UP_AUTH_PROVIDER_BASE_URL` for this value. |
+| `UP_PUBLIC_REGISTRATION_ENABLED` | `false` | Master gate for public registration and email verification. Enabling requires PostgreSQL, Redis, complete ZITADEL configuration, both project and organization IDs, and the public OAuth origin. |
 | `UP_FEISHU_BASE_URL` | `https://open.feishu.cn` | Feishu OpenAPI origin. HTTPS is required in production. |
 | `UP_FEISHU_AUTHORIZE_URL` | `https://accounts.feishu.cn/open-apis/authen/v1/authorize` | Feishu browser authorization endpoint. |
 | `UP_FEISHU_APP_ID` | | Feishu application ID. Must be configured atomically with App Secret, tenant ID and redirect URL. |
@@ -182,12 +231,16 @@ All configuration is loaded once at startup through `internal/config`. Variables
 
 | Variable | Description |
 | --- | --- |
-| `UP_TEST_DATABASE_URL` | PostgreSQL URL for integration tests. |
-| `UP_TEST_DATABASE_SCHEMA` | PostgreSQL schema for integration tests (default: `united_pass_test`). |
-| `UP_TEST_REDIS_URL` | Redis URL for integration tests. |
-| `UP_TEST_REDIS_KEY_PREFIX` | Redis key prefix for integration tests (default: `up:test:`). |
+| `UP_TEST_DATABASE_URL` | Matrix-owned disposable PostgreSQL URL; standalone/shared values are rejected. |
+| `UP_TEST_DATABASE_SCHEMA` | Matrix-owned per-run PostgreSQL schema. |
+| `UP_TEST_REDIS_URL` | Matrix-owned disposable Redis URL. |
+| `UP_TEST_REDIS_KEY_PREFIX` | Matrix-owned per-run Redis namespace. |
+| `UP_TEST_ZITADEL_STATE_FILE` | Immutable per-run snapshot of the protected native-loopback ZITADEL state. Direct `UP_TEST_ZITADEL_*` overrides are rejected. |
+| `UP_TEST_DISPOSABLE_RUN_TOKEN` | Random ownership token set only by the local integration matrix. |
 
-Integration tests skip when these variables are absent. They never fall back to the development database or Redis.
+Destructive integration packages fail before opening a connection when the
+matrix ownership token or any exact disposable-resource invariant is absent.
+They never fall back to development, shared, tunneled or production services.
 
 ### Security Notes
 
@@ -198,6 +251,13 @@ Integration tests skip when these variables are absent. They never fall back to 
 - Redis data loss only invalidates sessions — it does not delete users.
 - Never connect to public network services with plaintext. Development uses the SSH tunnel; production requires TLS.
 - CI does not connect to remote shared databases.
+- Interactive CAPTCHA providers are disabled unless their complete site-key,
+  server secret, and exact-hostname tuple is present. The server chooses the
+  provider; the browser cannot select one or supply a verification URL.
+- `recaptcha.net` is only a fixed-host fallback for the mainland pool and has
+  no mainland availability SLA. Alibaba Cloud CAPTCHA 2.0 is not implemented
+  in this revision, so operators must not treat this pool as a reliable
+  mainland CAPTCHA service.
 
 ## Test Commands
 
@@ -214,16 +274,51 @@ go build ./...
 # never place the password in process arguments, logs, or PID files)
 ./scripts/tunnel-hygiene-check.sh
 
-# Integration tests (require UP_TEST_DATABASE_URL and UP_TEST_REDIS_URL,
-# which point at the local SSH tunnel ports; start the tunnel first)
-./scripts/tunnel.sh start
-go test -tags integration -race ./internal/adapters/postgres/... ./internal/adapters/redis/...
-./scripts/tunnel.sh stop
+# Destructive integration tests must run only through the local disposable
+# matrix shown below. Direct `go test -tags integration` is fail-closed.
 ```
 
-Integration tests never run `FLUSHALL`, `FLUSHDB`, or `DROP DATABASE`. They only delete keys under the configured test prefix and only drop tables in the test schema.
+Integration tests never run `FLUSHALL`, `FLUSHDB`, or `DROP DATABASE`. The
+configured Redis test prefix is a non-overlapping base only; each test process
+adds a cryptographically random `run:<nonce>:` namespace, and cleanup refuses
+to scan or delete outside that exact namespace. PostgreSQL cleanup only drops
+tables in the test schema.
 
-## Current Implementation Scope (Phase 0–8 plus production seam completion)
+On Windows, the repository also includes a fully local, non-Docker matrix. It
+requires WSL PostgreSQL to listen only on `localhost:15433`; it creates a
+random disposable database and unprivileged role, starts a password-protected
+Redis on `127.0.0.1:16379`, runs the PostgreSQL, Redis, bootstrap, D1 and R2
+tests, then removes the disposable resources. It never opens an SSH connection
+and never reads `.env`:
+
+```powershell
+pwsh -NoProfile -File .\scripts\run-local-integration-matrix.ps1 -Mode core
+```
+
+The release-oriented full matrix additionally requires the protected native
+ZITADEL state and service-account key at the exact ignored repository paths.
+The script accepts only the fixed `127.0.0.1`/reserved `localhost` origin on
+port `18185` (with loopback-only DNS resolution) and binds that listener to the
+PID and executable created by
+`start-zitadel-loopback-local.ps1`, verifies the exact command/configuration
+and local `zitadel_dreamup_e2e` database ownership, and requires the protected
+clean-launch attestation produced only after the launcher rejects pre-existing
+`ZITADEL_*` overrides. Executable, configuration, launcher and attestation
+digests are bound for the whole run, so an arbitrary loopback proxy or state
+file is rejected. It then
+uses a read-only,
+ACL-protected, digest-bound snapshot and verifies the source, snapshot,
+listener owner and executable digest again after the provider test. Success is
+reported only after Redis, database, role and snapshot residue are all
+confirmed absent:
+
+```powershell
+pwsh -NoProfile -File .\scripts\run-local-integration-matrix.ps1 `
+  -Mode full `
+  -ZitadelStateFile .\.zitadel\native\init-state.json
+```
+
+## Current Implementation Scope (through Phase 8 technical implementation)
 
 Phase 0 established the HTTP foundation. Phase 1 adds session management, authentication, and current user endpoints. Phase 2 adds the OAuth Application and OAuth Client management plane (see [ADR-0004](docs/adr-0004.md)).
 
@@ -324,27 +419,6 @@ Phase 0 established the HTTP foundation. Phase 1 adds session management, authen
   [Phase 8 launch runbook](docs/p8-launch-runbook.md).
 - Legal approval and real production cutover remain external Pending items.
 
-### Production seam completion (2026-08-16)
-
-- **Public account lifecycle**: ZITADEL-owned registration credentials and
-  email/password-reset codes; pending stable user + Consumer Persona + exact
-  provider identity link; compensation on local failure; anti-enumerating reset
-  request; encrypted short-lived lifecycle capabilities; password-reset security
-  epoch advancement and old-session invalidation.
-- **Account self-service**: constrained profile patch, server-decoded/resized/
-  metadata-stripped PNG avatar storage, and durable user/session-bound email or
-  phone verification with claim leases, attempt limits and provider readback.
-- **Administration overview**: real PostgreSQL aggregates independently scoped
-  to user, application and audit read capabilities.
-- **Final frontend integration**: every production data seam calls real HTTP;
-  explicit fixtures cannot manufacture a session or silently persist writes.
-- **Security closure**: logged-out credential submissions require JSON plus an
-  exact same-origin Origin, forwarding headers are not trusted for rate-limit
-  identity, Redis construction failure aborts startup, and shutdown returns
-  joined HTTP/Redis/provider close errors.
-- Architecture: [ADR-0015](docs/adr-0015.md). Machine contract:
-  [OpenAPI 0.9.0](openapi/openapi.yaml).
-
 ### Status and remaining external acceptance
 
 **Phase 1 status: implementation complete; local real-instance acceptance passed.**
@@ -394,10 +468,11 @@ ZITADEL service account must hold `PROJECT_OWNER` membership on the
 provisioning project — organization-level `ORG_OWNER` alone is not sufficient
 for `RemoveApp` on v2.71.
 
+- Passkey browser ceremony against the real instance (WebAuthn begin fails in the local dev instance; adapter unit tests cover the contract and the fail-closed path)
 - Production HTTPS instance + Secret Manager rollout (Phase 1.2 production operational sign-off)
 - gRPC error-code calibration follow-ups on the production instance (see `internal/adapters/zitadel/errors.go`; local codes are recorded in ADR-0003)
-- Destructive live acceptance for registration/email delivery, password reset
-  and email/SMS contact changes against the designated production-like ZITADEL tenant
+- User registration, password reset, email verification
+- Profile updates and avatar upload
 - Recovery Code management (provider capability remains unsupported)
 - Legal sign-off, production backup/restore exercise, real production-like
   destructive account-deletion acceptance and traffic cutover
@@ -405,16 +480,19 @@ for `RemoveApp` on v2.71.
 ## Local ZITADEL Instance
 
 Phase 1.2 authenticates against ZITADEL via the LoginV2 API. For local
-development and integration tests, a disposable instance runs in Docker:
+development and integration tests, either the repository's existing
+disposable Docker fixture or the native loopback launcher can be used. The
+shell entrypoint is only a compatibility alias for the same hardened Go
+bootstrap used by the native flow:
 
 ```bash
 docker compose -f docker-compose.zitadel.yml up -d
 ./scripts/zitadel-init.sh
 ```
 
-`zitadel-init.sh` creates a human test user (password + TOTP), a service
-account, and its API key (`key.json`), then prints the `UP_TEST_ZITADEL_*`
-variables. Configure the service to use it:
+`zitadel-init.sh` delegates to `cmd/zitadel-bootstrap`, which creates a human
+test user (password + TOTP), a dedicated service account, and its protected API
+key without printing secret values. Configure the service to use it:
 
 ```bash
 UP_AUTH_PROVIDER=zitadel \
@@ -424,19 +502,31 @@ UP_AUTH_PROVIDER_DOMAIN=localhost \
 go run ./cmd/api
 ```
 
-Run the E2E tests against the instance (TOTP code is computed automatically
-from the secret saved in `.zitadel/init-state.json`; set
-`UP_TEST_DATABASE_URL` to also validate first-login identity mapping against a
-real PostgreSQL schema migrated with `cmd/migrate`):
+When a native ZITADEL process is already running on an explicit loopback
+port, the non-Docker bootstrap is preferred. It never accepts a non-loopback
+URL, never prints the generated password/TOTP/key material, and persists them
+only in the ignored protected state file. The dedicated backend account is
+required to hold exactly `IAM_LOGIN_CLIENT` at instance scope, exactly
+`PROJECT_OWNER` on the isolated provisioning project, and no organization
+membership. If any extra/manual role is discovered the bootstrap fails closed
+without rewriting or deleting that permission:
 
-```bash
-UP_TEST_ZITADEL_BASE_URL=http://localhost:8080 \
-UP_TEST_ZITADEL_KEY_FILE=.zitadel/sa-key.json \
-UP_TEST_ZITADEL_USER=zhixing.lin@example.com \
-UP_TEST_ZITADEL_PASSWORD='TestPassword123!' \
-UP_TEST_ZITADEL_TOTP_SECRET=$(jq -r .totpSecret .zitadel/init-state.json) \
-UP_TEST_DATABASE_URL='postgres://...' \
-go test -tags integration ./internal/adapters/zitadel/...
+```powershell
+go run ./cmd/zitadel-bootstrap `
+  -base-url http://localhost:18185 `
+  -out-dir .\.zitadel\native `
+  -init-key-file .\.zitadel\native\init-sa.json
+```
+
+Run the E2E tests only through the full disposable matrix. It computes the
+TOTP code from the protected snapshot and supplies a fresh PostgreSQL
+database/schema; direct environment overrides and standalone integration-test
+commands are rejected before connecting:
+
+```powershell
+pwsh -NoProfile -File .\scripts\run-local-integration-matrix.ps1 `
+  -Mode full `
+  -ZitadelStateFile .\.zitadel\native\init-state.json
 ```
 
 Production ZITADEL requires an HTTPS endpoint and the service account key
@@ -477,27 +567,6 @@ High-risk operations additionally require a fresh reauthentication grant
 | `/api/v1/admin/applications/{applicationId}/clients/{clientId}/enable` | POST | No | Enable client |
 | `/api/v1/admin/applications/{applicationId}/clients/{clientId}/disable` | POST | No | Disable client |
 | `/api/v1/admin/applications/{applicationId}/clients/{clientId}/secret-rotations` | POST | Yes | Rotate confidential client secret (one-time display) |
-
-## API Endpoints (production seam completion)
-
-Logged-out credential endpoints require `application/json` and the exact public
-Origin. Session-authenticated writes require CSRF. Verification capabilities
-and provider codes are sensitive and must not be logged.
-
-| Endpoint | Method | Auth | Description |
-| --- | --- | --- | --- |
-| `/api/v1/registrations` | POST | None + same-origin | Create provider credential and pending linked user |
-| `/api/v1/password-reset-requests` | POST | None + same-origin | Enumeration-safe reset notification request |
-| `/api/v1/password-resets` | POST | None + same-origin | Provider-verified reset and old-session invalidation |
-| `/api/v1/email-verifications` | POST | None + same-origin | Verify registration email and activate pending user |
-| `/api/v1/me` | PATCH | Session + CSRF | Update display name and/or nickname |
-| `/api/v1/me/avatar` | POST multipart | Session + CSRF | Decode, sanitize and store avatar |
-| `/api/v1/media/avatars/{avatarFile}` | GET | None | Serve controlled immutable PNG media |
-| `/api/v1/me/email-change-requests` | POST | Session + CSRF | Begin Provider-verified email change |
-| `/api/v1/me/email-change-requests/{requestId}/verify` | POST | Session + CSRF | Verify and commit exact email change |
-| `/api/v1/me/phone-change-requests` | POST | Session + CSRF | Begin Provider-verified phone change |
-| `/api/v1/me/phone-change-requests/{requestId}/verify` | POST | Session + CSRF | Verify and commit exact phone change |
-| `/api/v1/admin/dashboard` | GET | Session + capability | Return only independently authorized aggregates |
 
 ## API Endpoints (Phase 8)
 
@@ -545,9 +614,4 @@ The backend must never silently implement a different API contract from the fron
 - `docs/adr-0002.md` — Session, PostgreSQL, Redis, and authentication provider architecture
 - `docs/adr-0003.md` — Authentication provider selection (Phase 1.2)
 - `docs/adr-0004.md` — OAuth Application/Client management plane (Phase 2)
-- `docs/adr-0011.md` — Stable identity and workforce administration (Phase 5)
-- `docs/adr-0012.md` — Feishu provider and directory staging (Phase 6)
-- `docs/adr-0013.md` — Cerbos policies and durable audit (Phase 7)
-- `docs/adr-0014.md` — Privacy rights and controlled legal publication (Phase 8)
-- `docs/adr-0015.md` — Public account lifecycle and final production seam replacement
 - `docs/p28-acceptance-record.md` — Phase 2 real-provider acceptance record

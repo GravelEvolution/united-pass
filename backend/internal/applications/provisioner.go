@@ -67,6 +67,44 @@ type ClientProvisionResult struct {
 	ClientSecret string
 }
 
+// ProviderClientSnapshot is the non-secret, provider-authoritative view used
+// by explicit provisioning verification jobs. It deliberately excludes the
+// client secret: providers return confidential secrets only once, and later
+// reads may report only local secret metadata.
+type ProviderClientSnapshot struct {
+	ProviderProjectID        string
+	ProviderApplicationID    string
+	ProviderClientID         string
+	DisplayName              string
+	Profile                  ClientProfile
+	TokenEndpointAuth        TokenEndpointAuthMethod
+	Active                   bool
+	RedirectURIs             []string
+	LogoutURIs               []string
+	ResponseTypes            []OAuthResponseType
+	GrantTypes               []OAuthGrantType
+	LoginVersionBaseURI      string
+	DevMode                  bool
+	OIDCVersion              OAuthOIDCVersion
+	AccessTokenType          OAuthAccessTokenType
+	NonCompliant             bool
+	AccessTokenRoleAssertion bool
+	IDTokenRoleAssertion     bool
+	IDTokenUserinfoAssertion bool
+	ClockSkewNanoseconds     int64
+	AdditionalOrigins        []string
+	SkipNativeAppSuccessPage bool
+	BackChannelLogoutURI     string
+	AllowedOrigins           []string
+}
+
+// OAuthClientReadback reads one provider client without changing it. It is a
+// separate interface from OAuthClientProvisioner so ordinary management-plane
+// use cases cannot accidentally turn verification into a mutation.
+type OAuthClientReadback interface {
+	ReadClient(ctx context.Context, providerApplicationID string) (ProviderClientSnapshot, error)
+}
+
 // ClientUpdateSpec carries the mutable provider-side client settings.
 type ClientUpdateSpec struct {
 	DisplayName  string

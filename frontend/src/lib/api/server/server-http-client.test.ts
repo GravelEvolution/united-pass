@@ -162,4 +162,18 @@ describe("serverFetch error normalization", () => {
       expect(error.message).toContain("502");
     }
   });
+
+  it("preserves the backend error code for route-level recovery", async () => {
+    stubFetch(jsonResponse(JSON.stringify({
+      error: { code: "admin_stepup.required", message: "请先完成管理员二次验证。" },
+    }), 401));
+
+    const error = await serverFetch("/admin/dreamup/events/event-1/applications").catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      kind: "unauthorized",
+      code: "admin_stepup.required",
+      message: "请先完成管理员二次验证。",
+    });
+  });
 });

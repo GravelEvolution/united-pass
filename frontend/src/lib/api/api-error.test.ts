@@ -7,7 +7,12 @@
 //
 
 import { describe, it, expect } from "vitest";
-import { isApiError, getFieldError, type ApiError } from "./api-error";
+import {
+  getFieldError,
+  isApiError,
+  isStepUpChallenge,
+  type ApiError,
+} from "./api-error";
 
 describe("isApiError", () => {
   it("returns true for a valid ApiError object", () => {
@@ -18,6 +23,7 @@ describe("isApiError", () => {
   it("returns true for a complete ApiError with all optional fields", () => {
     const error: ApiError = {
       kind: "reauthentication_required",
+      code: "session.reauthentication_required",
       message: "Reauthentication required",
       requestId: "req_001",
       fieldErrors: [{ field: "email", message: "邮箱已被占用。" }],
@@ -103,6 +109,55 @@ describe("isApiError", () => {
 
   it("returns false when requestId is not a string", () => {
     expect(isApiError({ kind: "not_found", message: "error", requestId: 123 })).toBe(false);
+  });
+
+  it("accepts a backend error code but rejects non-string codes", () => {
+    expect(isApiError({ kind: "unauthorized", code: "admin_stepup.required", message: "需要二次验证" })).toBe(true);
+    expect(isApiError({ kind: "unauthorized", code: 42, message: "需要二次验证" })).toBe(false);
+  });
+});
+
+describe("isStepUpChallenge", () => {
+  const base = {
+    challengeToken: "opaque-token",
+    level: "medium",
+    expiresAt: "2026-08-25T10:05:00Z",
+    providerReady: true,
+  } as const;
+
+  it("accepts the bounded automation-cost contract", () => {
+    expect(isStepUpChallenge({
+      ...base,
+      method: "automation_cost",
+      algorithm: "sha256_leading_zero_bits",
+      difficulty: 18,
+      completionPath: "/api/v1/auth/step-up",
+    })).toBe(true);
+  });
+
+  it("accepts an unavailable interactive provider without treating it as success", () => {
+    expect(isStepUpChallenge({
+      ...base,
+      level: "high",
+      method: "interactive_captcha",
+      providerReady: false,
+      completionPath: "/api/v1/auth/step-up",
+    })).toBe(true);
+  });
+
+  it("rejects unsafe completion paths and out-of-range work factors", () => {
+    expect(isStepUpChallenge({
+      ...base,
+      method: "automation_cost",
+      algorithm: "sha256_leading_zero_bits",
+      difficulty: 31,
+      completionPath: "/api/v1/auth/step-up",
+    })).toBe(false);
+    expect(isStepUpChallenge({
+      ...base,
+      method: "interactive_captcha",
+      completionPath: "https://evil.example/collect",
+    })).toBe(false);
   });
 });
 

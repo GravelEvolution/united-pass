@@ -36,6 +36,30 @@ function headerOf(call: FetchCall, name: string): string | null {
   return new Headers(call.init.headers as HeadersInit).get(name);
 }
 
+function oauthClientResponse(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    clientId: "client_real",
+    applicationId: "app_real",
+    name: "Web",
+    clientType: "confidential",
+    grantTypes: ["authorization_code", "refresh_token"],
+    tokenEndpointAuthMethod: "client_secret_basic",
+    redirectUris: [{
+      uri: "https://portal.example.test/callback",
+      isLoopback: false,
+      addedAt: "2026-08-30T00:00:00Z",
+    }],
+    logoutUri: "",
+    allowedScopes: [{ scope: "openid", label: "OpenID", description: "OIDC", required: false }],
+    consentMode: "always",
+    status: "active",
+    clientSecrets: [],
+    createdAt: "2026-08-30T00:00:00Z",
+    updatedAt: "2026-08-30T00:00:00Z",
+    ...overrides,
+  };
+}
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe("final production browser seams", () => {
@@ -77,10 +101,34 @@ describe("final production browser seams", () => {
     expect(bodyOf(calls[0])).toMatchObject({ name: "SPA", profile: "spa_mobile" });
   });
 
+  it("updates, disables and reauthentication-deletes a child client through real routes", async () => {
+    let calls = stubFetch(jsonResponse(oauthClientResponse({ name: "Updated" })));
+    await browserCommands.updateOAuthClient("app/real", "client/real", {
+      name: "Updated",
+      logoutUri: "",
+    });
+    expect(calls[0].url).toBe("/api/v1/admin/applications/app%2Freal/clients/client%2Freal");
+    expect(calls[0].init.method).toBe("PATCH");
+    expect(bodyOf(calls[0])).toEqual({ name: "Updated", logoutUri: "" });
+
+    vi.unstubAllGlobals();
+    calls = stubFetch(jsonResponse(oauthClientResponse({ status: "disabled" })));
+    await browserCommands.updateOAuthClientStatus("app_real", "client_real", "disabled");
+    expect(calls[0].url).toBe("/api/v1/admin/applications/app_real/clients/client_real/disable");
+    expect(calls[0].init.method).toBe("POST");
+
+    vi.unstubAllGlobals();
+    calls = stubFetch(new Response(null, { status: 204 }));
+    await browserCommands.deleteOAuthClient("app_real", "client_real", "reauth_once");
+    expect(calls[0].url).toBe("/api/v1/admin/applications/app_real/clients/client_real");
+    expect(calls[0].init.method).toBe("DELETE");
+    expect(headerOf(calls[0], "X-Reauthentication-Token")).toBe("reauth_once");
+  });
+
   it("persists profile, avatar and verified-contact operations through real routes", async () => {
     let calls = stubFetch(new Response(null, { status: 204 }));
     await browserCommands.updateProfile({ displayName: "Updated", nickname: "U" });
-    expect(calls[0].url).toBe("/api/v1/me");
+    expect(calls[0].url).toBe("/api/v1/me/profile");
     expect(calls[0].init.method).toBe("PATCH");
 
     vi.unstubAllGlobals();
@@ -89,6 +137,9 @@ describe("final production browser seams", () => {
     await browserCommands.uploadAvatar(file);
     expect(calls[0].url).toBe("/api/v1/me/avatar");
     expect(calls[0].init.body).toBeInstanceOf(FormData);
+    const uploadedFile = (calls[0].init.body as FormData).get("file");
+    expect(uploadedFile).toBeInstanceOf(File);
+    expect(uploadedFile).toMatchObject({ name: "avatar.png", size: 3, type: "image/png" });
     expect(headerOf(calls[0], "Content-Type")).toBeNull();
 
     vi.unstubAllGlobals();
@@ -96,7 +147,7 @@ describe("final production browser seams", () => {
     await expect(browserCommands.requestEmailChange("new@example.test")).resolves.toEqual({
       requestId: "contact_capability",
     });
-    expect(calls[0].url).toBe("/api/v1/me/email-change-requests");
-    expect(bodyOf(calls[0])).toEqual({ value: "new@example.test" });
+    expect(calls[0].url).toBe("/api/v1/me/email-change");
+    expect(bodyOf(calls[0])).toEqual({ email: "new@example.test" });
   });
 });

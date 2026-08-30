@@ -9,18 +9,10 @@
 //go:build integration
 
 // Package postgres integration tests verify repository behavior against a real
-// PostgreSQL instance. These tests require UP_TEST_DATABASE_URL and
-// UP_TEST_DATABASE_SCHEMA to be set; they skip when the variables are absent.
-// They never connect to the development schema.
-//
-// Run locally (through the SSH tunnel managed by scripts/tunnel.sh):
-//
-//	UP_TEST_DATABASE_URL=postgres://user:pass@127.0.0.1:15432/db?sslmode=disable \
-//	UP_TEST_DATABASE_SCHEMA=united_pass_test \
-//	go test -tags integration ./internal/adapters/postgres/...
-//
-// Never point these tests at a public network endpoint with plaintext. The
-// tunnel keeps plaintext traffic on the loopback interface only.
+// PostgreSQL instance. Destructive integration tests are accepted only when
+// scripts/run-local-integration-matrix.ps1 supplies a per-run database, role,
+// schema and ownership token. Missing or arbitrary configuration fails before
+// any connection is opened; SSH-tunnel and shared-schema execution is refused.
 package postgres
 
 import (
@@ -30,7 +22,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -42,6 +33,8 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/integrationboundary"
+	"github.com/GravelEvolution/united-pass/backend/internal/registration"
 )
 
 // Repository integration tests are intentionally serial and reuse one fully
@@ -53,24 +46,34 @@ import (
 var testSchemaMu sync.Mutex
 
 func TestMain(m *testing.M) {
-	// A killed prior package cannot run its final cleanup. Start from the same
-	// dedicated-schema baseline that TestMain restores on exit so newly added
-	// migration objects never poison the next run.
-	cleanupSharedTestSchema()
+	if err := validatePostgresIntegrationBoundary(); err != nil {
+		fmt.Fprintln(os.Stderr, "PostgreSQL integration boundary rejected:", err)
+		os.Exit(2)
+	}
 	code := m.Run()
-	cleanupSharedTestSchema()
+	if err := cleanupSharedTestSchema(); err != nil {
+		fmt.Fprintln(os.Stderr, "PostgreSQL integration cleanup failed:", err)
+		if code == 0 {
+			code = 1
+		}
+	}
 	os.Exit(code)
+}
+
+func validatePostgresIntegrationBoundary() error {
+	return integrationboundary.ValidatePostgres(
+		os.Getenv("UP_TEST_DATABASE_URL"),
+		os.Getenv("UP_TEST_DATABASE_SCHEMA"),
+		os.Getenv(integrationboundary.RunTokenEnvironment),
+	)
 }
 
 func mustLoadTestDBConfig(t *testing.T) (string, string) {
 	t.Helper()
 	url := os.Getenv("UP_TEST_DATABASE_URL")
 	schema := os.Getenv("UP_TEST_DATABASE_SCHEMA")
-	if schema == "" {
-		schema = "united_pass_test"
-	}
-	if url == "" {
-		t.Skip("UP_TEST_DATABASE_URL not set; skipping PostgreSQL integration tests")
+	if err := integrationboundary.ValidatePostgres(url, schema, os.Getenv(integrationboundary.RunTokenEnvironment)); err != nil {
+		t.Fatalf("PostgreSQL integration boundary rejected: %v", err)
 	}
 	// The schema name is interpolated into SQL below, so it must pass strict
 	// identifier validation before any statement is built.
@@ -131,11 +134,9 @@ func setupTestPool(t *testing.T, maxConns int32) *Pool {
 		t.Fatalf("set dialect: %v", err)
 	}
 
-	if !sharedSchemaAtHead(t, db) {
-		migrationsDir := findMigrationsDir(t)
-		if err := goose.UpContext(context.Background(), db, migrationsDir); err != nil {
-			t.Fatalf("apply migrations: %v", err)
-		}
+	migrationsDir := findMigrationsDir(t)
+	if err := goose.UpContext(context.Background(), db, migrationsDir); err != nil {
+		t.Fatalf("apply migrations: %v", err)
 	}
 	resetTestSchemaData(t, db)
 
@@ -164,29 +165,17 @@ func setupTestPool(t *testing.T, maxConns int32) *Pool {
 	return pool
 }
 
-// sharedSchemaAtHead avoids replaying goose's remote bookkeeping queries for
-// every serial repository test. Migration-path tests may drop the shared
-// schema between cases, so readiness requires both goose bookkeeping and the
-// first/head business tables; a missing object falls back to the full runner.
-func sharedSchemaAtHead(t *testing.T, db *sql.DB) bool {
-	t.Helper()
-	var count int
-	if err := db.QueryRow(`
-		SELECT COUNT(*)
-		  FROM information_schema.tables
-		 WHERE table_schema = current_schema()
-		   AND table_name IN ('goose_db_version', 'users', 'contact_change_requests')`).Scan(&count); err != nil {
-		t.Fatalf("inspect shared test schema: %v", err)
-	}
-	return count == 3
-}
-
 func resetTestSchemaData(t *testing.T, db *sql.DB) {
 	t.Helper()
 	statements := []string{
 		`ALTER TABLE security_events DROP CONSTRAINT IF EXISTS test_reject_consent_audit`,
+		`ALTER TABLE security_events DROP CONSTRAINT IF EXISTS test_reject_wechat_pending_phone_audit`,
 		`TRUNCATE TABLE
 			contact_change_requests, user_avatars,
+			admin_operator_approvals, admin_operation_outbox,
+			identity_access_grant_fields, identity_access_grants, identity_access_request_fields, identity_access_requests,
+			protected_operation_reasons, admin_step_up_state, admin_challenges,
+			admin_role_bindings, dreamup_event_registry,
 			account_deletion_requests, personal_data_export_jobs, legal_document_publications,
 			audit_export_jobs, policy_publication_jobs,
 			authorization_policy_versions, authorization_policies,
@@ -199,6 +188,7 @@ func resetTestSchemaData(t *testing.T, db *sql.DB) {
 			oauth_authorization_decision_operations,
 			oauth_client_secret_records, oauth_client_scopes, oauth_client_redirect_uris,
 			oauth_clients, oauth_applications,
+			wechat_registration_provider_intents,
 			password_mutation_intents, user_personas, identity_links, users
 		 RESTART IDENTITY CASCADE`,
 		`ALTER SEQUENCE password_mutation_intent_seq RESTART WITH 1`,
@@ -208,26 +198,22 @@ func resetTestSchemaData(t *testing.T, db *sql.DB) {
 		 VALUES
 			('provider_feishu', '飞书', 'feishu', 'OAuth 2.0 + 通讯录 OpenAPI', 'disabled', FALSE)`,
 	}
-	// One simple-protocol batch keeps this serial integration suite below Go's
-	// package timeout over an SSH tunnel; statement order and transaction
-	// semantics are unchanged, but four network round trips become one.
-	if _, err := db.Exec(strings.Join(statements, ";\n")); err != nil {
-		t.Fatalf("reset test schema data: %v", err)
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("reset test schema data: %v", err)
+		}
 	}
 }
 
-func cleanupSharedTestSchema() {
+func cleanupSharedTestSchema() error {
 	url := os.Getenv("UP_TEST_DATABASE_URL")
 	schema := os.Getenv("UP_TEST_DATABASE_SCHEMA")
-	if schema == "" {
-		schema = "united_pass_test"
-	}
-	if url == "" || !config.ValidSchemaIdentifier(schema) {
-		return
+	if err := integrationboundary.ValidatePostgres(url, schema, os.Getenv(integrationboundary.RunTokenEnvironment)); err != nil {
+		return err
 	}
 	connConfig, err := pgx.ParseConfig(url)
 	if err != nil {
-		return
+		return errors.New("parse disposable PostgreSQL cleanup connection")
 	}
 	if connConfig.RuntimeParams == nil {
 		connConfig.RuntimeParams = make(map[string]string)
@@ -235,16 +221,20 @@ func cleanupSharedTestSchema() {
 	connConfig.RuntimeParams["search_path"] = schema
 	db := stdlib.OpenDB(*connConfig)
 	defer db.Close()
-	dropTestSchemaObjects(nil, db)
+	return dropTestSchemaObjects(nil, db)
 }
 
-func dropTestSchemaObjects(t *testing.T, db *sql.DB) {
+func dropTestSchemaObjects(t *testing.T, db *sql.DB) error {
 	if t != nil {
 		t.Helper()
 	}
 	statements := []string{
 		`DROP TABLE IF EXISTS
 			contact_change_requests, user_avatars,
+			admin_operator_approvals, admin_operation_outbox,
+			identity_access_grant_fields, identity_access_grants, identity_access_request_fields, identity_access_requests,
+			protected_operation_reasons, admin_step_up_state, admin_challenges,
+			admin_role_bindings, dreamup_event_registry, admin_security_event_vocabulary,
 			account_deletion_requests, personal_data_export_jobs, legal_document_publications,
 			audit_export_jobs, policy_publication_jobs,
 			authorization_policy_versions, authorization_policies,
@@ -257,13 +247,44 @@ func dropTestSchemaObjects(t *testing.T, db *sql.DB) {
 			oauth_authorization_decision_operations,
 			oauth_client_secret_records, oauth_client_scopes, oauth_client_redirect_uris,
 			oauth_clients, oauth_applications,
+			wechat_registration_provider_intents,
 			password_mutation_intents,
 			user_personas, identity_links, users CASCADE`,
 		`DROP SEQUENCE IF EXISTS password_mutation_intent_seq, employee_number_seq`,
+		`DROP FUNCTION IF EXISTS reject_dreamup_event_identity_change()`,
 		`DROP TABLE IF EXISTS goose_db_version`,
 	}
-	if _, err := db.Exec(strings.Join(statements, ";\n")); err != nil && t != nil {
-		t.Fatalf("clean test schema: %v", err)
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			if t != nil {
+				t.Fatalf("clean test schema: %v", err)
+			}
+			return errors.New("drop disposable PostgreSQL schema objects")
+		}
+	}
+	return nil
+}
+
+func TestIntegration_MigrationCleanupSupportsSecondFreshInstallInSameSchema(t *testing.T) {
+	db := openMigrationTestDB(t)
+	ctx := context.Background()
+	migrations := findMigrationsDir(t)
+	if err := goose.UpContext(ctx, db, migrations); err != nil {
+		t.Fatalf("first fresh migration: %v", err)
+	}
+	if !tableExists(t, db, "wechat_registration_provider_intents") || !tableExists(t, db, "admin_operation_outbox") || !tableExists(t, db, "contact_change_requests") {
+		t.Fatal("first fresh migration did not reach head")
+	}
+	dropTestSchemaObjects(t, db)
+	if err := goose.UpContext(ctx, db, migrations); err != nil {
+		t.Fatalf("second fresh migration in same schema: %v", err)
+	}
+	if !tableExists(t, db, "wechat_registration_provider_intents") || !tableExists(t, db, "admin_operation_outbox") || !tableExists(t, db, "contact_change_requests") {
+		t.Fatal("second fresh migration did not recreate head tables")
+	}
+	version, err := goose.GetDBVersion(db)
+	if err != nil || version != 16 {
+		t.Fatalf("second fresh migration version=%d err=%v", version, err)
 	}
 }
 
@@ -538,6 +559,19 @@ func TestIntegration_FirstLoginCreatesUserWithProfile(t *testing.T) {
 	}
 }
 
+func TestIntegration_UnverifiedFirstLoginCannotCreateActiveUser(t *testing.T) {
+	repo := setupTestDB(t)
+	user, err := repo.GetOrCreateUserByProviderSubject(context.Background(), "zitadel", "tenant_unverified", identity.ProviderUserInfo{
+		Subject: "unverified-provider-subject", Email: "pending@example.com", EmailVerified: false,
+	})
+	if err != nil {
+		t.Fatalf("first login linking: %v", err)
+	}
+	if user.Status != identity.UserStatusPending || user.Status.CanAuthenticate() || user.EmailVerified {
+		t.Fatalf("unverified first login created authenticatable user: %#v", user)
+	}
+}
+
 // TestIntegration_ConcurrentFirstLoginSingleWinner verifies that concurrent
 // first logins for the same provider subject produce exactly one user and no
 // orphan rows: all callers resolve to the same local user.
@@ -648,6 +682,51 @@ func TestIntegration_ConcurrentFirstLoginSingleConnection(t *testing.T) {
 	}
 	if loaded.UserID != first {
 		t.Errorf("link user = %q, want %q", loaded.UserID, first)
+	}
+}
+
+func TestIntegration_RegistrationPendingIdentityActivatesIdempotently(t *testing.T) {
+	users := setupTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	repo := NewRegistrationRepository(users.pool, "zitadel", "project_registration")
+	const userID = "user_0123456789abcdef0123456789abcdef"
+	if err := repo.CreatePending(ctx, registration.PendingUser{
+		UserID: userID, DisplayName: "月石选手", Email: "player@example.com",
+		Status: registration.StatusPending, EmailVerified: false,
+	}); err != nil {
+		t.Fatalf("create pending registration: %v", err)
+	}
+
+	pending, err := users.GetByID(ctx, identity.UserID(userID))
+	if err != nil {
+		t.Fatalf("get pending user: %v", err)
+	}
+	if pending.Status != identity.UserStatusPending || pending.EmailVerified || pending.Status.CanAuthenticate() {
+		t.Fatalf("pending user = %#v", pending)
+	}
+	if len(pending.Personas) != 1 || pending.Personas[0] != identity.PersonaConsumer {
+		t.Fatalf("pending personas = %v", pending.Personas)
+	}
+	link, err := users.GetIdentityLink(ctx, "zitadel", "project_registration", userID)
+	if err != nil || string(link.UserID) != userID || link.ProviderSubject != userID {
+		t.Fatalf("exact identity link = %#v err=%v", link, err)
+	}
+
+	if err := repo.ActivateVerified(ctx, userID); err != nil {
+		t.Fatalf("activate verified registration: %v", err)
+	}
+	active, err := users.GetByID(ctx, identity.UserID(userID))
+	if err != nil || !active.Status.CanAuthenticate() || !active.EmailVerified {
+		t.Fatalf("active user = %#v err=%v", active, err)
+	}
+	version := active.Version
+	if err := repo.ActivateVerified(ctx, userID); err != nil {
+		t.Fatalf("idempotent activation: %v", err)
+	}
+	again, err := users.GetByID(ctx, identity.UserID(userID))
+	if err != nil || again.Version != version {
+		t.Fatalf("idempotent activation changed version: before=%d after=%d err=%v", version, again.Version, err)
 	}
 }
 

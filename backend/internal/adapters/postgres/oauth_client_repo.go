@@ -131,7 +131,9 @@ func (r *ApplicationRepository) GetClient(ctx context.Context, appID application
 		`SELECT client_id, application_id, name, profile, client_type,
 		        token_endpoint_auth_method, consent_mode, logout_uri, status,
 		        provider, provider_project_id, provider_application_id,
-		        provider_client_id, provisioning_status, version, created_at, updated_at
+		        provider_client_id, provisioning_status,
+		        provider_reconciliation_required, secret_rotation_status,
+		        version, created_at, updated_at
 		   FROM oauth_clients
 		  WHERE client_id = $2 AND application_id = $1
 		    AND deleted_at IS NULL AND provisioning_status = 'provisioned'`,
@@ -156,7 +158,9 @@ func (r *ApplicationRepository) ListClientsByApplication(ctx context.Context, ap
 		`SELECT client_id, application_id, name, profile, client_type,
 		        token_endpoint_auth_method, consent_mode, logout_uri, status,
 		        provider, provider_project_id, provider_application_id,
-		        provider_client_id, provisioning_status, version, created_at, updated_at
+		        provider_client_id, provisioning_status,
+		        provider_reconciliation_required, secret_rotation_status,
+		        version, created_at, updated_at
 		   FROM oauth_clients
 		  WHERE application_id = $1
 		    AND deleted_at IS NULL AND provisioning_status = 'provisioned'
@@ -193,7 +197,9 @@ func (r *ApplicationRepository) ListLiveClientsByApplication(ctx context.Context
 		`SELECT client_id, application_id, name, profile, client_type,
 		        token_endpoint_auth_method, consent_mode, logout_uri, status,
 		        provider, provider_project_id, provider_application_id,
-		        provider_client_id, provisioning_status, version, created_at, updated_at
+		        provider_client_id, provisioning_status,
+		        provider_reconciliation_required, secret_rotation_status,
+		        version, created_at, updated_at
 		   FROM oauth_clients
 		  WHERE application_id = $1
 		    AND deleted_at IS NULL
@@ -217,6 +223,43 @@ func (r *ApplicationRepository) ListLiveClientsByApplication(ctx context.Context
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("postgres: iterate live client rows: %w", err)
+	}
+	return clients, nil
+}
+
+// listProvisioningClientsByApplication returns every client row, including
+// soft-deleted rows, for the offline bootstrap verifier. Ordinary service
+// projections must continue to use the live/provisioned list methods above.
+func (r *ApplicationRepository) listProvisioningClientsByApplication(ctx context.Context, appID applications.ApplicationID) ([]applications.OAuthClient, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT client_id, application_id, name, profile, client_type,
+		        token_endpoint_auth_method, consent_mode, logout_uri, status,
+		        provider, provider_project_id, provider_application_id,
+		        provider_client_id, provisioning_status,
+		        provider_reconciliation_required, secret_rotation_status,
+		        version, created_at, updated_at, deleted_at
+		   FROM oauth_clients
+		  WHERE application_id = $1
+		  ORDER BY created_at ASC, client_id ASC`,
+		string(appID))
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list provisioning clients: %w", err)
+	}
+	defer rows.Close()
+
+	clients := make([]applications.OAuthClient, 0)
+	for rows.Next() {
+		client, err := scanProvisioningClient(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: scan provisioning client: %w", err)
+		}
+		if err := r.hydrateClient(ctx, &client); err != nil {
+			return nil, err
+		}
+		clients = append(clients, client)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate provisioning clients: %w", err)
 	}
 	return clients, nil
 }
@@ -755,12 +798,13 @@ func scanClient(row rowScanner) (applications.OAuthClient, error) {
 		client                                          applications.OAuthClient
 		clientID, appID, profile, clientType, tokenAuth string
 		consent, status, provider, provProject, provApp string
-		provisioning                                    string
+		provisioning, rotationStatus                    string
 	)
 	err := row.Scan(&clientID, &appID, &client.Name, &profile, &clientType,
 		&tokenAuth, &consent, &client.LogoutURI, &status,
 		&provider, &provProject, &provApp, &client.ProviderClientID,
-		&provisioning, &client.Version, &client.CreatedAt, &client.UpdatedAt)
+		&provisioning, &client.ProviderReconciliationRequired, &rotationStatus,
+		&client.Version, &client.CreatedAt, &client.UpdatedAt)
 	if err != nil {
 		return applications.OAuthClient{}, err
 	}
@@ -775,6 +819,37 @@ func scanClient(row rowScanner) (applications.OAuthClient, error) {
 	client.ProviderProjectID = provProject
 	client.ProviderApplicationID = provApp
 	client.Provisioning = applications.ProvisioningStatus(provisioning)
+	client.SecretRotationStatus = applications.SecretRotationStatus(rotationStatus)
+	return client, nil
+}
+
+func scanProvisioningClient(row rowScanner) (applications.OAuthClient, error) {
+	var (
+		client                                          applications.OAuthClient
+		clientID, appID, profile, clientType, tokenAuth string
+		consent, status, provider, provProject, provApp string
+		provisioning, rotationStatus                    string
+	)
+	err := row.Scan(&clientID, &appID, &client.Name, &profile, &clientType,
+		&tokenAuth, &consent, &client.LogoutURI, &status,
+		&provider, &provProject, &provApp, &client.ProviderClientID,
+		&provisioning, &client.ProviderReconciliationRequired, &rotationStatus,
+		&client.Version, &client.CreatedAt, &client.UpdatedAt, &client.DeletedAt)
+	if err != nil {
+		return applications.OAuthClient{}, err
+	}
+	client.ID = applications.OAuthClientID(clientID)
+	client.ApplicationID = applications.ApplicationID(appID)
+	client.Profile = applications.ClientProfile(profile)
+	client.ClientType = applications.ClientType(clientType)
+	client.TokenEndpointAuth = applications.TokenEndpointAuthMethod(tokenAuth)
+	client.ConsentMode = applications.ConsentMode(consent)
+	client.Status = applications.Status(status)
+	client.Provider = provider
+	client.ProviderProjectID = provProject
+	client.ProviderApplicationID = provApp
+	client.Provisioning = applications.ProvisioningStatus(provisioning)
+	client.SecretRotationStatus = applications.SecretRotationStatus(rotationStatus)
 	return client, nil
 }
 

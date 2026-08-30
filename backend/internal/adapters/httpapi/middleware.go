@@ -12,12 +12,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
+	"mime"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
+	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
 // RequestIDHeader is the header name used to accept upstream request IDs and to
@@ -199,6 +202,98 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		h.Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// RequireTrustedBrowserMutation protects unauthenticated browser mutations
+// such as password login and MFA completion. These routes cannot use the
+// session-bound CSRF token because no session exists yet, so they require an
+// exact public Origin, reject cross-site Fetch Metadata, and accept JSON only.
+func RequireTrustedBrowserMutation(expectedOrigin string) func(http.Handler) http.Handler {
+	expectedOrigin = strings.TrimRight(strings.TrimSpace(expectedOrigin), "/")
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !validateTrustedBrowserMutation(w, r, expectedOrigin) {
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// validateTrustedBrowserMutation is the single pre-session CSRF boundary for
+// login, MFA, passkey and public registration. Registration uses it directly
+// so all unauthenticated account mutations enforce the same contract.
+func validateTrustedBrowserMutation(w http.ResponseWriter, r *http.Request, expectedOrigin string) bool {
+	expectedOrigin = strings.TrimRight(strings.TrimSpace(expectedOrigin), "/")
+	if expectedOrigin == "" || r.Header.Get("Origin") != expectedOrigin {
+		writeError(w, r, http.StatusForbidden, codeOriginMismatch, "请求来源无效。", nil)
+		return false
+	}
+	if fetchSite := strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")); fetchSite != "" && fetchSite != "same-origin" {
+		writeError(w, r, http.StatusForbidden, codeOriginMismatch, "请求来源无效。", nil)
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeError(w, r, http.StatusUnsupportedMediaType, codeUnsupportedMediaType, "请求必须使用 JSON 格式。", nil)
+		return false
+	}
+	return true
+}
+
+// RequireMiniProgramClient narrows native-only endpoints to the explicit
+// DreamUP Mini Program transport. The marker is not authentication and grants
+// no authority: authenticated routes must still apply RequireSession and
+// (for native-only surfaces) RequireNativeMiniProgramBearer.
+func RequireMiniProgramClient() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !isMiniProgramClientRequest(r) {
+				WriteNotFound(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// RequireNativeMiniProgramBearer closes native-only routes after
+// RequireSession has authenticated the explicit Authorization credential.
+func RequireNativeMiniProgramBearer() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			record, ok := SessionRecordFromContext(r.Context())
+			if !ok || !IsNativeBearerSession(r.Context()) || record.ClientKind != session.ClientKindMiniProgram {
+				WriteUnauthorized(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func isMiniProgramClientRequest(r *http.Request) bool {
+	return r.Header.Get("Origin") == "" &&
+		strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")) == "" &&
+		strings.TrimSpace(r.Header.Get("Sec-Fetch-Mode")) == "" &&
+		strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")) == "" &&
+		r.Header.Get("X-UnitedPass-Client") == session.ClientKindMiniProgram
+}
+
+// RequireJSONMutation accepts only application/json for native mutation
+// endpoints. It is separate from RequireMiniProgramClient so safe GETs need
+// no artificial request-body requirement.
+func RequireJSONMutation() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			if err != nil || mediaType != "application/json" {
+				writeError(w, r, http.StatusUnsupportedMediaType, codeUnsupportedMediaType, "请求必须使用 JSON 格式。", nil)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // MaxBodyBytes wraps the request body in an http.MaxBytesReader so handlers

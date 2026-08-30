@@ -139,6 +139,7 @@ type Resolution struct {
 	ApplicationName        string
 	ApplicationDescription string
 	ApplicationOwner       string
+	ApplicationLogoURL     string
 	RedirectHost           string
 	Scopes                 []ResolutionScope
 
@@ -341,6 +342,7 @@ func (s *ResolutionService) Resolve(ctx context.Context, input ResolutionInput) 
 		ApplicationName:        facts.Application.Name,
 		ApplicationDescription: facts.Application.Description,
 		ApplicationOwner:       facts.Application.OwnerName,
+		ApplicationLogoURL:     facts.Application.LogoURL,
 		RedirectHost:           verifiedRedirectHost(view.RedirectURI),
 		Scopes:                 resolutionScopes(requestedScopes),
 	}, nil
@@ -551,9 +553,10 @@ func resolutionScopes(requested []string) []ResolutionScope {
 // alreadyAuthorizedResolution builds the reuse outcome (ADR-0005 §7).
 func alreadyAuthorizedResolution(authRequestID string, view *AuthRequestView, facts ConsentClientFacts) Resolution {
 	return Resolution{
-		Status:          ResolutionAlreadyAuthorized,
-		AuthRequestID:   authRequestID,
-		ApplicationName: facts.Application.Name,
-		RedirectHost:    verifiedRedirectHost(view.RedirectURI),
+		Status:             ResolutionAlreadyAuthorized,
+		AuthRequestID:      authRequestID,
+		ApplicationName:    facts.Application.Name,
+		ApplicationLogoURL: facts.Application.LogoURL,
+		RedirectHost:       verifiedRedirectHost(view.RedirectURI),
 	}
 }

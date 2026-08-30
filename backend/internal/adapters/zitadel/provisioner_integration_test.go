@@ -31,12 +31,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
+	"github.com/GravelEvolution/united-pass/backend/internal/integrationboundary"
 
 	management "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/management"
 )
@@ -46,7 +48,7 @@ const probeAppName = "United Pass topology probe (P3.6)"
 func TestIntegration_ProvisionerLoginVersionTopology(t *testing.T) {
 	cfg := testZitadelConfig(t)
 	if cfg.ProjectID == "" {
-		t.Skip("UP_TEST_ZITADEL_PROJECT_ID not set; skipping topology acceptance")
+		t.Fatal("ZITADEL matrix snapshot is missing the isolated project ID")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -55,7 +57,7 @@ func TestIntegration_ProvisionerLoginVersionTopology(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSDKClient: %v", err)
 	}
-	defer sdk.Close()
+	t.Cleanup(func() { sdk.Close() })
 
 	// Local acceptance: the instance itself is the public origin, so the
 	// interaction base exercises the real production derivation rule.
@@ -68,23 +70,26 @@ func TestIntegration_ProvisionerLoginVersionTopology(t *testing.T) {
 		t.Fatalf("NewProvisioner: %v", err)
 	}
 
+	runToken := os.Getenv(integrationboundary.RunTokenEnvironment)
 	spec := applications.ClientProvisionSpec{
-		DisplayName:  probeAppName,
+		DisplayName:  probeAppName + " " + runToken,
 		Profile:      applications.ClientProfileWebServer,
 		RedirectURIs: []string{"https://topology-probe.example/callback"},
 		LogoutURI:    "https://topology-probe.example/logout",
 		Scopes:       []string{"openid"},
 	}
-	res, err := p.ProvisionClient(ctx, "topology-probe", spec)
+	res, err := p.ProvisionClient(ctx, "topology-probe-"+runToken, spec)
 	if err != nil {
 		t.Fatalf("ProvisionClient: %v", err)
 	}
 	t.Logf("probe app: applicationId=%s clientId=%s", res.ProviderApplicationID, redactMiddle(res.ProviderClientID))
-	defer func() {
-		if err := p.DeleteClient(context.Background(), res.ProviderApplicationID); err != nil {
-			t.Errorf("cleanup DeleteClient: %v", err)
+	t.Cleanup(func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+		if cleanupErr := p.DeleteClient(cleanupContext, res.ProviderApplicationID); cleanupErr != nil {
+			t.Errorf("cleanup DeleteClient: %v", cleanupErr)
 		}
-	}()
+	})
 
 	// Live read-back 1: creation must have submitted LoginVersion atomically.
 	assertLiveLoginVersion(t, ctx, sdk.ManagementService(), cfg.ProjectID, res.ProviderApplicationID, interactionBase)

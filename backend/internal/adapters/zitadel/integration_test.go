@@ -10,8 +10,9 @@
 
 // Package zitadel integration tests exercise the adapter against a real
 // ZITADEL instance (see docker-compose.zitadel.yml and
-// scripts/zitadel-init.sh). They are skipped unless the following variables
-// are set:
+// scripts/zitadel-init.sh). The integration TestMain requires the immutable
+// matrix snapshot and disposable-resource ownership token before any test can
+// connect. Missing inputs fail; they are never treated as a skip.
 //
 //	UP_TEST_ZITADEL_BASE_URL     e.g. http://localhost:8080
 //	UP_TEST_ZITADEL_KEY_FILE     path to the service account key.json
@@ -50,20 +51,22 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	sessionv2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/session/v2"
+	"google.golang.org/grpc/status"
 )
 
 func testZitadelConfig(t *testing.T) config.AuthProviderConfig {
 	t.Helper()
-	baseURL := os.Getenv("UP_TEST_ZITADEL_BASE_URL")
-	keyFile := os.Getenv("UP_TEST_ZITADEL_KEY_FILE")
+	baseURL := testZitadelValue(t, "UP_TEST_ZITADEL_BASE_URL")
+	keyFile := testZitadelValue(t, "UP_TEST_ZITADEL_KEY_FILE")
 	if baseURL == "" || keyFile == "" {
-		t.Skip("UP_TEST_ZITADEL_BASE_URL / UP_TEST_ZITADEL_KEY_FILE not set; skipping ZITADEL integration tests")
+		t.Fatal("ZITADEL matrix snapshot is missing provider endpoint or key")
 	}
 	return config.AuthProviderConfig{
 		Provider:              ProviderName,
 		BaseURL:               baseURL,
 		ServiceAccountKeyFile: keyFile,
-		ProjectID:             os.Getenv("UP_TEST_ZITADEL_PROJECT_ID"),
+		ProjectID:             testZitadelValue(t, "UP_TEST_ZITADEL_PROJECT_ID"),
 		Domain:                "localhost",
 	}
 }
@@ -202,10 +205,10 @@ func totpCode(t *testing.T, secret string) string {
 
 func TestIntegration_ZitadelAuthenticatorE2E(t *testing.T) {
 	cfg := testZitadelConfig(t)
-	user := os.Getenv("UP_TEST_ZITADEL_USER")
-	password := os.Getenv("UP_TEST_ZITADEL_PASSWORD")
+	user := testZitadelValue(t, "UP_TEST_ZITADEL_USER")
+	password := testZitadelValue(t, "UP_TEST_ZITADEL_PASSWORD")
 	if user == "" || password == "" {
-		t.Skip("UP_TEST_ZITADEL_USER / UP_TEST_ZITADEL_PASSWORD not set")
+		t.Fatal("ZITADEL matrix snapshot is missing test credentials")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -214,7 +217,7 @@ func TestIntegration_ZitadelAuthenticatorE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSDKClient: %v", err)
 	}
-	defer sdk.Close()
+	t.Cleanup(func() { sdk.Close() })
 
 	linker, pool, realDB := newIntegrationLinker(t)
 	if pool != nil {
@@ -227,6 +230,37 @@ func TestIntegration_ZitadelAuthenticatorE2E(t *testing.T) {
 	if err := a.Check(ctx); err != nil {
 		t.Fatalf("provider readiness: %v", err)
 	}
+	// Exercise the provider's password check directly before the adapter adds
+	// optional WebAuthn challenge fallback. This distinguishes invalid local
+	// bootstrap credentials from an adapter-state regression without ever
+	// printing the password or the provider response body.
+	probe, err := sdk.SessionServiceV2().CreateSession(ctx, &sessionv2.CreateSessionRequest{
+		Checks: &sessionv2.Checks{
+			User:     a.resolveCheckUser(ctx, user),
+			Password: &sessionv2.CheckPassword{Password: password},
+		},
+	})
+	if err != nil {
+		t.Fatalf("direct provider password-session probe failed (grpc=%s authorization=%t)", status.Code(err), isAuthZFailure(err))
+	}
+	if probe.GetSessionId() == "" {
+		t.Fatal("direct provider password-session probe returned no session id")
+	}
+	probeSessionID := probe.GetSessionId()
+	t.Cleanup(func() {
+		if probeSessionID == "" {
+			return
+		}
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if _, cleanupErr := sdk.SessionServiceV2().DeleteSession(cleanupContext, &sessionv2.DeleteSessionRequest{SessionId: probeSessionID}); cleanupErr != nil {
+			t.Errorf("cleanup direct password-session probe: %v", cleanupErr)
+		}
+	})
+	if _, err := sdk.SessionServiceV2().DeleteSession(ctx, &sessionv2.DeleteSessionRequest{SessionId: probe.GetSessionId()}); err != nil {
+		t.Fatalf("delete direct password-session probe: %v", err)
+	}
+	probeSessionID = ""
 
 	// Step 1: password authentication.
 	res, err := a.BeginPasswordAuthentication(ctx, auth.PasswordAuthenticationInput{
@@ -236,6 +270,20 @@ func TestIntegration_ZitadelAuthenticatorE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginPasswordAuthentication: %v", err)
 	}
+	providerSessionReference := res.ProviderSessionReference
+	if providerSessionReference == "" {
+		providerSessionReference = res.ProviderSessionID
+	}
+	t.Cleanup(func() {
+		if providerSessionReference == "" {
+			return
+		}
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if cleanupErr := a.RevokeProviderSession(cleanupContext, providerSessionReference); cleanupErr != nil {
+			t.Errorf("cleanup provider login session: %v", cleanupErr)
+		}
+	})
 
 	switch res.Status {
 	case auth.StatusAuthenticated:
@@ -245,12 +293,13 @@ func TestIntegration_ZitadelAuthenticatorE2E(t *testing.T) {
 		if err := a.RevokeProviderSession(ctx, res.ProviderSessionReference); err != nil {
 			t.Fatalf("RevokeProviderSession: %v", err)
 		}
+		providerSessionReference = ""
 
 	case auth.StatusMFARequired:
 		t.Logf("MFA required; available methods: %v", res.AvailableMethods)
-		secret := os.Getenv("UP_TEST_ZITADEL_TOTP_SECRET")
+		secret := testZitadelValue(t, "UP_TEST_ZITADEL_TOTP_SECRET")
 		if secret == "" {
-			t.Skip("MFA required but UP_TEST_ZITADEL_TOTP_SECRET not set (saved by zitadel-init.sh)")
+			t.Fatal("ZITADEL matrix snapshot is missing the TOTP secret")
 		}
 		// The provider session ID must be server-side only; it must never be
 		// exposed as a browser token.
@@ -269,11 +318,13 @@ func TestIntegration_ZitadelAuthenticatorE2E(t *testing.T) {
 		if completed.Status != auth.StatusAuthenticated {
 			t.Fatalf("MFA completion status = %q, want authenticated", completed.Status)
 		}
+		providerSessionReference = completed.ProviderSessionReference
 		verifyAuthenticatedResult(t, linker, realDB, completed)
 		// Step 3: revoke the provider session.
 		if err := a.RevokeProviderSession(ctx, completed.ProviderSessionReference); err != nil {
 			t.Fatalf("RevokeProviderSession: %v", err)
 		}
+		providerSessionReference = ""
 
 	case auth.StatusInvalidCredentials:
 		t.Fatalf("invalid credentials for configured test user: check UP_TEST_ZITADEL_USER/PASSWORD")
@@ -326,10 +377,10 @@ func getUserByID(t *testing.T, linker identity.UserLinker, userID identity.UserI
 
 func TestIntegration_ZitadelAuthenticatorWrongPassword(t *testing.T) {
 	cfg := testZitadelConfig(t)
-	user := os.Getenv("UP_TEST_ZITADEL_USER")
-	password := os.Getenv("UP_TEST_ZITADEL_PASSWORD")
+	user := testZitadelValue(t, "UP_TEST_ZITADEL_USER")
+	password := testZitadelValue(t, "UP_TEST_ZITADEL_PASSWORD")
 	if user == "" || password == "" {
-		t.Skip("UP_TEST_ZITADEL_USER / UP_TEST_ZITADEL_PASSWORD not set")
+		t.Fatal("ZITADEL matrix snapshot is missing test credentials")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -338,7 +389,7 @@ func TestIntegration_ZitadelAuthenticatorWrongPassword(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSDKClient: %v", err)
 	}
-	defer sdk.Close()
+	t.Cleanup(func() { sdk.Close() })
 
 	a := NewAuthenticator(sdk.SessionServiceV2(), sdk.UserServiceV2(), &recordingLinker{}, cfg.ProjectID, cfg.Domain, nil)
 

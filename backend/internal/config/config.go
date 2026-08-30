@@ -12,12 +12,20 @@
 package config
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"math"
+	"net"
+	"net/mail"
+	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -42,6 +50,7 @@ const (
 	defaultShutdownTimeout     = 30 * time.Second
 	defaultMaxRequestBodyBytes = 1 << 20 // 1 MiB
 	defaultLogLevel            = "info"
+	defaultAvatarDir           = "/var/lib/moonstone-united-pass/avatars"
 
 	defaultDatabaseSchema               = "united_pass"
 	defaultDatabaseMaxConns       int32 = 10
@@ -60,12 +69,49 @@ const (
 	defaultSessionTouchInterval = 5 * time.Minute
 	defaultSessionSameSite      = "lax"
 
-	defaultMFAChallengeTTL = 5 * time.Minute
-	defaultMFAMaxAttempts  = 5
-	defaultLoginRateLimit  = 10
-	defaultLoginRateWindow = 15 * time.Minute
-	defaultMFARateLimit    = 10
-	defaultMFARateWindow   = 15 * time.Minute
+	defaultMFAChallengeTTL              = 5 * time.Minute
+	defaultMFAMaxAttempts               = 5
+	defaultLoginRateLimit               = 10
+	defaultLoginRateWindow              = 15 * time.Minute
+	defaultMFARateLimit                 = 10
+	defaultMFARateWindow                = 15 * time.Minute
+	defaultAliyunSMSEndpoint            = "https://dysmsapi.aliyuncs.com/"
+	defaultWeChatRequestTimeout         = 8 * time.Second
+	defaultQRAuthChallengeTTL           = 2 * time.Minute
+	defaultQRAuthRateLimit              = 12
+	defaultQRAuthRateWindow             = 2 * time.Minute
+	defaultDreamUPMobileScopedRateLimit = 60
+	defaultDreamUPMobileGlobalRateLimit = 2000
+	defaultDreamUPMobileRateWindow      = time.Minute
+	defaultRiskObservationWindow        = 15 * time.Minute
+	defaultRiskLoginMediumAfter         = 3
+	defaultRiskLoginHighAfter           = 7
+	defaultRiskRegistrationMediumAfter  = 2
+	defaultRiskRegistrationHighAfter    = 3
+	defaultRiskChallengeTTL             = 5 * time.Minute
+	defaultRiskDeviceIDTTL              = 30 * 24 * time.Hour
+	defaultRiskTrustTTL                 = 15 * time.Minute
+	defaultRiskAutomationCostDifficulty = 18
+	defaultRiskCompletionLimit          = 8
+	defaultRiskCompletionWindow         = 15 * time.Minute
+	defaultRiskCaptchaRegion            = "mainland_china"
+	defaultRiskRecaptchaMinScore        = 0.7
+
+	defaultRegistrationCreateIPLimit     = 3
+	defaultRegistrationCreateIPWindow    = time.Hour
+	defaultRegistrationCreateNetLimit    = 10
+	defaultRegistrationCreateNetWindow   = time.Hour
+	defaultRegistrationCreateEmailLimit  = 3
+	defaultRegistrationCreateEmailWindow = 24 * time.Hour
+	defaultRegistrationCreatePairLimit   = 2
+	defaultRegistrationCreatePairWindow  = time.Hour
+	defaultRegistrationVerifyLimit       = 8
+	defaultRegistrationVerifyWindow      = 15 * time.Minute
+	defaultRegistrationResendLimit       = 3
+	defaultRegistrationResendWindow      = 30 * time.Minute
+	defaultRegistrationIPv4NetBits       = 24
+	defaultRegistrationIPv6NetBits       = 56
+	defaultTrustedProxyCIDRs             = "127.0.0.1/32,::1/128"
 
 	defaultReauthChallengeTTL    = 5 * time.Minute
 	defaultReauthGrantTTL        = 5 * time.Minute
@@ -94,6 +140,14 @@ const (
 
 	defaultCerbosRequestTimeout    = 3 * time.Second
 	defaultCerbosReconcileInterval = 30 * time.Second
+
+	defaultAdminFreshLoginMaxAge  = 5 * time.Minute
+	defaultAdminGeneralFreshness  = 30 * time.Minute
+	defaultAdminHighRiskFreshness = 5 * time.Minute
+	defaultAdminRateLimit         = 5
+	defaultAdminRateWindow        = 15 * time.Minute
+	defaultAdminLockDuration      = 30 * time.Minute
+	defaultAdminArgon2Concurrency = 2
 )
 
 // Config holds all process-level configuration. Values are loaded once at
@@ -110,17 +164,40 @@ type Config struct {
 	MaxRequestBodyBytes int64
 	LogLevel            string
 
+	// AvatarDir is the directory where re-encoded user avatars are stored.
+	// It must be writable by the API process at runtime.
+	AvatarDir string
+
 	// Phase 1 — Storage
-	Database DatabaseConfig
-	Redis    RedisConfig
+	Database         DatabaseConfig
+	IsolatedDatabase DatabaseConfig
+	Redis            RedisConfig
 
 	// Phase 1 — Session
 	Session SessionConfig
 
 	// Phase 1 — Authentication
-	MFA       MFAConfig
-	RateLimit RateLimitConfig
-	Auth      AuthProviderConfig
+	MFA         MFAConfig
+	RateLimit   RateLimitConfig
+	RiskDefense RiskDefenseConfig
+	Auth        AuthProviderConfig
+	ClientIP    TrustedClientIPConfig
+	// Registration is a master-gated public surface. It is closed unless an
+	// operator explicitly enables it and all durable/provider dependencies are
+	// configured.
+	Registration RegistrationConfig
+	// WeChatMiniProgram gates server-side Mini Program proof exchange and an
+	// independently enabled registration surface.
+	WeChatMiniProgram WeChatMiniProgramConfig
+	// QRAuth gates short-lived browser login challenges.
+	QRAuth QRAuthConfig
+	// DreamUPMobile signs request-bound participant assertions with dedicated
+	// key material and remains default-off.
+	DreamUPMobile DreamUPMobileConfig
+
+	// Phone binding verification (SMS) — Aliyun SMS delivery and code TTL.
+	AliyunSMS   AliyunSMSConfig
+	PhoneVerify PhoneVerifyConfig
 
 	// Phase 1 — Permissions
 	Permission PermissionConfig
@@ -135,11 +212,22 @@ type Config struct {
 	// Phase 3 — OAuth endpoint topology
 	OAuth OAuthConfig
 
+	// Operator-only DreamUP OAuth client bootstrap.
+	DreamUPBootstrap DreamUPBootstrapConfig
+
 	// Phase 6 — Feishu login and directory Provider
 	Feishu FeishuConfig
 
 	// Phase 7 — Cerbos policy decision and management APIs
 	Cerbos CerbosConfig
+
+	// DreamUP administration is a master-gated surface. It defaults off and
+	// no keyring is opened unless explicitly enabled.
+	DreamUPAdmin DreamUPAdminConfig
+
+	// Email configures the SMTP sender used by the internal email endpoint.
+	// Emails are only sent when the SMTP host is configured.
+	Email EmailConfig
 
 	// Integration tests
 	Test TestConfig
@@ -190,6 +278,100 @@ type RateLimitConfig struct {
 	MFAWindow   time.Duration
 }
 
+type WeChatMiniProgramConfig struct {
+	Enabled             bool
+	RegistrationEnabled bool
+	// OnboardingEnabled independently gates the authority-writing account
+	// creation/linking routes. It remains false when only legacy WeChat login or
+	// registration is enabled.
+	OnboardingEnabled         bool
+	OnboardingEncryptionKey   string // base64-encoded 32-byte AES-GCM key, never shared with sessions
+	OnboardingEncryptionKeyID string
+	// OnboardingRetainedDecryptionKeys is a JSON object of historical
+	// key-ID/base64-key pairs. These keys decrypt durable cleanup obligations
+	// after rotation but are never used for new ciphertext.
+	OnboardingRetainedDecryptionKeys string
+	AppID                            string
+	AppSecret                        string
+	APIBaseURL                       string
+	RequestTimeout                   time.Duration
+}
+
+type QRAuthConfig struct {
+	Enabled      bool
+	ChallengeTTL time.Duration
+	RateLimit    int
+	RateWindow   time.Duration
+}
+
+type DreamUPMobileConfig struct {
+	Enabled                bool
+	DelegationKeyringPath  string
+	DelegationCurrentKeyID string
+	DelegationIssuer       string
+	DelegationAudience     string
+	AssertionTTL           time.Duration
+	ScopedRateLimit        int
+	GlobalRateLimit        int
+	RateWindow             time.Duration
+}
+
+// RiskDefenseConfig controls objective registration/login abuse defense.
+// Allowlist entries are SHA-256 hex digests of normalized identifiers; raw
+// emails, names, and usernames are intentionally not accepted here.
+type RiskDefenseConfig struct {
+	Enabled                  bool
+	ObservationWindow        time.Duration
+	LoginMediumAfter         int
+	LoginHighAfter           int
+	RegistrationMediumAfter  int
+	RegistrationHighAfter    int
+	ChallengeTTL             time.Duration
+	DeviceIDTTL              time.Duration
+	TrustTTL                 time.Duration
+	AutomationCostDifficulty int
+	CompletionLimit          int
+	CompletionWindow         time.Duration
+	AllowlistedHashes        []string
+	Captcha                  RiskCaptchaConfig
+}
+
+// RiskCaptchaConfig enables only providers whose complete credential and
+// hostname tuple is present. Browser code never selects the region or provider.
+type RiskCaptchaConfig struct {
+	Region    string
+	Turnstile RiskCaptchaProviderConfig
+	Recaptcha RiskRecaptchaConfig
+}
+
+type RiskCaptchaProviderConfig struct {
+	SiteKey   string
+	SecretKey string
+	Hostname  string
+}
+
+type RiskRecaptchaConfig struct {
+	SiteKey   string
+	SecretKey string
+	Hostname  string
+	MinScore  float64
+}
+
+func (c RiskCaptchaProviderConfig) Configured() bool {
+	return c.SiteKey != "" && c.SecretKey != "" && c.Hostname != ""
+}
+
+func (c RiskRecaptchaConfig) Configured() bool {
+	return c.SiteKey != "" && c.SecretKey != "" && c.Hostname != ""
+}
+
+// TrustedClientIPConfig defines the transport peers allowed to supply the
+// internal X-Moonstone-Client-IP header. The public gateway must overwrite
+// that header on every request.
+type TrustedClientIPConfig struct {
+	TrustedProxyCIDRs []string
+}
+
 // ReauthConfig holds reauthentication challenge and grant parameters
 // (ADR-0004 §7). Challenges and grants are short-lived, single-use and
 // bound to user + session + action + target resource.
@@ -238,11 +420,12 @@ type SecurityStateConfig struct {
 
 // AuthProviderConfig holds authentication provider parameters.
 type AuthProviderConfig struct {
-	Provider     string
-	BaseURL      string
-	ProjectID    string
-	ClientID     string
-	ClientSecret string
+	Provider       string
+	BaseURL        string
+	ProjectID      string
+	OrganizationID string
+	ClientID       string
+	ClientSecret   string
 	// ServiceAccountKeyFile is the path to the ZITADEL service account
 	// key.json used for JWT profile authentication to the ZITADEL API. The
 	// key file is read at adapter construction; it must contain the keyId
@@ -253,6 +436,40 @@ type AuthProviderConfig struct {
 	// a top-level domain of the request origin. Empty disables passkey
 	// challenges (TOTP remains available).
 	Domain string
+}
+
+// AliyunSMSConfig controls SMS verification delivery through Aliyun SendSms.
+type AliyunSMSConfig struct {
+	AccessKeyID     string
+	AccessKeySecret string
+	SignName        string
+	TemplateCode    string
+	Endpoint        string
+	Enabled         bool
+}
+
+// PhoneVerifyConfig tunes the phone binding verification flow.
+type PhoneVerifyConfig struct {
+	TTL time.Duration
+}
+
+// RegistrationConfig controls the public account-registration surface.
+type RegistrationConfig struct {
+	Enabled           bool
+	CreateIPLimit     int
+	CreateIPWindow    time.Duration
+	CreateNetLimit    int
+	CreateNetWindow   time.Duration
+	CreateEmailLimit  int
+	CreateEmailWindow time.Duration
+	CreatePairLimit   int
+	CreatePairWindow  time.Duration
+	VerifyLimit       int
+	VerifyWindow      time.Duration
+	ResendLimit       int
+	ResendWindow      time.Duration
+	IPv4NetBits       int
+	IPv6NetBits       int
 }
 
 // PermissionConfig holds permission resolver parameters.
@@ -276,6 +493,13 @@ type OAuthConfig struct {
 	// provider management/API address; this value is the browser-visible
 	// issuer origin.
 	PublicOrigin string
+}
+
+// DreamUPBootstrapConfig contains the stable local owner required to create
+// the DreamUP application. It is intentionally separate from request-serving
+// OAuth configuration because only the one-shot operator command consumes it.
+type DreamUPBootstrapConfig struct {
+	OwnerUserID string
 }
 
 // FeishuConfig contains the server-only Phase 6 Provider configuration.
@@ -307,6 +531,45 @@ type CerbosConfig struct {
 	ReconcileInterval time.Duration
 }
 
+type DreamUPAdminConfig struct {
+	Enabled bool
+	// MiniProgramEnabled permits the native transport to reach the same BFF;
+	// authorization and true session-bound step-up remain mandatory.
+	MiniProgramEnabled bool
+
+	ChallengeEncryptionKeyringPath   string
+	ChallengeEncryptionCurrentKeyID  string
+	ChallengePepperKeyringPath       string
+	ChallengePepperCurrentKeyID      string
+	ProtectedReasonKeyringPath       string
+	ProtectedReasonCurrentKeyID      string
+	RateLimitKeyringPath             string
+	RateLimitCurrentKeyID            string
+	OperationFingerprintKeyringPath  string
+	OperationFingerprintCurrentKeyID string
+	DelegationKeyringPath            string
+	DelegationCurrentKeyID           string
+
+	BaseURL                  string
+	DelegationIssuer         string
+	DelegationAudience       string
+	AdminOrigin              string
+	ResponseLimitBytes       int64
+	ReconcileInterval        time.Duration
+	ReconcileBatchSize       int
+	ReconcileLease           time.Duration
+	DelegationServiceSubject string
+	DelegationServiceVersion int64
+
+	FreshLoginMaxAge    time.Duration
+	GeneralFreshness    time.Duration
+	HighRiskFreshness   time.Duration
+	RateLimit           int
+	RateWindow          time.Duration
+	LockDuration        time.Duration
+	Argon2MaxConcurrent int
+}
+
 func (c CerbosConfig) Configured() bool {
 	return c.PDPURL != "" && c.AdminURL != "" && c.AdminUsername != "" && c.AdminPassword != ""
 }
@@ -326,6 +589,85 @@ func (c OAuthConfig) InteractionBaseURI() string {
 		return ""
 	}
 	return strings.TrimRight(c.PublicOrigin, "/") + "/_interaction"
+}
+
+// EmailConfig contains the SMTP sender settings used by the internal email
+// endpoint. The endpoint only sends when SMTPHost is non-empty; the shared
+// token authenticates loopback callers such as the DreamUP worker.
+type EmailConfig struct {
+	SMTPHost      string
+	SMTPPort      int
+	SMTPUser      string
+	SMTPPassword  string
+	FromAddress   string
+	FromName      string
+	InternalToken string
+}
+
+// Configured reports whether an SMTP host has been set so the internal email
+// endpoint can fail closed when no sender is available.
+func (c EmailConfig) Configured() bool { return c.SMTPHost != "" }
+
+// SecurityNotificationsConfigured reports whether onboarding can start with
+// a usable notification transport. Credentials may be empty for SMTP relays
+// that intentionally support unauthenticated delivery.
+func (c EmailConfig) SecurityNotificationsConfigured() bool {
+	host := strings.TrimSpace(c.SMTPHost)
+	from := strings.TrimSpace(c.FromAddress)
+	if host == "" || host != c.SMTPHost || strings.ContainsAny(host, "\r\n\t ") || c.SMTPPort < 1 || c.SMTPPort > 65535 || from == "" || from != c.FromAddress {
+		return false
+	}
+	address, err := mail.ParseAddress(from)
+	return err == nil && address.Address == from
+}
+
+// ParseWeChatOnboardingRetainedDecryptionKeys parses the optional rotation
+// keyring without ever including key IDs or key material in returned errors.
+// The small hard limit bounds secret exposure and configuration complexity.
+func ParseWeChatOnboardingRetainedDecryptionKeys(raw string) (map[string]string, error) {
+	keys := make(map[string]string)
+	if strings.TrimSpace(raw) == "" {
+		return keys, nil
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('{') {
+		return nil, errors.New("retained onboarding decryption keys must be a JSON object")
+	}
+	for decoder.More() {
+		keyToken, tokenErr := decoder.Token()
+		keyID, ok := keyToken.(string)
+		if tokenErr != nil || !ok {
+			return nil, errors.New("retained onboarding decryption keys contain an invalid key ID")
+		}
+		if len(keys) >= 8 {
+			return nil, errors.New("retained onboarding decryption keys exceed the maximum of 8")
+		}
+		if _, exists := keys[keyID]; exists {
+			return nil, errors.New("retained onboarding decryption keys contain a duplicate key ID")
+		}
+		if keyID == "" || keyID != strings.TrimSpace(keyID) || strings.Contains(keyID, ":") {
+			return nil, errors.New("retained onboarding decryption key IDs must be non-empty, trimmed and must not contain ':'")
+		}
+		var keyB64 string
+		if err := decoder.Decode(&keyB64); err != nil {
+			return nil, errors.New("retained onboarding decryption key values must be base64 strings")
+		}
+		key, decodeErr := base64.StdEncoding.DecodeString(keyB64)
+		if decodeErr != nil || len(key) != 32 {
+			return nil, errors.New("retained onboarding decryption keys must decode to 32 bytes")
+		}
+		keys[keyID] = keyB64
+	}
+	end, err := decoder.Token()
+	if err != nil || end != json.Delim('}') {
+		return nil, errors.New("retained onboarding decryption keys must be a JSON object")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, errors.New("retained onboarding decryption keys contain trailing data")
+	}
+	return keys, nil
 }
 
 // TestConfig holds integration test environment parameters.
@@ -350,6 +692,7 @@ func Load() (Config, error) {
 		ShutdownTimeout:     durationOr("UP_SHUTDOWN_TIMEOUT", defaultShutdownTimeout),
 		MaxRequestBodyBytes: int64Or("UP_MAX_REQUEST_BODY_BYTES", defaultMaxRequestBodyBytes),
 		LogLevel:            envOr("UP_LOG_LEVEL", defaultLogLevel),
+		AvatarDir:           envOr("UP_AVATAR_DIR", defaultAvatarDir),
 
 		Database: DatabaseConfig{
 			URL:            envOr("UP_DATABASE_URL", ""),
@@ -357,6 +700,19 @@ func Load() (Config, error) {
 			MaxConns:       int32Or("UP_DATABASE_MAX_CONNS", defaultDatabaseMaxConns),
 			MinConns:       int32Or("UP_DATABASE_MIN_CONNS", defaultDatabaseMinConns),
 			ConnectTimeout: durationOr("UP_DATABASE_CONNECT_TIMEOUT", defaultDatabaseConnectTimeout),
+		},
+
+		// The isolated operational store is optional for legacy deployments. When
+		// configured, WeChat registration retry verifiers and DreamUP cross-system
+		// mutation receipts are kept out of the United Pass authority database.
+		// This permits a side-by-side rollout without altering the production
+		// identity/permission schema.
+		IsolatedDatabase: DatabaseConfig{
+			URL:            envOr("UP_ISOLATED_DATABASE_URL", ""),
+			Schema:         envOr("UP_ISOLATED_DATABASE_SCHEMA", "dreamup_isolated"),
+			MaxConns:       int32Or("UP_ISOLATED_DATABASE_MAX_CONNS", defaultDatabaseMaxConns),
+			MinConns:       int32Or("UP_ISOLATED_DATABASE_MIN_CONNS", defaultDatabaseMinConns),
+			ConnectTimeout: durationOr("UP_ISOLATED_DATABASE_CONNECT_TIMEOUT", defaultDatabaseConnectTimeout),
 		},
 
 		Redis: RedisConfig{
@@ -390,15 +746,107 @@ func Load() (Config, error) {
 			MFALimit:    intOr("UP_MFA_RATE_LIMIT", defaultMFARateLimit),
 			MFAWindow:   durationOr("UP_MFA_RATE_WINDOW", defaultMFARateWindow),
 		},
+		RiskDefense: RiskDefenseConfig{
+			Enabled:                  boolOr("UP_RISK_DEFENSE_ENABLED", false),
+			ObservationWindow:        durationOr("UP_RISK_OBSERVATION_WINDOW", defaultRiskObservationWindow),
+			LoginMediumAfter:         intOr("UP_RISK_LOGIN_MEDIUM_AFTER", defaultRiskLoginMediumAfter),
+			LoginHighAfter:           intOr("UP_RISK_LOGIN_HIGH_AFTER", defaultRiskLoginHighAfter),
+			RegistrationMediumAfter:  intOr("UP_RISK_REGISTRATION_MEDIUM_AFTER", defaultRiskRegistrationMediumAfter),
+			RegistrationHighAfter:    intOr("UP_RISK_REGISTRATION_HIGH_AFTER", defaultRiskRegistrationHighAfter),
+			ChallengeTTL:             durationOr("UP_RISK_CHALLENGE_TTL", defaultRiskChallengeTTL),
+			DeviceIDTTL:              durationOr("UP_RISK_DEVICE_ID_TTL", defaultRiskDeviceIDTTL),
+			TrustTTL:                 durationOr("UP_RISK_TRUST_TTL", defaultRiskTrustTTL),
+			AutomationCostDifficulty: intOr("UP_RISK_AUTOMATION_COST_DIFFICULTY", defaultRiskAutomationCostDifficulty),
+			CompletionLimit:          intOr("UP_RISK_COMPLETION_LIMIT", defaultRiskCompletionLimit),
+			CompletionWindow:         durationOr("UP_RISK_COMPLETION_WINDOW", defaultRiskCompletionWindow),
+			AllowlistedHashes:        csvOr("UP_RISK_ALLOWLIST_SHA256", ""),
+			Captcha: RiskCaptchaConfig{
+				Region: envOr("UP_RISK_CAPTCHA_REGION", defaultRiskCaptchaRegion),
+				Turnstile: RiskCaptchaProviderConfig{
+					SiteKey:   envOr("UP_RISK_TURNSTILE_SITE_KEY", ""),
+					SecretKey: envOr("UP_RISK_TURNSTILE_SECRET_KEY", ""),
+					Hostname:  envOr("UP_RISK_TURNSTILE_HOSTNAME", ""),
+				},
+				Recaptcha: RiskRecaptchaConfig{
+					SiteKey:   envOr("UP_RISK_RECAPTCHA_SITE_KEY", ""),
+					SecretKey: envOr("UP_RISK_RECAPTCHA_SECRET_KEY", ""),
+					Hostname:  envOr("UP_RISK_RECAPTCHA_HOSTNAME", ""),
+					MinScore:  float64Or("UP_RISK_RECAPTCHA_MIN_SCORE", defaultRiskRecaptchaMinScore),
+				},
+			},
+		},
 
 		Auth: AuthProviderConfig{
 			Provider:              envOr("UP_AUTH_PROVIDER", ""),
 			BaseURL:               envOr("UP_AUTH_PROVIDER_BASE_URL", ""),
 			ProjectID:             envOr("UP_AUTH_PROVIDER_PROJECT_ID", ""),
+			OrganizationID:        envOr("UP_AUTH_PROVIDER_ORGANIZATION_ID", ""),
 			ClientID:              envOr("UP_AUTH_PROVIDER_CLIENT_ID", ""),
 			ClientSecret:          envOr("UP_AUTH_PROVIDER_CLIENT_SECRET", ""),
 			ServiceAccountKeyFile: envOr("UP_AUTH_PROVIDER_SERVICE_ACCOUNT_KEY_FILE", ""),
 			Domain:                envOr("UP_AUTH_PROVIDER_DOMAIN", ""),
+		},
+		ClientIP: TrustedClientIPConfig{
+			TrustedProxyCIDRs: csvOr("UP_TRUSTED_PROXY_CIDRS", defaultTrustedProxyCIDRs),
+		},
+
+		Registration: RegistrationConfig{
+			Enabled:           boolOr("UP_PUBLIC_REGISTRATION_ENABLED", false),
+			CreateIPLimit:     intOr("UP_REGISTRATION_CREATE_IP_LIMIT", defaultRegistrationCreateIPLimit),
+			CreateIPWindow:    durationOr("UP_REGISTRATION_CREATE_IP_WINDOW", defaultRegistrationCreateIPWindow),
+			CreateNetLimit:    intOr("UP_REGISTRATION_CREATE_NET_LIMIT", defaultRegistrationCreateNetLimit),
+			CreateNetWindow:   durationOr("UP_REGISTRATION_CREATE_NET_WINDOW", defaultRegistrationCreateNetWindow),
+			CreateEmailLimit:  intOr("UP_REGISTRATION_CREATE_EMAIL_LIMIT", defaultRegistrationCreateEmailLimit),
+			CreateEmailWindow: durationOr("UP_REGISTRATION_CREATE_EMAIL_WINDOW", defaultRegistrationCreateEmailWindow),
+			CreatePairLimit:   intOr("UP_REGISTRATION_CREATE_PAIR_LIMIT", defaultRegistrationCreatePairLimit),
+			CreatePairWindow:  durationOr("UP_REGISTRATION_CREATE_PAIR_WINDOW", defaultRegistrationCreatePairWindow),
+			VerifyLimit:       intOr("UP_REGISTRATION_VERIFY_LIMIT", defaultRegistrationVerifyLimit),
+			VerifyWindow:      durationOr("UP_REGISTRATION_VERIFY_WINDOW", defaultRegistrationVerifyWindow),
+			ResendLimit:       intOr("UP_REGISTRATION_RESEND_LIMIT", defaultRegistrationResendLimit),
+			ResendWindow:      durationOr("UP_REGISTRATION_RESEND_WINDOW", defaultRegistrationResendWindow),
+			IPv4NetBits:       intOr("UP_REGISTRATION_IPV4_NET_BITS", defaultRegistrationIPv4NetBits),
+			IPv6NetBits:       intOr("UP_REGISTRATION_IPV6_NET_BITS", defaultRegistrationIPv6NetBits),
+		},
+		WeChatMiniProgram: WeChatMiniProgramConfig{
+			Enabled:                          boolOr("UP_WECHAT_MINIPROGRAM_ENABLED", false),
+			RegistrationEnabled:              boolOr("UP_WECHAT_MINIPROGRAM_REGISTRATION_ENABLED", false),
+			OnboardingEnabled:                boolOr("UP_WECHAT_MINIPROGRAM_ONBOARDING_ENABLED", false),
+			OnboardingEncryptionKey:          envOr("UP_WECHAT_MINIPROGRAM_ONBOARDING_ENCRYPTION_KEY", ""),
+			OnboardingEncryptionKeyID:        envOr("UP_WECHAT_MINIPROGRAM_ONBOARDING_ENCRYPTION_KEY_ID", ""),
+			OnboardingRetainedDecryptionKeys: envOr("UP_WECHAT_MINIPROGRAM_ONBOARDING_RETAINED_DECRYPTION_KEYS", ""),
+			AppID:                            envOr("UP_WECHAT_MINIPROGRAM_APP_ID", ""),
+			AppSecret:                        envOr("UP_WECHAT_MINIPROGRAM_APP_SECRET", ""),
+			APIBaseURL:                       envOr("UP_WECHAT_MINIPROGRAM_API_BASE_URL", "https://api.weixin.qq.com"),
+			RequestTimeout:                   durationOr("UP_WECHAT_MINIPROGRAM_REQUEST_TIMEOUT", defaultWeChatRequestTimeout),
+		},
+		QRAuth: QRAuthConfig{
+			Enabled:      boolOr("UP_QR_AUTH_ENABLED", false),
+			ChallengeTTL: durationOr("UP_QR_AUTH_CHALLENGE_TTL", defaultQRAuthChallengeTTL),
+			RateLimit:    intOr("UP_QR_AUTH_RATE_LIMIT", defaultQRAuthRateLimit),
+			RateWindow:   durationOr("UP_QR_AUTH_RATE_WINDOW", defaultQRAuthRateWindow),
+		},
+		DreamUPMobile: DreamUPMobileConfig{
+			Enabled:                boolOr("UP_DREAMUP_MOBILE_ENABLED", false),
+			DelegationKeyringPath:  envOr("UP_DREAMUP_MOBILE_DELEGATION_KEYRING_PATH", ""),
+			DelegationCurrentKeyID: envOr("UP_DREAMUP_MOBILE_DELEGATION_CURRENT_KEY_ID", ""),
+			DelegationIssuer:       envOr("UP_DREAMUP_MOBILE_DELEGATION_ISSUER", "https://auth.moonstone.org.cn"),
+			DelegationAudience:     envOr("UP_DREAMUP_MOBILE_DELEGATION_AUDIENCE", "dreamup-mobile-api"),
+			AssertionTTL:           durationOr("UP_DREAMUP_MOBILE_ASSERTION_TTL", 15*time.Second),
+			ScopedRateLimit:        intOr("UP_DREAMUP_MOBILE_SCOPED_RATE_LIMIT", defaultDreamUPMobileScopedRateLimit),
+			GlobalRateLimit:        intOr("UP_DREAMUP_MOBILE_GLOBAL_RATE_LIMIT", defaultDreamUPMobileGlobalRateLimit),
+			RateWindow:             durationOr("UP_DREAMUP_MOBILE_RATE_WINDOW", defaultDreamUPMobileRateWindow),
+		},
+
+		AliyunSMS: AliyunSMSConfig{
+			AccessKeyID:     envOr("UP_ALIYUN_SMS_ACCESS_KEY_ID", ""),
+			AccessKeySecret: envOr("UP_ALIYUN_SMS_ACCESS_KEY_SECRET", ""),
+			SignName:        envOr("UP_ALIYUN_SMS_SIGN_NAME", ""),
+			TemplateCode:    envOr("UP_ALIYUN_SMS_TEMPLATE_CODE", ""),
+			Endpoint:        envOr("UP_ALIYUN_SMS_ENDPOINT", defaultAliyunSMSEndpoint),
+			Enabled:         boolOr("UP_ALIYUN_SMS_ENABLED", false),
+		},
+		PhoneVerify: PhoneVerifyConfig{
+			TTL: durationOr("UP_PHONE_VERIFY_TTL", 5*time.Minute),
 		},
 
 		Permission: PermissionConfig{
@@ -433,6 +881,10 @@ func Load() (Config, error) {
 			PublicOrigin: envOr("UP_OAUTH_PUBLIC_ORIGIN", ""),
 		},
 
+		DreamUPBootstrap: DreamUPBootstrapConfig{
+			OwnerUserID: envOr("UP_DREAMUP_OWNER_USER_ID", ""),
+		},
+
 		Feishu: FeishuConfig{
 			BaseURL:           envOr("UP_FEISHU_BASE_URL", defaultFeishuBaseURL),
 			AuthorizeURL:      envOr("UP_FEISHU_AUTHORIZE_URL", defaultFeishuAuthorizeURL),
@@ -456,6 +908,50 @@ func Load() (Config, error) {
 			ReconcileInterval: durationOr("UP_CERBOS_RECONCILE_INTERVAL", defaultCerbosReconcileInterval),
 		},
 
+		DreamUPAdmin: DreamUPAdminConfig{
+			Enabled:                          boolOr("UP_DREAMUP_ADMIN_ENABLED", false),
+			MiniProgramEnabled:               boolOr("UP_DREAMUP_ADMIN_MINIPROGRAM_ENABLED", false),
+			ChallengeEncryptionKeyringPath:   envOr("UP_ADMIN_CHALLENGE_ENCRYPTION_KEYRING_PATH", ""),
+			ChallengeEncryptionCurrentKeyID:  envOr("UP_ADMIN_CHALLENGE_ENCRYPTION_CURRENT_KEY_ID", ""),
+			ChallengePepperKeyringPath:       envOr("UP_ADMIN_CHALLENGE_PEPPER_KEYRING_PATH", ""),
+			ChallengePepperCurrentKeyID:      envOr("UP_ADMIN_CHALLENGE_PEPPER_CURRENT_KEY_ID", ""),
+			ProtectedReasonKeyringPath:       envOr("UP_PROTECTED_REASON_KEYRING_PATH", ""),
+			ProtectedReasonCurrentKeyID:      envOr("UP_PROTECTED_REASON_CURRENT_KEY_ID", ""),
+			RateLimitKeyringPath:             envOr("UP_ADMIN_CHALLENGE_RATE_LIMIT_KEYRING_PATH", ""),
+			RateLimitCurrentKeyID:            envOr("UP_ADMIN_CHALLENGE_RATE_LIMIT_CURRENT_KEY_ID", ""),
+			OperationFingerprintKeyringPath:  envOr("UP_ADMIN_OPERATION_FINGERPRINT_KEYRING_PATH", ""),
+			OperationFingerprintCurrentKeyID: envOr("UP_ADMIN_OPERATION_FINGERPRINT_CURRENT_KEY_ID", ""),
+			DelegationKeyringPath:            envOr("UP_DREAMUP_DELEGATION_KEYRING_PATH", ""),
+			DelegationCurrentKeyID:           envOr("UP_DREAMUP_DELEGATION_CURRENT_KEY_ID", ""),
+			BaseURL:                          envOr("UP_DREAMUP_ADMIN_BASE_URL", "http://127.0.0.1:18084"),
+			DelegationIssuer:                 envOr("UP_DREAMUP_DELEGATION_ISSUER", "https://auth.moonstone.org.cn"),
+			DelegationAudience:               envOr("UP_DREAMUP_DELEGATION_AUDIENCE", "dreamup-admin-api"),
+			AdminOrigin:                      envOr("UP_DREAMUP_ADMIN_ORIGIN", "https://auth.moonstone.org.cn"),
+			ResponseLimitBytes:               int64Or("UP_DREAMUP_ADMIN_RESPONSE_LIMIT_BYTES", 8<<20),
+			ReconcileInterval:                durationOr("UP_DREAMUP_RECONCILE_INTERVAL", 15*time.Second),
+			ReconcileBatchSize:               intOr("UP_DREAMUP_RECONCILE_BATCH_SIZE", 50),
+			ReconcileLease:                   durationOr("UP_DREAMUP_RECONCILE_LEASE", 30*time.Second),
+			DelegationServiceSubject:         envOr("UP_DREAMUP_DELEGATION_SERVICE_SUBJECT", "united-pass:dreamup-reconciler"),
+			DelegationServiceVersion:         int64Or("UP_DREAMUP_DELEGATION_SERVICE_VERSION", 1),
+			FreshLoginMaxAge:                 durationOr("UP_ADMIN_CHALLENGE_FRESH_LOGIN_MAX_AGE", defaultAdminFreshLoginMaxAge),
+			GeneralFreshness:                 durationOr("UP_ADMIN_CHALLENGE_GENERAL_FRESHNESS", defaultAdminGeneralFreshness),
+			HighRiskFreshness:                durationOr("UP_ADMIN_CHALLENGE_HIGH_RISK_FRESHNESS", defaultAdminHighRiskFreshness),
+			RateLimit:                        intOr("UP_ADMIN_CHALLENGE_RATE_LIMIT", defaultAdminRateLimit),
+			RateWindow:                       durationOr("UP_ADMIN_CHALLENGE_RATE_WINDOW", defaultAdminRateWindow),
+			LockDuration:                     durationOr("UP_ADMIN_CHALLENGE_LOCK_DURATION", defaultAdminLockDuration),
+			Argon2MaxConcurrent:              intOr("UP_ADMIN_CHALLENGE_ARGON2_MAX_CONCURRENT", defaultAdminArgon2Concurrency),
+		},
+
+		Email: EmailConfig{
+			SMTPHost:      envOr("UP_SMTP_HOST", ""),
+			SMTPPort:      intOr("UP_SMTP_PORT", 465),
+			SMTPUser:      envOr("UP_SMTP_USER", ""),
+			SMTPPassword:  envOr("UP_SMTP_PASS", ""),
+			FromAddress:   envOr("UP_SMTP_FROM", ""),
+			FromName:      envOr("UP_SMTP_FROM_NAME", ""),
+			InternalToken: envOr("UP_INTERNAL_EMAIL_TOKEN", ""),
+		},
+
 		Test: TestConfig{
 			DatabaseURL:    envOr("UP_TEST_DATABASE_URL", ""),
 			DatabaseSchema: envOr("UP_TEST_DATABASE_SCHEMA", "united_pass_test"),
@@ -474,6 +970,262 @@ func Load() (Config, error) {
 // rejects any configuration that would weaken security or availability.
 func (c Config) Validate() error {
 	var errs []error
+
+	if c.Registration.Enabled {
+		if c.Database.URL == "" || c.Redis.URL == "" {
+			errs = append(errs, errors.New("public registration requires UP_DATABASE_URL and UP_REDIS_URL"))
+		}
+		if c.Auth.Provider != "zitadel" || c.Auth.BaseURL == "" || c.Auth.ServiceAccountKeyFile == "" {
+			errs = append(errs, errors.New("public registration requires complete ZITADEL provider configuration"))
+		}
+		if c.Auth.ProjectID == "" {
+			errs = append(errs, errors.New("public registration requires UP_AUTH_PROVIDER_PROJECT_ID"))
+		}
+		if c.Auth.OrganizationID == "" {
+			errs = append(errs, errors.New("public registration requires UP_AUTH_PROVIDER_ORGANIZATION_ID"))
+		}
+		if c.OAuth.PublicOrigin == "" {
+			errs = append(errs, errors.New("public registration requires UP_OAUTH_PUBLIC_ORIGIN"))
+		}
+		if len(c.ClientIP.TrustedProxyCIDRs) == 0 {
+			errs = append(errs, errors.New("public registration requires a trusted gateway client-IP boundary"))
+		}
+	}
+	registrationLimits := []struct {
+		limit  int
+		window time.Duration
+		name   string
+	}{
+		{c.Registration.CreateIPLimit, c.Registration.CreateIPWindow, "registration create IP"},
+		{c.Registration.CreateNetLimit, c.Registration.CreateNetWindow, "registration create network"},
+		{c.Registration.CreateEmailLimit, c.Registration.CreateEmailWindow, "registration create email"},
+		{c.Registration.CreatePairLimit, c.Registration.CreatePairWindow, "registration create client/email pair"},
+		{c.Registration.VerifyLimit, c.Registration.VerifyWindow, "registration verification"},
+		{c.Registration.ResendLimit, c.Registration.ResendWindow, "registration resend"},
+	}
+	for _, rate := range registrationLimits {
+		if rate.limit <= 0 || rate.window <= 0 {
+			errs = append(errs, fmt.Errorf("%s rate limit and window must be positive", rate.name))
+		}
+	}
+	if c.Registration.IPv4NetBits < 8 || c.Registration.IPv4NetBits > 32 {
+		errs = append(errs, errors.New("registration IPv4 network prefix must be between 8 and 32 bits"))
+	}
+	if c.Registration.IPv6NetBits < 16 || c.Registration.IPv6NetBits > 128 {
+		errs = append(errs, errors.New("registration IPv6 network prefix must be between 16 and 128 bits"))
+	}
+	for _, raw := range c.ClientIP.TrustedProxyCIDRs {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil || prefix.Bits() == 0 {
+			errs = append(errs, fmt.Errorf("trusted proxy CIDR %q is invalid or over-broad", raw))
+		}
+	}
+	if c.WeChatMiniProgram.RegistrationEnabled {
+		if !c.WeChatMiniProgram.Enabled {
+			errs = append(errs, errors.New("WeChat Mini Program registration requires UP_WECHAT_MINIPROGRAM_ENABLED"))
+		}
+		if c.Database.URL == "" || c.Redis.URL == "" || c.Auth.Provider != "zitadel" || c.Auth.BaseURL == "" || c.Auth.ServiceAccountKeyFile == "" || c.Auth.ProjectID == "" || c.Auth.OrganizationID == "" || c.OAuth.PublicOrigin == "" {
+			errs = append(errs, errors.New("WeChat Mini Program registration requires complete database, Redis, ZITADEL and public-origin configuration"))
+		}
+		if len(c.ClientIP.TrustedProxyCIDRs) == 0 {
+			errs = append(errs, errors.New("WeChat Mini Program registration requires a trusted gateway client-IP boundary"))
+		}
+		if !c.HasIsolatedDatabase() {
+			errs = append(errs, errors.New("WeChat Mini Program registration requires UP_ISOLATED_DATABASE_URL so retry verifiers never alter the authority schema"))
+		}
+	}
+	if c.WeChatMiniProgram.OnboardingEnabled {
+		if !c.WeChatMiniProgram.Enabled || !c.WeChatMiniProgram.RegistrationEnabled {
+			errs = append(errs, errors.New("WeChat Mini Program onboarding requires UP_WECHAT_MINIPROGRAM_ENABLED and UP_WECHAT_MINIPROGRAM_REGISTRATION_ENABLED"))
+		}
+		if c.WeChatMiniProgram.OnboardingEncryptionKey == "" || strings.TrimSpace(c.WeChatMiniProgram.OnboardingEncryptionKeyID) == "" {
+			errs = append(errs, errors.New("WeChat Mini Program onboarding requires UP_WECHAT_MINIPROGRAM_ONBOARDING_ENCRYPTION_KEY and UP_WECHAT_MINIPROGRAM_ONBOARDING_ENCRYPTION_KEY_ID"))
+		} else {
+			onboardingKey, err := base64.StdEncoding.DecodeString(c.WeChatMiniProgram.OnboardingEncryptionKey)
+			if err != nil {
+				errs = append(errs, errors.New("WeChat Mini Program onboarding encryption key must be base64-encoded"))
+			} else if len(onboardingKey) != 32 {
+				errs = append(errs, fmt.Errorf("WeChat Mini Program onboarding encryption key must decode to 32 bytes, got %d", len(onboardingKey)))
+			}
+			if c.WeChatMiniProgram.OnboardingEncryptionKeyID != strings.TrimSpace(c.WeChatMiniProgram.OnboardingEncryptionKeyID) || strings.Contains(c.WeChatMiniProgram.OnboardingEncryptionKeyID, ":") {
+				errs = append(errs, errors.New("WeChat Mini Program onboarding encryption key id must be non-empty, trimmed and must not contain ':'"))
+			}
+			if c.Session.EncryptionKey != "" {
+				sessionKey, sessionErr := base64.StdEncoding.DecodeString(c.Session.EncryptionKey)
+				if err == nil && sessionErr == nil && bytes.Equal(onboardingKey, sessionKey) {
+					errs = append(errs, errors.New("UP_WECHAT_MINIPROGRAM_ONBOARDING_ENCRYPTION_KEY must be distinct from UP_SESSION_ENCRYPTION_KEY"))
+				}
+			}
+			retained, retainedErr := ParseWeChatOnboardingRetainedDecryptionKeys(c.WeChatMiniProgram.OnboardingRetainedDecryptionKeys)
+			if retainedErr != nil {
+				errs = append(errs, fmt.Errorf("UP_WECHAT_MINIPROGRAM_ONBOARDING_RETAINED_DECRYPTION_KEYS is invalid: %w", retainedErr))
+			} else {
+				if _, duplicateID := retained[c.WeChatMiniProgram.OnboardingEncryptionKeyID]; duplicateID {
+					errs = append(errs, errors.New("retained onboarding decryption keys must not repeat the current key ID"))
+				}
+				materials := make([][]byte, 0, len(retained)+1)
+				if err == nil && len(onboardingKey) == 32 {
+					materials = append(materials, onboardingKey)
+				}
+				var sessionKey []byte
+				if c.Session.EncryptionKey != "" {
+					sessionKey, _ = base64.StdEncoding.DecodeString(c.Session.EncryptionKey)
+				}
+				for _, keyB64 := range retained {
+					key, _ := base64.StdEncoding.DecodeString(keyB64)
+					duplicateMaterial := false
+					for _, existing := range materials {
+						if bytes.Equal(existing, key) {
+							duplicateMaterial = true
+							break
+						}
+					}
+					if duplicateMaterial {
+						errs = append(errs, errors.New("retained onboarding decryption key material must be unique"))
+					} else {
+						materials = append(materials, key)
+					}
+					if len(sessionKey) == 32 && bytes.Equal(sessionKey, key) {
+						errs = append(errs, errors.New("retained onboarding decryption keys must be distinct from UP_SESSION_ENCRYPTION_KEY"))
+					}
+				}
+			}
+		}
+		if !c.Email.SecurityNotificationsConfigured() {
+			errs = append(errs, errors.New("WeChat Mini Program onboarding requires UP_SMTP_HOST, a valid UP_SMTP_PORT and UP_SMTP_FROM for security notifications"))
+		}
+	}
+	if c.WeChatMiniProgram.Enabled {
+		if c.Database.URL == "" || c.Redis.URL == "" {
+			errs = append(errs, errors.New("WeChat Mini Program login requires UP_DATABASE_URL and UP_REDIS_URL"))
+		}
+		if strings.TrimSpace(c.WeChatMiniProgram.AppID) == "" || strings.TrimSpace(c.WeChatMiniProgram.AppSecret) == "" {
+			errs = append(errs, errors.New("WeChat Mini Program login requires UP_WECHAT_MINIPROGRAM_APP_ID and UP_WECHAT_MINIPROGRAM_APP_SECRET"))
+		}
+		if c.WeChatMiniProgram.RequestTimeout <= 0 || c.WeChatMiniProgram.RequestTimeout > 30*time.Second {
+			errs = append(errs, errors.New("WeChat Mini Program request timeout must be positive and at most 30 seconds"))
+		}
+	}
+	if c.AliyunSMS.Enabled {
+		required := []struct {
+			name  string
+			value string
+		}{
+			{"UP_ALIYUN_SMS_ACCESS_KEY_ID", c.AliyunSMS.AccessKeyID},
+			{"UP_ALIYUN_SMS_ACCESS_KEY_SECRET", c.AliyunSMS.AccessKeySecret},
+			{"UP_ALIYUN_SMS_SIGN_NAME", c.AliyunSMS.SignName},
+			{"UP_ALIYUN_SMS_TEMPLATE_CODE", c.AliyunSMS.TemplateCode},
+		}
+		for _, field := range required {
+			if field.value == "" || field.value != strings.TrimSpace(field.value) {
+				errs = append(errs, fmt.Errorf("Aliyun SMS requires a non-empty, trimmed %s", field.name))
+			}
+		}
+		if err := validateAliyunSMSEndpoint(c.AliyunSMS.Endpoint); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if c.QRAuth.Enabled {
+		if c.Redis.URL == "" {
+			errs = append(errs, errors.New("QR authentication requires UP_REDIS_URL"))
+		}
+		if c.QRAuth.ChallengeTTL <= 0 || c.QRAuth.ChallengeTTL > 10*time.Minute {
+			errs = append(errs, errors.New("QR authentication challenge TTL must be positive and at most 10 minutes"))
+		}
+		if c.QRAuth.RateLimit < 1 || c.QRAuth.RateLimit > 100 || c.QRAuth.RateWindow <= 0 || c.QRAuth.RateWindow > time.Hour {
+			errs = append(errs, errors.New("QR authentication rate limit must be 1-100 with a positive window no longer than one hour"))
+		}
+	}
+	if c.DreamUPMobile.Enabled {
+		if c.Database.URL == "" || c.Redis.URL == "" || c.Auth.Provider != "zitadel" || c.Auth.ProjectID == "" {
+			errs = append(errs, errors.New("DreamUP Mobile bridge requires PostgreSQL, Redis, ZITADEL provider and project ID"))
+		}
+		if strings.TrimSpace(c.DreamUPMobile.DelegationKeyringPath) == "" || strings.TrimSpace(c.DreamUPMobile.DelegationCurrentKeyID) == "" || !filepath.IsAbs(c.DreamUPMobile.DelegationKeyringPath) {
+			errs = append(errs, errors.New("DreamUP Mobile bridge requires an absolute dedicated delegation keyring path and current key ID"))
+		}
+		if err := validateHTTPSOrigin(c.DreamUPMobile.DelegationIssuer, "DreamUP Mobile bridge issuer"); err != nil {
+			errs = append(errs, err)
+		}
+		if strings.TrimSpace(c.DreamUPMobile.DelegationAudience) == "" || c.DreamUPMobile.AssertionTTL < time.Second || c.DreamUPMobile.AssertionTTL > 20*time.Second {
+			errs = append(errs, errors.New("DreamUP Mobile bridge audience and assertion TTL are invalid"))
+		}
+		if c.DreamUPMobile.ScopedRateLimit < 1 || c.DreamUPMobile.ScopedRateLimit > 1000 || c.DreamUPMobile.GlobalRateLimit < c.DreamUPMobile.ScopedRateLimit || c.DreamUPMobile.GlobalRateLimit > 100000 || c.DreamUPMobile.RateWindow <= 0 || c.DreamUPMobile.RateWindow > time.Hour {
+			errs = append(errs, errors.New("DreamUP Mobile assertion rate limits must have a scoped limit of 1-1000, a global limit from the scoped limit through 100000, and a positive window no longer than one hour"))
+		}
+	}
+	if c.DreamUPMobile.Enabled && c.DreamUPAdmin.Enabled {
+		mobilePath := filepath.Clean(strings.TrimSpace(c.DreamUPMobile.DelegationKeyringPath))
+		administratorPath := filepath.Clean(strings.TrimSpace(c.DreamUPAdmin.DelegationKeyringPath))
+		if mobilePath != "." && administratorPath != "." && strings.EqualFold(mobilePath, administratorPath) {
+			errs = append(errs, errors.New("UP_DREAMUP_MOBILE_DELEGATION_KEYRING_PATH and UP_DREAMUP_DELEGATION_KEYRING_PATH must use distinct keyrings"))
+		}
+		mobileKeyID := strings.TrimSpace(c.DreamUPMobile.DelegationCurrentKeyID)
+		administratorKeyID := strings.TrimSpace(c.DreamUPAdmin.DelegationCurrentKeyID)
+		if mobileKeyID != "" && administratorKeyID != "" && mobileKeyID == administratorKeyID {
+			errs = append(errs, errors.New("UP_DREAMUP_MOBILE_DELEGATION_CURRENT_KEY_ID and UP_DREAMUP_DELEGATION_CURRENT_KEY_ID current key IDs must be distinct"))
+		}
+	}
+
+	if c.DreamUPAdmin.Enabled {
+		if !c.HasIsolatedDatabase() {
+			errs = append(errs, errors.New("DreamUP administration requires UP_ISOLATED_DATABASE_URL for cross-system mutation receipts"))
+		}
+		keyrings := []struct{ path, current, purpose string }{
+			{c.DreamUPAdmin.ChallengeEncryptionKeyringPath, c.DreamUPAdmin.ChallengeEncryptionCurrentKeyID, "challenge encryption"},
+			{c.DreamUPAdmin.ChallengePepperKeyringPath, c.DreamUPAdmin.ChallengePepperCurrentKeyID, "challenge pepper"},
+			{c.DreamUPAdmin.ProtectedReasonKeyringPath, c.DreamUPAdmin.ProtectedReasonCurrentKeyID, "protected reason"},
+			{c.DreamUPAdmin.RateLimitKeyringPath, c.DreamUPAdmin.RateLimitCurrentKeyID, "challenge rate limit"},
+			{c.DreamUPAdmin.OperationFingerprintKeyringPath, c.DreamUPAdmin.OperationFingerprintCurrentKeyID, "operation fingerprint"},
+		}
+		seen := map[string]string{}
+		for _, keyring := range keyrings {
+			if strings.TrimSpace(keyring.path) == "" || strings.TrimSpace(keyring.current) == "" {
+				errs = append(errs, fmt.Errorf("DreamUP admin %s keyring path and current key ID are required", keyring.purpose))
+				continue
+			}
+			identity := keyring.path + "\x00" + keyring.current
+			if prior, ok := seen[identity]; ok {
+				errs = append(errs, fmt.Errorf("DreamUP admin keyring purpose reuse: %s and %s", prior, keyring.purpose))
+			}
+			seen[identity] = keyring.purpose
+		}
+		if c.DreamUPAdmin.FreshLoginMaxAge <= 0 || c.DreamUPAdmin.FreshLoginMaxAge > 15*time.Minute {
+			errs = append(errs, errors.New("DreamUP admin fresh login max age must be positive and at most 15 minutes"))
+		}
+		if c.DreamUPAdmin.GeneralFreshness <= 0 || c.DreamUPAdmin.HighRiskFreshness <= 0 || c.DreamUPAdmin.HighRiskFreshness > c.DreamUPAdmin.GeneralFreshness {
+			errs = append(errs, errors.New("DreamUP admin freshness durations are invalid"))
+		}
+		if c.DreamUPAdmin.RateLimit != 5 || c.DreamUPAdmin.RateWindow != 15*time.Minute || c.DreamUPAdmin.LockDuration != 30*time.Minute {
+			errs = append(errs, errors.New("DreamUP admin challenge policy must be five attempts per 15 minutes with a 30 minute lock"))
+		}
+		if c.DreamUPAdmin.Argon2MaxConcurrent <= 0 || c.DreamUPAdmin.Argon2MaxConcurrent > 64 {
+			errs = append(errs, errors.New("DreamUP admin Argon2 concurrency must be between 1 and 64"))
+		}
+		if strings.TrimSpace(c.DreamUPAdmin.DelegationKeyringPath) == "" || strings.TrimSpace(c.DreamUPAdmin.DelegationCurrentKeyID) == "" || !filepath.IsAbs(c.DreamUPAdmin.DelegationKeyringPath) {
+			errs = append(errs, errors.New("DreamUP admin BFF delegation keyring requires an absolute path and current key ID"))
+		}
+		if err := validateDreamUPInternalBaseURL(c.DreamUPAdmin.BaseURL); err != nil {
+			errs = append(errs, err)
+		}
+		if err := validateHTTPSOrigin(c.DreamUPAdmin.DelegationIssuer, "DreamUP admin BFF issuer"); err != nil {
+			errs = append(errs, err)
+		}
+		if err := validateHTTPSOrigin(c.DreamUPAdmin.AdminOrigin, "DreamUP admin BFF browser origin"); err != nil {
+			errs = append(errs, err)
+		}
+		if strings.TrimSpace(c.DreamUPAdmin.DelegationAudience) == "" {
+			errs = append(errs, errors.New("DreamUP admin BFF delegation audience is required"))
+		}
+		if c.DreamUPAdmin.ResponseLimitBytes < 1<<20 || c.DreamUPAdmin.ResponseLimitBytes > 16<<20 {
+			errs = append(errs, errors.New("DreamUP admin BFF response limit must be between 1 MiB and 16 MiB"))
+		}
+		if c.DreamUPAdmin.ReconcileInterval < time.Second || c.DreamUPAdmin.ReconcileInterval > 5*time.Minute || c.DreamUPAdmin.ReconcileBatchSize < 1 || c.DreamUPAdmin.ReconcileBatchSize > 100 || c.DreamUPAdmin.ReconcileLease < c.DreamUPAdmin.ReconcileInterval || c.DreamUPAdmin.ReconcileLease > 10*time.Minute {
+			errs = append(errs, errors.New("DreamUP admin BFF reconciliation settings are invalid"))
+		}
+		if c.DreamUPAdmin.DelegationServiceSubject != "united-pass:dreamup-reconciler" || c.DreamUPAdmin.DelegationServiceVersion <= 0 {
+			errs = append(errs, errors.New("DreamUP admin BFF service subject and positive version are required"))
+		}
+	}
 
 	switch c.Environment {
 	case EnvironmentDevelopment, EnvironmentProduction:
@@ -613,6 +1365,35 @@ func (c Config) Validate() error {
 	if c.RateLimit.MFAWindow <= 0 {
 		errs = append(errs, errors.New("MFA rate window must be positive"))
 	}
+	if c.RiskDefense.Enabled {
+		risk := c.RiskDefense
+		if risk.ObservationWindow <= 0 || risk.ChallengeTTL <= 0 || risk.DeviceIDTTL <= 0 || risk.TrustTTL <= 0 || risk.CompletionWindow <= 0 || risk.CompletionLimit <= 0 {
+			errs = append(errs, errors.New("risk defense TTLs, windows, and completion limit must be positive"))
+		}
+		if risk.LoginMediumAfter <= 0 || risk.LoginHighAfter <= risk.LoginMediumAfter || risk.RegistrationMediumAfter <= 0 || risk.RegistrationHighAfter <= risk.RegistrationMediumAfter {
+			errs = append(errs, errors.New("risk defense thresholds must be positive and high must exceed medium"))
+		}
+		if risk.AutomationCostDifficulty <= 0 || risk.AutomationCostDifficulty > 30 {
+			errs = append(errs, errors.New("risk automation-cost difficulty must be between 1 and 30 bits"))
+		}
+		for _, digest := range risk.AllowlistedHashes {
+			if !riskAllowlistDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(digest))) {
+				errs = append(errs, errors.New("risk allowlist entries must be SHA-256 hex digests"))
+			}
+		}
+		if risk.Captcha.Region != "mainland_china" && risk.Captcha.Region != "global" {
+			errs = append(errs, errors.New("risk captcha region must be mainland_china or global"))
+		}
+		if err := validateRiskCaptchaProvider("Turnstile", risk.Captcha.Turnstile.SiteKey, risk.Captcha.Turnstile.SecretKey, risk.Captcha.Turnstile.Hostname); err != nil {
+			errs = append(errs, err)
+		}
+		if err := validateRiskCaptchaProvider("reCAPTCHA", risk.Captcha.Recaptcha.SiteKey, risk.Captcha.Recaptcha.SecretKey, risk.Captcha.Recaptcha.Hostname); err != nil {
+			errs = append(errs, err)
+		}
+		if risk.Captcha.Recaptcha.Configured() && (math.IsNaN(risk.Captcha.Recaptcha.MinScore) || math.IsInf(risk.Captcha.Recaptcha.MinScore, 0) || risk.Captcha.Recaptcha.MinScore <= 0 || risk.Captcha.Recaptcha.MinScore > 1) {
+			errs = append(errs, errors.New("risk reCAPTCHA minimum score must be greater than zero and at most one"))
+		}
+	}
 
 	// Database validation (when configured).
 	if c.Database.URL != "" {
@@ -629,6 +1410,25 @@ func (c Config) Validate() error {
 		}
 		if c.Database.ConnectTimeout <= 0 {
 			errs = append(errs, errors.New("database connect timeout must be positive"))
+		}
+	}
+	if c.IsolatedDatabase.URL != "" {
+		if c.IsolatedDatabase.Schema == "" {
+			errs = append(errs, errors.New("isolated database schema must not be empty when UP_ISOLATED_DATABASE_URL is set"))
+		} else if !ValidSchemaIdentifier(c.IsolatedDatabase.Schema) {
+			errs = append(errs, fmt.Errorf("isolated database schema %q is not a valid PostgreSQL identifier", c.IsolatedDatabase.Schema))
+		}
+		if c.IsolatedDatabase.MaxConns <= 0 {
+			errs = append(errs, errors.New("isolated database max connections must be positive"))
+		}
+		if c.IsolatedDatabase.MinConns < 0 {
+			errs = append(errs, errors.New("isolated database min connections must not be negative"))
+		}
+		if c.IsolatedDatabase.ConnectTimeout <= 0 {
+			errs = append(errs, errors.New("isolated database connect timeout must be positive"))
+		}
+		if samePostgresDatabase(c.Database, c.IsolatedDatabase) {
+			errs = append(errs, errors.New("UP_ISOLATED_DATABASE_URL must identify a database distinct from UP_DATABASE_URL"))
 		}
 	}
 
@@ -728,6 +1528,9 @@ func (c Config) Validate() error {
 	}
 
 	if c.IsProduction() {
+		if len(c.ClientIP.TrustedProxyCIDRs) == 0 {
+			errs = append(errs, errors.New("production requires UP_TRUSTED_PROXY_CIDRS"))
+		}
 		if c.ShutdownTimeout > 60*time.Second {
 			errs = append(errs, errors.New("production shutdown timeout must not exceed 60s"))
 		}
@@ -809,6 +1612,13 @@ func (c Config) HasDatabase() bool {
 	return c.Database.URL != ""
 }
 
+// HasIsolatedDatabase reports whether the optional DreamUP/Mini Program
+// operational store has been configured. It never substitutes for the main
+// United Pass authority database.
+func (c Config) HasIsolatedDatabase() bool {
+	return c.IsolatedDatabase.URL != ""
+}
+
 // HasRedis reports whether a Redis URL is configured.
 func (c Config) HasRedis() bool {
 	return c.Redis.URL != ""
@@ -824,6 +1634,7 @@ func (c Config) HasAuthProvider() bool {
 // characters (PostgreSQL's NAMEDATALEN limit). Schema names from environment
 // variables must never be interpolated into SQL without this check.
 var schemaIdentifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+var riskAllowlistDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // ValidSchemaIdentifier reports whether s is a safe PostgreSQL schema
 // identifier. Schema names are interpolated into SQL (CREATE SCHEMA, goose
@@ -831,6 +1642,54 @@ var schemaIdentifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 // use and quoted with pgx.Identifier when concatenated into statements.
 func ValidSchemaIdentifier(s string) bool {
 	return schemaIdentifierPattern.MatchString(s)
+}
+
+func samePostgresDatabase(primary, isolated DatabaseConfig) bool {
+	if primary.URL == "" || isolated.URL == "" {
+		return false
+	}
+	primaryHost, primaryDatabase, primaryOK := normalizedPostgresTarget(primary.URL)
+	isolatedHost, isolatedDatabase, isolatedOK := normalizedPostgresTarget(isolated.URL)
+	if !primaryOK || !isolatedOK {
+		return false
+	}
+	return primaryHost == isolatedHost && primaryDatabase == isolatedDatabase
+}
+
+// normalizedPostgresTarget deliberately ignores credentials, TLS query
+// parameters and the postgres/postgresql spelling difference. Those values
+// can differ while still selecting the same authority database. Treat an
+// omitted TCP port as PostgreSQL's 5432 default so cosmetic URL changes cannot
+// bypass the isolated-store boundary check.
+func normalizedPostgresTarget(raw string) (host, database string, ok bool) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", "", false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "postgres", "postgresql":
+	default:
+		return "", "", false
+	}
+	hostname := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if hostname == "" {
+		return "", "", false
+	}
+	port := parsed.Port()
+	if port == "" {
+		port = "5432"
+	}
+	database = strings.TrimPrefix(parsed.Path, "/")
+	if queryDatabase := parsed.Query().Get("dbname"); queryDatabase != "" {
+		if database != "" && database != queryDatabase {
+			return "", "", false
+		}
+		database = queryDatabase
+	}
+	if database == "" {
+		return "", "", false
+	}
+	return net.JoinHostPort(hostname, port), database, true
 }
 
 // validateOAuthPublicOrigin enforces strict origin syntax: scheme://host[:port]
@@ -864,6 +1723,47 @@ func validateOAuthPublicOrigin(origin string, requireHTTPS bool) error {
 	}
 	if u.Fragment != "" {
 		return errors.New("oauth public origin must not contain a fragment")
+	}
+	return nil
+}
+
+func validateDreamUPInternalBaseURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return errors.New("DreamUP admin BFF base URL must be an origin without credentials, path, query, or fragment")
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	address := net.ParseIP(u.Hostname())
+	if u.Scheme != "http" || address == nil || !address.IsLoopback() {
+		return errors.New("DreamUP admin BFF cleartext base URL is permitted only on loopback")
+	}
+	return nil
+}
+
+// validateAliyunSMSEndpoint pins every runtime SMS request to Aliyun's public
+// SendSms origin. Tests that need a loopback provider use the adapter's
+// injected HTTP-client seam and never pass through deployment configuration.
+func validateAliyunSMSEndpoint(raw string) error {
+	if raw == "" || raw != strings.TrimSpace(raw) {
+		return errors.New("Aliyun SMS endpoint must be non-empty and trimmed")
+	}
+	endpoint, err := url.Parse(raw)
+	if err != nil || strings.Contains(raw, "#") || endpoint.Scheme == "" || endpoint.Host == "" || endpoint.Opaque != "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.ForceQuery || endpoint.Fragment != "" || endpoint.RawPath != "" || (endpoint.Path != "" && endpoint.Path != "/") {
+		return errors.New("Aliyun SMS endpoint must be an origin without userinfo, path, query, or fragment")
+	}
+	officialHost := strings.EqualFold(endpoint.Host, "dysmsapi.aliyuncs.com") || strings.EqualFold(endpoint.Host, "dysmsapi.aliyuncs.com:443")
+	if endpoint.Scheme != "https" || !officialHost {
+		return errors.New("Aliyun SMS endpoint must use the official https://dysmsapi.aliyuncs.com origin on port 443")
+	}
+	return nil
+}
+
+func validateHTTPSOrigin(raw, label string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return fmt.Errorf("%s must be an HTTPS origin", label)
 	}
 	return nil
 }
@@ -905,6 +1805,44 @@ func validateFeishuRedirectURL(raw string, requireHTTPS bool) error {
 	return nil
 }
 
+func validateRiskCaptchaProvider(label, siteKey, secretKey, hostname string) error {
+	values := []string{strings.TrimSpace(siteKey), strings.TrimSpace(secretKey), strings.TrimSpace(hostname)}
+	configured := 0
+	for _, value := range values {
+		if value != "" {
+			configured++
+		}
+	}
+	if configured == 0 {
+		return nil
+	}
+	if configured != len(values) {
+		return fmt.Errorf("risk %s requires site key, secret key, and exact hostname together", label)
+	}
+	if len(values[0]) > 512 || len(values[1]) > 512 || !validRiskCaptchaHostname(values[2]) {
+		return fmt.Errorf("risk %s site key, secret key, or hostname is invalid", label)
+	}
+	return nil
+}
+
+func validRiskCaptchaHostname(value string) bool {
+	value = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
+	if value == "" || len(value) > 253 || strings.ContainsAny(value, "/:@") {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, char := range label {
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func parseLogLevel(raw string) (slog.Level, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "debug":
@@ -925,6 +1863,18 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func csvOr(key, fallback string) []string {
+	raw := envOr(key, fallback)
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if value := strings.TrimSpace(part); value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
 }
 
 func durationOr(key string, fallback time.Duration) time.Duration {
@@ -960,6 +1910,16 @@ func int32Or(key string, fallback int32) int32 {
 func intOr(key string, fallback int) int {
 	if value, ok := os.LookupEnv(key); ok && value != "" {
 		parsed, err := strconv.Atoi(value)
+		if err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func float64Or(key string, fallback float64) float64 {
+	if value, ok := os.LookupEnv(key); ok && value != "" {
+		parsed, err := strconv.ParseFloat(value, 64)
 		if err == nil {
 			return parsed
 		}

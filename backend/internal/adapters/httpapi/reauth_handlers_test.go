@@ -25,6 +25,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
@@ -35,6 +36,7 @@ type fakeReauthAuth struct {
 	verifyErr    error
 	mfaResult    auth.AuthenticationResult
 	mfaErr       error
+	mfaCalls     int
 	verifyCalls  int
 	revokeErr    error
 	revoked      []string
@@ -46,6 +48,7 @@ func (f *fakeReauthAuth) VerifyUserPassword(_ context.Context, _ identity.UserID
 }
 
 func (f *fakeReauthAuth) CompleteMFA(_ context.Context, _ auth.MFAChallengeInput) (auth.AuthenticationResult, error) {
+	f.mfaCalls++
 	return f.mfaResult, f.mfaErr
 }
 
@@ -60,13 +63,14 @@ func (f *fakeReauthAuth) RevokeProviderSession(_ context.Context, sessionReferen
 // memReauthChallenges is an in-memory ReauthChallengeStore mirroring the
 // Redis claim/consume semantics.
 type memReauthChallenges struct {
-	mu        sync.Mutex
-	data      map[string]auth.ReauthChallengeData
-	attempts  map[string]int
-	claimed   map[string]string
-	expires   map[string]time.Time
-	pending   []auth.ExpiredReauthChallenge
-	createErr error
+	mu           sync.Mutex
+	data         map[string]auth.ReauthChallengeData
+	attempts     map[string]int
+	claimed      map[string]string
+	expires      map[string]time.Time
+	pending      []auth.ExpiredReauthChallenge
+	createErr    error
+	incrementErr error
 }
 
 func newMemReauthChallenges() *memReauthChallenges {
@@ -132,11 +136,14 @@ func (m *memReauthChallenges) ConsumeChallenge(_ context.Context, tokenHash, cla
 func (m *memReauthChallenges) IncrementChallengeAttempts(_ context.Context, tokenHash string, maxAttempts int) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.incrementErr != nil {
+		return 0, m.incrementErr
+	}
 	if _, ok := m.data[tokenHash]; !ok {
 		return 0, auth.ErrReauthChallengeNotFound
 	}
 	m.attempts[tokenHash]++
-	if m.attempts[tokenHash] > maxAttempts {
+	if m.attempts[tokenHash] >= maxAttempts {
 		return m.attempts[tokenHash], auth.ErrReauthMaxAttemptsExceeded
 	}
 	return m.attempts[tokenHash], nil
@@ -240,14 +247,23 @@ type capturedReauthEvent struct {
 }
 
 type fakeReauthAuditor struct {
-	mu     sync.Mutex
-	events []capturedReauthEvent
+	mu        sync.Mutex
+	events    []capturedReauthEvent
+	failEvent string
+	err       error
 }
 
-func (f *fakeReauthAuditor) RecordEvent(_ context.Context, eventType string, _ identity.UserID, _ applications.ApplicationID, _ applications.OAuthClientID, _, operation string, result applications.SecurityEventResult, failureClass string) {
+func (f *fakeReauthAuditor) RecordEvent(_ context.Context, eventType string, _ identity.UserID, _ applications.ApplicationID, _ applications.OAuthClientID, _, operation string, result applications.SecurityEventResult, failureClass string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if eventType == f.failEvent {
+		if f.err != nil {
+			return f.err
+		}
+		return errors.New("audit unavailable")
+	}
 	f.events = append(f.events, capturedReauthEvent{eventType: eventType, result: result, failureClass: failureClass, action: operation})
+	return nil
 }
 
 func (f *fakeReauthAuditor) has(eventType string, result applications.SecurityEventResult) bool {
@@ -255,6 +271,17 @@ func (f *fakeReauthAuditor) has(eventType string, result applications.SecurityEv
 	defer f.mu.Unlock()
 	for _, ev := range f.events {
 		if ev.eventType == eventType && ev.result == result {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeReauthAuditor) hasFailureClass(value string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, event := range f.events {
+		if event.failureClass == value {
 			return true
 		}
 	}
@@ -289,6 +316,10 @@ var reauthPrincipal = session.Principal{
 }
 
 func reauthRouter(h *ReauthHandlers, principal session.Principal) http.Handler {
+	return reauthRouterWithEpoch(h, principal, 1)
+}
+
+func reauthRouterWithEpoch(h *ReauthHandlers, principal session.Principal, epoch int64) http.Handler {
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -298,7 +329,7 @@ func reauthRouter(h *ReauthHandlers, principal session.Principal) http.Handler {
 			ctx = WithSessionRecord(ctx, session.SessionRecord{
 				SessionID:     principal.SessionID,
 				UserID:        principal.UserID,
-				SecurityEpoch: 1,
+				SecurityEpoch: securitystate.Epoch(epoch),
 			})
 			next.ServeHTTP(w, req.WithContext(ctx))
 		})
@@ -360,6 +391,32 @@ func TestReauthRequest_GrantedImmediately(t *testing.T) {
 	if !env.auditor.has(applications.EventReauthenticationRequested, applications.SecurityEventSuccess) ||
 		!env.auditor.has(applications.EventReauthenticationSucceeded, applications.SecurityEventSuccess) {
 		t.Error("expected requested + succeeded audit events")
+	}
+}
+
+func TestReauthRequestFailsClosedWhenRequestAuditCannotPersist(t *testing.T) {
+	env := newReauthEnv()
+	env.auditor.failEvent = applications.EventReauthenticationRequested
+	env.authz.verifyResult = auth.AuthenticationResult{Status: auth.StatusAuthenticated}
+	w := doReauthJSON(t, reauthRouter(env.handlers, reauthPrincipal), "/auth/reauthentication", reauthRotateBody)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want 500 body=%s", w.Code, w.Body.String())
+	}
+	if env.authz.verifyCalls != 0 || len(env.grants.data) != 0 {
+		t.Fatalf("unaudited request reached provider/grant: verifyCalls=%d grants=%d", env.authz.verifyCalls, len(env.grants.data))
+	}
+}
+
+func TestReauthRequestDoesNotReturnGrantWhenSuccessAuditFails(t *testing.T) {
+	env := newReauthEnv()
+	env.auditor.failEvent = applications.EventReauthenticationSucceeded
+	env.authz.verifyResult = auth.AuthenticationResult{Status: auth.StatusAuthenticated}
+	w := doReauthJSON(t, reauthRouter(env.handlers, reauthPrincipal), "/auth/reauthentication", reauthRotateBody)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want 500 body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "reauthToken") || len(env.grants.data) != 0 {
+		t.Fatalf("unaudited grant escaped: body=%s grants=%d", w.Body.String(), len(env.grants.data))
 	}
 }
 
@@ -470,13 +527,14 @@ type ctxRecordingAuditor struct {
 	result      applications.SecurityEventResult
 }
 
-func (c *ctxRecordingAuditor) RecordEvent(ctx context.Context, eventType string, _ identity.UserID, _ applications.ApplicationID, _ applications.OAuthClientID, _, _ string, result applications.SecurityEventResult, _ string) {
+func (c *ctxRecordingAuditor) RecordEvent(ctx context.Context, eventType string, _ identity.UserID, _ applications.ApplicationID, _ applications.OAuthClientID, _, _ string, result applications.SecurityEventResult, _ string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.recorded = true
 	c.auditCtxErr = ctx.Err()
 	c.eventType = eventType
 	c.result = result
+	return nil
 }
 
 func TestRevokeProviderSession_AuditSurvivesRevokeTimeout(t *testing.T) {
@@ -757,14 +815,15 @@ func TestReauthCompleteMFA_WrongCodeUsesAttemptBudget(t *testing.T) {
 	env.authz.mfaResult = auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}
 	router := reauthRouter(env.handlers, reauthPrincipal)
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 4; i++ {
 		w := doReauthJSON(t, router, "/auth/reauthentication/mfa",
 			`{"reauthToken":"`+challengeToken+`","method":"totp","code":"000000"}`)
 		if w.Code != http.StatusUnauthorized {
 			t.Fatalf("attempt %d status = %d, want 401; body=%s", i, w.Code, w.Body.String())
 		}
 	}
-	// The sixth attempt exhausts the budget and consumes the challenge.
+	// The configured fifth failed verification exhausts the budget and
+	// consumes the challenge; no hidden sixth attempt is permitted.
 	w := doReauthJSON(t, router, "/auth/reauthentication/mfa",
 		`{"reauthToken":"`+challengeToken+`","method":"totp","code":"000000"}`)
 	if w.Code != http.StatusTooManyRequests {
@@ -780,6 +839,28 @@ func TestReauthCompleteMFA_WrongCodeUsesAttemptBudget(t *testing.T) {
 	// must be revoked.
 	if len(env.authz.revoked) != 1 || env.authz.revoked[0] != "ps-1" {
 		t.Errorf("revoked = %v, want [ps-1]", env.authz.revoked)
+	}
+}
+
+func TestReauthCompleteMFA_AttemptCounterFailureConsumesChallengeAndFailsClosed(t *testing.T) {
+	env := newReauthEnv()
+	challengeToken := startReauthChallenge(t, env)
+	env.authz.mfaResult = auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}
+	env.challenges.incrementErr = errors.New("counter unavailable")
+	router := reauthRouter(env.handlers, reauthPrincipal)
+	w := doReauthJSON(t, router, "/auth/reauthentication/mfa",
+		`{"reauthToken":"`+challengeToken+`","method":"totp","code":"000000"}`)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want 500 body=%s", w.Code, w.Body.String())
+	}
+	if len(env.challenges.data) != 0 || len(env.challenges.claimed) != 0 {
+		t.Fatalf("counter failure left challenge retryable: data=%v claims=%v", env.challenges.data, env.challenges.claimed)
+	}
+	if len(env.authz.revoked) != 1 || env.authz.revoked[0] != "ps-1" {
+		t.Fatalf("provider session not revoked: %v", env.authz.revoked)
+	}
+	if !env.auditor.hasFailureClass("attempt_counter_unavailable") {
+		t.Fatal("counter failure audit missing")
 	}
 }
 
@@ -805,6 +886,33 @@ func TestReauthCompleteMFA_SessionBindingMismatch(t *testing.T) {
 	// be revoked.
 	if len(env.authz.revoked) != 1 || env.authz.revoked[0] != "ps-1" {
 		t.Errorf("revoked = %v, want [ps-1]", env.authz.revoked)
+	}
+}
+
+func TestReauthCompleteMFA_RejectsStaleSessionSecurityEpochBeforeProviderCall(t *testing.T) {
+	env := newReauthEnv()
+	challengeToken := startReauthChallenge(t, env)
+	env.authz.mfaResult = auth.AuthenticationResult{Status: auth.StatusAuthenticated}
+
+	// Simulate a password/factor mutation advancing the live session epoch
+	// after the MFA challenge was issued at epoch 1.
+	router := reauthRouterWithEpoch(env.handlers, reauthPrincipal, 2)
+	w := doReauthJSON(t, router, "/auth/reauthentication/mfa",
+		`{"reauthToken":"`+challengeToken+`","method":"totp","code":"123456"}`)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want 401 body=%s", w.Code, w.Body.String())
+	}
+	if env.authz.mfaCalls != 0 {
+		t.Fatalf("stale challenge reached provider %d times", env.authz.mfaCalls)
+	}
+	if len(env.challenges.data) != 0 || len(env.grants.data) != 0 {
+		t.Fatal("stale epoch challenge was not terminally consumed")
+	}
+	if len(env.authz.revoked) != 1 || env.authz.revoked[0] != "ps-1" {
+		t.Fatalf("revoked=%v want [ps-1]", env.authz.revoked)
+	}
+	if !env.auditor.has(applications.EventReauthenticationFailed, applications.SecurityEventDenied) {
+		t.Fatal("stale epoch rejection was not audited")
 	}
 }
 
@@ -886,6 +994,37 @@ func TestReauthGrants_BindingChecks(t *testing.T) {
 	}
 }
 
+func TestReauthGrants_VerifyAndConsumeDataReturnsStableGrantIdentityOnce(t *testing.T) {
+	grants := newMemReauthGrants()
+	verifier := NewReauthGrants(grants, nil)
+	ctx := context.Background()
+	want := auth.ReauthGrantData{
+		GrantID: "rgr_random-stable", UserID: "user_actor", SessionID: "sess-1",
+		Action: auth.ReauthActionAdminRoleManagement, Target: "evt_a",
+		SecurityEpoch: 3, ChallengeVersion: 7, CreatedAt: time.Now().UTC(),
+	}
+	if err := grants.CreateGrant(ctx, session.HashToken("tok-data"), want, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	got, err := verifier.VerifyAndConsumeData(ctx, "tok-data", want.Action, want.SessionID, want.Target, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GrantID != want.GrantID || got.ChallengeVersion != want.ChallengeVersion || got.SecurityEpoch != want.SecurityEpoch {
+		t.Fatalf("consumed data=%+v want stable identity/version", got)
+	}
+	if _, err := verifier.VerifyAndConsumeData(ctx, "tok-data", want.Action, want.SessionID, want.Target, "", ""); !errors.Is(err, auth.ErrReauthGrantNotFound) {
+		t.Fatalf("second consume error=%v", err)
+	}
+	// The legacy compatibility seam still consumes and discards the data.
+	if err := grants.CreateGrant(ctx, session.HashToken("tok-legacy"), want, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifier.VerifyAndConsume(ctx, "tok-legacy", want.Action, want.SessionID, want.Target, "", ""); err != nil {
+		t.Fatalf("legacy wrapper: %v", err)
+	}
+}
+
 // --- Account action seam (ADR-0006 §4) ---
 
 // TestReauthRequest_AccountActionValidation locks the §4 request validation
@@ -946,6 +1085,22 @@ func TestReauthRequest_AccountActionGrantedWithoutApplication(t *testing.T) {
 	}
 	if err := grants.VerifyAndConsume(context.Background(), "tok-app", "account.totp.enroll", "sess-1", "", "app_fake", ""); err == nil {
 		t.Fatal("account grant must not consume with an application binding")
+	}
+}
+
+func TestReauthRequest_EmailChangeGrantIsSessionAndActionBound(t *testing.T) {
+	env := newReauthEnv()
+	env.authz.verifyResult = auth.AuthenticationResult{Status: auth.StatusAuthenticated}
+	router := reauthRouter(env.handlers, reauthPrincipal)
+
+	w := doReauthJSON(t, router, "/auth/reauthentication", `{"action":"account.email.change","password":"pw"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	token := decodeReauthToken(t, w)
+	grants := NewReauthGrants(env.grants, nil)
+	if err := grants.VerifyAndConsume(context.Background(), token, auth.ReauthActionEmailChange, "sess-1", "", "", ""); err != nil {
+		t.Fatalf("consume email-change grant: %v", err)
 	}
 }
 
@@ -1046,6 +1201,7 @@ func TestReauthRequest_ManagementActionRequiresOnlyExactTargetBinding(t *testing
 		{auth.ReauthActionProviderIdentityLink, "conflict_target", "conflict_other"},
 		{auth.ReauthActionPolicyPublish, "pol_target", "pol_other"},
 		{auth.ReauthActionAuditExport, "audit", "audit_other"},
+		{auth.ReauthActionRegistrationAbuseUnblock, "ip_" + strings.Repeat("a", 64), "device_" + strings.Repeat("a", 64)},
 	} {
 		t.Run(tc.action, func(t *testing.T) {
 			env := newReauthEnv()
@@ -1082,6 +1238,19 @@ func TestReauthRequest_ManagementActionRequiresOnlyExactTargetBinding(t *testing
 				t.Fatalf("forbidden app binding status = %d, want 400", w.Code)
 			}
 		})
+	}
+}
+
+func TestReauthRequest_RegistrationUnblockRejectsNonCanonicalTarget(t *testing.T) {
+	env := newReauthEnv()
+	env.authz.verifyResult = auth.AuthenticationResult{Status: auth.StatusAuthenticated}
+	router := reauthRouter(env.handlers, reauthPrincipal)
+	for _, target := range []string{"ip_short", "ip_" + strings.Repeat("A", 64), "redis_" + strings.Repeat("a", 64)} {
+		w := doReauthJSON(t, router, "/auth/reauthentication",
+			`{"action":"registration.abuse.unblock","target":"`+target+`","password":"pw"}`)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("target=%q status=%d body=%s", target, w.Code, w.Body.String())
+		}
 	}
 }
 

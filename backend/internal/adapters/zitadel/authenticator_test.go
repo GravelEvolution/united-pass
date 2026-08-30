@@ -51,6 +51,7 @@ func (f *fakeSessionService) DeleteSession(_ context.Context, in *sessionv2.Dele
 
 type fakeUserService struct {
 	getFn             func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error)
+	listUsersFn       func(*userv2.ListUsersRequest) (*userv2.ListUsersResponse, error)
 	methodsFn         func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error)
 	registerTOTPFn    func(*userv2.RegisterTOTPRequest) (*userv2.RegisterTOTPResponse, error)
 	verifyTOTPFn      func(*userv2.VerifyTOTPRegistrationRequest) (*userv2.VerifyTOTPRegistrationResponse, error)
@@ -60,6 +61,7 @@ type fakeUserService struct {
 	listPasskeysFn    func(*userv2.ListPasskeysRequest) (*userv2.ListPasskeysResponse, error)
 	removePasskeyFn   func(*userv2.RemovePasskeyRequest) (*userv2.RemovePasskeyResponse, error)
 	setPasswordFn     func(*userv2.SetPasswordRequest) (*userv2.SetPasswordResponse, error)
+	passwordResetFn   func(*userv2.PasswordResetRequest) (*userv2.PasswordResetResponse, error)
 	setEmailFn        func(*userv2.SetEmailRequest) (*userv2.SetEmailResponse, error)
 	verifyEmailFn     func(*userv2.VerifyEmailRequest) (*userv2.VerifyEmailResponse, error)
 	setPhoneFn        func(*userv2.SetPhoneRequest) (*userv2.SetPhoneResponse, error)
@@ -68,6 +70,12 @@ type fakeUserService struct {
 
 func (f *fakeUserService) GetUserByID(_ context.Context, in *userv2.GetUserByIDRequest, _ ...grpc.CallOption) (*userv2.GetUserByIDResponse, error) {
 	return f.getFn(in)
+}
+func (f *fakeUserService) ListUsers(_ context.Context, in *userv2.ListUsersRequest, _ ...grpc.CallOption) (*userv2.ListUsersResponse, error) {
+	if f.listUsersFn == nil {
+		return &userv2.ListUsersResponse{}, nil
+	}
+	return f.listUsersFn(in)
 }
 func (f *fakeUserService) ListAuthenticationMethodTypes(_ context.Context, in *userv2.ListAuthenticationMethodTypesRequest, _ ...grpc.CallOption) (*userv2.ListAuthenticationMethodTypesResponse, error) {
 	return f.methodsFn(in)
@@ -98,6 +106,12 @@ func (f *fakeUserService) SetPassword(_ context.Context, in *userv2.SetPasswordR
 		return &userv2.SetPasswordResponse{}, nil
 	}
 	return f.setPasswordFn(in)
+}
+func (f *fakeUserService) PasswordReset(_ context.Context, in *userv2.PasswordResetRequest, _ ...grpc.CallOption) (*userv2.PasswordResetResponse, error) {
+	if f.passwordResetFn == nil {
+		return &userv2.PasswordResetResponse{}, nil
+	}
+	return f.passwordResetFn(in)
 }
 func (f *fakeUserService) SetEmail(_ context.Context, in *userv2.SetEmailRequest, _ ...grpc.CallOption) (*userv2.SetEmailResponse, error) {
 	if f.setEmailFn == nil {
@@ -863,6 +877,33 @@ func TestRevokeProviderSession(t *testing.T) {
 	}
 }
 
+func TestRevokeProviderSessionNotFoundIsIdempotentButFailuresRemainVisible(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		wantErr bool
+	}{
+		{name: "ordinary not found", err: status.Error(codes.NotFound, "session gone")},
+		{name: "authz disguised as not found", err: status.Error(codes.NotFound, "membership not found (AUTHZ-cdgFk)"), wantErr: true},
+		{name: "permission denied", err: status.Error(codes.PermissionDenied, "forbidden"), wantErr: true},
+		{name: "transport unavailable", err: status.Error(codes.Unavailable, "connection refused"), wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := &fakeSessionService{
+				delFn: func(*sessionv2.DeleteSessionRequest) (*sessionv2.DeleteSessionResponse, error) {
+					return nil, test.err
+				},
+			}
+			a := newTestAuth(t, s, &fakeUserService{}, &fakeLinker{})
+			err := a.RevokeProviderSession(context.Background(), "s1")
+			if (err != nil) != test.wantErr {
+				t.Fatalf("RevokeProviderSession error = %v, wantErr=%v", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestAuthenticatorCheck(t *testing.T) {
 	s := &fakeSessionService{
 		listFn: func(*sessionv2.ListSessionsRequest) (*sessionv2.ListSessionsResponse, error) {
@@ -890,6 +931,7 @@ func TestMapAuthError(t *testing.T) {
 		{"deadline", status.Error(codes.DeadlineExceeded, "slow"), auth.StatusProviderUnavailable},
 		{"unauthenticated", status.Error(codes.Unauthenticated, "bad token"), auth.StatusProviderUnavailable},
 		{"permission denied", status.Error(codes.PermissionDenied, "forbidden"), auth.StatusProviderUnavailable},
+		{"authz disguised as not found", status.Error(codes.NotFound, "membership not found (AUTHZ-cdgFk)"), auth.StatusProviderUnavailable},
 		{"invalid argument", status.Error(codes.InvalidArgument, "bad password"), auth.StatusInvalidCredentials},
 		{"not found", status.Error(codes.NotFound, "session gone"), auth.StatusInvalidCredentials},
 		{"failed precondition", status.Error(codes.FailedPrecondition, "user locked"), auth.StatusInvalidCredentials},

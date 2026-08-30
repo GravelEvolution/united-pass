@@ -7,6 +7,7 @@
  */
 
 :root {
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --up-brand: #2457d6;
   --up-brand-strong: #173ea5;
   --up-brand-soft: #edf3ff;

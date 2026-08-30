@@ -38,18 +38,18 @@ import (
 )
 
 const (
-	maxAvatarInputBytes   = int64(2 * 1024 * 1024)
-	maxAvatarRequestBytes = maxAvatarInputBytes + 128*1024
-	maxAvatarEdge         = 4096
-	minAvatarEdge         = 64
-	maxAvatarPixels       = 8_388_608
-	maxAvatarOutputEdge   = 1024
-	maxAvatarOutputBytes  = 5 * 1024 * 1024
-	contactRequestTTL     = 10 * time.Minute
-	contactClaimTTL       = 60 * time.Second
-	contactProviderTTL    = 10 * time.Second
-	contactRateLimit      = 5
-	contactRateWindow     = 15 * time.Minute
+	maxAvatarInputBytes      = int64(2 * 1024 * 1024)
+	maxAvatarRequestBytes    = maxAvatarInputBytes + 128*1024
+	maxImmutableAvatarEdge   = 4096
+	minImmutableAvatarEdge   = 64
+	maxImmutableAvatarPixels = 8_388_608
+	maxAvatarOutputEdge      = 1024
+	maxAvatarOutputBytes     = 5 * 1024 * 1024
+	contactRequestTTL        = 10 * time.Minute
+	contactClaimTTL          = 60 * time.Second
+	contactProviderTTL       = 10 * time.Second
+	contactRateLimit         = 5
+	contactRateWindow        = 15 * time.Minute
 )
 
 // AvatarRequestBodyLimit is the multipart-aware route override used by the
@@ -521,11 +521,11 @@ func sanitizeAvatar(input []byte, declaredType string) ([]byte, error) {
 	if format == "png" && bytes.Contains(input, []byte("acTL")) {
 		return nil, errors.New("不支持动画 PNG 头像。")
 	}
-	if config.Width < minAvatarEdge || config.Height < minAvatarEdge {
+	if config.Width < minImmutableAvatarEdge || config.Height < minImmutableAvatarEdge {
 		return nil, errors.New("头像宽高均不能小于 64 像素。")
 	}
-	if config.Width > maxAvatarEdge || config.Height > maxAvatarEdge ||
-		int64(config.Width)*int64(config.Height) > maxAvatarPixels {
+	if config.Width > maxImmutableAvatarEdge || config.Height > maxImmutableAvatarEdge ||
+		int64(config.Width)*int64(config.Height) > maxImmutableAvatarPixels {
 		return nil, errors.New("头像尺寸过大，宽高不得超过 4096 像素且总像素不得超过 838 万。")
 	}
 	decoded, decodedFormat, err := image.Decode(bytes.NewReader(input))

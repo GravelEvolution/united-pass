@@ -9,10 +9,11 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button, Input, Modal, Toast } from "@douyinfe/semi-ui";
 import { validateContactValue, type ContactKind } from "../utils/contact-validation";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
+import { preloadAliyunCaptcha, verifyAliyunCaptcha } from "@/lib/security/aliyun-captcha";
 import styles from "./account-panels.module.css";
 
 type ContactVerificationModalProps = {
@@ -28,6 +29,10 @@ export function ContactVerificationModal({
   onCancel,
   onVerified,
 }: ContactVerificationModalProps) {
+  useEffect(() => {
+    void preloadAliyunCaptcha();
+  }, []);
+
   const [step, setStep] = useState<"request" | "verify">("request");
   const [contactValue, setContactValue] = useState("");
   const [verificationCode, setVerificationCode] = useState("");
@@ -54,10 +59,20 @@ export function ContactVerificationModal({
 
     setFieldError(undefined);
     setIsSubmitting(true);
+
+    let captchaVerifyParam: string;
+    try {
+      captchaVerifyParam = await verifyAliyunCaptcha();
+    } catch {
+      setIsSubmitting(false);
+      Toast.error({ content: "人机验证未通过，请重试。" });
+      return;
+    }
+
     try {
       const result = isEmail
-        ? await browserCommands.requestEmailChange(normalizedContactValue)
-        : await browserCommands.requestPhoneChange(normalizedContactValue);
+        ? await browserCommands.requestEmailChange(normalizedContactValue, captchaVerifyParam)
+        : await browserCommands.requestPhoneChange(normalizedContactValue, captchaVerifyParam);
       setRequestId(result.requestId);
       setStep("verify");
     } catch {
@@ -69,11 +84,6 @@ export function ContactVerificationModal({
 
   async function handleVerifyCode(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-
-    if (verificationCode.trim().length < 4) {
-      setFieldError("请输入收到的验证码。");
-      return;
-    }
 
     if (!requestId) {
       setFieldError("验证请求已失效，请重新发起。");
@@ -118,7 +128,7 @@ export function ContactVerificationModal({
                 setContactValue(nextValue);
                 setFieldError(undefined);
               }}
-              placeholder={isEmail ? "new-address@example.com" : "+8613800138000"}
+              placeholder={isEmail ? "new-address@example.com" : "13800138000"}
               autoComplete={isEmail ? "email" : "tel"}
               validateStatus={fieldError ? "error" : "default"}
               aria-invalid={Boolean(fieldError)}
@@ -133,7 +143,7 @@ export function ContactVerificationModal({
             )}
           </label>
           <p className={styles.profileNotice}>
-            验证码将由身份服务发送到新的{contactLabel}，请求在短时间后失效。
+            验证码将通过安全渠道发送到新的{contactLabel}。
           </p>
           <div className={styles.profileActions}>
             <Button theme="outline" onClick={onCancel} disabled={isSubmitting}>取消</Button>
@@ -151,13 +161,13 @@ export function ContactVerificationModal({
               id={`${kind}-verification-code`}
               value={verificationCode}
               onChange={(nextCode) => {
-                setVerificationCode(nextCode.replace(/[^a-zA-Z0-9]/g, "").slice(0, 20));
+                setVerificationCode(nextCode.replace(/\D/g, "").slice(0, 6));
                 setFieldError(undefined);
               }}
-              placeholder="验证码"
+              placeholder="6 位验证码"
               inputMode="numeric"
               autoComplete="one-time-code"
-              maxLength={20}
+              maxLength={6}
               validateStatus={fieldError ? "error" : "default"}
               aria-invalid={Boolean(fieldError)}
               aria-errormessage={fieldError ? `${kind}-verification-code-error` : undefined}

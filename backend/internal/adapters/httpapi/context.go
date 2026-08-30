@@ -19,6 +19,8 @@ type contextKey int
 const (
 	principalKey contextKey = iota
 	sessionRecordKey
+	sessionTokenKey
+	nativeBearerSessionKey
 )
 
 // WithPrincipal stores the authenticated principal in the request context.
@@ -45,4 +47,31 @@ func WithSessionRecord(ctx context.Context, r session.SessionRecord) context.Con
 func SessionRecordFromContext(ctx context.Context) (session.SessionRecord, bool) {
 	r, ok := ctx.Value(sessionRecordKey).(session.SessionRecord)
 	return r, ok
+}
+
+// WithSessionToken stores the raw request credential only for the lifetime of
+// this request. It is needed by logout and password-rotation handlers; it must
+// never be logged, serialized or persisted outside the session store's hash.
+func WithSessionToken(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, sessionTokenKey, token)
+}
+
+// SessionTokenFromContext returns the credential validated by RequireSession.
+func SessionTokenFromContext(ctx context.Context) (string, bool) {
+	token, ok := ctx.Value(sessionTokenKey).(string)
+	return token, ok && token != ""
+}
+
+// WithNativeBearerSession marks a request authenticated by the explicit
+// native Mini Program bearer transport. Only RequireSession may set it after
+// both request-shape and stored ClientKind validation have succeeded.
+func WithNativeBearerSession(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nativeBearerSessionKey, true)
+}
+
+// IsNativeBearerSession reports whether RequireSession authenticated the
+// request through the native bearer contract.
+func IsNativeBearerSession(ctx context.Context) bool {
+	native, _ := ctx.Value(nativeBearerSessionKey).(bool)
+	return native
 }

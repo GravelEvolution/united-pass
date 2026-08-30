@@ -139,6 +139,101 @@ func (p *Provisioner) ProvisionClient(ctx context.Context, idempotencyKey string
 	}, nil
 }
 
+// ReadClient returns the provider-authoritative, non-secret configuration of
+// one OIDC application. It is intentionally read-only: verification jobs use
+// this method to detect drift and must never repair provider state implicitly.
+func (p *Provisioner) ReadClient(ctx context.Context, providerApplicationID string) (applications.ProviderClientSnapshot, error) {
+	resp, err := p.mgmt.GetAppByID(ctx, &management.GetAppByIDRequest{
+		ProjectId: p.projectID,
+		AppId:     providerApplicationID,
+	})
+	if err != nil {
+		return applications.ProviderClientSnapshot{}, p.mapError("read_client", err)
+	}
+	app := resp.GetApp()
+	if app == nil || app.GetOidcConfig() == nil {
+		p.logFailure("read_client", "unexpected_app_type")
+		return applications.ProviderClientSnapshot{}, fmt.Errorf("%w: read_client", applications.ErrProviderConflict)
+	}
+	cfg := app.GetOidcConfig()
+
+	responseTypes := make([]applications.OAuthResponseType, 0, len(cfg.GetResponseTypes()))
+	for _, responseType := range cfg.GetResponseTypes() {
+		switch responseType {
+		case appv1.OIDCResponseType_OIDC_RESPONSE_TYPE_CODE:
+			responseTypes = append(responseTypes, applications.ResponseTypeCode)
+		default:
+			responseTypes = append(responseTypes, applications.OAuthResponseType("provider_unknown"))
+		}
+	}
+	grantTypes := make([]applications.OAuthGrantType, 0, len(cfg.GetGrantTypes()))
+	for _, grantType := range cfg.GetGrantTypes() {
+		switch grantType {
+		case appv1.OIDCGrantType_OIDC_GRANT_TYPE_AUTHORIZATION_CODE:
+			grantTypes = append(grantTypes, applications.GrantTypeAuthorizationCode)
+		case appv1.OIDCGrantType_OIDC_GRANT_TYPE_REFRESH_TOKEN:
+			grantTypes = append(grantTypes, applications.GrantTypeRefreshToken)
+		default:
+			grantTypes = append(grantTypes, applications.OAuthGrantType("provider_unknown"))
+		}
+	}
+
+	profile := applications.ClientProfile("provider_unknown")
+	switch cfg.GetAppType() {
+	case appv1.OIDCAppType_OIDC_APP_TYPE_WEB:
+		profile = applications.ClientProfileWebServer
+	case appv1.OIDCAppType_OIDC_APP_TYPE_USER_AGENT:
+		profile = applications.ClientProfileSPAMobile
+	}
+	tokenAuth := applications.TokenEndpointAuthMethod("provider_unknown")
+	switch cfg.GetAuthMethodType() {
+	case appv1.OIDCAuthMethodType_OIDC_AUTH_METHOD_TYPE_BASIC:
+		tokenAuth = applications.TokenAuthClientSecretBasic
+	case appv1.OIDCAuthMethodType_OIDC_AUTH_METHOD_TYPE_NONE:
+		tokenAuth = applications.TokenAuthNone
+	}
+	oidcVersion := applications.OAuthOIDCVersion("provider_unknown")
+	if cfg.GetVersion() == appv1.OIDCVersion_OIDC_VERSION_1_0 {
+		oidcVersion = applications.OIDCVersion10
+	}
+	accessTokenType := applications.OAuthAccessTokenType("provider_unknown")
+	switch cfg.GetAccessTokenType() {
+	case appv1.OIDCTokenType_OIDC_TOKEN_TYPE_BEARER:
+		accessTokenType = applications.AccessTokenTypeBearer
+	case appv1.OIDCTokenType_OIDC_TOKEN_TYPE_JWT:
+		accessTokenType = applications.AccessTokenTypeJWT
+	}
+	clockSkew := cfg.GetClockSkew()
+	clockSkewNanoseconds := clockSkew.GetSeconds()*1_000_000_000 + int64(clockSkew.GetNanos())
+
+	return applications.ProviderClientSnapshot{
+		ProviderProjectID:        p.projectID,
+		ProviderApplicationID:    app.GetId(),
+		ProviderClientID:         cfg.GetClientId(),
+		DisplayName:              app.GetName(),
+		Profile:                  profile,
+		TokenEndpointAuth:        tokenAuth,
+		Active:                   app.GetState() == appv1.AppState_APP_STATE_ACTIVE,
+		RedirectURIs:             append([]string(nil), cfg.GetRedirectUris()...),
+		LogoutURIs:               append([]string(nil), cfg.GetPostLogoutRedirectUris()...),
+		ResponseTypes:            responseTypes,
+		GrantTypes:               grantTypes,
+		LoginVersionBaseURI:      cfg.GetLoginVersion().GetLoginV2().GetBaseUri(),
+		DevMode:                  cfg.GetDevMode(),
+		OIDCVersion:              oidcVersion,
+		AccessTokenType:          accessTokenType,
+		NonCompliant:             cfg.GetNoneCompliant(),
+		AccessTokenRoleAssertion: cfg.GetAccessTokenRoleAssertion(),
+		IDTokenRoleAssertion:     cfg.GetIdTokenRoleAssertion(),
+		IDTokenUserinfoAssertion: cfg.GetIdTokenUserinfoAssertion(),
+		ClockSkewNanoseconds:     clockSkewNanoseconds,
+		AdditionalOrigins:        append([]string(nil), cfg.GetAdditionalOrigins()...),
+		SkipNativeAppSuccessPage: cfg.GetSkipNativeAppSuccessPage(),
+		BackChannelLogoutURI:     cfg.GetBackChannelLogoutUri(),
+		AllowedOrigins:           append([]string(nil), cfg.GetAllowedOrigins()...),
+	}, nil
+}
+
 // recoverExistingApp returns the provider identifiers of an app created by
 // an ambiguously succeeded earlier attempt. The original secret is
 // unreachable at this point, so confidential clients get a fresh rotation

@@ -123,8 +123,10 @@ func mapFactorError(err error, confirm bool) error {
 // reveals whether an account exists or is locked.
 //
 // Any transport, authentication or quota failure is a server-side problem and
-// maps to provider_unavailable (HTTP 500 by the handler), never to a user
-// error.
+// maps internally to provider_unavailable, never to a user credential status.
+// The public password-login handler deliberately normalizes that status to the
+// same generic 401 body as invalid_credentials because ZITADEL's AUTHZ-*
+// NotFound response can otherwise disclose whether an identifier exists.
 //
 // CALIBRATION (Phase 1.2 sign-off, ZITADEL v2.71.0, 2026-08-06): real gRPC
 // codes observed against the local instance:
@@ -140,16 +142,20 @@ func mapFactorError(err error, confirm bool) error {
 //	provider unreachable           -> non-gRPC      (OIDC discovery)
 //
 // Both credential failures (unknown user, wrong password, wrong TOTP) and
-// session-state failures map to the generic invalid_credentials status, which
-// never reveals whether an account exists or is locked. ZITADEL surfaces
-// insufficient service-account permission as NotFound (AUTHZ-*), not
-// PermissionDenied, so it lands in InvalidCredentials rather than
-// ProviderUnavailable; both are opaque to the client and safe.
+// ordinary session-state failures map to the generic invalid_credentials
+// status, which never reveals whether an account exists or is locked.
+// ZITADEL surfaces insufficient service-account permission as NotFound
+// (AUTHZ-*), not PermissionDenied. That server-side configuration fault must
+// fail closed as provider_unavailable instead of consuming user credential
+// attempts or masquerading as a bad password.
 func mapAuthError(err error) auth.AuthenticationStatus {
 	if err == nil {
 		return auth.StatusAuthenticated
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return auth.StatusProviderUnavailable
+	}
+	if isAuthZFailure(err) {
 		return auth.StatusProviderUnavailable
 	}
 

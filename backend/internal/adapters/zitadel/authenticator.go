@@ -35,13 +35,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 
+	objectv2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/object/v2"
 	sessionv2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/session/v2"
 	userv2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/user/v2"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -64,6 +68,7 @@ type sessionService interface {
 // backend service account, never under a user token.
 type userService interface {
 	GetUserByID(ctx context.Context, in *userv2.GetUserByIDRequest, opts ...grpc.CallOption) (*userv2.GetUserByIDResponse, error)
+	ListUsers(ctx context.Context, in *userv2.ListUsersRequest, opts ...grpc.CallOption) (*userv2.ListUsersResponse, error)
 	ListAuthenticationMethodTypes(ctx context.Context, in *userv2.ListAuthenticationMethodTypesRequest, opts ...grpc.CallOption) (*userv2.ListAuthenticationMethodTypesResponse, error)
 	RegisterTOTP(ctx context.Context, in *userv2.RegisterTOTPRequest, opts ...grpc.CallOption) (*userv2.RegisterTOTPResponse, error)
 	VerifyTOTPRegistration(ctx context.Context, in *userv2.VerifyTOTPRegistrationRequest, opts ...grpc.CallOption) (*userv2.VerifyTOTPRegistrationResponse, error)
@@ -142,9 +147,76 @@ func (a *Authenticator) BeginPasswordAuthentication(
 	ctx context.Context,
 	input auth.PasswordAuthenticationInput,
 ) (auth.AuthenticationResult, error) {
-	return a.beginSession(ctx, &sessionv2.CheckUser{
-		Search: &sessionv2.CheckUser_LoginName{LoginName: input.Identifier},
-	}, input.Password)
+	return a.beginSession(ctx, a.resolveCheckUser(ctx, input.Identifier), input.Password)
+}
+
+// BeginPasskeyAuthentication starts a passwordless passkey login: it creates
+// a ZITADEL session carrying only a WebAuthn challenge, so the browser can run
+// navigator.credentials.get against the caller's discoverable credentials and
+// finish through CompleteMFA (SetSession with the assertion). The challenge is
+// only issued when the relying-party domain is configured.
+func (a *Authenticator) BeginPasskeyAuthentication(ctx context.Context) (auth.AuthenticationResult, error) {
+	if a.domain == "" {
+		return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
+	}
+	create, err := a.sessions.CreateSession(ctx, &sessionv2.CreateSessionRequest{
+		Challenges: a.requestChallenges(),
+	})
+	if err != nil {
+		if status := mapAuthError(err); status != auth.StatusInvalidCredentials {
+			return auth.AuthenticationResult{Status: status}, nil
+		}
+		return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
+	}
+	if create.Challenges == nil || create.Challenges.WebAuthN == nil {
+		return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
+	}
+	options, err := create.Challenges.WebAuthN.PublicKeyCredentialRequestOptions.MarshalJSON()
+	if err != nil {
+		return auth.AuthenticationResult{}, fmt.Errorf("zitadel: encode passkey request options: %w", err)
+	}
+	return auth.AuthenticationResult{
+		Status:                auth.StatusMFARequired,
+		ProviderSessionID:     create.SessionId,
+		AvailableMethods:      []auth.MFAMethod{auth.MFAMethodPasskey},
+		PasskeyRequestOptions: options,
+	}, nil
+}
+
+// resolveCheckUser maps a free-form login identifier to a ZITADEL CheckUser
+// search. The session API only accepts a login name or a user ID, so an
+// email address is resolved to its owning user first; anything else (a bare
+// username or a full login name) is matched by login name, preserving the
+// previous behaviour.
+func (a *Authenticator) resolveCheckUser(ctx context.Context, identifier string) *sessionv2.CheckUser {
+	if user := a.findUserByEmail(ctx, identifier); user != nil {
+		return &sessionv2.CheckUser{Search: &sessionv2.CheckUser_UserId{UserId: user.GetUserId()}}
+	}
+	return &sessionv2.CheckUser{Search: &sessionv2.CheckUser_LoginName{LoginName: identifier}}
+}
+
+// findUserByEmail resolves an identifier that looks like an email address to
+// a unique ZITADEL user, or returns nil when the identifier is not an email,
+// no unique user matches, or the lookup fails. Returning nil lets the caller
+// fall back to login-name matching without revealing account existence.
+func (a *Authenticator) findUserByEmail(ctx context.Context, identifier string) *userv2.User {
+	if !strings.Contains(identifier, "@") {
+		return nil
+	}
+	resp, err := a.users.ListUsers(ctx, &userv2.ListUsersRequest{
+		Queries: []*userv2.SearchQuery{{
+			Query: &userv2.SearchQuery_EmailQuery{
+				EmailQuery: &userv2.EmailQuery{
+					EmailAddress: identifier,
+					Method:       objectv2.TextQueryMethod_TEXT_QUERY_METHOD_EQUALS_IGNORE_CASE,
+				},
+			},
+		}},
+	})
+	if err != nil || len(resp.GetResult()) != 1 {
+		return nil
+	}
+	return resp.GetResult()[0]
 }
 
 // VerifyUserPassword verifies the password of an already-authenticated United
@@ -331,6 +403,13 @@ func (a *Authenticator) RevokeProviderSession(
 		SessionId: sessionReference,
 	})
 	if err != nil {
+		// Delete is idempotent for a genuinely absent/expired session. ZITADEL
+		// also disguises service-account authorization failures as NotFound with
+		// an AUTHZ-* error id; those must remain failures, as must every transport
+		// and permission error.
+		if status.Code(err) == codes.NotFound && !isAuthZFailure(err) {
+			return nil
+		}
 		return fmt.Errorf("zitadel: revoke session: %w", err)
 	}
 	return nil
@@ -443,7 +522,6 @@ func (a *Authenticator) providerProfile(ctx context.Context, userID string) (ide
 	}
 	if ph := human.Phone; ph != nil {
 		info.Phone = ph.Phone
-		info.PhoneVerified = ph.IsVerified
 	}
 	return info, nil
 }

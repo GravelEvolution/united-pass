@@ -27,10 +27,11 @@ type FieldError struct {
 // machine-readable; message is safe for user display; requestId supports
 // troubleshooting correlation.
 type ErrorBody struct {
-	Code        string       `json:"code"`
-	Message     string       `json:"message"`
-	RequestID   string       `json:"requestId,omitempty"`
-	FieldErrors []FieldError `json:"fieldErrors,omitempty"`
+	Code        string         `json:"code"`
+	Message     string         `json:"message"`
+	RequestID   string         `json:"requestId,omitempty"`
+	FieldErrors []FieldError   `json:"fieldErrors,omitempty"`
+	StepUp      *StepUpDetails `json:"stepUp,omitempty"`
 }
 
 // ErrorResponse is the standard API error envelope shared by every failing
@@ -53,6 +54,8 @@ const (
 	CodeRequestBodyTooLarge = "request.body_too_large"
 	CodeProviderUnavailable = "provider.unavailable"
 	CodeProviderForbidden   = "provider.forbidden"
+	CodeStepUpRequired      = "step_up_required"
+	CodeStepUpUnavailable   = "step_up_unavailable"
 )
 
 // writeError writes a standard error envelope with the given status and code.

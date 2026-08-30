@@ -118,7 +118,7 @@ func TestListAuthorizedApplicationsHappyPath(t *testing.T) {
 	// Frozen contract shape: exactly these fields, nothing else.
 	wantKeys := map[string]bool{
 		"grantId": true, "applicationId": true, "applicationName": true,
-		"applicationOwner": true, "clientType": true, "grantedAt": true,
+		"applicationOwner": true, "logoUrl": true, "clientType": true, "grantedAt": true,
 		"lastUsedAt": true, "scopes": true, "hasOfflineAccess": true, "status": true,
 	}
 	if len(row) != len(wantKeys) {

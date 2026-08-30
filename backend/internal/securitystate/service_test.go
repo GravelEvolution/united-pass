@@ -329,6 +329,12 @@ func TestAllowSensitiveConsumption(t *testing.T) {
 			t.Fatalf("err = %v, want ErrEpochStale", err)
 		}
 	})
+	t.Run("future stamp also dies permanently", func(t *testing.T) {
+		svc := newTestService(&fakeLedger{epoch: 2}, &fakeCleaner{}, WithClock(time.Now))
+		if err := svc.AllowSensitiveConsumption(t.Context(), testUser, 3); !errors.Is(err, ErrEpochStale) {
+			t.Fatalf("err = %v, want ErrEpochStale", err)
+		}
+	})
 	for _, status := range []IntentStatus{IntentActive, IntentOutcomeRecorded, IntentLocalSettlement} {
 		t.Run("barrier phase "+string(status)+" denies", func(t *testing.T) {
 			ledger := &fakeLedger{epoch: 2, intent: &Intent{IntentID: 1, Status: status}}
@@ -344,6 +350,22 @@ func TestAllowSensitiveConsumption(t *testing.T) {
 			t.Fatal("lookup failure must fail closed")
 		}
 	})
+}
+
+func TestAllowSensitiveConsumptionAccountEpochAdvanceRejectsOldGrant(t *testing.T) {
+	ledger := &fakeLedger{epoch: 4}
+	svc := newTestService(ledger, &fakeCleaner{}, WithClock(time.Now))
+	if err := svc.AllowSensitiveConsumption(t.Context(), testUser, 4); err != nil {
+		t.Fatalf("current grant rejected before account security change: %v", err)
+	}
+	// Password and other account-epoch-advancing changes advance users.security_epoch.
+	ledger.epoch = 5
+	if err := svc.AllowSensitiveConsumption(t.Context(), testUser, 4); !errors.Is(err, ErrEpochStale) {
+		t.Fatalf("pre-change grant error=%v, want ErrEpochStale", err)
+	}
+	if err := svc.AllowSensitiveConsumption(t.Context(), testUser, 6); !errors.Is(err, ErrEpochStale) {
+		t.Fatalf("future-stamped grant error=%v, want ErrEpochStale", err)
+	}
 }
 
 // --- B4 + lifecycle: single-winner acquisition and CAS fencing ---

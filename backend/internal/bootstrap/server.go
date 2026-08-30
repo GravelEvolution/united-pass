@@ -12,36 +12,57 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	zitadelsdk "github.com/zitadel/zitadel-go/v3/pkg/client"
 
+	"github.com/GravelEvolution/united-pass/backend/internal/accountcontact"
+	"github.com/GravelEvolution/united-pass/backend/internal/adapters/aliyunsms"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/cerbos"
+	dreamupclient "github.com/GravelEvolution/united-pass/backend/internal/adapters/dreamupadmin"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/feishu"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/postgres"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/redis"
+	wechatadapter "github.com/GravelEvolution/united-pass/backend/internal/adapters/wechat"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/zitadel"
+	"github.com/GravelEvolution/united-pass/backend/internal/adminpagination"
+	"github.com/GravelEvolution/united-pass/backend/internal/adminroles"
+	"github.com/GravelEvolution/united-pass/backend/internal/adminstepup"
+	"github.com/GravelEvolution/united-pass/backend/internal/adminstore"
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 	"github.com/GravelEvolution/united-pass/backend/internal/audit"
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/consent"
+	app "github.com/GravelEvolution/united-pass/backend/internal/dreamupadmin"
+	"github.com/GravelEvolution/united-pass/backend/internal/dreamupdelegation"
+	"github.com/GravelEvolution/united-pass/backend/internal/email"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
+	"github.com/GravelEvolution/united-pass/backend/internal/phoneverify"
 	"github.com/GravelEvolution/united-pass/backend/internal/policies"
 	"github.com/GravelEvolution/united-pass/backend/internal/privacy"
 	"github.com/GravelEvolution/united-pass/backend/internal/providers"
+	"github.com/GravelEvolution/united-pass/backend/internal/qrauth"
+	"github.com/GravelEvolution/united-pass/backend/internal/registration"
+	"github.com/GravelEvolution/united-pass/backend/internal/riskdefense"
 	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
+	wechatdomain "github.com/GravelEvolution/united-pass/backend/internal/wechat"
+	"github.com/GravelEvolution/united-pass/backend/internal/wechatonboarding"
+	"github.com/GravelEvolution/united-pass/backend/internal/wechatregistration"
 	"github.com/GravelEvolution/united-pass/backend/internal/workforce"
 )
 
@@ -53,11 +74,136 @@ type Server struct {
 	logger         *slog.Logger
 	config         config.Config
 	pool           *postgres.Pool
+	isolatedPool   *postgres.Pool
 	redisClient    *redis.Client
 	providerCloser interface{ Close() error }
+	// dreamUPAuthorizer is wired for later BFF composition but intentionally
+	// has no browser route in Task 2. The DreamUP administration switch and
+	// handlers remain default-off until their dedicated task.
+	dreamUPAuthorizer permissions.Authorizer
 	// workerStops stops background workers (e.g. the abandoned reauth
 	// challenge cleanup worker) before infrastructure is closed.
 	workerStops []func()
+}
+
+type roleFingerprinterAdapter struct {
+	base *adminstore.OperationFingerprinter
+}
+
+type stepUpFingerprinterAdapter struct {
+	base *adminstore.OperationFingerprinter
+}
+
+func (a *stepUpFingerprinterAdapter) Fingerprint(purpose string, canonical []byte) (adminstepup.RequestFingerprint, error) {
+	if a == nil || a.base == nil {
+		return adminstepup.RequestFingerprint{}, errors.New("bootstrap: step-up fingerprinter unavailable")
+	}
+	fingerprint, err := a.base.Fingerprint(purpose, canonical)
+	if err != nil {
+		return adminstepup.RequestFingerprint{}, err
+	}
+	return adminstepup.RequestFingerprint{Version: fingerprint.Version, KeyID: fingerprint.KeyID, Digest: fingerprint.Digest}, nil
+}
+
+var _ adminstepup.Fingerprinter = (*stepUpFingerprinterAdapter)(nil)
+
+type dreamUPAdminSecurityMaterial struct {
+	challengeCipher *adminstepup.AESGCMCipher
+	protectedCipher *adminstepup.AESGCMCipher
+	pepperKeyring   *adminstepup.Keyring
+	rateKeyring     *adminstepup.Keyring
+	fingerprinter   *adminstore.OperationFingerprinter
+}
+
+// loadDreamUPAdminSecurityMaterial loads every purpose-specific keyring in a
+// single, fail-closed boundary. Key bytes may never be reused between
+// purposes, including retained rotation keys: purpose separation must remain
+// true for reads as well as writes.
+func loadDreamUPAdminSecurityMaterial(cfg config.Config) (*dreamUPAdminSecurityMaterial, error) {
+	adminCfg := cfg.DreamUPAdmin
+	type purposeKeyring struct {
+		name      string
+		path      string
+		currentID string
+	}
+	specs := []purposeKeyring{
+		{name: "challenge encryption", path: adminCfg.ChallengeEncryptionKeyringPath, currentID: adminCfg.ChallengeEncryptionCurrentKeyID},
+		{name: "challenge pepper", path: adminCfg.ChallengePepperKeyringPath, currentID: adminCfg.ChallengePepperCurrentKeyID},
+		{name: "protected reason", path: adminCfg.ProtectedReasonKeyringPath, currentID: adminCfg.ProtectedReasonCurrentKeyID},
+		{name: "challenge rate limit", path: adminCfg.RateLimitKeyringPath, currentID: adminCfg.RateLimitCurrentKeyID},
+		{name: "operation fingerprint", path: adminCfg.OperationFingerprintKeyringPath, currentID: adminCfg.OperationFingerprintCurrentKeyID},
+	}
+
+	rings := make(map[string]*adminstepup.Keyring, len(specs))
+	type ownedKey struct {
+		purpose string
+		value   []byte
+	}
+	var allKeys []ownedKey
+	if cfg.Session.EncryptionKey != "" {
+		sessionKey, err := base64.StdEncoding.DecodeString(cfg.Session.EncryptionKey)
+		if err != nil {
+			return nil, errors.New("DreamUP admin cannot validate session key purpose separation")
+		}
+		allKeys = append(allKeys, ownedKey{purpose: "session encryption", value: sessionKey})
+	}
+	for _, spec := range specs {
+		ring, err := adminstepup.LoadKeyring(spec.path, spec.currentID)
+		if err != nil {
+			return nil, fmt.Errorf("load %s keyring: %w", spec.name, err)
+		}
+		_, snapshot, err := ring.Snapshot()
+		if err != nil {
+			return nil, fmt.Errorf("snapshot %s keyring: %w", spec.name, err)
+		}
+		for _, key := range snapshot {
+			for _, previous := range allKeys {
+				if bytes.Equal(previous.value, key) && previous.purpose != spec.name {
+					return nil, errors.New("DreamUP admin key material must be distinct for every cryptographic purpose")
+				}
+			}
+			allKeys = append(allKeys, ownedKey{purpose: spec.name, value: append([]byte(nil), key...)})
+		}
+		rings[spec.name] = ring
+	}
+
+	challengeCipher, err := adminstepup.NewAESGCMCipher(rings["challenge encryption"])
+	if err != nil {
+		return nil, fmt.Errorf("challenge encryption keyring: %w", err)
+	}
+	protectedCipher, err := adminstepup.NewAESGCMCipher(rings["protected reason"])
+	if err != nil {
+		return nil, fmt.Errorf("protected reason keyring: %w", err)
+	}
+	activeID, operationKeys, err := rings["operation fingerprint"].Snapshot()
+	if err != nil {
+		return nil, fmt.Errorf("operation fingerprint keyring: %w", err)
+	}
+	fingerprinter, err := adminstore.NewOperationFingerprinter(adminstore.Keyring{ActiveKeyID: activeID, Keys: operationKeys})
+	if err != nil {
+		return nil, fmt.Errorf("operation fingerprint keyring: %w", err)
+	}
+
+	return &dreamUPAdminSecurityMaterial{
+		challengeCipher: challengeCipher,
+		protectedCipher: protectedCipher,
+		pepperKeyring:   rings["challenge pepper"],
+		rateKeyring:     rings["challenge rate limit"],
+		fingerprinter:   fingerprinter,
+	}, nil
+}
+
+var _ adminroles.Fingerprinter = (*roleFingerprinterAdapter)(nil)
+
+func (a *roleFingerprinterAdapter) Fingerprint(purpose string, canonical []byte) (adminroles.RequestFingerprint, error) {
+	if a == nil || a.base == nil {
+		return adminroles.RequestFingerprint{}, errors.New("bootstrap: role fingerprinter unavailable")
+	}
+	fingerprint, err := a.base.Fingerprint(purpose, canonical)
+	if err != nil {
+		return adminroles.RequestFingerprint{}, err
+	}
+	return adminroles.RequestFingerprint{Version: fingerprint.Version, KeyID: fingerprint.KeyID, Digest: fingerprint.Digest}, nil
 }
 
 type cerbosReadinessChecker struct {
@@ -80,12 +226,101 @@ func (c *cerbosReadinessChecker) Check(ctx context.Context) error {
 // NewServer returns an error when the configuration demands an authentication
 // provider adapter that is not implemented (always the case in production),
 // or when the configured session encryption key is unusable.
+type registrationSurfacePlan struct {
+	legacy            bool
+	emailLifecycle    bool
+	wechatMiniProgram bool
+}
+
+func configuredRegistrationSurfaces(cfg config.Config) registrationSurfacePlan {
+	return registrationSurfacePlan{
+		legacy:            cfg.Registration.Enabled,
+		emailLifecycle:    cfg.Registration.Enabled || (cfg.WeChatMiniProgram.Enabled && cfg.WeChatMiniProgram.RegistrationEnabled),
+		wechatMiniProgram: cfg.WeChatMiniProgram.Enabled && cfg.WeChatMiniProgram.RegistrationEnabled,
+	}
+}
+
+func mountRegistrationSurfaces(router chi.Router, plan registrationSurfacePlan, legacy *httpapi.RegistrationHandlers, wechatMiniProgram *httpapi.WeChatRegistrationHandlers) {
+	if plan.legacy && legacy != nil {
+		legacy.MountCreate(router)
+	}
+	if plan.emailLifecycle && legacy != nil {
+		legacy.MountEmailLifecycle(router)
+	}
+	if plan.wechatMiniProgram && wechatMiniProgram != nil {
+		wechatMiniProgram.Mount(router)
+	}
+}
+
+func newAliyunSMSClient(cfg config.AliyunSMSConfig) (*aliyunsms.Client, error) {
+	return aliyunsms.NewClient(aliyunsms.Config{
+		AccessKeyID:     cfg.AccessKeyID,
+		AccessKeySecret: cfg.AccessKeySecret,
+		SignName:        cfg.SignName,
+		TemplateCode:    cfg.TemplateCode,
+		Endpoint:        cfg.Endpoint,
+	}, nil)
+}
+
 func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
+	if cfg.WeChatMiniProgram.RegistrationEnabled && !cfg.WeChatMiniProgram.Enabled {
+		return nil, errors.New("WeChat Mini Program registration requires the WeChat Mini Program surface")
+	}
+	if cfg.WeChatMiniProgram.OnboardingEnabled && (!cfg.WeChatMiniProgram.Enabled || !cfg.WeChatMiniProgram.RegistrationEnabled) {
+		return nil, errors.New("WeChat Mini Program onboarding requires the login and registration surfaces")
+	}
+	var wechatOnboardingEncryptor session.Encryptor
+	if cfg.WeChatMiniProgram.OnboardingEnabled {
+		var err error
+		wechatOnboardingEncryptor, err = newWeChatOnboardingEncryptor(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("WeChat Mini Program onboarding encryption key: %w", err)
+		}
+		if !cfg.Email.SecurityNotificationsConfigured() {
+			return nil, errors.New("WeChat Mini Program onboarding security notification transport is unavailable")
+		}
+	}
 	router := chi.NewRouter()
+	trustedClientIP, err := httpapi.TrustedClientIP(cfg.ClientIP.TrustedProxyCIDRs)
+	if err != nil {
+		return nil, fmt.Errorf("trusted client IP configuration: %w", err)
+	}
+
+	// The master gate is checked before any keyring open or service
+	// construction. Disabled deployments keep the old graph byte-for-byte and
+	// do not require the new secrets.
+	var dreamUPAdminMaterial *dreamUPAdminSecurityMaterial
+	var dreamUPDelegationKeyring *dreamupdelegation.Keyring
+	var dreamUPMobileDelegationKeyring *dreamupdelegation.Keyring
+	if cfg.DreamUPAdmin.Enabled {
+		var err error
+		dreamUPAdminMaterial, err = loadDreamUPAdminSecurityMaterial(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP admin security material: %w", err)
+		}
+		dreamUPDelegationKeyring, err = dreamupdelegation.LoadKeyring(cfg.DreamUPAdmin.DelegationKeyringPath)
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP delegation keyring: %w", err)
+		}
+		if dreamUPDelegationKeyring.CurrentKeyID() != cfg.DreamUPAdmin.DelegationCurrentKeyID {
+			return nil, errors.New("DreamUP delegation current key ID does not match keyring")
+		}
+	}
+	if cfg.DreamUPMobile.Enabled {
+		var err error
+		dreamUPMobileDelegationKeyring, err = dreamupdelegation.LoadKeyring(cfg.DreamUPMobile.DelegationKeyringPath)
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP Mobile delegation keyring: %w", err)
+		}
+		if dreamUPMobileDelegationKeyring.CurrentKeyID() != cfg.DreamUPMobile.DelegationCurrentKeyID {
+			return nil, errors.New("DreamUP Mobile delegation current key ID does not match keyring")
+		}
+	}
 
 	router.Use(httpapi.MaxBodyBytesByPath(cfg.MaxRequestBodyBytes, map[string]int64{
 		"/api/v1/me/avatar": httpapi.AvatarRequestBodyLimit,
 	}))
+	router.Use(trustedClientIP)
 	router.Use(httpapi.RequestID)
 	router.Use(httpapi.SecurityHeaders)
 	router.Use(httpapi.AccessLog(logger))
@@ -95,6 +330,13 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	// URLs are absent (e.g. local dev without remote services), the server
 	// starts but readiness checks will fail for those dependencies.
 	var pool *postgres.Pool
+	var isolatedPool *postgres.Pool
+	isolatedPoolTransferred := false
+	defer func() {
+		if isolatedPool != nil && !isolatedPoolTransferred {
+			isolatedPool.Close()
+		}
+	}()
 	var redisClient *redis.Client
 	var readinessCheckers []httpapi.ReadinessChecker
 
@@ -108,18 +350,31 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				NewPostgresReadinessChecker(pool, 3*time.Second))
 		}
 	}
+	if cfg.HasIsolatedDatabase() {
+		var err error
+		isolatedPool, err = postgres.NewPoolFromConfig(context.Background(), cfg.IsolatedDatabase)
+		if err != nil {
+			return nil, fmt.Errorf("create isolated operational database pool: %w", err)
+		}
+		contractCtx, cancel := context.WithTimeout(context.Background(), cfg.IsolatedDatabase.ConnectTimeout)
+		contractErr := postgres.ValidateIsolatedOperationalStore(contractCtx, isolatedPool.PgxPool())
+		cancel()
+		if contractErr != nil {
+			return nil, fmt.Errorf("validate isolated operational database: %w", contractErr)
+		}
+		readinessCheckers = append(readinessCheckers,
+			NewPostgresReadinessChecker(isolatedPool, 3*time.Second))
+	}
 
 	if cfg.HasRedis() {
 		var err error
 		redisClient, err = redis.NewClient(cfg.Redis)
 		if err != nil {
-			if pool != nil {
-				pool.Close()
-			}
-			return nil, fmt.Errorf("create redis client: %w", err)
+			logger.Error("failed to create redis client", "error", err)
+		} else {
+			readinessCheckers = append(readinessCheckers,
+				httpapi.NewRedisChecker(redisClient, 3*time.Second))
 		}
-		readinessCheckers = append(readinessCheckers,
-			httpapi.NewRedisChecker(redisClient, 3*time.Second))
 	}
 
 	// Session service. The encryption key is validated up front: an invalid
@@ -132,6 +387,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var sessionSvc *session.Service
 	var userChecker httpapi.UserStatusChecker
 	var userReader httpapi.UserReader
+	var userWriter httpapi.UserWriter
 	var userLinker identity.UserLinker
 	var permResolver permissions.Resolver
 	var authenticator auth.Authenticator
@@ -139,16 +395,40 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var providerCloser interface{ Close() error }
 	var mfaStore httpapi.MFAChallengeStore
 	var rateChecker httpapi.RateChecker
-	var contactRateChecker httpapi.ContactRateChecker
 	var sessionAuditor session.SecurityAuditor
 	var workerStops []func()
 	var cerbosClient *cerbos.Client
 	var accountDeleter privacy.ProviderAccountDeleter
 	var userRepo *postgres.UserRepository
+	var registrationRateChecker httpapi.RegistrationRateChecker
+	var wechatRegistrationRateChecker httpapi.WeChatRegistrationRateChecker
+	var registrationBlockRateChecker httpapi.RegistrationBlockRateChecker
+	var registrationBlockHandlers *httpapi.RegistrationBlockHandlers
+	var accountContactRateChecker httpapi.AccountContactRateChecker
+	var legacyContactRateChecker httpapi.ContactRateChecker
+	var accountContactService httpapi.AccountContactService
+	var wechatRateChecker httpapi.WeChatRateChecker
+	var qrAuthRateChecker httpapi.QRAuthRateChecker
+	var dreamUPMobileRateChecker httpapi.DreamUPMobileRateChecker
+	var accountContactHandlers *httpapi.AccountContactHandlers
+	var phoneVerifyHandlers *httpapi.PhoneVerifyHandlers
+	var wechatHandlers *httpapi.WeChatHandlers
+	var wechatOnboardingHandlers *httpapi.WeChatOnboardingHandlers
+	var wechatOnboardingCleanup *redis.WeChatOnboardingCleanupWorker
+	var wechatRegistrationHandlers *httpapi.WeChatRegistrationHandlers
+	var qrAuthHandlers *httpapi.QRAuthHandlers
+	var riskGuard *httpapi.RiskGuard
+	var registrationProvider registration.Provider
+	var registrationRepository *postgres.RegistrationRepository
+	var wechatIntentCleanup *postgres.WeChatRegistrationIntentCleanupWorker
+	var wechatNotificationWorker *postgres.WeChatNotificationWorker
+	cookieAttrs := httpapi.CookieAttributesFromConfig(cfg.Session)
+	registrationSurfaces := configuredRegistrationSurfaces(cfg)
 
 	if pool != nil {
 		userRepo = postgres.NewUserRepository(pool.PgxPool())
 		userReader = userRepo
+		userWriter = userRepo
 		userChecker = &userStatusChecker{repo: userRepo}
 		userLinker = userRepo
 	}
@@ -221,7 +501,200 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		mfaStore = redis.NewMFAStore(redisClient)
 		limiter := redis.NewRateLimiter(redisClient)
 		rateChecker = limiter
-		contactRateChecker = limiter
+		registrationRateChecker = limiter
+		wechatRegistrationRateChecker = limiter
+		registrationBlockRateChecker = limiter
+		accountContactRateChecker = limiter
+		legacyContactRateChecker = limiter
+		wechatRateChecker = limiter
+		qrAuthRateChecker = limiter
+		dreamUPMobileRateChecker = limiter
+	}
+	if cfg.RiskDefense.Enabled {
+		if redisClient == nil {
+			return nil, errors.New("risk defense requires Redis")
+		}
+		interactiveProvider, providerErr := newRiskCaptchaProvider(cfg.RiskDefense.Captcha)
+		if providerErr != nil {
+			return nil, fmt.Errorf("risk defense CAPTCHA: %w", providerErr)
+		}
+		riskService, riskErr := riskdefense.NewService(redis.NewRiskStore(redisClient), interactiveProvider, riskdefense.Config{
+			Enabled:                  cfg.RiskDefense.Enabled,
+			ObservationWindow:        cfg.RiskDefense.ObservationWindow,
+			LoginMediumAfter:         cfg.RiskDefense.LoginMediumAfter,
+			LoginHighAfter:           cfg.RiskDefense.LoginHighAfter,
+			RegistrationMediumAfter:  cfg.RiskDefense.RegistrationMediumAfter,
+			RegistrationHighAfter:    cfg.RiskDefense.RegistrationHighAfter,
+			ChallengeTTL:             cfg.RiskDefense.ChallengeTTL,
+			DeviceIDTTL:              cfg.RiskDefense.DeviceIDTTL,
+			TrustTTL:                 cfg.RiskDefense.TrustTTL,
+			AutomationCostDifficulty: uint8(cfg.RiskDefense.AutomationCostDifficulty),
+			CompletionLimit:          cfg.RiskDefense.CompletionLimit,
+			CompletionWindow:         cfg.RiskDefense.CompletionWindow,
+			AllowlistedHashes:        cfg.RiskDefense.AllowlistedHashes,
+		})
+		if riskErr != nil {
+			return nil, fmt.Errorf("risk defense: %w", riskErr)
+		}
+		riskGuard = httpapi.NewRiskGuard(
+			riskService, sessionSvc, httpapi.CookieAttributesFromConfig(cfg.Session),
+			cfg.RiskDefense.DeviceIDTTL, cfg.RiskDefense.TrustTTL,
+		)
+	}
+
+	registrationRatePolicy := registration.RatePolicy{
+		FormIntent: registration.Limit{Max: 20, Window: 5 * time.Minute},
+		Create: registration.CreateRatePolicy{
+			ClientIP:    registration.Limit{Max: cfg.Registration.CreateIPLimit, Window: cfg.Registration.CreateIPWindow},
+			ClientNet:   registration.Limit{Max: cfg.Registration.CreateNetLimit, Window: cfg.Registration.CreateNetWindow},
+			Email:       registration.Limit{Max: cfg.Registration.CreateEmailLimit, Window: cfg.Registration.CreateEmailWindow},
+			ClientEmail: registration.Limit{Max: cfg.Registration.CreatePairLimit, Window: cfg.Registration.CreatePairWindow},
+			IPv4NetBits: cfg.Registration.IPv4NetBits,
+			IPv6NetBits: cfg.Registration.IPv6NetBits,
+		},
+		Verify: registration.Limit{Max: cfg.Registration.VerifyLimit, Window: cfg.Registration.VerifyWindow},
+		Resend: registration.Limit{Max: cfg.Registration.ResendLimit, Window: cfg.Registration.ResendWindow},
+	}
+	emailDeliveryValidator := registration.NewDefaultEmailDeliveryValidator()
+	var registrationHandlers *httpapi.RegistrationHandlers
+	if registrationSurfaces.emailLifecycle {
+		if pool == nil || redisClient == nil || sdkClient == nil || userRepo == nil || registrationRateChecker == nil {
+			return nil, errors.New("registration dependencies are unavailable")
+		}
+		registrationProvider = zitadel.NewRegistrationProvider(sdkClient.UserServiceV2(), cfg.Auth.OrganizationID)
+		if registrationSurfaces.wechatMiniProgram {
+			if isolatedPool == nil {
+				return nil, errors.New("WeChat Mini Program registration intent store is unavailable")
+			}
+			intentStore := postgres.NewWeChatRegistrationIntentStore(isolatedPool.PgxPool())
+			registrationRepository = postgres.NewRegistrationRepositoryWithIntentStore(
+				pool.PgxPool(), zitadel.ProviderName, cfg.Auth.ProjectID,
+				intentStore,
+			)
+			wechatIntentCleanup = postgres.NewWeChatRegistrationIntentCleanupWorker(intentStore, pool.PgxPool(), 15*time.Minute, time.Hour, logger)
+		} else {
+			registrationRepository = postgres.NewRegistrationRepository(pool.PgxPool(), zitadel.ProviderName, cfg.Auth.ProjectID)
+		}
+		registrationService := registration.NewService(
+			registrationProvider,
+			registrationRepository,
+			redis.NewRegistrationStore(redisClient),
+			registration.Config{
+				PublicOrigin:   cfg.OAuth.PublicOrigin,
+				TokenTTL:       30 * time.Minute,
+				EmailValidator: emailDeliveryValidator,
+			},
+		)
+		formDefense, err := registration.NewFormDefense(
+			redis.NewRegistrationFormDefenseStore(redisClient),
+			newRegistrationAbuseAuditor(postgres.NewSecurityEventStore(pool.PgxPool())),
+			registration.FormDefenseConfig{
+				IntentTTL: 20 * time.Minute, MinimumFormAge: 2 * time.Second, MaxHoneypotSize: 12 << 10,
+				Policy: registration.AbusePolicy{
+					DeviceBlockTTL: 24 * time.Hour,
+					IPStrikeWindow: time.Hour, IPBlockAfter: 3, IPBlockTTL: time.Hour,
+					IPLongBlockAfter: 6, IPLongBlockTTL: 24 * time.Hour,
+				},
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("registration form defense: %w", err)
+		}
+		registrationHandlers = httpapi.NewRegistrationHandlers(
+			registrationService, registrationRateChecker, true, cfg.OAuth.PublicOrigin,
+			registrationRatePolicy, logger, httpapi.WithRegistrationRiskGuard(riskGuard),
+			httpapi.WithRegistrationFormDefense(formDefense),
+		)
+	}
+	if pool != nil && redisClient != nil && sdkClient != nil && accountContactRateChecker != nil {
+		accountContactService = accountcontact.NewService(
+			zitadel.NewAccountContactProvider(sdkClient.UserServiceV2()),
+			postgres.NewAccountContactRepository(pool.PgxPool(), zitadel.ProviderName, cfg.Auth.ProjectID),
+			accountcontact.Config{
+				PublicOrigin:   cfg.OAuth.PublicOrigin,
+				EmailValidator: &accountContactEmailValidator{inner: emailDeliveryValidator},
+			},
+		)
+	}
+	if redisClient != nil && userRepo != nil && cfg.AliyunSMS.Enabled {
+		phoneStore := redis.NewPhoneVerifyStore(redisClient)
+		smsClient, err := newAliyunSMSClient(cfg.AliyunSMS)
+		if err != nil {
+			return nil, fmt.Errorf("build Aliyun SMS client: %w", err)
+		}
+		phoneService, err := phoneverify.NewService(
+			phoneStore, smsClient, userRepo,
+			phoneverify.Config{TTL: cfg.PhoneVerify.TTL},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("build phone verify service: %w", err)
+		}
+		phoneVerifyHandlers = httpapi.NewPhoneVerifyHandlers(phoneService, cfg.OAuth.PublicOrigin, logger)
+	}
+	if cfg.WeChatMiniProgram.Enabled {
+		if userRepo == nil || sessionSvc == nil || wechatRateChecker == nil {
+			return nil, errors.New("WeChat Mini Program dependencies are unavailable")
+		}
+		client, clientErr := wechatadapter.NewClient(wechatadapter.Config{
+			AppID: cfg.WeChatMiniProgram.AppID, AppSecret: cfg.WeChatMiniProgram.AppSecret,
+			APIBaseURL: cfg.WeChatMiniProgram.APIBaseURL, RequestTimeout: cfg.WeChatMiniProgram.RequestTimeout,
+		}, nil)
+		if clientErr != nil {
+			return nil, fmt.Errorf("WeChat Mini Program client: %w", clientErr)
+		}
+		wechatService := wechatdomain.NewService(client, userRepo, userRepo)
+		wechatHandlers = httpapi.NewWeChatHandlers(wechatService, sessionSvc, wechatRateChecker, cfg.RateLimit.LoginLimit, cfg.RateLimit.LoginWindow, logger)
+		if registrationSurfaces.wechatMiniProgram {
+			if registrationProvider == nil || registrationRepository == nil || isolatedPool == nil || redisClient == nil || wechatRegistrationRateChecker == nil {
+				return nil, errors.New("WeChat Mini Program registration dependencies are unavailable")
+			}
+			// The shared repository is deliberate: the email verification route
+			// mounted above must clear the same isolated intent created by this
+			// WeChat registration flow. A second repository wired only here would
+			// make activation fall back to the authority-schema migration.
+			wechatRegistrationService := wechatregistration.NewService(client, registrationProvider, registrationRepository, redis.NewRegistrationStore(redisClient), wechatregistration.Config{PublicOrigin: cfg.OAuth.PublicOrigin, TokenTTL: 30 * time.Minute})
+			wechatRegistrationHandlers = httpapi.NewWeChatRegistrationHandlers(wechatRegistrationService, wechatRegistrationRateChecker, registrationRatePolicy.Create, logger)
+			if cfg.WeChatMiniProgram.OnboardingEnabled {
+				if wechatOnboardingEncryptor == nil || rateChecker == nil {
+					return nil, errors.New("WeChat Mini Program onboarding secure challenge dependencies are unavailable")
+				}
+				passwordAuthenticator, ok := authenticator.(wechatonboarding.PasswordAuthenticator)
+				if !ok {
+					return nil, errors.New("WeChat Mini Program onboarding password authentication is unavailable")
+				}
+				wechatOnboardingStore := redis.NewWeChatOnboardingStore(redisClient, wechatOnboardingEncryptor)
+				wechatOnboardingCleanup, err = redis.NewWeChatOnboardingCleanupWorker(wechatOnboardingStore, passwordAuthenticator, logger)
+				if err != nil {
+					return nil, fmt.Errorf("WeChat Mini Program onboarding cleanup worker: %w", err)
+				}
+				wechatOnboardingService := wechatonboarding.NewService(
+					client, userRepo, postgres.NewWeChatOnboardingAccountRepository(pool.PgxPool()),
+					passwordAuthenticator, wechatRegistrationService,
+					wechatOnboardingStore, rateChecker, wechatRegistrationRateChecker,
+					wechatonboarding.Config{
+						OnboardingTTL: 15 * time.Minute, MFATTL: 5 * time.Minute,
+						MaxAttempts: 5, RateLimit: cfg.RateLimit.LoginLimit, RateWindow: cfg.RateLimit.LoginWindow,
+						CompletionRatePolicy: registrationRatePolicy.Create,
+					},
+				)
+				wechatOnboardingHandlers = httpapi.NewWeChatOnboardingHandlers(
+					wechatOnboardingService, sessionSvc, wechatRateChecker, passwordAuthenticator,
+					wechatOnboardingStore,
+					registrationRatePolicy.Create,
+					cfg.RateLimit.LoginLimit, cfg.RateLimit.LoginWindow, logger,
+				)
+			}
+		}
+	}
+	if cfg.QRAuth.Enabled {
+		if redisClient == nil || pool == nil || sessionSvc == nil || qrAuthRateChecker == nil {
+			return nil, errors.New("QR authentication dependencies are unavailable")
+		}
+		qrAuthHandlers = httpapi.NewQRAuthHandlers(
+			qrauth.NewService(redis.NewQRAuthStore(redisClient), cfg.QRAuth.ChallengeTTL, nil),
+			sessionSvc, userChecker, qrAuthRateChecker, newQRAuthSecurityAuditor(postgres.NewSecurityEventStore(pool.PgxPool())),
+			cookieAttrs, cfg.QRAuth.ChallengeTTL, cfg.QRAuth.RateLimit, cfg.QRAuth.RateWindow, logger,
+		)
 	}
 
 	// Phase 7 Cerbos boundary (ADR-0013). The REST adapter uses bounded HTTP
@@ -242,13 +715,17 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	// development-only explicit override remains outermost, while the
 	// workforce offboarding guard is added below and therefore always wins.
 	var permissionBase permissions.Resolver = permissions.NewDefaultResolver()
+	var dreamUPAuthorizer permissions.Authorizer
 	var policyRepo *postgres.PolicyRepository
 	if pool != nil {
 		policyRepo = postgres.NewPolicyRepository(pool.PgxPool())
 	}
 	if pool != nil && cerbosClient != nil && policyRepo != nil {
+		principalContext := postgres.NewPermissionContextRepository(pool.PgxPool())
 		permissionBase = permissions.NewCerbosResolver(
-			postgres.NewPermissionContextRepository(pool.PgxPool()), policyRepo, cerbosClient, request.ID)
+			principalContext, policyRepo, cerbosClient, request.ID)
+		dreamUPAuthorizer = permissions.NewCerbosAuthorizer(
+			postgres.NewAdminRoleRepository(pool.PgxPool(), nil), principalContext, policyRepo, cerbosClient, request.ID)
 	}
 	permResolver = permissionBase
 	if cfg.Permission.DevOverrideEnabled {
@@ -275,7 +752,6 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			workerStops = append(workerStops, reconciler.Stop)
 		}
 	}
-
 	// Phase 6 Provider plane (ADR-0012). PostgreSQL stores only safe metadata,
 	// durable sync jobs, normalized directory staging and explicit identity
 	// links. Feishu credentials remain in typed process configuration and the
@@ -387,6 +863,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var securityHandlers *httpapi.SecurityHandlers
 	var passwordHandlers *httpapi.PasswordHandlers
 	var reauthVerifier httpapi.ReauthVerifier
+	var reauthGrantVerifier app.ReauthGrantVerifier
 	var rotationRates httpapi.RotationRateChecker
 	var policyHandlers *httpapi.PolicyHandlers
 	var auditHandlers *httpapi.AuditHandlers
@@ -395,6 +872,11 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var legalHandlers *httpapi.LegalHandlers
 	var accountMutationHandlers *httpapi.AccountMutationHandlers
 	var publicAccountHandlers *httpapi.PublicAccountHandlers
+	var adminStepUpHandlers *httpapi.AdminStepUpHandlers
+	var dreamUPAdminHandlers *httpapi.DreamUPAdminHandlers
+	var dreamUPJWKSHandler *httpapi.DreamUPJWKSHandler
+	var dreamUPMobileHandlers *httpapi.DreamUPMobileHandlers
+	var dreamUPMobileJWKSHandler *httpapi.DreamUPJWKSHandler
 	// Reauthentication is shared infrastructure for account, application and
 	// workforce high-risk operations. It must not disappear merely because an
 	// unrelated OAuth provisioner is unavailable (ADR-0011 §3).
@@ -402,7 +884,9 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		limiter := redis.NewRateLimiter(redisClient)
 		rotationRates = limiter
 		reauthStore := redis.NewReauthStore(redisClient)
-		reauthVerifier = httpapi.NewReauthGrants(reauthStore, sensitiveGate)
+		reauthGrants := httpapi.NewReauthGrants(reauthStore, sensitiveGate)
+		reauthVerifier = reauthGrants
+		reauthGrantVerifier = reauthGrants
 		if reauthAuth, ok := authenticator.(httpapi.ReauthAuthenticator); ok {
 			reauthAuditor := newReauthSecurityAuditor(postgres.NewSecurityEventStore(pool.PgxPool()))
 			reauthHandlers = httpapi.NewReauthHandlers(
@@ -432,6 +916,135 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 				passwordManager, reauthVerifier, sessionSvc, securitySvc, sessionAuditor,
 				cfg.SecurityState.ProviderDeadline, cfg.SecurityState.SettlementTimeout,
 				cfg, logger)
+		}
+	}
+	if accountContactService != nil && accountContactRateChecker != nil && reauthVerifier != nil {
+		accountContactHandlers = httpapi.NewAccountContactHandlers(
+			accountContactService, accountContactRateChecker, reauthVerifier, cfg.OAuth.PublicOrigin,
+			cfg.RateLimit.LoginLimit, cfg.RateLimit.LoginWindow, logger,
+		)
+	}
+	if pool != nil && redisClient != nil && sessionSvc != nil && reauthVerifier != nil &&
+		registrationBlockRateChecker != nil && cfg.Session.EncryptionKey != "" {
+		auditRootKey, decodeErr := base64.StdEncoding.DecodeString(cfg.Session.EncryptionKey)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("registration block audit key: %w", decodeErr)
+		}
+		auditTargets, targetErr := httpapi.NewRegistrationBlockAuditTargets(auditRootKey, cfg.Session.EncryptionKeyID)
+		if targetErr != nil {
+			return nil, fmt.Errorf("registration block audit targets: %w", targetErr)
+		}
+		registrationBlockHandlers = httpapi.NewRegistrationBlockHandlers(
+			redis.NewRegistrationFormDefenseStore(redisClient),
+			postgres.NewAdminRoleRepository(pool.PgxPool(), nil),
+			postgres.NewPermissionContextRepository(pool.PgxPool()),
+			permResolver,
+			postgres.NewSecurityEventStore(pool.PgxPool()),
+			httpapi.RegistrationBlockControls{
+				Reauth: reauthVerifier, Rates: registrationBlockRateChecker,
+				AuditTargets: auditTargets, RateLimit: 12, RateWindow: 15 * time.Minute,
+			},
+			logger,
+		)
+	}
+	if cfg.DreamUPAdmin.Enabled {
+		if pool == nil || isolatedPool == nil || redisClient == nil || sessionSvc == nil || dreamUPAdminMaterial == nil || dreamUPDelegationKeyring == nil || dreamUPAuthorizer == nil {
+			return nil, errors.New("DreamUP admin requires authority and isolated PostgreSQL, Redis, and browser sessions")
+		}
+		hasher, err := adminstepup.NewAnswerHasher(dreamUPAdminMaterial.pepperKeyring, adminstepup.DefaultArgon2Params, cfg.DreamUPAdmin.Argon2MaxConcurrent)
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP admin answer hasher: %w", err)
+		}
+		limiter, err := redis.NewAdminChallengeRateLimiter(redisClient, dreamUPAdminMaterial.rateKeyring, cfg.DreamUPAdmin.RateLimit, cfg.DreamUPAdmin.RateWindow)
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP admin rate limiter: %w", err)
+		}
+		cursorCodec, err := adminpagination.NewCursorCodec(cfg.Session.EncryptionKey, nil)
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP admin cursor codec: %w", err)
+		}
+		uow := postgres.NewAdminUnitOfWork(pool.PgxPool(), cursorCodec)
+		dreamUPBFFUOW := postgres.NewAdminOutboxUnitOfWork(isolatedPool.PgxPool())
+		stepUpRepository := postgres.NewAdminStepUpRepository(pool.PgxPool())
+		service, err := adminstepup.NewService(adminstepup.ServiceDependencies{
+			Repository: stepUpRepository,
+			Bindings:   postgres.NewAdminRoleRepository(pool.PgxPool(), nil),
+			UnitOfWork: uow, Limiter: limiter, Hasher: hasher,
+			QuestionCipher: dreamUPAdminMaterial.challengeCipher,
+			Fingerprinter:  &stepUpFingerprinterAdapter{base: dreamUPAdminMaterial.fingerprinter},
+			GrantStore:     redis.NewReauthStore(redisClient),
+		}, adminstepup.ServiceConfig{GeneralFreshness: cfg.DreamUPAdmin.GeneralFreshness, HighRiskFreshness: cfg.DreamUPAdmin.HighRiskFreshness, GrantTTL: cfg.Reauth.GrantTTL})
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP admin step-up service: %w", err)
+		}
+		adminStepUpHandlers = httpapi.NewAdminStepUpHandlers(service, cfg.DreamUPAdmin.FreshLoginMaxAge, nil)
+
+		administratorSigner, err := dreamupdelegation.NewAdministratorSigner(dreamUPDelegationKeyring, dreamupdelegation.SignerConfig{
+			Issuer: cfg.DreamUPAdmin.DelegationIssuer, Audience: cfg.DreamUPAdmin.DelegationAudience,
+			TTL: dreamupdelegation.MaxOrdinaryTTL, ClockSkew: dreamupdelegation.MaxClockSkew,
+			Now: func() time.Time { return time.Now().UTC() },
+		})
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP administrator signer: %w", err)
+		}
+		upstreamClient, err := dreamupclient.NewClient(cfg.DreamUPAdmin.BaseURL, nil, dreamupclient.WithMaxResponseBytes(cfg.DreamUPAdmin.ResponseLimitBytes))
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP administration client: %w", err)
+		}
+		bffService, err := app.NewService(app.ServiceDependencies{
+			Authorizer:      dreamUPAuthorizer,
+			Registry:        postgres.NewDreamUPEventRegistryRepository(pool.PgxPool(), cursorCodec),
+			StepUps:         stepUpRepository,
+			AccountSecurity: postgres.NewSecurityStateStore(pool.PgxPool()),
+			ReauthGrants:    reauthGrantVerifier,
+			Signer:          administratorSigner,
+			Client:          upstreamClient,
+			UnitOfWork:      dreamUPBFFUOW,
+			Fingerprinter:   dreamUPAdminMaterial.fingerprinter,
+		}, app.ServiceConfig{RequireDurableMutations: true, MutationLease: cfg.DreamUPAdmin.ReconcileLease})
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP administration BFF: %w", err)
+		}
+		dreamUPAdminHandlers, err = httpapi.NewDreamUPAdminHandlers(bffService, cfg.DreamUPAdmin.AdminOrigin, cfg.DreamUPAdmin.MiniProgramEnabled)
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP administration handlers: %w", err)
+		}
+		dreamUPJWKSHandler, err = httpapi.NewDreamUPJWKSHandler(dreamUPDelegationKeyring)
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP delegation JWKS: %w", err)
+		}
+		serviceSigner, err := dreamupdelegation.NewServiceSigner(dreamUPDelegationKeyring, dreamupdelegation.SignerConfig{
+			Issuer: cfg.DreamUPAdmin.DelegationIssuer, Audience: cfg.DreamUPAdmin.DelegationAudience,
+			TTL: dreamupdelegation.MaxOrdinaryTTL, ClockSkew: dreamupdelegation.MaxClockSkew,
+			Now: func() time.Time { return time.Now().UTC() },
+		})
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP reconciler signer: %w", err)
+		}
+		reconciler, err := app.NewReconciler(app.ReconcilerDependencies{UnitOfWork: dreamUPBFFUOW, Signer: serviceSigner, Client: upstreamClient}, app.ReconcilerConfig{
+			Interval: cfg.DreamUPAdmin.ReconcileInterval, BatchSize: cfg.DreamUPAdmin.ReconcileBatchSize,
+			Lease: cfg.DreamUPAdmin.ReconcileLease, ServiceSubject: cfg.DreamUPAdmin.DelegationServiceSubject,
+			ServiceVersion: cfg.DreamUPAdmin.DelegationServiceVersion,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("DreamUP administration reconciler: %w", err)
+		}
+		reconciler.Start(context.Background())
+		workerStops = append(workerStops, reconciler.Stop)
+	}
+	if cfg.DreamUPMobile.Enabled {
+		if userRepo == nil || sessionSvc == nil || dreamUPMobileDelegationKeyring == nil || dreamUPMobileRateChecker == nil {
+			return nil, errors.New("DreamUP Mobile bridge requires PostgreSQL, Redis, and sessions")
+		}
+		signer, signerErr := dreamupdelegation.NewParticipantSigner(dreamUPMobileDelegationKeyring, dreamupdelegation.SignerConfig{Issuer: cfg.DreamUPMobile.DelegationIssuer, Audience: cfg.DreamUPMobile.DelegationAudience, TTL: cfg.DreamUPMobile.AssertionTTL, Now: func() time.Time { return time.Now().UTC() }})
+		if signerErr != nil {
+			return nil, fmt.Errorf("DreamUP Mobile participant signer: %w", signerErr)
+		}
+		dreamUPMobileHandlers = httpapi.NewDreamUPMobileHandlers(signer, userRepo, dreamUPMobileRateChecker, cfg.Auth.Provider, cfg.Auth.ProjectID, cfg.DreamUPMobile.ScopedRateLimit, cfg.DreamUPMobile.GlobalRateLimit, cfg.DreamUPMobile.RateWindow, logger)
+		var jwksErr error
+		dreamUPMobileJWKSHandler, jwksErr = httpapi.NewDreamUPJWKSHandler(dreamUPMobileDelegationKeyring)
+		if jwksErr != nil {
+			return nil, fmt.Errorf("DreamUP Mobile JWKS: %w", jwksErr)
 		}
 	}
 	if pool != nil && provisioner != nil && userReader != nil && sessionSvc != nil && cfg.Session.EncryptionKey != "" {
@@ -479,18 +1092,18 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		privacyWorker.Start()
 		workerStops = append(workerStops, privacyWorker.Stop)
 	}
-	if userRepo != nil {
+	if userRepo != nil && legacyContactRateChecker != nil {
 		contactProvider, _ := authenticator.(identity.AccountContactProvider)
 		accountMutationHandlers = httpapi.NewAccountMutationHandlers(
-			userRepo, contactProvider, contactRateChecker, logger,
+			userRepo, contactProvider, legacyContactRateChecker, logger,
 		)
-		if sdkClient != nil && securitySvc != nil && contactRateChecker != nil &&
+		if sdkClient != nil && securitySvc != nil && sessionAuditor != nil &&
 			encryptor != nil && cfg.OAuth.PublicOrigin != "" {
 			lifecycleProvider := zitadel.NewLifecycleProvider(
 				sdkClient.UserServiceV2(), sdkClient.ManagementService(), cfg.Auth.ProjectID,
 			)
 			publicAccountHandlers = httpapi.NewPublicAccountHandlers(
-				userRepo, lifecycleProvider, contactRateChecker, securitySvc,
+				userRepo, lifecycleProvider, legacyContactRateChecker, securitySvc,
 				sessionAuditor, encryptor, zitadel.ProviderName, cfg.Auth.ProjectID,
 				cfg.OAuth.PublicOrigin, logger,
 			)
@@ -564,12 +1177,52 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	health := httpapi.NewHealthHandlers(readinessCheckers...)
 	router.Get("/healthz", health.Healthz)
 	router.Get("/readyz", health.Readyz)
+	if dreamUPJWKSHandler != nil {
+		router.Get("/.well-known/dreamup-admin-jwks.json", dreamUPJWKSHandler.JWKS)
+		router.Head("/.well-known/dreamup-admin-jwks.json", dreamUPJWKSHandler.JWKS)
+	}
+	if dreamUPMobileJWKSHandler != nil {
+		router.Get("/.well-known/dreamup-mobile-jwks.json", dreamUPMobileJWKSHandler.JWKS)
+		router.Head("/.well-known/dreamup-mobile-jwks.json", dreamUPMobileJWKSHandler.JWKS)
+	}
+
+	// Loopback-only email sender used by the DreamUP worker. The endpoint
+	// fails closed with a 503 when SMTP is not configured. It is not proxied
+	// by nginx, so only colocated services can reach it.
+	var emailHandlers *httpapi.EmailHandlers
+	var smtpSender email.Sender
+	if cfg.Email.Configured() {
+		sender, senderErr := email.NewSMTP(email.Config{
+			Host:        cfg.Email.SMTPHost,
+			Port:        cfg.Email.SMTPPort,
+			User:        cfg.Email.SMTPUser,
+			Password:    cfg.Email.SMTPPassword,
+			FromAddress: cfg.Email.FromAddress,
+			FromName:    cfg.Email.FromName,
+		})
+		if senderErr != nil {
+			return nil, fmt.Errorf("email sender: %w", senderErr)
+		}
+		smtpSender = sender
+		emailHandlers = httpapi.NewEmailHandlers(sender, cfg.Email.InternalToken)
+	} else {
+		emailHandlers = httpapi.NewEmailHandlers(nil, "")
+	}
+	router.Post("/internal/v1/emails", emailHandlers.Send)
+	if cfg.WeChatMiniProgram.OnboardingEnabled && pool != nil && smtpSender != nil {
+		wechatNotificationWorker = postgres.NewWeChatNotificationWorker(
+			postgres.NewWeChatNotificationStore(pool.PgxPool()),
+			postgres.NewWeChatNotificationEmailSender(smtpSender),
+			logger,
+		)
+	}
 
 	// Session promotion middleware parameters (ADR-0007 F1): every
 	// promotion path shares the same authoritative security-state
 	// validator and the same cookie attributes; the gate is nil only in
 	// gate-less wiring (fake development mode).
-	cookieAttrs := httpapi.CookieAttributesFromConfig(cfg.Session)
+	// cookieAttrs was constructed before feature wiring so native and browser
+	// transports share the exact same cookie policy.
 
 	// Authorization Interaction Gateway (ADR-0005 §1, §12): the sole entry
 	// point ZITADEL generates for LoginV2 clients, served on the public
@@ -587,26 +1240,52 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 
 	// API v1 routes.
 	router.Route("/api/v1", func(r chi.Router) {
-		// Sanitized avatar media is public by opaque immutable identifier. The
-		// handler serves only server-reencoded PNG bytes from PostgreSQL.
+		// Preserve immutable PostgreSQL-backed avatar URLs issued by the public
+		// repository before the deployed filesystem-backed avatar contract.
 		if accountMutationHandlers != nil {
-			r.Get("/media/avatars/{avatarFile}", accountMutationHandlers.GetAvatar)
+			r.Get("/media/avatars/{avatarFile:avt_[0-9a-f]+\\.png}", accountMutationHandlers.GetAvatar)
 		}
 
 		// Auth endpoints (no session required for login/MFA; logout requires
 		// session + CSRF).
 		authHandlers := httpapi.NewAuthHandlers(
 			authenticator, sessionSvc, mfaStore, rateChecker,
-			userChecker, cfg, logger)
-
+			userChecker, cfg, logger, httpapi.WithAuthRiskGuard(riskGuard))
+		trustedAuthMutation := httpapi.RequireTrustedBrowserMutation(cfg.OAuth.PublicOrigin)
+		miniProgramClient := httpapi.RequireMiniProgramClient()
+		jsonMutation := httpapi.RequireJSONMutation()
 		if publicAccountHandlers != nil {
-			r.Post("/registrations", publicAccountHandlers.Register)
-			r.Post("/password-reset-requests", publicAccountHandlers.RequestPasswordReset)
-			r.Post("/password-resets", publicAccountHandlers.ResetPassword)
-			r.Post("/email-verifications", publicAccountHandlers.VerifyEmail)
+			r.With(trustedAuthMutation).Post("/password-reset-requests", publicAccountHandlers.RequestPasswordReset)
+			r.With(trustedAuthMutation).Post("/password-resets", publicAccountHandlers.ResetPassword)
+			r.With(trustedAuthMutation).Post("/email-verifications", publicAccountHandlers.VerifyEmail)
 		}
-		r.Post("/auth/sessions", authHandlers.Login)
-		r.Post("/auth/sessions/mfa", authHandlers.CompleteMFA)
+
+		r.With(trustedAuthMutation).Post("/auth/sessions", authHandlers.Login)
+		r.With(miniProgramClient, jsonMutation).Post("/auth/miniprogram/sessions", authHandlers.LoginMiniProgram)
+		r.With(miniProgramClient, jsonMutation).Post("/auth/miniprogram/sessions/mfa", authHandlers.CompleteMFAMiniProgram)
+		if wechatHandlers != nil {
+			r.With(miniProgramClient, jsonMutation).Post("/auth/wechat/sessions", wechatHandlers.Login)
+		}
+		if wechatOnboardingHandlers != nil {
+			wechatOnboardingHandlers.Mount(r)
+		}
+		if qrAuthHandlers != nil {
+			r.With(trustedAuthMutation).Post("/auth/qr/challenges", qrAuthHandlers.Begin)
+			r.With(trustedAuthMutation).Post("/auth/qr/challenges/{challengeId}/consume", qrAuthHandlers.Consume)
+		}
+		r.With(trustedAuthMutation).Post("/auth/passkey/begin", authHandlers.BeginPasskeyLogin)
+		r.With(trustedAuthMutation).Post("/auth/sessions/mfa", authHandlers.CompleteMFA)
+		if riskGuard != nil {
+			r.With(trustedAuthMutation).Post("/auth/step-up", riskGuard.Complete)
+		}
+		mountRegistrationSurfaces(r, registrationSurfaces, registrationHandlers, wechatRegistrationHandlers)
+		if registrationBlockHandlers != nil {
+			r.Group(func(r chi.Router) {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
+				r.Use(httpapi.RequireCSRF())
+				r.Post("/admin/registration-defense/blocks/revoke", registrationBlockHandlers.Revoke)
+			})
+		}
 		if legalHandlers != nil {
 			r.Get("/legal-documents", legalHandlers.List)
 		}
@@ -614,6 +1293,35 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			r.Get("/auth/providers", providerLoginHandlers.ListPublicProviders)
 			r.Get("/auth/providers/feishu/authorize", providerLoginHandlers.BeginFeishu)
 			r.Get("/auth/providers/feishu/callback", providerLoginHandlers.FeishuCallback)
+		}
+
+		// DreamUP administrator challenge routes exist only behind the master
+		// gate. With the default false value the whole namespace remains 404.
+		if adminStepUpHandlers != nil {
+			r.Group(func(r chi.Router) {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
+				r.Use(httpapi.RequireCSRF())
+				r.Get("/admin/step-up/challenge", adminStepUpHandlers.Challenge)
+				r.Post("/admin/step-up/enroll", adminStepUpHandlers.Enroll)
+				r.Post("/admin/step-up/verify", adminStepUpHandlers.Verify)
+				r.Post("/admin/step-up/rotate", adminStepUpHandlers.Rotate)
+			})
+		}
+		if dreamUPAdminHandlers != nil {
+			r.Group(func(r chi.Router) {
+				r.Use(dreamUPAdminHandlers.CORS)
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
+				r.Use(httpapi.RequireCSRF())
+				r.Route("/admin/dreamup", func(r chi.Router) {
+					dreamUPAdminHandlers.Mount(r)
+					if adminStepUpHandlers != nil {
+						r.Get("/step-up/challenge", adminStepUpHandlers.Challenge)
+						r.Post("/step-up/enroll", adminStepUpHandlers.Enroll)
+						r.Post("/step-up/verify", adminStepUpHandlers.Verify)
+						r.Post("/step-up/rotate", adminStepUpHandlers.Rotate)
+					}
+				})
+			})
 		}
 
 		// Logout requires session and CSRF.
@@ -684,23 +1392,64 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		r.Group(func(r chi.Router) {
 			if sessionSvc != nil {
 				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
-				r.Use(httpapi.RequireCSRF())
 			}
 			if userReader != nil && permResolver != nil {
-				accountHandlers := httpapi.NewAccountHandlers(userReader, permResolver)
+				accountHandlers := httpapi.NewAccountHandlers(userReader, permResolver, userWriter, cfg.AvatarDir)
 				if workforceRepo != nil {
-					accountHandlers = httpapi.NewAccountHandlers(userReader, permResolver, workforceRepo)
+					accountHandlers = httpapi.NewAccountHandlers(userReader, permResolver, userWriter, cfg.AvatarDir, workforceRepo)
 				}
 				r.Get("/me", accountHandlers.GetCurrentUser)
 				r.Get("/me/permissions", accountHandlers.GetPermissions)
+				r.Get("/media/avatars/{userId}", accountHandlers.ServeAvatar)
+
+				r.Group(func(r chi.Router) {
+					if sessionSvc != nil {
+						r.Use(httpapi.RequireCSRF())
+					}
+					if userWriter != nil {
+						r.Patch("/me/profile", accountHandlers.UpdateProfile)
+						r.With(miniProgramClient, httpapi.RequireNativeMiniProgramBearer()).Post("/me/miniprogram/profile", accountHandlers.UpdateProfileFromMiniProgram)
+						avatarUpload := http.HandlerFunc(accountHandlers.UploadAvatar)
+						if accountMutationHandlers != nil {
+							avatarUpload = httpapi.CompatibleAvatarUpload(avatarUpload, accountMutationHandlers.UploadAvatar)
+						}
+						r.Post("/me/avatar", avatarUpload)
+					}
+					if accountMutationHandlers != nil {
+						r.Patch("/me", accountMutationHandlers.UpdateProfile)
+						r.Post("/me/email-change-requests", accountMutationHandlers.RequestEmailChange)
+						r.Post("/me/email-change-requests/{requestId}/verify", accountMutationHandlers.VerifyEmailChange)
+						r.Post("/me/phone-change-requests", accountMutationHandlers.RequestPhoneChange)
+						r.Post("/me/phone-change-requests/{requestId}/verify", accountMutationHandlers.VerifyPhoneChange)
+					}
+				})
 			}
-			if accountMutationHandlers != nil {
-				r.Patch("/me", accountMutationHandlers.UpdateProfile)
-				r.Post("/me/avatar", accountMutationHandlers.UploadAvatar)
-				r.Post("/me/email-change-requests", accountMutationHandlers.RequestEmailChange)
-				r.Post("/me/email-change-requests/{requestId}/verify", accountMutationHandlers.VerifyEmailChange)
-				r.Post("/me/phone-change-requests", accountMutationHandlers.RequestPhoneChange)
-				r.Post("/me/phone-change-requests/{requestId}/verify", accountMutationHandlers.VerifyPhoneChange)
+		})
+
+		// Verified primary email changes are provider-owned and mirror back to
+		// the local identity only after the provider confirms the one-time code.
+		r.Group(func(r chi.Router) {
+			if sessionSvc != nil {
+				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))
+				r.Use(httpapi.RequireCSRF())
+			}
+			if accountContactHandlers != nil {
+				r.Post("/me/email-change", accountContactHandlers.BeginEmailChange)
+				r.Post("/me/email-change/verify", accountContactHandlers.VerifyEmailChange)
+			}
+			if phoneVerifyHandlers != nil {
+				r.Post("/me/phone-change", phoneVerifyHandlers.RequestPhoneChange)
+				r.Post("/me/phone-change/verify", phoneVerifyHandlers.VerifyPhoneChange)
+			}
+			if wechatHandlers != nil {
+				r.With(miniProgramClient, httpapi.RequireNativeMiniProgramBearer()).Post("/me/wechat/phone", wechatHandlers.BindPhone)
+			}
+			if dreamUPMobileHandlers != nil {
+				r.With(miniProgramClient, httpapi.RequireNativeMiniProgramBearer()).Post("/dreamup/mobile/assertions", dreamUPMobileHandlers.CreateAssertion)
+				r.With(miniProgramClient, httpapi.RequireNativeMiniProgramBearer()).Post("/dreamup/mobile/resume-upload-assertions", dreamUPMobileHandlers.CreateResumeUploadAssertion)
+			}
+			if qrAuthHandlers != nil {
+				r.With(miniProgramClient, httpapi.RequireNativeMiniProgramBearer()).Post("/auth/qr/challenges/{challengeId}/approve", qrAuthHandlers.Approve)
 			}
 		})
 
@@ -878,17 +1627,33 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		WriteTimeout:      cfg.WriteTimeout,
 		IdleTimeout:       cfg.IdleTimeout,
 	}
+	if wechatIntentCleanup != nil {
+		wechatIntentCleanup.Start()
+		workerStops = append(workerStops, wechatIntentCleanup.Stop)
+	}
+	if wechatOnboardingCleanup != nil {
+		wechatOnboardingCleanup.Start()
+		workerStops = append(workerStops, wechatOnboardingCleanup.Stop)
+	}
+	if wechatNotificationWorker != nil {
+		wechatNotificationWorker.Start()
+		workerStops = append(workerStops, wechatNotificationWorker.Stop)
+	}
 
-	return &Server{
-		HTTP:           srv,
-		Router:         router,
-		logger:         logger,
-		config:         cfg,
-		pool:           pool,
-		redisClient:    redisClient,
-		providerCloser: providerCloser,
-		workerStops:    workerStops,
-	}, nil
+	server := &Server{
+		HTTP:              srv,
+		Router:            router,
+		logger:            logger,
+		config:            cfg,
+		pool:              pool,
+		isolatedPool:      isolatedPool,
+		redisClient:       redisClient,
+		providerCloser:    providerCloser,
+		dreamUPAuthorizer: dreamUPAuthorizer,
+		workerStops:       workerStops,
+	}
+	isolatedPoolTransferred = true
+	return server, nil
 }
 
 // buildAuthenticator selects the authentication provider implementation.
@@ -968,6 +1733,53 @@ func newSessionEncryptor(cfg config.Config) (session.Encryptor, error) {
 	return enc, nil
 }
 
+// newWeChatOnboardingEncryptor constructs the dedicated AEAD boundary for
+// short-lived onboarding and MFA challenges. It is intentionally unavailable
+// while the feature is disabled, and it refuses session-key reuse even when
+// the same key bytes are supplied through a different base64 representation.
+func newWeChatOnboardingEncryptor(cfg config.Config) (session.Encryptor, error) {
+	if !cfg.WeChatMiniProgram.OnboardingEnabled {
+		return nil, nil
+	}
+	keyB64 := cfg.WeChatMiniProgram.OnboardingEncryptionKey
+	keyID := cfg.WeChatMiniProgram.OnboardingEncryptionKeyID
+	if keyB64 == "" || strings.TrimSpace(keyID) == "" {
+		return nil, errors.New("dedicated key and key ID are required")
+	}
+	if keyID != strings.TrimSpace(keyID) || strings.Contains(keyID, ":") {
+		return nil, errors.New("key ID must be non-empty, trimmed and must not contain ':'")
+	}
+	onboardingKey, err := base64.StdEncoding.DecodeString(keyB64)
+	if err != nil {
+		return nil, errors.New("key must be base64-encoded")
+	}
+	if len(onboardingKey) != 32 {
+		return nil, fmt.Errorf("key must decode to 32 bytes, got %d", len(onboardingKey))
+	}
+	if cfg.Session.EncryptionKey != "" {
+		sessionKey, sessionErr := base64.StdEncoding.DecodeString(cfg.Session.EncryptionKey)
+		if sessionErr == nil && bytes.Equal(onboardingKey, sessionKey) {
+			return nil, errors.New("key material must be distinct from the session encryption key")
+		}
+	}
+	retained, err := config.ParseWeChatOnboardingRetainedDecryptionKeys(cfg.WeChatMiniProgram.OnboardingRetainedDecryptionKeys)
+	if err != nil {
+		return nil, errors.New("retained decryption keyring is invalid")
+	}
+	if cfg.Session.EncryptionKey != "" {
+		sessionKey, sessionErr := base64.StdEncoding.DecodeString(cfg.Session.EncryptionKey)
+		if sessionErr == nil {
+			for _, retainedKeyB64 := range retained {
+				retainedKey, decodeErr := base64.StdEncoding.DecodeString(retainedKeyB64)
+				if decodeErr == nil && bytes.Equal(retainedKey, sessionKey) {
+					return nil, errors.New("retained key material must be distinct from the session encryption key")
+				}
+			}
+		}
+	}
+	return session.NewAESGCMKeyring(keyB64, keyID, retained)
+}
+
 // Run starts the HTTP server. It blocks until the server stops accepting
 // connections and returns the resulting error.
 func (s *Server) Run() error {
@@ -988,12 +1800,10 @@ func (s *Server) Run() error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(ctx, s.config.ShutdownTimeout)
 	defer cancel()
-	var shutdownErrors []error
 
 	s.logger.Info("http server shutting down", "timeout", s.config.ShutdownTimeout.String())
 	if err := s.HTTP.Shutdown(shutdownCtx); err != nil {
 		s.logger.Error("graceful shutdown failed", "error", err)
-		shutdownErrors = append(shutdownErrors, fmt.Errorf("http shutdown: %w", err))
 	}
 
 	// Stop background workers before their infrastructure (Redis) closes.
@@ -1004,23 +1814,24 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.redisClient != nil {
 		if err := s.redisClient.Close(); err != nil {
 			s.logger.Error("redis close failed", "error", err)
-			shutdownErrors = append(shutdownErrors, fmt.Errorf("redis close: %w", err))
 		}
 	}
 
 	if s.providerCloser != nil {
 		if err := s.providerCloser.Close(); err != nil {
 			s.logger.Error("authentication provider close failed", "error", err)
-			shutdownErrors = append(shutdownErrors, fmt.Errorf("authentication provider close: %w", err))
 		}
 	}
 
 	if s.pool != nil {
 		s.pool.Close()
 	}
+	if s.isolatedPool != nil {
+		s.isolatedPool.Close()
+	}
 
 	s.logger.Info("http server stopped")
-	return errors.Join(shutdownErrors...)
+	return nil
 }
 
 // Config returns the loaded configuration.
@@ -1033,6 +1844,58 @@ func (s *Server) Config() config.Config { return s.config }
 // no application/client references, so those columns stay empty.
 type sessionSecurityAuditor struct {
 	store *postgres.SecurityEventStore
+}
+
+type registrationAbuseAuditor struct {
+	store *postgres.SecurityEventStore
+}
+
+// accountContactEmailValidator translates the registration delivery policy's
+// narrow error contract into accountcontact's domain errors. Both flows share
+// the same cached domain/MX validator instance without coupling the two domain
+// packages to one another.
+type accountContactEmailValidator struct {
+	inner registration.EmailValidator
+}
+
+func (v *accountContactEmailValidator) Validate(ctx context.Context, email string) error {
+	if v == nil || v.inner == nil {
+		return accountcontact.ErrUnavailable
+	}
+	if err := v.inner.Validate(ctx, email); err != nil {
+		if errors.Is(err, registration.ErrInvalidInput) {
+			return accountcontact.ErrInvalidInput
+		}
+		return accountcontact.ErrUnavailable
+	}
+	return nil
+}
+
+func newRegistrationAbuseAuditor(store *postgres.SecurityEventStore) *registrationAbuseAuditor {
+	return &registrationAbuseAuditor{store: store}
+}
+
+func (a *registrationAbuseAuditor) RecordRegistrationAbuse(ctx context.Context, event registration.AbuseAuditEvent) error {
+	if a == nil || a.store == nil {
+		return registration.ErrUnavailable
+	}
+	extra := map[string]string{
+		"reason":                   event.Reason.String(),
+		"client_ip_hash":           event.Fingerprint.ClientIPHash,
+		"client_ip_block_eligible": strconv.FormatBool(event.Fingerprint.ClientIPBlockEligible),
+		"user_agent_hash":          event.Fingerprint.UserAgentHash,
+		"ip_strike_count":          strconv.Itoa(event.Disposition.IPStrikeCount),
+		"ip_blocked":               strconv.FormatBool(event.Disposition.IPBlocked),
+		"long_ip_block":            strconv.FormatBool(event.Disposition.LongIPBlock),
+	}
+	if event.Fingerprint.DeviceIDHash != "" {
+		extra["device_id_hash"] = event.Fingerprint.DeviceIDHash
+	}
+	return a.store.Record(ctx, applications.SecurityEvent{
+		EventID: applications.NewSecurityEventID(), EventType: "registration.honeypot_triggered",
+		RequestID: event.RequestID, Operation: "registration.create", Result: applications.SecurityEventDenied,
+		TargetKey: "client_ip_hash", TargetID: event.Fingerprint.ClientIPHash, Extra: extra, OccurredAt: event.OccurredAt,
+	})
 }
 
 func newSessionSecurityAuditor(store *postgres.SecurityEventStore) *sessionSecurityAuditor {
@@ -1055,6 +1918,45 @@ type reauthSecurityAuditor struct {
 	store *postgres.SecurityEventStore
 }
 
+type qrAuthSecurityAuditor struct {
+	store *postgres.SecurityEventStore
+}
+
+func newQRAuthSecurityAuditor(store *postgres.SecurityEventStore) *qrAuthSecurityAuditor {
+	return &qrAuthSecurityAuditor{store: store}
+}
+
+func (a *qrAuthSecurityAuditor) RecordQRAuthEvent(ctx context.Context, event httpapi.QRAuthAuditEvent) error {
+	if a == nil || a.store == nil || event.ChallengeReference == "" {
+		return errors.New("QR authentication audit unavailable")
+	}
+	var eventType string
+	switch event.EventType {
+	case "qr_login.approval_requested":
+		eventType = applications.EventQRLoginApprovalRequested
+	case "qr_login.receiver_verified":
+		eventType = applications.EventQRLoginReceiverVerified
+	case "qr_login.receiver_rejected":
+		eventType = applications.EventQRLoginReceiverRejected
+	default:
+		return errors.New("unknown QR authentication audit event")
+	}
+	var result applications.SecurityEventResult
+	switch event.Result {
+	case "success":
+		result = applications.SecurityEventSuccess
+	case "denied":
+		result = applications.SecurityEventDenied
+	default:
+		return errors.New("invalid QR authentication audit result")
+	}
+	requestID := event.RequestID
+	if requestID == "" {
+		requestID = request.ID(ctx)
+	}
+	return a.store.Record(ctx, applications.SecurityEvent{EventID: applications.NewSecurityEventID(), EventType: eventType, ActorUserID: event.ActorUserID, RequestID: requestID, Operation: event.Operation, Result: result, FailureClass: event.FailureClass, TargetKey: "qr_challenge_hash", TargetID: event.ChallengeReference, OccurredAt: time.Now().UTC()})
+}
+
 func newReauthSecurityAuditor(store *postgres.SecurityEventStore) *reauthSecurityAuditor {
 	return &reauthSecurityAuditor{store: store}
 }
@@ -1062,11 +1964,11 @@ func newReauthSecurityAuditor(store *postgres.SecurityEventStore) *reauthSecurit
 func (a *reauthSecurityAuditor) RecordEvent(ctx context.Context, eventType string,
 	actor identity.UserID, appID applications.ApplicationID, clientID applications.OAuthClientID,
 	requestID, operation string, result applications.SecurityEventResult, failureClass string,
-) {
+) error {
 	if a == nil || a.store == nil {
-		return
+		return errors.New("reauth security audit unavailable")
 	}
-	_ = a.store.Record(ctx, applications.SecurityEvent{
+	return a.store.Record(ctx, applications.SecurityEvent{
 		EventID: applications.NewSecurityEventID(), EventType: eventType,
 		ActorUserID: actor, ApplicationID: appID, ClientID: clientID,
 		RequestID: requestID, Operation: operation, Result: result,

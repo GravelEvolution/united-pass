@@ -189,7 +189,7 @@ func (s *Service) EvaluatePromotion(ctx context.Context, userID identity.UserID,
 // AllowSensitiveConsumption validates the consumption of a sensitive
 // capability (reauth grant, enrollment token) stamped with stampedEpoch
 // against the user's authoritative state (ADR-0007 Decision 5, two-phase
-// barrier): the stamp must not be behind the current epoch, and no
+// barrier): the stamp must exactly equal the current epoch, and no
 // non-terminal intent may exist — sensitive consumption stays denied until
 // settled in every barrier phase. Lookup failures fail closed.
 func (s *Service) AllowSensitiveConsumption(ctx context.Context, userID identity.UserID, stampedEpoch Epoch) error {
@@ -197,7 +197,7 @@ func (s *Service) AllowSensitiveConsumption(ctx context.Context, userID identity
 	if err != nil {
 		return fmt.Errorf("securitystate: consumption gate state read: %w", err)
 	}
-	if stampedEpoch < state.Epoch {
+	if stampedEpoch != state.Epoch {
 		return ErrEpochStale
 	}
 	if BarrierSensitive(state) {

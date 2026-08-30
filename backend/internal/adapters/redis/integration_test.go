@@ -9,23 +9,17 @@
 //go:build integration
 
 // Redis integration tests verify session store, MFA store, and rate limiter
-// behavior against a real Redis instance. These tests require UP_TEST_REDIS_URL
-// and UP_TEST_REDIS_KEY_PREFIX to be set; they skip when the variables are
-// absent. They never run FLUSHALL or FLUSHDB, and only delete keys under the
-// configured test prefix.
-//
-// Run locally (through the SSH tunnel managed by scripts/tunnel.sh):
-//
-//	UP_TEST_REDIS_URL=redis://:password@127.0.0.1:16379/1 \
-//	UP_TEST_REDIS_KEY_PREFIX=up:test: \
-//	go test -tags integration ./internal/adapters/redis/...
-//
-// Never point these tests at a public network endpoint with plaintext. The
-// tunnel keeps plaintext traffic on the loopback interface only.
+// behavior against the disposable instance created by the local integration
+// matrix. A per-run ownership token, exact loopback port/database and exact
+// namespace are mandatory; missing or shared configuration fails before any
+// connection is opened. Cleanup never runs FLUSHALL or FLUSHDB.
 package redis
 
 import (
+	"bytes"
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -36,21 +30,100 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
+	"github.com/GravelEvolution/united-pass/backend/internal/adminstepup"
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/integrationboundary"
+	"github.com/GravelEvolution/united-pass/backend/internal/qrauth"
+	"github.com/GravelEvolution/united-pass/backend/internal/registration"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
+
+const (
+	testRedisRunTokenBytes = 16
+	maxTestRedisPrefixLen  = 128
+)
+
+var (
+	testRedisRunTokenOnce  sync.Once
+	testRedisRunTokenValue string
+	testRedisRunTokenErr   error
+)
+
+func TestMain(m *testing.M) {
+	if err := integrationboundary.ValidateRedis(
+		os.Getenv("UP_TEST_REDIS_URL"),
+		os.Getenv("UP_TEST_REDIS_KEY_PREFIX"),
+		os.Getenv(integrationboundary.RunTokenEnvironment),
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "Redis integration boundary rejected:", err)
+		os.Exit(2)
+	}
+	os.Exit(m.Run())
+}
+
+func TestIntegration_AdminChallengeRateLimiter(t *testing.T) {
+	client := setupTestRedis(t)
+	keyring, err := adminstepup.NewKeyring("rate-1", map[string][]byte{"rate-1": bytes.Repeat([]byte{0x71}, 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limiter, err := NewAdminChallengeRateLimiter(client, keyring, 2, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := limiter.Check(ctx, "user_1", "ip-a|ua-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := limiter.Check(ctx, "user_1", "ip-b|ua-b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := limiter.Check(ctx, "user_1", "ip-c|ua-c"); !errors.Is(err, adminstepup.ErrRateLimited) {
+		t.Fatalf("changed client reset immutable user counter: %v", err)
+	}
+
+	// A shared client has its own budget across distinct users.
+	limiter2, err := NewAdminChallengeRateLimiter(client, keyring, 2, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := limiter2.Check(ctx, "user_10", "shared-client"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := limiter2.Check(ctx, "user_11", "shared-client"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := limiter2.Check(ctx, "user_12", "shared-client"); !errors.Is(err, adminstepup.ErrRateLimited) {
+		t.Fatalf("many users bypassed client counter: %v", err)
+	}
+
+	keys, _, err := client.RDB().Scan(ctx, 0, client.KeyPrefix()+adminChallengeRateSegment+"*", 100).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(keys, " ")
+	for _, raw := range []string{"user_1", "shared-client", "ip-a", "ua-a"} {
+		if strings.Contains(joined, raw) {
+			t.Fatalf("raw identifier leaked into redis key: %q", raw)
+		}
+	}
+}
 
 func mustLoadTestRedisConfig(t *testing.T) config.RedisConfig {
 	t.Helper()
 	url := os.Getenv("UP_TEST_REDIS_URL")
 	prefix := os.Getenv("UP_TEST_REDIS_KEY_PREFIX")
-	if prefix == "" {
-		prefix = "up:test:"
+	if err := integrationboundary.ValidateRedis(url, prefix, os.Getenv(integrationboundary.RunTokenEnvironment)); err != nil {
+		t.Fatalf("Redis integration boundary rejected: %v", err)
 	}
-	if url == "" {
-		t.Skip("UP_TEST_REDIS_URL not set; skipping Redis integration tests")
+	if err := validateTestRedisPrefix(prefix, os.Getenv("UP_REDIS_KEY_PREFIX")); err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := isolatedTestRedisPrefix(prefix)
+	if err != nil {
+		t.Fatalf("create isolated Redis test namespace: %v", err)
 	}
 	return config.RedisConfig{
 		URL:       url,
@@ -59,8 +132,409 @@ func mustLoadTestRedisConfig(t *testing.T) config.RedisConfig {
 	}
 }
 
+func isolatedTestRedisPrefix(basePrefix string) (string, error) {
+	if err := validateTestRedisPrefix(basePrefix, ""); err != nil {
+		return "", err
+	}
+	runToken, err := testRedisRunToken()
+	if err != nil {
+		return "", err
+	}
+	namespace := basePrefix + "run:" + runToken + ":"
+	if len(namespace) > maxTestRedisPrefixLen {
+		return "", errors.New("random Redis integration namespace exceeds the maximum prefix length")
+	}
+	return namespace, nil
+}
+
+func testRedisRunToken() (string, error) {
+	testRedisRunTokenOnce.Do(func() {
+		value := make([]byte, testRedisRunTokenBytes)
+		if _, err := cryptorand.Read(value); err != nil {
+			testRedisRunTokenErr = fmt.Errorf("read cryptographic randomness: %w", err)
+			return
+		}
+		testRedisRunTokenValue = hex.EncodeToString(value)
+	})
+	return testRedisRunTokenValue, testRedisRunTokenErr
+}
+
+func validateCleanupTestRedisPrefix(prefix, runToken string) error {
+	if len(prefix) > maxTestRedisPrefixLen {
+		return errors.New("Redis integration cleanup namespace is too long")
+	}
+	decoded, err := hex.DecodeString(runToken)
+	if err != nil || len(decoded) != testRedisRunTokenBytes || runToken != strings.ToLower(runToken) {
+		return errors.New("Redis integration cleanup token is invalid")
+	}
+	suffix := "run:" + runToken + ":"
+	if !strings.HasSuffix(prefix, suffix) {
+		return errors.New("Redis integration cleanup requires the exact random run namespace")
+	}
+	basePrefix := strings.TrimSuffix(prefix, suffix)
+	if err := validateTestRedisPrefix(basePrefix, ""); err != nil {
+		return fmt.Errorf("Redis integration cleanup namespace is invalid: %w", err)
+	}
+	return nil
+}
+
+func exactCleanupTestRedisPrefix(clientPrefix, basePrefix, runToken string) (string, error) {
+	if err := validateTestRedisPrefix(basePrefix, ""); err != nil {
+		return "", err
+	}
+	expected := basePrefix + "run:" + runToken + ":"
+	if err := validateCleanupTestRedisPrefix(expected, runToken); err != nil {
+		return "", err
+	}
+	if clientPrefix != expected {
+		return "", fmt.Errorf("Redis client namespace %q does not match exact cleanup namespace %q", clientPrefix, expected)
+	}
+	return expected, nil
+}
+
+func exactTestCleanupKeys(keys []string, namespace string) ([]string, error) {
+	for _, key := range keys {
+		if !strings.HasPrefix(key, namespace) {
+			return nil, fmt.Errorf("Redis cleanup key escaped exact test namespace: %q", key)
+		}
+	}
+	return keys, nil
+}
+
+func validateTestRedisPrefix(prefix, productionPrefix string) error {
+	// Backslash is a Redis glob escape and is therefore just as unsafe as a
+	// wildcard in the SCAN pattern used by cleanupTestKeys.
+	if prefix != strings.TrimSpace(prefix) || len(prefix) < 8 || len(prefix) > maxTestRedisPrefixLen || !strings.HasSuffix(prefix, ":") || strings.ContainsAny(prefix, "*?[]\\ \t\r\n") {
+		return errors.New("UP_TEST_REDIS_KEY_PREFIX must be an explicit, glob-free, colon-terminated dedicated namespace")
+	}
+	if productionPrefix != "" && (strings.HasPrefix(prefix, productionPrefix) || strings.HasPrefix(productionPrefix, prefix)) {
+		return errors.New("UP_TEST_REDIS_KEY_PREFIX must not overlap UP_REDIS_KEY_PREFIX")
+	}
+	return nil
+}
+
+func TestIntegration_RedisPrefixRejectsGlobEscape(t *testing.T) {
+	if err := validateTestRedisPrefix("up:test\\foo:", ""); err == nil {
+		t.Fatal("Redis glob escape accepted in destructive-cleanup prefix")
+	}
+	if err := validateTestRedisPrefix("up:test:qr:", "up:production:"); err != nil {
+		t.Fatalf("dedicated literal prefix rejected: %v", err)
+	}
+	for name, prefixes := range map[string][2]string{
+		"test ancestor": {"up:test:", "up:test:production:"},
+		"test child":    {"up:test:integration:", "up:test:"},
+		"equal":         {"up:test:", "up:test:"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateTestRedisPrefix(prefixes[0], prefixes[1]); err == nil {
+				t.Fatalf("overlapping test=%q production=%q prefixes accepted", prefixes[0], prefixes[1])
+			}
+		})
+	}
+}
+
+func TestIntegration_RedisCleanupRequiresExactRandomNamespace(t *testing.T) {
+	runToken := strings.Repeat("a", testRedisRunTokenBytes*2)
+	exactNamespace := "up:test:run:" + runToken + ":"
+	if err := validateCleanupTestRedisPrefix(exactNamespace, runToken); err != nil {
+		t.Fatalf("exact random namespace rejected: %v", err)
+	}
+	for name, prefix := range map[string]string{
+		"ancestor base":   "up:test:",
+		"ancestor run":    "up:test:run:",
+		"child namespace": exactNamespace + "child:",
+		"wrong token":     "up:test:run:" + strings.Repeat("b", testRedisRunTokenBytes*2) + ":",
+		"glob namespace":  "up:*:run:" + runToken + ":",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateCleanupTestRedisPrefix(prefix, runToken); err == nil {
+				t.Fatalf("unsafe cleanup prefix %q accepted", prefix)
+			}
+		})
+	}
+	for name, token := range map[string]string{
+		"short":   strings.Repeat("a", testRedisRunTokenBytes*2-2),
+		"non-hex": strings.Repeat("z", testRedisRunTokenBytes*2),
+		"upper":   strings.Repeat("A", testRedisRunTokenBytes*2),
+	} {
+		t.Run("token "+name, func(t *testing.T) {
+			if err := validateCleanupTestRedisPrefix(exactNamespace, token); err == nil {
+				t.Fatalf("invalid cleanup token %q accepted", token)
+			}
+		})
+	}
+
+	keys := []string{exactNamespace + "session:one", exactNamespace + "rate:two"}
+	if _, err := exactTestCleanupKeys(keys, exactNamespace); err != nil {
+		t.Fatalf("in-namespace cleanup keys rejected: %v", err)
+	}
+	if _, err := exactTestCleanupKeys(
+		append(keys, "up:test:production:session:do-not-delete"),
+		exactNamespace,
+	); err == nil {
+		t.Fatal("out-of-namespace cleanup key was accepted")
+	}
+	if _, err := exactCleanupTestRedisPrefix(exactNamespace, "up:test:", runToken); err != nil {
+		t.Fatalf("exact client/base cleanup binding rejected: %v", err)
+	}
+	if _, err := exactCleanupTestRedisPrefix(
+		"up:production:run:"+runToken+":",
+		"up:test:",
+		runToken,
+	); err == nil {
+		t.Fatal("foreign client namespace was accepted for cleanup")
+	}
+}
+
+func TestIntegration_RedisPrefixDerivesProcessRandomNamespace(t *testing.T) {
+	const basePrefix = "up:test:"
+	runToken, err := testRedisRunToken()
+	if err != nil {
+		t.Fatalf("create random run token: %v", err)
+	}
+	if len(runToken) != testRedisRunTokenBytes*2 {
+		t.Fatalf("run token length=%d, want %d hex characters", len(runToken), testRedisRunTokenBytes*2)
+	}
+	prefix, err := isolatedTestRedisPrefix(basePrefix)
+	if err != nil {
+		t.Fatalf("derive random test namespace: %v", err)
+	}
+	want := basePrefix + "run:" + runToken + ":"
+	if prefix != want {
+		t.Fatalf("derived namespace=%q, want exact process namespace %q", prefix, want)
+	}
+	if err := validateCleanupTestRedisPrefix(prefix, runToken); err != nil {
+		t.Fatalf("derived namespace is not cleanup-safe: %v", err)
+	}
+	tooLongBase := strings.Repeat("x", maxTestRedisPrefixLen-len("run:"+runToken+":")) + ":"
+	if _, err := isolatedTestRedisPrefix(tooLongBase); err == nil {
+		t.Fatal("oversized derived namespace was accepted")
+	}
+}
+
+func TestIntegration_QRAuthCreateApproveWrongReceiverAndDuplicateTransitions(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewQRAuthStore(client)
+	ctx := context.Background()
+	challengeHash := strings.Repeat("a", 64)
+	receiverHash := strings.Repeat("b", 64)
+	const challengeTTL = 4 * time.Second
+	if err := store.Create(ctx, challengeHash, receiverHash, challengeTTL); err != nil {
+		t.Fatalf("create challenge: %v", err)
+	}
+	key := client.buildKey(qrAuthChallengeSegment, challengeHash)
+	if !strings.HasPrefix(key, client.KeyPrefix()) {
+		t.Fatalf("QR key escaped dedicated prefix: %q", key)
+	}
+	createdTTL, err := client.rdb.PTTL(ctx, key).Result()
+	if err != nil || createdTTL < 3*time.Second || createdTTL > challengeTTL {
+		t.Fatalf("challenge TTL=%v err=%v, want [3s,%v]", createdTTL, err, challengeTTL)
+	}
+	if _, err := store.Consume(ctx, challengeHash, receiverHash); !errors.Is(err, qrauth.ErrPending) {
+		t.Fatalf("pre-approval consume error=%v", err)
+	}
+	if err := store.Approve(ctx, challengeHash, identity.UserID("user_qr_1")); err != nil {
+		t.Fatalf("approve challenge: %v", err)
+	}
+	approvedTTL, err := client.rdb.PTTL(ctx, key).Result()
+	if err != nil || approvedTTL <= 0 || approvedTTL > createdTTL {
+		t.Fatalf("approved TTL=%v err=%v, want positive and no greater than pre-approval %v", approvedTTL, err, createdTTL)
+	}
+	if err := store.Approve(ctx, challengeHash, identity.UserID("user_qr_2")); !errors.Is(err, qrauth.ErrConsumed) {
+		t.Fatalf("duplicate approval error=%v", err)
+	}
+	if _, err := store.Consume(ctx, challengeHash, strings.Repeat("c", 64)); !errors.Is(err, qrauth.ErrDenied) {
+		t.Fatalf("wrong receiver error=%v", err)
+	}
+	// The wrong receiver must not consume or rewrite the approved terminal
+	// value; the original receiver remains the sole successful consumer.
+	userID, err := store.Consume(ctx, challengeHash, receiverHash)
+	if err != nil || userID != "user_qr_1" {
+		t.Fatalf("correct receiver user=%q err=%v", userID, err)
+	}
+	if _, err := store.Consume(ctx, challengeHash, receiverHash); !errors.Is(err, qrauth.ErrNotFound) {
+		t.Fatalf("duplicate consume error=%v", err)
+	}
+}
+
+func TestIntegration_QRAuthConcurrentApproveHasExactlyOneWinner(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewQRAuthStore(client)
+	ctx := context.Background()
+	challengeHash := strings.Repeat("1", 64)
+	receiverHash := strings.Repeat("2", 64)
+	if err := store.Create(ctx, challengeHash, receiverHash, 4*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	const approvers = 16
+	type approvalResult struct {
+		userID identity.UserID
+		err    error
+	}
+	results := make(chan approvalResult, approvers)
+	var wait sync.WaitGroup
+	wait.Add(approvers)
+	for index := range approvers {
+		go func() {
+			defer wait.Done()
+			userID := identity.UserID(fmt.Sprintf("user_qr_approver_%d", index))
+			results <- approvalResult{userID: userID, err: store.Approve(ctx, challengeHash, userID)}
+		}()
+	}
+	wait.Wait()
+	close(results)
+
+	winners, consumed := make([]identity.UserID, 0, 1), 0
+	for result := range results {
+		switch {
+		case result.err == nil:
+			winners = append(winners, result.userID)
+		case errors.Is(result.err, qrauth.ErrConsumed):
+			consumed++
+		default:
+			t.Fatalf("unexpected concurrent approval error: %v", result.err)
+		}
+	}
+	if len(winners) != 1 || consumed != approvers-1 {
+		t.Fatalf("approval winners=%d consumed=%d, want 1/%d", len(winners), consumed, approvers-1)
+	}
+	userID, err := store.Consume(ctx, challengeHash, receiverHash)
+	if err != nil || userID != winners[0] {
+		t.Fatalf("approved winner user=%q want=%q err=%v", userID, winners[0], err)
+	}
+}
+
+func TestIntegration_QRAuthConcurrentConsumeHasExactlyOneWinner(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewQRAuthStore(client)
+	ctx := context.Background()
+	challengeHash := strings.Repeat("d", 64)
+	receiverHash := strings.Repeat("e", 64)
+	if err := store.Create(ctx, challengeHash, receiverHash, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Approve(ctx, challengeHash, identity.UserID("user_qr_winner")); err != nil {
+		t.Fatal(err)
+	}
+	const consumers = 16
+	results := make(chan error, consumers)
+	var wait sync.WaitGroup
+	wait.Add(consumers)
+	for range consumers {
+		go func() {
+			defer wait.Done()
+			userID, err := store.Consume(ctx, challengeHash, receiverHash)
+			if err == nil && userID != "user_qr_winner" {
+				err = fmt.Errorf("unexpected winner user %q", userID)
+			}
+			results <- err
+		}()
+	}
+	wait.Wait()
+	close(results)
+	winners, missing := 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, qrauth.ErrNotFound):
+			missing++
+		default:
+			t.Fatalf("unexpected concurrent consume error: %v", err)
+		}
+	}
+	if winners != 1 || missing != consumers-1 {
+		t.Fatalf("winners=%d missing=%d, want 1/%d", winners, missing, consumers-1)
+	}
+}
+
+func TestIntegration_QRAuthChallengeTTLExpiresWithoutApprovalOrConsumption(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewQRAuthStore(client)
+	ctx := context.Background()
+	challengeHash := strings.Repeat("f", 64)
+	receiverHash := strings.Repeat("0", 64)
+	const challengeTTL = 2 * time.Second
+	if err := store.Create(ctx, challengeHash, receiverHash, challengeTTL); err != nil {
+		t.Fatal(err)
+	}
+	key := client.buildKey(qrAuthChallengeSegment, challengeHash)
+	createdTTL, err := client.rdb.PTTL(ctx, key).Result()
+	if err != nil || createdTTL < time.Second || createdTTL > challengeTTL {
+		t.Fatalf("challenge TTL=%v err=%v, want [1s,%v]", createdTTL, err, challengeTTL)
+	}
+	deadline := time.Now().Add(challengeTTL + time.Second)
+	for {
+		exists, err := client.rdb.Exists(ctx, key).Result()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exists == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("QR challenge did not expire within the bounded deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := store.Approve(ctx, challengeHash, identity.UserID("user_qr_expired")); !errors.Is(err, qrauth.ErrNotFound) {
+		t.Fatalf("expired approval error=%v", err)
+	}
+	if _, err := store.Consume(ctx, challengeHash, receiverHash); !errors.Is(err, qrauth.ErrNotFound) {
+		t.Fatalf("expired consume error=%v", err)
+	}
+}
+
+func TestIntegration_QRAuthApprovedChallengeKeepsOriginalDeadline(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewQRAuthStore(client)
+	ctx := context.Background()
+	challengeHash := strings.Repeat("3", 64)
+	receiverHash := strings.Repeat("4", 64)
+	const challengeTTL = 2 * time.Second
+	createdAt := time.Now()
+	if err := store.Create(ctx, challengeHash, receiverHash, challengeTTL); err != nil {
+		t.Fatal(err)
+	}
+	key := client.buildKey(qrAuthChallengeSegment, challengeHash)
+	beforeApproval, err := client.rdb.PTTL(ctx, key).Result()
+	if err != nil || beforeApproval < time.Second || beforeApproval > challengeTTL {
+		t.Fatalf("pre-approval TTL=%v err=%v, want [1s,%v]", beforeApproval, err, challengeTTL)
+	}
+	if err := store.Approve(ctx, challengeHash, identity.UserID("user_qr_ttl")); err != nil {
+		t.Fatal(err)
+	}
+	afterApproval, err := client.rdb.PTTL(ctx, key).Result()
+	if err != nil || afterApproval <= 0 || afterApproval > beforeApproval {
+		t.Fatalf("post-approval TTL=%v err=%v, want positive and no greater than %v", afterApproval, err, beforeApproval)
+	}
+
+	deadline := createdAt.Add(challengeTTL + time.Second)
+	for {
+		exists, err := client.rdb.Exists(ctx, key).Result()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exists == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("approved QR challenge outlived its original TTL deadline")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := store.Approve(ctx, challengeHash, identity.UserID("user_qr_ttl_retry")); !errors.Is(err, qrauth.ErrNotFound) {
+		t.Fatalf("expired approved challenge approval error=%v", err)
+	}
+	if _, err := store.Consume(ctx, challengeHash, receiverHash); !errors.Is(err, qrauth.ErrNotFound) {
+		t.Fatalf("expired approved challenge consume error=%v", err)
+	}
+}
+
 func setupTestRedis(t *testing.T) *Client {
 	t.Helper()
+	basePrefix := os.Getenv("UP_TEST_REDIS_KEY_PREFIX")
 	cfg := mustLoadTestRedisConfig(t)
 	client, err := NewClient(cfg)
 	if err != nil {
@@ -74,27 +548,36 @@ func setupTestRedis(t *testing.T) *Client {
 		t.Fatalf("ping redis: %v", err)
 	}
 
-	// A killed test process cannot run t.Cleanup. Clear only the dedicated
-	// integration prefix before each test so stale enrollment/claim leases do
-	// not turn a fresh run into a false concurrency failure.
-	cleanupTestKeys(t, client, cfg.KeyPrefix)
+	// A failed test can leave keys for a later test in this process. Clear only
+	// this process's exact random namespace before each test; never sweep an
+	// ancestor prefix to recover artifacts from an earlier process.
+	cleanupTestKeys(t, client, basePrefix)
 
 	// Clean up: delete only keys under the test prefix. Never FLUSHALL or
 	// FLUSHDB.
 	t.Cleanup(func() {
-		cleanupTestKeys(t, client, cfg.KeyPrefix)
+		cleanupTestKeys(t, client, basePrefix)
 		_ = client.Close()
 	})
 
 	return client
 }
 
-// cleanupTestKeys deletes all keys matching the test prefix pattern. It uses
-// SCAN to find keys (never KEYS, which blocks) and deletes them in batches.
-// This is the only destructive operation in the integration tests, and it is
-// scoped to the test prefix.
-func cleanupTestKeys(t *testing.T, client *Client, prefix string) {
+// cleanupTestKeys derives and verifies this process's exact random namespace,
+// then uses SCAN to find its keys (never KEYS, which blocks) and deletes them
+// in batches. This is the only destructive operation in the integration tests;
+// an ancestor, child, sibling, globbed, or foreign-run namespace is rejected
+// before Redis is queried.
+func cleanupTestKeys(t *testing.T, client *Client, basePrefix string) {
 	t.Helper()
+	runToken, err := testRedisRunToken()
+	if err != nil {
+		t.Fatalf("load Redis integration cleanup token: %v", err)
+	}
+	prefix, err := exactCleanupTestRedisPrefix(client.KeyPrefix(), basePrefix, runToken)
+	if err != nil {
+		t.Fatalf("refusing unsafe Redis integration cleanup: %v", err)
+	}
 	ctx := context.Background()
 	rdb := client.RDB()
 
@@ -102,12 +585,15 @@ func cleanupTestKeys(t *testing.T, client *Client, prefix string) {
 	for {
 		keys, nextCursor, err := rdb.Scan(ctx, cursor, prefix+"*", 100).Result()
 		if err != nil {
-			t.Logf("cleanup scan error: %v", err)
-			return
+			t.Fatalf("cleanup scan error: %v", err)
+		}
+		keys, err = exactTestCleanupKeys(keys, prefix)
+		if err != nil {
+			t.Fatalf("refusing out-of-namespace Redis cleanup: %v", err)
 		}
 		if len(keys) > 0 {
 			if err := rdb.Del(ctx, keys...).Err(); err != nil {
-				t.Logf("cleanup delete error: %v", err)
+				t.Fatalf("cleanup delete error: %v", err)
 			}
 		}
 		cursor = nextCursor
@@ -118,6 +604,164 @@ func cleanupTestKeys(t *testing.T, client *Client, prefix string) {
 }
 
 // --- Session Store Tests ---
+
+func TestIntegration_RegistrationStoreHashesTokenAndSeparatesRateBudgets(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewRegistrationStore(client)
+	ctx := context.Background()
+	const rawToken = "raw-registration-secret"
+	want := registration.TokenRecord{UserID: "user_0123456789abcdef0123456789abcdef", RequestID: "request-1"}
+	if err := store.Create(ctx, rawToken, want, time.Minute); err != nil {
+		t.Fatalf("create registration token: %v", err)
+	}
+	keys, _, err := client.RDB().Scan(ctx, 0, client.KeyPrefix()+registrationTokenSegment+"*", 10).Result()
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("registration keys=%v err=%v", keys, err)
+	}
+	if strings.Contains(keys[0], rawToken) || !strings.HasSuffix(keys[0], session.HashToken(rawToken)) {
+		t.Fatalf("raw token leaked or hash missing from key: %q", keys[0])
+	}
+	payload, err := client.RDB().Get(ctx, keys[0]).Result()
+	if err != nil || strings.Contains(payload, rawToken) {
+		t.Fatalf("registration payload leaked raw token: payload=%q err=%v", payload, err)
+	}
+	got, err := store.Get(ctx, rawToken)
+	if err != nil || got != want {
+		t.Fatalf("get registration token=%#v err=%v", got, err)
+	}
+
+	limiter := NewRateLimiter(client)
+	createPolicy := registration.CreateRatePolicy{
+		ClientIP: registration.Limit{Max: 1, Window: time.Minute}, ClientNet: registration.Limit{Max: 1, Window: time.Minute},
+		Email: registration.Limit{Max: 1, Window: time.Minute}, ClientEmail: registration.Limit{Max: 1, Window: time.Minute},
+		IPv4NetBits: 24, IPv6NetBits: 56,
+	}
+	checks := []func() (bool, time.Duration, error){
+		func() (bool, time.Duration, error) {
+			return limiter.CheckRegistrationCreate(ctx, "127.0.0.1", "127.0.0.0/24", "same", createPolicy)
+		},
+		func() (bool, time.Duration, error) {
+			return limiter.CheckRegistrationVerify(ctx, "127.0.0.1", "same", registration.Limit{Max: 1, Window: time.Minute})
+		},
+		func() (bool, time.Duration, error) {
+			return limiter.CheckRegistrationResend(ctx, "127.0.0.1", "same", registration.Limit{Max: 1, Window: time.Minute})
+		},
+	}
+	for index, check := range checks {
+		allowed, _, err := check()
+		if err != nil || !allowed {
+			t.Fatalf("independent rate budget %d allowed=%v err=%v", index, allowed, err)
+		}
+	}
+}
+
+func TestIntegration_RegistrationCreateClientBudgetSurvivesEmailRotation(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	policy := registration.CreateRatePolicy{
+		ClientIP:    registration.Limit{Max: 2, Window: time.Minute},
+		ClientNet:   registration.Limit{Max: 20, Window: time.Minute},
+		Email:       registration.Limit{Max: 5, Window: time.Minute},
+		ClientEmail: registration.Limit{Max: 2, Window: time.Minute},
+		IPv4NetBits: 24, IPv6NetBits: 56,
+	}
+	ctx := context.Background()
+	for _, emailHash := range []string{"email-a", "email-b"} {
+		allowed, _, err := limiter.CheckRegistrationCreate(ctx, "203.0.113.7", "203.0.113.0/24", emailHash, policy)
+		if err != nil || !allowed {
+			t.Fatalf("initial email %q allowed=%v err=%v", emailHash, allowed, err)
+		}
+	}
+	allowed, retry, err := limiter.CheckRegistrationCreate(ctx, "203.0.113.7", "203.0.113.0/24", "email-c", policy)
+	if err != nil || allowed || retry <= 0 {
+		t.Fatalf("rotated email bypassed client budget: allowed=%v retry=%v err=%v", allowed, retry, err)
+	}
+}
+
+func TestIntegration_RegistrationFormIntentBudgetIsAtomicAndIndependent(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	ctx := context.Background()
+	intentLimit := registration.Limit{Max: 2, Window: time.Minute}
+	networkHash := registration.HashAbuseValue("203.0.113.0/24")
+	for attempt := 1; attempt <= 2; attempt++ {
+		allowed, retry, err := limiter.CheckRegistrationFormIntent(ctx, networkHash, intentLimit)
+		if err != nil || !allowed || retry != 0 {
+			t.Fatalf("form-intent attempt %d allowed=%v retry=%v err=%v", attempt, allowed, retry, err)
+		}
+	}
+	allowed, retry, err := limiter.CheckRegistrationFormIntent(ctx, networkHash, intentLimit)
+	if err != nil || allowed || retry <= 0 {
+		t.Fatalf("exhausted form-intent budget allowed=%v retry=%v err=%v", allowed, retry, err)
+	}
+
+	createPolicy := registration.CreateRatePolicy{
+		ClientIP: registration.Limit{Max: 1, Window: time.Minute}, ClientNet: registration.Limit{Max: 1, Window: time.Minute},
+		Email: registration.Limit{Max: 1, Window: time.Minute}, ClientEmail: registration.Limit{Max: 1, Window: time.Minute},
+		IPv4NetBits: 24, IPv6NetBits: 56,
+	}
+	allowed, retry, err = limiter.CheckRegistrationCreate(ctx, "203.0.113.7", "203.0.113.0/24", registration.HashAbuseValue("person@example.com"), createPolicy)
+	if err != nil || !allowed || retry != 0 {
+		t.Fatalf("form-intent budget consumed create budget: allowed=%v retry=%v err=%v", allowed, retry, err)
+	}
+}
+
+func TestIntegration_RegistrationFormDefenseBindsExistingDeviceAndBlocksOnlySource(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewRegistrationFormDefenseStore(client)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	uaHash := registration.HashAbuseValue("browser")
+	networkHash := registration.HashAbuseValue("203.0.113.0/24")
+
+	withoutDevice := registration.FormIntentRecord{
+		UserAgentHash: uaHash, ClientNetworkHash: networkHash,
+		NotBefore: now.Add(-time.Second), ExpiresAt: now.Add(time.Minute),
+	}
+	if err := store.CreateFormIntent(ctx, "intent-before-device", withoutDevice, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ConsumeFormIntent(ctx, "intent-before-device", registration.FormIntentBinding{
+		UserAgentHash: uaHash, ClientNetworkHash: networkHash, DeviceIDHash: registration.HashAbuseValue("server-issued-device"),
+	}, now); err != nil {
+		t.Fatalf("first server device after step-up rejected: %v", err)
+	}
+
+	withDevice := withoutDevice
+	withDevice.DeviceIDHash = registration.HashAbuseValue("original-device")
+	if err := store.CreateFormIntent(ctx, "intent-bound-device", withDevice, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ConsumeFormIntent(ctx, "intent-bound-device", registration.FormIntentBinding{
+		UserAgentHash: uaHash, ClientNetworkHash: networkHash, DeviceIDHash: registration.HashAbuseValue("replacement-device"),
+	}, now); !errors.Is(err, registration.ErrFormIntentInvalid) {
+		t.Fatalf("replacement device accepted: %v", err)
+	}
+
+	policy := registration.AbusePolicy{
+		DeviceBlockTTL: time.Hour, IPStrikeWindow: time.Hour,
+		IPBlockAfter: 3, IPBlockTTL: time.Hour, IPLongBlockAfter: 6, IPLongBlockTTL: 24 * time.Hour,
+	}
+	attackSource := registration.AbuseFingerprint{
+		ClientIPHash: registration.HashAbuseValue("203.0.113.8"), ClientIPBlockEligible: true,
+		DeviceIDHash: registration.HashAbuseValue("attack-device"), UserAgentHash: uaHash,
+	}
+	if _, err := store.RecordRegistrationHoneypot(ctx, attackSource, policy); err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := store.IsRegistrationBlocked(ctx, attackSource)
+	if err != nil || !blocked {
+		t.Fatalf("attack source blocked=%v err=%v", blocked, err)
+	}
+	cleanSource := registration.AbuseFingerprint{
+		ClientIPHash: registration.HashAbuseValue("198.51.100.44"), ClientIPBlockEligible: true,
+		DeviceIDHash: registration.HashAbuseValue("clean-device"), UserAgentHash: uaHash,
+	}
+	blocked, err = store.IsRegistrationBlocked(ctx, cleanSource)
+	if err != nil || blocked {
+		t.Fatalf("clean source blocked=%v err=%v", blocked, err)
+	}
+}
 
 func TestIntegration_SessionStoreCreateAndGet(t *testing.T) {
 	client := setupTestRedis(t)
@@ -612,9 +1256,9 @@ func TestIntegration_MFAStoreAttemptIncrement(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	// Increment attempts up to maxAttempts.
+	// The final configured attempt is rejected as exhausted.
 	maxAttempts := 3
-	for i := 1; i <= maxAttempts; i++ {
+	for i := 1; i < maxAttempts; i++ {
 		count, err := store.IncrementAttempts(ctx, tokenHash, maxAttempts)
 		if err != nil {
 			t.Fatalf("increment %d: %v", i, err)
@@ -624,7 +1268,7 @@ func TestIntegration_MFAStoreAttemptIncrement(t *testing.T) {
 		}
 	}
 
-	// Next increment should exceed maxAttempts.
+	// Reaching maxAttempts exhausts the budget.
 	_, err := store.IncrementAttempts(ctx, tokenHash, maxAttempts)
 	if !errors.Is(err, auth.ErrMFAMaxAttemptsExceeded) {
 		t.Fatalf("expected ErrMFAMaxAttemptsExceeded, got %v", err)
@@ -944,7 +1588,7 @@ func TestIntegration_RateLimiterLogin(t *testing.T) {
 	}
 }
 
-func TestIntegration_RateLimiterDifferentIPs(t *testing.T) {
+func TestIntegration_RateLimiterAccountBudgetSurvivesIPRotation(t *testing.T) {
 	client := setupTestRedis(t)
 	limiter := NewRateLimiter(client)
 	ctx := context.Background()
@@ -961,27 +1605,40 @@ func TestIntegration_RateLimiterDifferentIPs(t *testing.T) {
 		}
 	}
 
-	// IP 2 should still be allowed.
-	allowed, _, err := limiter.CheckLogin(ctx, "10.0.0.2", identifierHash, limit, window)
+	// Rotating to IP 2 must not reset the immutable account budget.
+	allowed, retryAfter, err := limiter.CheckLogin(ctx, "10.0.0.2", identifierHash, limit, window)
+	if err != nil || allowed || retryAfter <= 0 {
+		t.Fatalf("IP rotation bypassed account budget: allowed=%v retry=%v err=%v", allowed, retryAfter, err)
+	}
+
+	// A denied atomic check must not consume IP 2's independent budget.
+	otherIdentifierHash := session.HashToken("rate-multi-ip-independent-account")
+	allowed, _, err = limiter.CheckLogin(ctx, "10.0.0.2", otherIdentifierHash, limit, window)
 	if err != nil || !allowed {
-		t.Fatalf("ip2 should be allowed: allowed=%v err=%v", allowed, err)
+		t.Fatalf("denied account check consumed unrelated IP budget: allowed=%v err=%v", allowed, err)
 	}
 }
 
 // --- Prefix Isolation Test ---
 
 func TestIntegration_PrefixIsolation(t *testing.T) {
+	basePrefix := os.Getenv("UP_TEST_REDIS_KEY_PREFIX")
 	cfg := mustLoadTestRedisConfig(t)
 
 	// Create a client with a different prefix.
 	otherCfg := cfg
-	otherCfg.KeyPrefix = "up:other_test:"
+	otherBasePrefix := basePrefix + "other:"
+	otherPrefix, err := isolatedTestRedisPrefix(otherBasePrefix)
+	if err != nil {
+		t.Fatalf("create sibling test namespace: %v", err)
+	}
+	otherCfg.KeyPrefix = otherPrefix
 	otherClient, err := NewClient(otherCfg)
 	if err != nil {
 		t.Fatalf("create other client: %v", err)
 	}
 	defer func() {
-		cleanupTestKeys(t, otherClient, otherCfg.KeyPrefix)
+		cleanupTestKeys(t, otherClient, otherBasePrefix)
 		_ = otherClient.Close()
 	}()
 
@@ -1147,7 +1804,7 @@ func TestIntegration_ReauthStoreChallengeAttemptBudget(t *testing.T) {
 		t.Fatalf("create challenge: %v", err)
 	}
 
-	for i := 1; i <= 3; i++ {
+	for i := 1; i < 3; i++ {
 		count, err := store.IncrementChallengeAttempts(ctx, tokenHash, 3)
 		if err != nil {
 			t.Fatalf("attempt %d: %v", i, err)
@@ -1156,7 +1813,7 @@ func TestIntegration_ReauthStoreChallengeAttemptBudget(t *testing.T) {
 			t.Errorf("attempt count = %d, want %d", count, i)
 		}
 	}
-	// The budget is exhausted: the store rejects further attempts.
+	// The configured final attempt exhausts the budget.
 	if _, err := store.IncrementChallengeAttempts(ctx, tokenHash, 3); !errors.Is(err, auth.ErrReauthMaxAttemptsExceeded) {
 		t.Fatalf("over-budget err = %v, want ErrReauthMaxAttemptsExceeded", err)
 	}

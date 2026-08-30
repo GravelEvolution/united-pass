@@ -19,6 +19,8 @@ import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import styles from "./authorized-application-list.module.css";
 
+const DEFAULT_APP_LOGO_URL = "https://moonstone.org.cn/image/logo.png";
+
 type AuthorizedApplicationListProps = {
   applications: AuthorizedApplication[];
 };
@@ -32,13 +34,13 @@ export function AuthorizedApplicationList({ applications }: AuthorizedApplicatio
       <PageHeader
         eyebrow="Authorized applications"
         title="授权应用"
-        description="查看你授权过的 OAuth 应用与已授予的 Scope。撤销授权后，United Pass 不再为该应用静默复用此授权；未来新的授权请求需要重新获得你的确认。"
+        description="查看你授权过的 OAuth 应用与已授予的 Scope。撤销授权后，砾石进化统一登陆门户平台不再为该应用静默复用此授权；未来新的授权请求需要重新获得你的确认。"
       />
 
       {applications.length === 0 ? (
         <section className={styles.emptyState}>
           <p>你还没有授权任何应用。</p>
-          <p className={styles.emptyHint}>当你在其他应用中使用 United Pass 登录并确认授权后，记录会出现在这里。</p>
+          <p className={styles.emptyHint}>当你在其他应用中使用统一门户登录并确认授权后，记录会出现在这里。</p>
         </section>
       ) : (
         <>
@@ -76,7 +78,13 @@ function GrantCard({ grant }: { grant: AuthorizedApplication }) {
     <article className={styles.grantCard}>
       <div className={styles.grantHeader}>
         <div className={styles.grantIdentity}>
-          <div className={styles.appIcon} aria-hidden="true">{grant.applicationName.slice(0, 1)}</div>
+          <div className={styles.appIcon} aria-hidden="true">
+            <img
+              src={grant.logoUrl ?? DEFAULT_APP_LOGO_URL}
+              alt=""
+              style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit" }}
+            />
+          </div>
           <div>
             <div className={styles.grantTitle}>
               <h3>{grant.applicationName}</h3>
@@ -113,8 +121,8 @@ function GrantCard({ grant }: { grant: AuthorizedApplication }) {
 
       {grant.hasOfflineAccess && (
         <p className={styles.offlineNotice}>
-          此授权包含 <code>offline_access</code>，应用可在你不活跃时通过 Refresh Token 继续访问已授权数据。撤销后 United
-          Pass 不再允许基于此授权记录的静默授权；已签发的令牌不会被 United Pass 立即撤销。
+          此授权包含 <code>offline_access</code>，应用可在你不活跃时通过 Refresh Token 继续访问已授权数据。撤销后统一登陆门户
+          不再允许基于此授权记录的静默授权；已签发的令牌不会被统一登陆门户立即撤销。
         </p>
       )}
     </article>
@@ -133,7 +141,7 @@ function RevokeGrantButton({ grant }: { grant: AuthorizedApplication }) {
           <p>撤销后：</p>
           <ul>
             <li>未来新的授权请求需要重新获得你的确认（不再静默复用此授权记录）</li>
-            <li>已签发的 Access Token 与 Refresh Token 不会被 United Pass 立即撤销，可能持续有效直到 Provider 生命周期结束</li>
+            <li>已签发的 Access Token 与 Refresh Token 不会被统一登陆门户立即撤销，可能持续有效直到 Provider 生命周期结束</li>
             <li>如果需要重新授权，需在应用中重新发起授权流程</li>
           </ul>
           <p>{USE_MOCK_DATA_SOURCE ? "此操作不可逆。当前为 Mock 实现，刷新页面后恢复。" : "此操作不可逆。"}</p>

@@ -126,6 +126,67 @@ func (r *UserRepository) UpdateStatus(ctx context.Context, userID identity.UserI
 	return nil
 }
 
+// UpdateProfile updates the user's self-service display name and nickname and
+// increments the optimistic-concurrency version. Returns
+// identity.ErrUserNotFound when no row matches the given ID.
+func (r *UserRepository) UpdateProfile(ctx context.Context, userID identity.UserID, displayName, nickname string) error {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE users
+            SET display_name = $2, nickname = $3, updated_at = NOW(), version = version + 1
+          WHERE id = $1`,
+		string(userID),
+		displayName,
+		nickname,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: update user profile: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrUserNotFound
+	}
+	return nil
+}
+
+// UpdateAvatar updates the user's avatar URL and increments the
+// optimistic-concurrency version. Returns identity.ErrUserNotFound when no row
+// matches the given ID.
+func (r *UserRepository) UpdateAvatar(ctx context.Context, userID identity.UserID, avatarURL string) error {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE users
+            SET avatar_url = $2, updated_at = NOW(), version = version + 1
+          WHERE id = $1`,
+		string(userID),
+		avatarURL,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: update user avatar: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrUserNotFound
+	}
+	return nil
+}
+
+// UpdatePhone sets the user's verified phone number and increments the
+// optimistic-concurrency version. Returns identity.ErrUserNotFound when no row
+// matches the given ID.
+func (r *UserRepository) UpdatePhone(ctx context.Context, userID identity.UserID, phone string) error {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE users
+            SET phone = $2, phone_verified = TRUE, updated_at = NOW(), version = version + 1
+          WHERE id = $1`,
+		string(userID),
+		phone,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: update user phone: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrUserNotFound
+	}
+	return nil
+}
+
 // GetIdentityLink loads the identity link for a specific provider subject
 // within a provider tenant. Returns identity.ErrUserNotFound when no link
 // matches, since the absence of a link means the external identity is not

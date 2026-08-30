@@ -268,8 +268,10 @@ func (h *PasswordHandlers) settleCommitted(w http.ResponseWriter, r *http.Reques
 			// A takeover already recorded the outcome and advanced the
 			// epoch exactly once: the old generation is dead. Force
 			// re-login.
-			ClearSessionCookie(w, h.cookieAttrs)
-			ClearCSRFCookie(w, h.cookieAttrs)
+			if !IsNativeBearerSession(r.Context()) {
+				ClearSessionCookie(w, h.cookieAttrs)
+				ClearCSRFCookie(w, h.cookieAttrs)
+			}
 			WriteUnauthorized(w, r)
 			return
 		}
@@ -289,7 +291,14 @@ func (h *PasswordHandlers) settleCommitted(w http.ResponseWriter, r *http.Reques
 	var rotated *session.RotateSessionResult
 	if providerOutcome == securitystate.ProviderOutcomeSuccess {
 		rotate = func(ctx context.Context) (vanished bool, rotateErr error) {
-			result, err := h.sessions.RotateSession(ctx, ReadSessionCookie(r), newEpoch)
+			requestToken, ok := SessionTokenFromContext(r.Context())
+			if !ok {
+				requestToken = ReadSessionCookie(r)
+			}
+			if requestToken == "" {
+				return true, nil
+			}
+			result, err := h.sessions.RotateSession(ctx, requestToken, newEpoch)
 			if err != nil {
 				if errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, session.ErrSessionExpired) {
 					// A concurrent logout/revocation or the expiry sweep
@@ -323,25 +332,33 @@ func (h *PasswordHandlers) settleCommitted(w http.ResponseWriter, r *http.Reques
 	case providerOutcome == securitystate.ProviderOutcomeUnknown:
 		// Unknown never reports success and always forces re-login: every
 		// old-generation artifact is invalid regardless of Redis state.
-		ClearSessionCookie(w, h.cookieAttrs)
-		ClearCSRFCookie(w, h.cookieAttrs)
+		if !IsNativeBearerSession(r.Context()) {
+			ClearSessionCookie(w, h.cookieAttrs)
+			ClearCSRFCookie(w, h.cookieAttrs)
+		}
 		WriteUnauthorized(w, r)
 	case result.Outcome == securitystate.SettlementOutcomeSettled && rotated != nil:
-		SetSessionCookie(w, rotated.SessionToken, sessionCookieMaxAge(rotated.RemainingTTL), h.cookieAttrs)
-		SetCSRFCookie(w, rotated.CSRFToken, sessionCookieMaxAge(rotated.RemainingTTL), h.cookieAttrs)
-		w.WriteHeader(http.StatusNoContent)
+		if IsNativeBearerSession(r.Context()) {
+			writeJSONNoStore(w, r, http.StatusOK, authenticatedResponse{Status: "authenticated", SessionBearer: rotated.SessionToken, ExpiresAt: rotated.Record.ExpiresAt})
+		} else {
+			SetSessionCookie(w, rotated.SessionToken, sessionCookieMaxAge(rotated.RemainingTTL), h.cookieAttrs)
+			SetCSRFCookie(w, rotated.CSRFToken, sessionCookieMaxAge(rotated.RemainingTTL), h.cookieAttrs)
+			w.WriteHeader(http.StatusNoContent)
+		}
 	case result.Outcome == securitystate.SettlementOutcomeSettledRelogin:
 		// The epoch advanced but the current session vanished: every
 		// pre-change session and capability is invalid; re-login required.
-		ClearSessionCookie(w, h.cookieAttrs)
-		ClearCSRFCookie(w, h.cookieAttrs)
+		if !IsNativeBearerSession(r.Context()) {
+			ClearSessionCookie(w, h.cookieAttrs)
+			ClearCSRFCookie(w, h.cookieAttrs)
+		}
 		WriteUnauthorized(w, r)
 	default:
 		// Degraded settlement (cleanup/rotation/transition failure): the
 		// epoch boundary still holds; the response never reports success.
 		// Rotated credentials are issued when available so the caller is
 		// not stranded with a token no cookie carries.
-		if rotated != nil {
+		if rotated != nil && !IsNativeBearerSession(r.Context()) {
 			SetSessionCookie(w, rotated.SessionToken, sessionCookieMaxAge(rotated.RemainingTTL), h.cookieAttrs)
 			SetCSRFCookie(w, rotated.CSRFToken, sessionCookieMaxAge(rotated.RemainingTTL), h.cookieAttrs)
 		}

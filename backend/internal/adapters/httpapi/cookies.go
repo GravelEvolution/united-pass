@@ -10,6 +10,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/config"
@@ -18,9 +19,10 @@ import (
 // Cookie and header names match the frontend contract exactly.
 // See ../frontend/src/lib/api/constants.ts and ADR-0002.
 const (
-	SessionCookieName = "up_session"
-	CSRFCookieName    = "up_csrf"
-	CSRFHeaderName    = "X-CSRF-Token"
+	SessionCookieName       = "up_session"
+	CSRFCookieName          = "up_csrf"
+	CSRFHeaderName          = "X-CSRF-Token"
+	AuthorizationHeaderName = "Authorization"
 )
 
 // SessionCookieAttributes builds the attributes for the up_session cookie based
@@ -67,11 +69,15 @@ func SetSessionCookie(w http.ResponseWriter, token string, maxAge int, attrs Ses
 // cookie, this is NOT HttpOnly so JavaScript can read it and send it as the
 // X-CSRF-Token header on write requests.
 func SetCSRFCookie(w http.ResponseWriter, token string, maxAge int, attrs SessionCookieAttributes) {
+	setCSRFCookie(w, token, maxAge, attrs, false)
+}
+
+func setCSRFCookie(w http.ResponseWriter, token string, maxAge int, attrs SessionCookieAttributes, httpOnly bool) {
 	cookie := &http.Cookie{
 		Name:     CSRFCookieName,
 		Value:    token,
 		Path:     "/",
-		HttpOnly: false,
+		HttpOnly: httpOnly,
 		Secure:   attrs.Secure,
 		SameSite: attrs.SameSite,
 		MaxAge:   maxAge,
@@ -112,6 +118,30 @@ func ReadCSRFCookie(r *http.Request) string {
 // ReadCSRFHeader extracts the CSRF token from the X-CSRF-Token request header.
 func ReadCSRFHeader(r *http.Request) string {
 	return r.Header.Get(CSRFHeaderName)
+}
+
+// ReadMiniProgramBearer parses the deliberately strict native credential
+// format. Multiple headers, alternate schemes, padding, whitespace and any
+// token that is not the 43-character base64url encoding of 32 random bytes
+// fail closed.
+func ReadMiniProgramBearer(r *http.Request) string {
+	values := r.Header.Values(AuthorizationHeaderName)
+	if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") {
+		return ""
+	}
+	token := strings.TrimPrefix(values[0], "Bearer ")
+	if len(token) != 43 {
+		return ""
+	}
+	for i := 0; i < len(token); i++ {
+		c := token[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '-' || c == '_' {
+			continue
+		}
+		return ""
+	}
+	return token
 }
 
 // sessionCookieMaxAge converts a TTL duration to a MaxAge in seconds for cookie

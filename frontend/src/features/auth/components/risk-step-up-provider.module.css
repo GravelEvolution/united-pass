@@ -1,0 +1,79 @@
+.content {
+  display: grid;
+  gap: 16px;
+  color: var(--semi-color-text-0);
+}
+.introduction {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.introduction > svg {
+  flex: 0 0 auto;
+  color: var(--up-brand);
+}
+
+.introduction h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.introduction p,
+.lede,
+.privacyNote,
+.status p {
+  margin: 0;
+  color: var(--semi-color-text-2);
+  line-height: 1.65;
+}
+
+.captchaContainer {
+  min-height: 92px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--semi-color-border);
+  border-radius: var(--semi-border-radius-medium);
+  background: var(--semi-color-fill-0);
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+  color: var(--semi-color-text-1);
+  font-weight: 600;
+}
+
+.privacyNote {
+  font-size: 13px;
+}
+
+.error {
+  color: var(--semi-color-danger);
+  line-height: 1.5;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.status {
+  min-height: 140px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 14px;
+}
+
+@media (max-width: 520px) {
+  .actions {
+    flex-direction: column-reverse;
+  }
+
+  .actions :global(.semi-button) {
+    width: 100%;
+  }
+}

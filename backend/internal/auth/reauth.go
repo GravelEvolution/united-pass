@@ -33,6 +33,7 @@ const (
 	// Account security-factor actions (ADR-0006 §4). Account actions bind
 	// user + session + action only; ApplicationID/ClientID must stay empty.
 	ReauthActionPasswordChange = "account.password.change"
+	ReauthActionEmailChange    = "account.email.change"
 	ReauthActionTOTPEnroll     = "account.totp.enroll"
 	ReauthActionTOTPRemove     = "account.totp.remove"
 	ReauthActionPasskeyEnroll  = "account.passkey.enroll"
@@ -55,11 +56,27 @@ const (
 	ReauthActionPolicyPublish = "policy.publish"
 	ReauthActionAuditExport   = "audit.export"
 
+	// Registration-defense recovery binds the grant to the exact typed
+	// fingerprint digest (for example, ip_<sha256>). The raw IP or device
+	// token never enters the reauthentication store.
+	ReauthActionRegistrationAbuseUnblock = "registration.abuse.unblock"
+
 	// Phase 8 privacy-rights operations bind the grant to the caller's stable
 	// user ID. Export and deletion can therefore never be replayed against a
 	// different account.
 	ReauthActionPersonalDataExport = "account.data_export"
 	ReauthActionAccountDelete      = "account.delete"
+
+	// DreamUP administration actions are fixed server-side values. A grant
+	// minted for one management surface cannot be replayed on another.
+	ReauthActionAdminRoleManagement      = "dreamup.admin.role.manage"
+	ReauthActionAdminEventRegistry       = "dreamup.admin.event_registry.manage"
+	ReauthActionAdminOAApproval          = "dreamup.admin.oa.approve"
+	ReauthActionAdminRestrictedView      = "dreamup.admin.restricted.view"
+	ReauthActionAdminLegalView           = "dreamup.admin.legal.view"
+	ReauthActionAdminExport              = "dreamup.admin.export"
+	ReauthActionAdminChallengeRotate     = "dreamup.admin.challenge.rotate"
+	ReauthActionAdminCheckinWindowManage = "dreamup.admin.checkin_window.manage"
 )
 
 // ReauthActionSessionsRevokeOthers is reserved but never accepted: session
@@ -74,6 +91,7 @@ const ReauthActionSessionsRevokeOthers = "account.sessions.revoke_others"
 func IsAccountReauthAction(action string) bool {
 	switch action {
 	case ReauthActionPasswordChange,
+		ReauthActionEmailChange,
 		ReauthActionTOTPEnroll,
 		ReauthActionTOTPRemove,
 		ReauthActionPasskeyEnroll,
@@ -96,6 +114,7 @@ func IsTargetReauthAction(action string) bool {
 		ReauthActionProviderIdentityLink,
 		ReauthActionPolicyPublish,
 		ReauthActionAuditExport,
+		ReauthActionRegistrationAbuseUnblock,
 		ReauthActionPersonalDataExport,
 		ReauthActionAccountDelete:
 		return true
@@ -169,6 +188,9 @@ type ExpiredReauthChallenge struct {
 // The target operation consumes it atomically before executing; any binding
 // mismatch or reuse fails closed.
 type ReauthGrantData struct {
+	// GrantID is a cryptographically random stable identifier for audit and
+	// downstream signatures. It is not derived from the bearer token.
+	GrantID string `json:"grantId,omitempty"`
 	// UserID is the stable United Pass user ID that reauthenticated.
 	UserID identity.UserID `json:"userId"`
 	// SessionID is the session the grant is bound to; a grant can never be
@@ -190,6 +212,10 @@ type ReauthGrantData struct {
 	// verify the user's authoritative state against this stamp. Legacy
 	// records decode as 0 and are normalized to 1 (F2).
 	SecurityEpoch securitystate.Epoch `json:"securityEpoch,omitempty"`
+	// ChallengeVersion binds DreamUP grants to the credential generation.
+	// Legacy non-DreamUP grants decode as zero and retain their established
+	// security-epoch contract.
+	ChallengeVersion int64 `json:"challengeVersion,omitempty"`
 }
 
 // ErrReauthChallengeNotFound is returned when a reauthentication challenge
