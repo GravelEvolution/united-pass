@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -148,7 +149,7 @@ func TestLoadIsolatedOperationalDatabaseConfiguration(t *testing.T) {
 func TestDreamUPMobileEnabledRejectsUnsafeRateLimits(t *testing.T) {
 	cfg := validDevelopmentConfig()
 	cfg.DreamUPMobile = DreamUPMobileConfig{
-		Enabled: true, DelegationKeyringPath: `C:\secrets\dreamup-mobile.json`, DelegationCurrentKeyID: "mobile-1",
+		Enabled: true, DelegationKeyringPath: filepath.Join(t.TempDir(), "dreamup-mobile.json"), DelegationCurrentKeyID: "mobile-1",
 		DelegationIssuer: "https://auth.moonstone.org.cn", DelegationAudience: "dreamup-mobile-api", AssertionTTL: 15 * time.Second,
 		ScopedRateLimit: 60, GlobalRateLimit: 59, RateWindow: time.Minute,
 	}
@@ -163,6 +164,7 @@ func TestDreamUPMobileEnabledRejectsUnsafeRateLimits(t *testing.T) {
 
 func TestDreamUPMobileAndAdministratorDelegationKeysMustBeDistinct(t *testing.T) {
 	cfg := validDevelopmentConfig()
+	mobileKeyringPath := filepath.Join(t.TempDir(), "dreamup-mobile.json")
 	cfg.Database = DatabaseConfig{
 		URL: "postgres://user:pass@localhost:5432/united_pass?sslmode=disable", Schema: "united_pass",
 		MaxConns: 10, MinConns: 1, ConnectTimeout: 10 * time.Second,
@@ -174,18 +176,18 @@ func TestDreamUPMobileAndAdministratorDelegationKeysMustBeDistinct(t *testing.T)
 	cfg.Auth.Provider = "zitadel"
 	cfg.Auth.ProjectID = "project-id"
 	cfg.DreamUPMobile = DreamUPMobileConfig{
-		Enabled: true, DelegationKeyringPath: `C:\secrets\dreamup-mobile.json`, DelegationCurrentKeyID: "mobile-1",
+		Enabled: true, DelegationKeyringPath: mobileKeyringPath, DelegationCurrentKeyID: "mobile-1",
 		DelegationIssuer: "https://auth.moonstone.org.cn", DelegationAudience: "dreamup-mobile-api", AssertionTTL: 15 * time.Second,
 		ScopedRateLimit: 60, GlobalRateLimit: 2000, RateWindow: time.Minute,
 	}
-	cfg.DreamUPAdmin = validDreamUPAdminConfigForTest()
+	cfg.DreamUPAdmin = validDreamUPAdminConfigForTest(t)
 
 	cfg.DreamUPMobile.DelegationKeyringPath = cfg.DreamUPAdmin.DelegationKeyringPath
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must use distinct keyrings") {
 		t.Fatalf("shared delegation keyring path accepted: %v", err)
 	}
 
-	cfg.DreamUPMobile.DelegationKeyringPath = `C:\secrets\dreamup-mobile.json`
+	cfg.DreamUPMobile.DelegationKeyringPath = mobileKeyringPath
 	cfg.DreamUPMobile.DelegationCurrentKeyID = cfg.DreamUPAdmin.DelegationCurrentKeyID
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "current key IDs must be distinct") {
 		t.Fatalf("shared delegation current key ID accepted: %v", err)
@@ -572,7 +574,7 @@ func TestDreamUPAdminEnabledRequiresEveryPurposeSpecificKeyring(t *testing.T) {
 		HighRiskFreshness: 5 * time.Minute, RateLimit: 5, RateWindow: 15 * time.Minute,
 		LockDuration: 30 * time.Minute, Argon2MaxConcurrent: 2,
 		BaseURL: "http://127.0.0.1:18084", DelegationIssuer: "https://auth.moonstone.org.cn",
-		DelegationAudience: "dreamup-admin-api", DelegationKeyringPath: `C:\secrets\dreamup-delegation.json`,
+		DelegationAudience: "dreamup-admin-api", DelegationKeyringPath: filepath.Join(t.TempDir(), "dreamup-delegation.json"),
 		DelegationCurrentKeyID: "delegation-1", AdminOrigin: "https://auth.moonstone.org.cn",
 		ResponseLimitBytes: 8 << 20, ReconcileInterval: 15 * time.Second,
 		ReconcileBatchSize: 50, ReconcileLease: 30 * time.Second,
@@ -590,7 +592,7 @@ func TestDreamUPAdminEnabledRequiresEveryPurposeSpecificKeyring(t *testing.T) {
 
 func TestDreamUPAdminRequiresIsolatedOperationalDatabase(t *testing.T) {
 	cfg := validDevelopmentConfig()
-	cfg.DreamUPAdmin = validDreamUPAdminConfigForTest()
+	cfg.DreamUPAdmin = validDreamUPAdminConfigForTest(t)
 	cfg.IsolatedDatabase = DatabaseConfig{}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "UP_ISOLATED_DATABASE_URL") {
 		t.Fatalf("DreamUP admin accepted authority-database outbox: %v", err)
@@ -617,7 +619,7 @@ func TestDreamUPAdminBFFConfigurationFailsClosed(t *testing.T) {
 	cfg.DreamUPAdmin.BaseURL = "http://127.0.0.1:18084"
 	cfg.DreamUPAdmin.DelegationIssuer = "https://auth.moonstone.org.cn"
 	cfg.DreamUPAdmin.DelegationAudience = "dreamup-admin-api"
-	cfg.DreamUPAdmin.DelegationKeyringPath = `C:\secrets\dreamup-delegation.json`
+	cfg.DreamUPAdmin.DelegationKeyringPath = filepath.Join(t.TempDir(), "dreamup-delegation.json")
 	cfg.DreamUPAdmin.DelegationCurrentKeyID = "delegation-1"
 	cfg.DreamUPAdmin.AdminOrigin = "https://auth.moonstone.org.cn"
 	cfg.DreamUPAdmin.ResponseLimitBytes = 8 << 20
@@ -1232,7 +1234,8 @@ func validDevelopmentConfig() Config {
 	}
 }
 
-func validDreamUPAdminConfigForTest() DreamUPAdminConfig {
+func validDreamUPAdminConfigForTest(t *testing.T) DreamUPAdminConfig {
+	t.Helper()
 	return DreamUPAdminConfig{
 		Enabled:                        true,
 		ChallengeEncryptionKeyringPath: "challenge-encryption.json", ChallengeEncryptionCurrentKeyID: "ce-1",
@@ -1244,7 +1247,7 @@ func validDreamUPAdminConfigForTest() DreamUPAdminConfig {
 		HighRiskFreshness: 5 * time.Minute, RateLimit: 5, RateWindow: 15 * time.Minute,
 		LockDuration: 30 * time.Minute, Argon2MaxConcurrent: 2,
 		BaseURL: "http://127.0.0.1:18084", DelegationIssuer: "https://auth.moonstone.org.cn",
-		DelegationAudience: "dreamup-admin-api", DelegationKeyringPath: `C:\secrets\dreamup-admin.json`,
+		DelegationAudience: "dreamup-admin-api", DelegationKeyringPath: filepath.Join(t.TempDir(), "dreamup-admin.json"),
 		DelegationCurrentKeyID: "administrator-1", AdminOrigin: "https://auth.moonstone.org.cn",
 		ResponseLimitBytes: 8 << 20, ReconcileInterval: 15 * time.Second,
 		ReconcileBatchSize: 50, ReconcileLease: 30 * time.Second,

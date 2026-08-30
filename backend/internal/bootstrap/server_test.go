@@ -710,19 +710,25 @@ func bootstrapTestAESKey(fill byte) string {
 // database-backed userChecker and userReader rejected fake users whose IDs
 // do not exist in PostgreSQL.
 //
-// It requires a real PostgreSQL and Redis instance; the test is skipped when
-// UP_TEST_DATABASE_URL or UP_TEST_REDIS_URL is not set. Run with:
+// It requires the disposable local integration matrix. The run token is the
+// explicit opt-in: database and Redis variables alone may be inherited from a
+// broader CI job and must not turn this integration-backed check into a unit
+// test dependency. Run with:
 //
-//	UP_TEST_DATABASE_URL=postgres://... UP_TEST_REDIS_URL=redis://... \
+//	UP_TEST_DISPOSABLE_RUN_TOKEN=... UP_TEST_DATABASE_URL=postgres://... \
+//	UP_TEST_REDIS_URL=redis://... \
 //	go test ./internal/bootstrap/ -run TestFakeProviderWithDatabaseServesCurrentUser
 func TestFakeProviderWithDatabaseServesCurrentUser(t *testing.T) {
+	runToken := os.Getenv(integrationboundary.RunTokenEnvironment)
+	if runToken == "" {
+		t.Skip("UP_TEST_DISPOSABLE_RUN_TOKEN required to opt in to this integration-backed test")
+	}
 	dbURL := os.Getenv("UP_TEST_DATABASE_URL")
 	redisURL := os.Getenv("UP_TEST_REDIS_URL")
 	if dbURL == "" || redisURL == "" {
-		t.Skip("UP_TEST_DATABASE_URL and UP_TEST_REDIS_URL required for this test")
+		t.Fatal("UP_TEST_DATABASE_URL and UP_TEST_REDIS_URL required after integration opt-in")
 	}
 	dbSchema := os.Getenv("UP_TEST_DATABASE_SCHEMA")
-	runToken := os.Getenv(integrationboundary.RunTokenEnvironment)
 	redisPrefix := os.Getenv("UP_TEST_REDIS_KEY_PREFIX")
 	if err := integrationboundary.ValidatePostgres(dbURL, dbSchema, runToken); err != nil {
 		t.Fatalf("PostgreSQL integration boundary rejected: %v", err)
