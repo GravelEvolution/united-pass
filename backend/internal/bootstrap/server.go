@@ -33,6 +33,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/feishu"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
+	"github.com/GravelEvolution/united-pass/backend/internal/adapters/internalsms"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/postgres"
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/redis"
 	wechatadapter "github.com/GravelEvolution/united-pass/backend/internal/adapters/wechat"
@@ -406,6 +407,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	var registrationBlockHandlers *httpapi.RegistrationBlockHandlers
 	var accountContactRateChecker httpapi.AccountContactRateChecker
 	var legacyContactRateChecker httpapi.ContactRateChecker
+	var phoneChangeRateChecker httpapi.PhoneVerifyRateChecker
 	var accountContactService httpapi.AccountContactService
 	var wechatRateChecker httpapi.WeChatRateChecker
 	var qrAuthRateChecker httpapi.QRAuthRateChecker
@@ -506,6 +508,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		registrationBlockRateChecker = limiter
 		accountContactRateChecker = limiter
 		legacyContactRateChecker = limiter
+		phoneChangeRateChecker = limiter
 		wechatRateChecker = limiter
 		qrAuthRateChecker = limiter
 		dreamUPMobileRateChecker = limiter
@@ -622,14 +625,27 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		if err != nil {
 			return nil, fmt.Errorf("build Aliyun SMS client: %w", err)
 		}
+		var internationalSMS phoneverify.Sender
+		if cfg.InternalSMS.Enabled {
+			internationalSMS = internalsms.NewClient(internalsms.Config{
+				Endpoint: cfg.InternalSMS.Endpoint,
+				APIKey:   cfg.InternalSMS.APIKey,
+				From:     cfg.InternalSMS.From,
+				Timeout:  cfg.InternalSMS.Timeout,
+			}, nil)
+		}
 		phoneService, err := phoneverify.NewService(
-			phoneStore, smsClient, userRepo,
+			phoneStore, phoneverify.NewRoutingSender(smsClient, internationalSMS), userRepo,
 			phoneverify.Config{TTL: cfg.PhoneVerify.TTL},
 		)
 		if err != nil {
 			return nil, fmt.Errorf("build phone verify service: %w", err)
 		}
-		phoneVerifyHandlers = httpapi.NewPhoneVerifyHandlers(phoneService, cfg.OAuth.PublicOrigin, logger)
+		phoneVerifyHandlers = httpapi.NewPhoneVerifyHandlers(
+			phoneService, cfg.OAuth.PublicOrigin, logger,
+			httpapi.WithPhoneVerifyRiskGuard(riskGuard),
+			httpapi.WithPhoneVerifyRateChecker(phoneChangeRateChecker, cfg.RateLimit.LoginLimit, cfg.RateLimit.LoginWindow),
+		)
 	}
 	if cfg.WeChatMiniProgram.Enabled {
 		if userRepo == nil || sessionSvc == nil || wechatRateChecker == nil {

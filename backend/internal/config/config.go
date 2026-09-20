@@ -197,6 +197,7 @@ type Config struct {
 
 	// Phone binding verification (SMS) — Aliyun SMS delivery and code TTL.
 	AliyunSMS   AliyunSMSConfig
+	InternalSMS InternalSMSConfig
 	PhoneVerify PhoneVerifyConfig
 
 	// Phase 1 — Permissions
@@ -446,6 +447,14 @@ type AliyunSMSConfig struct {
 	TemplateCode    string
 	Endpoint        string
 	Enabled         bool
+}
+
+type InternalSMSConfig struct {
+	Endpoint string
+	APIKey   string
+	From     string
+	Timeout  time.Duration
+	Enabled  bool
 }
 
 // PhoneVerifyConfig tunes the phone binding verification flow.
@@ -844,6 +853,13 @@ func Load() (Config, error) {
 			TemplateCode:    envOr("UP_ALIYUN_SMS_TEMPLATE_CODE", ""),
 			Endpoint:        envOr("UP_ALIYUN_SMS_ENDPOINT", defaultAliyunSMSEndpoint),
 			Enabled:         boolOr("UP_ALIYUN_SMS_ENABLED", false),
+		},
+		InternalSMS: InternalSMSConfig{
+			Endpoint: envOr("UP_INTERNAL_SMS_ENDPOINT", ""),
+			APIKey:   envOr("UP_INTERNAL_SMS_API_KEY", ""),
+			From:     envOr("UP_INTERNAL_SMS_FROM", ""),
+			Timeout:  durationOr("UP_INTERNAL_SMS_TIMEOUT", 10*time.Second),
+			Enabled:  boolOr("UP_INTERNAL_SMS_ENABLED", false),
 		},
 		PhoneVerify: PhoneVerifyConfig{
 			TTL: durationOr("UP_PHONE_VERIFY_TTL", 5*time.Minute),

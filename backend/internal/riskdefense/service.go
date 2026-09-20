@@ -22,6 +22,7 @@ type Operation string
 const (
 	OperationLogin        Operation = "login"
 	OperationRegistration Operation = "registration"
+	OperationPhoneChange  Operation = "phone_change"
 )
 
 type Level string
@@ -220,9 +221,11 @@ func (s *Service) Assess(ctx context.Context, signal Signal) (Decision, error) {
 		return Decision{}, err
 	}
 	decision := Decision{DeviceIDToken: deviceToken}
-	if _, ok := s.allowlist[strings.ToLower(signal.IdentifierHash)]; ok || signal.SessionTrusted {
-		decision.Allow = true
-		return decision, nil
+	if signal.Operation != OperationPhoneChange {
+		if _, ok := s.allowlist[strings.ToLower(signal.IdentifierHash)]; ok || signal.SessionTrusted {
+			decision.Allow = true
+			return decision, nil
+		}
 	}
 	if signal.DeviceTrustToken != "" {
 		trusted, trustErr := s.validTrust(ctx, signal.DeviceTrustToken, deviceHash, signal)
@@ -368,11 +371,11 @@ func (s *Service) validTrust(ctx context.Context, raw, deviceHash string, signal
 	if !valid {
 		return false, nil
 	}
-	if signal.Operation == OperationRegistration {
+	if signal.Operation == OperationRegistration || signal.Operation == OperationPhoneChange {
 		// Registration trust exists to let the browser retry the exact submission
 		// that earned it. Do not turn one solved challenge into a temporary pass
 		// for creating unrelated accounts from the same device.
-		return record.Operation == OperationRegistration && constantEqual(record.IdentifierHash, strings.ToLower(signal.IdentifierHash)), nil
+		return record.Operation == signal.Operation && constantEqual(record.IdentifierHash, strings.ToLower(signal.IdentifierHash)), nil
 	}
 	return true, nil
 }
@@ -392,6 +395,9 @@ func (s *Service) level(operation Operation, attempts, anomalies int) Level {
 			return LevelMedium
 		}
 		return LevelLow
+	}
+	if operation == OperationPhoneChange {
+		return LevelHigh
 	}
 	// Login stays deliberately conservative: frequency alone cannot distinguish
 	// a person mistyping a password from automation. It only strengthens an
@@ -439,6 +445,9 @@ func (s *Service) issue(ctx context.Context, signal Signal, deviceHash string, l
 				challenge.ProviderReady = true
 			}
 		}
+		if record.Method == "" && signal.Operation == OperationPhoneChange {
+			return Challenge{}, ErrUnavailable
+		}
 		if record.Method == "" {
 			record.Method = MethodAutomationCost
 			record.Difficulty = strongerAutomationCostDifficulty(s.cfg.AutomationCostDifficulty)
@@ -461,7 +470,7 @@ func strongerAutomationCostDifficulty(base uint8) uint8 {
 }
 
 func validSignal(signal Signal) bool {
-	return (signal.Operation == OperationLogin || signal.Operation == OperationRegistration) && len(signal.IdentifierHash) == sha256.Size*2 && signal.UserAgentHash != ""
+	return (signal.Operation == OperationLogin || signal.Operation == OperationRegistration || signal.Operation == OperationPhoneChange) && len(signal.IdentifierHash) == sha256.Size*2 && signal.UserAgentHash != ""
 }
 
 func validAutomationCost(token, nonce string, difficulty uint8) bool {

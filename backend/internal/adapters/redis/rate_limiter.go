@@ -52,6 +52,7 @@ const (
 	rateLimitRegistrationUnblockSegment    = "rl:registration:unblock:"
 	rateLimitAccountEmailBeginSegment      = "rl:account:email-change:begin:"
 	rateLimitAccountEmailVerifySegment     = "rl:account:email-change:verify:"
+	rateLimitAccountPhoneChangeSegment     = "rl:account:phone-change:begin:"
 	rateLimitWeChatLoginSegment            = "rl:wechat:login:"
 	rateLimitWeChatPhoneSegment            = "rl:wechat:phone:"
 	rateLimitQRAuthBeginSegment            = "rl:qr-auth:begin:"
@@ -388,14 +389,18 @@ func (r *RateLimiter) checkBuckets(ctx context.Context, buckets []rateBucket) (b
 }
 
 func (r *RateLimiter) CheckAccountEmailChangeBegin(ctx context.Context, ip, keyHash string, limit int, window time.Duration) (bool, time.Duration, error) {
-	return r.checkBuckets(ctx, r.accountEmailChangeBuckets(rateLimitAccountEmailBeginSegment, ip, keyHash, limit, window))
+	return r.checkBuckets(ctx, r.accountContactChangeBuckets(rateLimitAccountEmailBeginSegment, ip, keyHash, limit, window))
 }
 
 func (r *RateLimiter) CheckAccountEmailChangeVerify(ctx context.Context, ip, keyHash string, limit int, window time.Duration) (bool, time.Duration, error) {
-	return r.checkBuckets(ctx, r.accountEmailChangeBuckets(rateLimitAccountEmailVerifySegment, ip, keyHash, limit, window))
+	return r.checkBuckets(ctx, r.accountContactChangeBuckets(rateLimitAccountEmailVerifySegment, ip, keyHash, limit, window))
 }
 
-func (r *RateLimiter) accountEmailChangeBuckets(segment, ip, keyHash string, limit int, window time.Duration) []rateBucket {
+func (r *RateLimiter) CheckAccountPhoneChangeBegin(ctx context.Context, ip, keyHash string, limit int, window time.Duration) (bool, time.Duration, error) {
+	return r.checkBuckets(ctx, r.accountContactChangeBuckets(rateLimitAccountPhoneChangeSegment, ip, keyHash, limit, window))
+}
+
+func (r *RateLimiter) accountContactChangeBuckets(segment, ip, keyHash string, limit int, window time.Duration) []rateBucket {
 	policy := registration.Limit{Max: limit, Window: window}
 	return []rateBucket{
 		{key: r.client.buildKey(segment, "user:", keyHash), limit: policy},

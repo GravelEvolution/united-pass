@@ -61,7 +61,7 @@ return deviceCount
 `)
 
 func (s *RiskStore) Observe(ctx context.Context, operation riskdefense.Operation, deviceHash, identifierHash string, window time.Duration) (riskdefense.Activity, error) {
-	if !validRiskKeyPart(deviceHash) || !validRiskKeyPart(identifierHash) || window <= 0 || (operation != riskdefense.OperationLogin && operation != riskdefense.OperationRegistration) {
+	if !validRiskKeyPart(deviceHash) || !validRiskKeyPart(identifierHash) || window <= 0 || (operation != riskdefense.OperationLogin && operation != riskdefense.OperationRegistration && operation != riskdefense.OperationPhoneChange) {
 		return riskdefense.Activity{}, errors.New("redis: invalid risk observation")
 	}
 	base := riskObservationSegment + string(operation) + ":"

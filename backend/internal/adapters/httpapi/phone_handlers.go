@@ -15,9 +15,13 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/phoneverify"
 	"github.com/GravelEvolution/united-pass/backend/internal/platform/observability"
+	"github.com/GravelEvolution/united-pass/backend/internal/riskdefense"
+	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
 const maxPhoneVerifyBodyBytes = 16 << 10
@@ -35,18 +39,45 @@ type PhoneVerifyHandlers struct {
 	service        PhoneVerifyService
 	expectedOrigin string
 	logger         *slog.Logger
+	risk           *RiskGuard
+	rate           PhoneVerifyRateChecker
+	rateLimit      int
+	rateWindow     time.Duration
+}
+
+// PhoneVerifyRateChecker bounds how often one account may start a phone change.
+type PhoneVerifyRateChecker interface {
+	CheckAccountPhoneChangeBegin(context.Context, string, string, int, time.Duration) (bool, time.Duration, error)
+}
+
+type PhoneVerifyHandlerOption func(*PhoneVerifyHandlers)
+
+func WithPhoneVerifyRiskGuard(guard *RiskGuard) PhoneVerifyHandlerOption {
+	return func(h *PhoneVerifyHandlers) { h.risk = guard }
+}
+
+func WithPhoneVerifyRateChecker(checker PhoneVerifyRateChecker, limit int, window time.Duration) PhoneVerifyHandlerOption {
+	return func(h *PhoneVerifyHandlers) {
+		h.rate = checker
+		h.rateLimit = limit
+		h.rateWindow = window
+	}
 }
 
 // NewPhoneVerifyHandlers builds the phone verification handlers.
-func NewPhoneVerifyHandlers(service PhoneVerifyService, expectedOrigin string, logger *slog.Logger) *PhoneVerifyHandlers {
+func NewPhoneVerifyHandlers(service PhoneVerifyService, expectedOrigin string, logger *slog.Logger, options ...PhoneVerifyHandlerOption) *PhoneVerifyHandlers {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &PhoneVerifyHandlers{
+	handlers := &PhoneVerifyHandlers{
 		service:        service,
 		expectedOrigin: strings.TrimRight(expectedOrigin, "/"),
 		logger:         logger,
 	}
+	for _, option := range options {
+		option(handlers)
+	}
+	return handlers
 }
 
 // RequestPhoneChange handles POST /api/v1/me/phone-change. It validates the
@@ -67,12 +98,46 @@ func (h *PhoneVerifyHandlers) RequestPhoneChange(w http.ResponseWriter, r *http.
 	if err := decodeJSONBody(w, r, &body, "begin phone change"); err != nil {
 		return
 	}
-	result, err := h.service.Request(r.Context(), phoneverify.RequestInput{UserID: principal.UserID, Phone: body.Phone})
+	phone, err := phoneverify.NormalizePhone(body.Phone)
+	if err != nil {
+		WriteValidation(w, r, "请输入有效的手机号码。", nil)
+		return
+	}
+	if !h.checkRate(w, r, principal) {
+		return
+	}
+	if h.risk != nil && !h.risk.Require(w, r, riskdefense.OperationPhoneChange, phoneChangeRiskIdentifier(principal.UserID, phone)) {
+		return
+	}
+	result, err := h.service.Request(r.Context(), phoneverify.RequestInput{UserID: principal.UserID, Phone: phone})
 	if err != nil {
 		h.writeError(w, r, "begin", err)
 		return
 	}
 	writeJSONNoStore(w, r, http.StatusAccepted, map[string]any{"status": "verification_required", "requestId": result.RequestID})
+}
+
+func (h *PhoneVerifyHandlers) checkRate(w http.ResponseWriter, r *http.Request, principal session.Principal) bool {
+	if h == nil || h.rate == nil || h.rateLimit <= 0 || h.rateWindow <= 0 {
+		return true
+	}
+	allowed, retry, err := h.rate.CheckAccountPhoneChangeBegin(
+		r.Context(), clientIP(r), hashRiskValue(string(principal.UserID)), h.rateLimit, h.rateWindow,
+	)
+	if err != nil {
+		h.logger.Error("phone change rate limit failed", "requestId", requestID(r), "errorClass", observability.ClassifyError(err))
+		WriteRateLimited(w, r, int(h.rateWindow.Seconds()))
+		return false
+	}
+	if !allowed {
+		WriteRateLimited(w, r, int((retry+time.Second-1)/time.Second))
+		return false
+	}
+	return true
+}
+
+func phoneChangeRiskIdentifier(userID identity.UserID, phone string) string {
+	return hashRiskValue(string(userID) + "\x00" + phone)
 }
 
 // VerifyPhoneChange handles POST /api/v1/me/phone-change/verify. It consumes

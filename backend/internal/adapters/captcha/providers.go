@@ -379,6 +379,8 @@ func providerAction(operation riskdefense.Operation) (string, error) {
 		return "united_pass_login", nil
 	case riskdefense.OperationRegistration:
 		return "united_pass_register", nil
+	case riskdefense.OperationPhoneChange:
+		return "united_pass_phone_change", nil
 	default:
 		return "", riskdefense.ErrUnavailable
 	}

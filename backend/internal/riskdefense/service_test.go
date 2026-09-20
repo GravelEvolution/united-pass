@@ -324,3 +324,72 @@ func solveAutomationCost(token string, difficulty uint8) string {
 		}
 	}
 }
+
+func phoneChangeSignal(identifier string) Signal {
+	return Signal{
+		Operation: OperationPhoneChange, IdentifierHash: hash(identifier),
+		UserAgentHash: hash("ua"), SessionTrusted: true,
+	}
+}
+
+func TestPhoneChangeAlwaysDemandsHumanVerificationBoundToTheTargetNumber(t *testing.T) {
+	now := time.Date(2026, 9, 20, 8, 0, 0, 0, time.UTC)
+	provider := &interactiveFake{}
+	svc, err := NewService(newMemoryStore(), provider, testConfig(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signal := phoneChangeSignal("user-1\x00+37257013843")
+
+	first, err := svc.Assess(t.Context(), signal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Allow || first.Challenge == nil || first.Challenge.Method != MethodInteractiveCAPTCHA ||
+		first.Challenge.Level != LevelHigh || !first.Challenge.ProviderReady {
+		t.Fatalf("first decision=%#v", first)
+	}
+	if provider.beginCalls != 1 {
+		t.Fatalf("provider begin calls=%d", provider.beginCalls)
+	}
+	signal.DeviceIDToken = first.DeviceIDToken
+	completed, err := svc.Complete(t.Context(), Completion{
+		ChallengeToken: first.Challenge.Token, ProviderProof: "provider-proof",
+		DeviceIDToken: signal.DeviceIDToken, UserAgentHash: signal.UserAgentHash,
+	})
+	if err != nil || completed.TrustToken == "" {
+		t.Fatalf("complete=%#v err=%v", completed, err)
+	}
+
+	signal.DeviceTrustToken = completed.TrustToken
+	retry, err := svc.Assess(t.Context(), signal)
+	if err != nil || !retry.Allow {
+		t.Fatalf("retry decision=%#v err=%v", retry, err)
+	}
+
+	signal.IdentifierHash = hash("user-1\x00+8613800138000")
+	other, err := svc.Assess(t.Context(), signal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Allow || other.Challenge == nil || other.Challenge.Method != MethodInteractiveCAPTCHA {
+		t.Fatalf("other number decision=%#v", other)
+	}
+}
+
+func TestPhoneChangeFailsClosedWhenTheInteractiveProviderIsUnavailable(t *testing.T) {
+	now := time.Date(2026, 9, 20, 8, 0, 0, 0, time.UTC)
+	provider := &unavailableInteractiveFake{}
+	svc, err := NewService(newMemoryStore(), provider, testConfig(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decision, err := svc.Assess(t.Context(), phoneChangeSignal("user-1\x00+37257013843"))
+	if !errors.Is(err, ErrUnavailable) || decision.Challenge != nil {
+		t.Fatalf("decision=%#v err=%v", decision, err)
+	}
+	if provider.beginCalls != 1 {
+		t.Fatalf("provider begin calls=%d", provider.beginCalls)
+	}
+}

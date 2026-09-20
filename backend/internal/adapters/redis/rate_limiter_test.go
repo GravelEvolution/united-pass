@@ -42,10 +42,10 @@ func TestRegistrationBucketValidationFailsClosed(t *testing.T) {
 	}
 }
 
-func TestAccountEmailChangeBucketsIncludeUserIPAndPairScopes(t *testing.T) {
+func TestAccountContactChangeBucketsIncludeUserIPAndPairScopes(t *testing.T) {
 	client := &Client{keyPrefix: "up:test:"}
 	limiter := NewRateLimiter(client)
-	buckets := limiter.accountEmailChangeBuckets(rateLimitAccountEmailVerifySegment, "203.0.113.7", strings.Repeat("a", 64), 5, time.Hour)
+	buckets := limiter.accountContactChangeBuckets(rateLimitAccountEmailVerifySegment, "203.0.113.7", strings.Repeat("a", 64), 5, time.Hour)
 	if len(buckets) != 3 {
 		t.Fatalf("bucket count = %d, want 3", len(buckets))
 	}
