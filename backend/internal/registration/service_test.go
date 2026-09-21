@@ -34,12 +34,14 @@ func (p *providerStub) ResendEmail(_ context.Context, input ResendEmailInput) er
 }
 
 type repositoryStub struct {
-	created     PendingUser
-	deleted     string
-	activated   string
-	createErr   error
-	deleteErr   error
-	activateErr error
+	created        PendingUser
+	deleted        string
+	activated      string
+	createErr      error
+	deleteErr      error
+	activateErr    error
+	pendingErr     error
+	pendingMissing bool
 }
 
 func (r *repositoryStub) CreatePending(_ context.Context, user PendingUser) error {
@@ -49,6 +51,9 @@ func (r *repositoryStub) CreatePending(_ context.Context, user PendingUser) erro
 func (r *repositoryStub) DeletePending(_ context.Context, userID string) error {
 	r.deleted = userID
 	return r.deleteErr
+}
+func (r *repositoryStub) IsPending(_ context.Context, _ string) (bool, error) {
+	return !r.pendingMissing, r.pendingErr
 }
 func (r *repositoryStub) ActivateVerified(_ context.Context, userID string) error {
 	r.activated = userID
@@ -209,6 +214,19 @@ func TestVerifyActivatesOnlyAfterProviderVerification(t *testing.T) {
 	}
 	if repo.activated != "" {
 		t.Fatal("local account activated after provider rejected the code")
+	}
+}
+
+func TestVerifyDoesNotContactProviderForUnknownLocalPendingUser(t *testing.T) {
+	provider := &providerStub{}
+	repo := &repositoryStub{pendingMissing: true}
+	service := newTestService(provider, repo, &tokenStoreStub{})
+	input := VerifyInput{UserID: "user_0123456789abcdef0123456789abcdef", Code: "provider-code"}
+	if _, err := service.Verify(t.Context(), input); !errors.Is(err, ErrVerificationFailed) {
+		t.Fatalf("Verify error=%v, want generic verification failure", err)
+	}
+	if provider.verified != (VerifyEmailInput{}) || repo.activated != "" {
+		t.Fatalf("unknown pending user reached provider or activation: provider=%#v activated=%q", provider.verified, repo.activated)
 	}
 }
 

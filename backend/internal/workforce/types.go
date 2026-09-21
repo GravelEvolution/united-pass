@@ -215,6 +215,7 @@ type DepartmentPatch struct {
 
 type UserStatusMutation struct {
 	ActorUserID    identity.UserID
+	ActorLabel     string
 	TargetUserID   identity.UserID
 	Status         identity.UserStatus
 	RevokeSessions bool

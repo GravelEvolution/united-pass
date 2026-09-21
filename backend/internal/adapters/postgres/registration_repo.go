@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
@@ -93,12 +94,15 @@ func (r *RegistrationRepository) CreatePending(ctx context.Context, input regist
 	return nil
 }
 
-// ReservePendingWithWeChat atomically creates the pending user, optional
+// ReservePendingWithWeChat atomically creates the pending user, mandatory
 // verified phone, primary provider link, WeChat link and consumer persona. If
 // an earlier provider call failed ambiguously, the same verified WeChat
 // subject reuses and reconciles its pending reservation so the caller can
 // safely retry the same provider-controlled user ID.
 func (r *RegistrationRepository) ReservePendingWithWeChat(ctx context.Context, input wechatregistration.PendingUser) (string, error) {
+	if input.Phone == "" || input.Phone != strings.TrimSpace(input.Phone) {
+		return "", registration.ErrInvalidInput
+	}
 	if r == nil || r.pool == nil || r.intentStore == nil || r.provider == "" || r.tenantID == "" || input.User.UserID == "" || input.User.Status != registration.StatusPending || input.User.EmailVerified || input.TenantID == "" || input.Subject == "" || input.ProviderIntent.Username == "" || input.ProviderIntent.Password == "" || input.ProviderIntent.DisplayName != input.User.DisplayName || !strings.EqualFold(strings.TrimSpace(input.ProviderIntent.Email), strings.TrimSpace(input.User.Email)) {
 		return "", registration.ErrUnavailable
 	}
@@ -165,14 +169,17 @@ SELECT u.id,
 		if input.ExpectedUserID != "" && existingUserID != input.ExpectedUserID {
 			return "", registration.ErrConflict
 		}
-		if existingStatus != registration.StatusPending || existingEmailVerified || !strings.EqualFold(strings.TrimSpace(existingEmail), normalizedEmail) || (input.Phone != "" && existingPhone != "" && existingPhone != input.Phone) {
+		if existingStatus != registration.StatusPending || existingEmailVerified || !strings.EqualFold(strings.TrimSpace(existingEmail), normalizedEmail) {
 			return "", registration.ErrConflict
+		}
+		if existingPhone != "" && existingPhone != input.Phone {
+			return "", registration.ErrPhoneConflict
 		}
 		if input.Phone != "" {
 			var conflictingUserID string
 			phoneErr := tx.QueryRow(ctx, `SELECT id FROM users WHERE phone = $1 AND id <> $2 ORDER BY id LIMIT 1 FOR UPDATE`, input.Phone, existingUserID).Scan(&conflictingUserID)
 			if phoneErr == nil {
-				return "", registration.ErrConflict
+				return "", registration.ErrPhoneConflict
 			}
 			if !errors.Is(phoneErr, pgx.ErrNoRows) {
 				return "", fmt.Errorf("postgres: check retryable WeChat registration phone owner: %w", phoneErr)
@@ -205,6 +212,9 @@ UPDATE users
 				if errors.Is(updateErr, pgx.ErrNoRows) {
 					return "", registration.ErrConflict
 				}
+				if isUniqueViolation(updateErr) {
+					return "", registration.ErrPhoneConflict
+				}
 				return "", fmt.Errorf("postgres: reconcile WeChat registration phone: %w", updateErr)
 			}
 			if effectErr := recordPendingPhoneVerifiedWeChatAuthorityEffect(
@@ -228,6 +238,9 @@ UPDATE users
 			return "", effectErr
 		}
 		if commitErr := tx.Commit(ctx); commitErr != nil {
+			if isPhoneUniqueViolation(commitErr) {
+				return "", registration.ErrPhoneConflict
+			}
 			return "", fmt.Errorf("postgres: commit WeChat registration reconciliation: %w", commitErr)
 		}
 		return existingUserID, nil
@@ -252,7 +265,7 @@ UPDATE users
 		var conflictingUserID string
 		phoneErr := tx.QueryRow(ctx, `SELECT id FROM users WHERE phone = $1 ORDER BY id LIMIT 1 FOR UPDATE`, input.Phone).Scan(&conflictingUserID)
 		if phoneErr == nil {
-			return "", registration.ErrConflict
+			return "", registration.ErrPhoneConflict
 		}
 		if !errors.Is(phoneErr, pgx.ErrNoRows) {
 			return "", fmt.Errorf("postgres: check WeChat registration phone owner: %w", phoneErr)
@@ -267,6 +280,9 @@ UPDATE users
 	userID := identity.UserID(input.User.UserID)
 	user := identity.User{ID: userID, Status: identity.UserStatusPending, DisplayName: input.User.DisplayName, Email: input.User.Email, EmailVerified: false, Phone: input.Phone, PhoneVerified: input.Phone != "", CreatedAt: now, UpdatedAt: now, Version: 1}
 	if err := createUserTx(ctx, tx, user); err != nil {
+		if isPhoneUniqueViolation(err) {
+			return "", registration.ErrPhoneConflict
+		}
 		return "", mapRegistrationWriteError(err)
 	}
 	primary := identity.IdentityLink{ID: generateLinkID(), UserID: userID, Provider: r.provider, ProviderTenantID: r.tenantID, ProviderSubject: input.User.UserID, CreatedAt: now, LastSeenAt: now}
@@ -284,6 +300,9 @@ UPDATE users
 		return "", effectErr
 	}
 	if err := tx.Commit(ctx); err != nil {
+		if isPhoneUniqueViolation(err) {
+			return "", registration.ErrPhoneConflict
+		}
 		return "", fmt.Errorf("postgres: commit WeChat registration transaction: %w", err)
 	}
 	return input.User.UserID, nil
@@ -379,6 +398,31 @@ SELECT EXISTS (
 		return fmt.Errorf("postgres: commit registration cleanup: %w", err)
 	}
 	return nil
+}
+
+// IsPending is the local authority guard in front of provider email
+// verification. Random user IDs never reach the provider, and the query does
+// not reveal whether another kind of account exists.
+func (r *RegistrationRepository) IsPending(ctx context.Context, userID string) (bool, error) {
+	if r == nil || r.pool == nil || userID == "" || r.provider == "" || r.tenantID == "" {
+		return false, registration.ErrUnavailable
+	}
+	var pending bool
+	if err := r.pool.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1
+      FROM users AS u
+      JOIN identity_links AS l ON l.user_id = u.id
+     WHERE u.id = $1
+       AND u.status = 'pending'
+       AND u.email_verified = FALSE
+       AND l.provider = $2
+       AND l.provider_tenant_id = $3
+       AND l.provider_subject = $1
+)`, userID, r.provider, r.tenantID).Scan(&pending); err != nil {
+		return false, fmt.Errorf("postgres: read pending registration: %w", err)
+	}
+	return pending, nil
 }
 
 func (r *RegistrationRepository) ActivateVerified(ctx context.Context, userID string) error {
@@ -499,4 +543,17 @@ func mapRegistrationWriteError(err error) error {
 		return registration.ErrVerificationFailed
 	}
 	return err
+}
+
+// isPhoneUniqueViolation recognizes a database-level phone uniqueness guard
+// without treating an unrelated user-ID, email or link race as a phone
+// conflict. The normal owner check provides the stable path; this closes the
+// concurrent/deferred-constraint path in deployments that enforce uniqueness.
+func isPhoneUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+		return false
+	}
+	metadata := strings.ToLower(strings.Join([]string{pgErr.ConstraintName, pgErr.ColumnName, pgErr.Detail}, " "))
+	return strings.Contains(metadata, "phone")
 }

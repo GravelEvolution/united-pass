@@ -197,8 +197,29 @@
   gap: 12px;
 }
 
+.mockBadge {
+  display: inline-flex;
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: var(--up-brand);
+  background: var(--up-brand-soft);
+  font-size: 12px;
+  font-weight: 760;
+  letter-spacing: 0.12em;
+}
+
 @media (max-width: 640px) {
   .twoColumns {
     grid-template-columns: 1fr;
   }
+
+  .redirectRow { align-items: stretch; flex-direction: column; }
+  .redirectRow :global(.semi-button) { width: 100%; min-height: 44px; }
+  .actions,
+  .resultActions { align-items: stretch; flex-direction: column; }
+  .actions > *,
+  .resultActions > * { width: 100%; }
+  .actions :global(.semi-button),
+  .resultActions :global(.semi-button) { width: 100%; min-height: 44px; }
+  .resultPanel { padding: 20px 16px; }
 }

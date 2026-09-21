@@ -117,28 +117,36 @@ func (c *Client) VerifyRegistration(ctx context.Context, loginCode, phoneCode st
 	return wechatdomain.IdentityProof{TenantID: c.appID, Subject: subject, Phone: phone}, nil
 }
 
-// VerifyOnboarding always treats wx.login as the identity proof. A phone code
-// is optional and best effort: malformed, consumed, rejected or temporarily
-// unavailable phone authorization is silently represented by an empty Phone.
-// The login exchange itself remains fail closed and is never downgraded.
+// VerifyOnboarding requires both the wx.login identity proof and a fresh
+// getPhoneNumber proof. Provider rejection or unavailability fails closed;
+// onboarding must never downgrade to an identity-only account or session.
 func (c *Client) VerifyOnboarding(ctx context.Context, loginCode, phoneCode string) (wechatdomain.IdentityProof, error) {
-	proof, err := c.VerifyLogin(ctx, loginCode)
+	if err := wechatdomain.ValidateCode(loginCode); err != nil {
+		return wechatdomain.IdentityProof{}, err
+	}
+	if err := wechatdomain.ValidateCode(phoneCode); err != nil {
+		return wechatdomain.IdentityProof{}, errors.Join(wechatdomain.ErrPhoneRequired, err)
+	}
+	identity, err := c.exchangeLoginCode(ctx, loginCode)
 	if err != nil {
 		return wechatdomain.IdentityProof{}, err
 	}
-	if phoneCode == "" || wechatdomain.ValidateCode(phoneCode) != nil {
-		return proof, nil
-	}
 	accessToken, err := c.accessToken(ctx)
 	if err != nil {
-		return proof, nil
+		return wechatdomain.IdentityProof{}, err
 	}
 	phone, err := c.exchangePhoneCode(ctx, accessToken, phoneCode)
 	if err != nil {
-		return proof, nil
+		if errors.Is(err, wechatdomain.ErrRejected) || errors.Is(err, wechatdomain.ErrInvalidCode) {
+			return wechatdomain.IdentityProof{}, errors.Join(wechatdomain.ErrPhoneRequired, err)
+		}
+		return wechatdomain.IdentityProof{}, err
 	}
-	proof.Phone = phone
-	return proof, nil
+	subject, err := wechatdomain.Subject(identity.UnionID, identity.OpenID)
+	if err != nil {
+		return wechatdomain.IdentityProof{}, err
+	}
+	return wechatdomain.IdentityProof{TenantID: c.appID, Subject: subject, Phone: phone}, nil
 }
 
 type loginExchangeResponse struct {

@@ -29,5 +29,6 @@ describe("registration availability", () => {
       expect(panelSource).toContain(`name="${field}"`);
     }
     expect(panelSource).toContain("requestId=${encodeURIComponent(requestId)}");
+    expect(panelSource).toContain("注册凭据已自动更新，请再次点击创建账户。");
   });
 });

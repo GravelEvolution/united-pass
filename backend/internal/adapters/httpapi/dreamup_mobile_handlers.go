@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -86,14 +87,13 @@ func (h *DreamUPMobileHandlers) CreateAssertion(w http.ResponseWriter, r *http.R
 		WriteValidation(w, r, "DreamUP 请求内容过大。", nil)
 		return
 	}
-	link, err := h.resolver.GetIdentityLinkByUserID(r.Context(), h.provider, h.tenantID, principal.UserID)
-	if err != nil || link.UserID != principal.UserID || link.ProviderSubject == "" {
-		WriteUnauthorized(w, r)
+	subject, ok := h.resolveParticipantSubject(w, r, principal.UserID)
+	if !ok {
 		return
 	}
 	digest := sha256.Sum256([]byte(body.Body))
 	assertion, err := h.signer.SignParticipant(dreamupdelegation.ParticipantAssertion{
-		Subject: link.ProviderSubject, JWTID: requestctx.ID(r.Context()), Method: body.Method, PathAndQuery: body.Path, BodySHA256: hex.EncodeToString(digest[:]),
+		Subject: subject, JWTID: requestctx.ID(r.Context()), Method: body.Method, PathAndQuery: body.Path, BodySHA256: hex.EncodeToString(digest[:]),
 		HeaderSHA256: dreamupdelegation.ParticipantHeadersSHA256(body.IfMatch, body.IdempotencyKey),
 	})
 	if err != nil {
@@ -154,13 +154,12 @@ func (h *DreamUPMobileHandlers) CreateResumeUploadAssertion(w http.ResponseWrite
 		WriteValidation(w, r, "文件摘要无效。", nil)
 		return
 	}
-	link, err := h.resolver.GetIdentityLinkByUserID(r.Context(), h.provider, h.tenantID, principal.UserID)
-	if err != nil || link.UserID != principal.UserID || link.ProviderSubject == "" {
-		WriteUnauthorized(w, r)
+	subject, ok := h.resolveParticipantSubject(w, r, principal.UserID)
+	if !ok {
 		return
 	}
 	assertion, err := h.signer.SignParticipant(dreamupdelegation.ParticipantAssertion{
-		Subject: link.ProviderSubject, JWTID: requestctx.ID(r.Context()), Method: body.Method, PathAndQuery: body.Path,
+		Subject: subject, JWTID: requestctx.ID(r.Context()), Method: body.Method, PathAndQuery: body.Path,
 		BodySHA256: body.BodySHA256, HeaderSHA256: dreamupdelegation.ParticipantHeadersSHA256("", ""),
 		ResumeUpload: &dreamupdelegation.ResumeUploadMetadata{FileName: body.FileName, ContentType: body.ContentType, ByteSize: body.ByteSize},
 	})
@@ -169,6 +168,33 @@ func (h *DreamUPMobileHandlers) CreateResumeUploadAssertion(w http.ResponseWrite
 		return
 	}
 	writeJSONNoStore(w, r, http.StatusCreated, map[string]any{"assertion": assertion.Token, "expiresAt": assertion.ExpiresAt.Format("2006-01-02T15:04:05Z")})
+}
+
+// resolveParticipantSubject keeps session authentication failures separate
+// from identity-link state and dependency failures. The native client may
+// evict its bearer on session.unauthenticated, so this handler must never use
+// that code for a valid principal whose durable identity projection cannot be
+// read or is inconsistent.
+func (h *DreamUPMobileHandlers) resolveParticipantSubject(w http.ResponseWriter, r *http.Request, userID identity.UserID) (string, bool) {
+	link, err := h.resolver.GetIdentityLinkByUserID(r.Context(), h.provider, h.tenantID, userID)
+	switch {
+	case errors.Is(err, identity.ErrUserNotFound):
+		WriteForbidden(w, r)
+		return "", false
+	case errors.Is(err, identity.ErrIdentityLinkConflict):
+		writeError(w, r, http.StatusConflict, CodeConflict, "统一账户身份绑定存在冲突，请联系管理员。", nil)
+		return "", false
+	case err != nil:
+		h.logger.Error("DreamUP Mobile identity link lookup failed", "requestId", requestID(r), "errorClass", observability.ClassifyError(err))
+		WriteInternalError(w, r)
+		return "", false
+	case link.UserID != userID || link.Provider != h.provider || link.ProviderTenantID != h.tenantID || link.ProviderSubject == "":
+		h.logger.Error("DreamUP Mobile identity link projection invalid", "requestId", requestID(r))
+		WriteInternalError(w, r)
+		return "", false
+	default:
+		return link.ProviderSubject, true
+	}
 }
 
 func (h *DreamUPMobileHandlers) prepareIssuance(w http.ResponseWriter, r *http.Request, principal session.Principal) bool {

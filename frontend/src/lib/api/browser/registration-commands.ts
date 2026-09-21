@@ -9,7 +9,13 @@ export type CreateRegistrationInput = {
   password: string;
   acceptedTerms: boolean;
   requestId?: string;
-  captchaVerifyParam?: string;
+  formIntentToken: string;
+  automationBrief: string;
+};
+
+export type RegistrationFormIntent = {
+  formIntentToken: string;
+  expiresAt: string;
 };
 
 export type CreateRegistrationResult = {
@@ -29,17 +35,31 @@ export type VerifyRegistrationEmailResult = {
   requestId?: string;
 };
 
+export async function issueRegistrationFormIntent(signal?: AbortSignal): Promise<RegistrationFormIntent> {
+  const response = await browserFetch<unknown>("/registrations/form-intents", {
+    method: "POST",
+    body: {},
+    signal,
+  });
+  if (!isRecord(response)
+    || typeof response.formIntentToken !== "string"
+    || response.formIntentToken.length === 0
+    || typeof response.expiresAt !== "string"
+    || Number.isNaN(Date.parse(response.expiresAt))) {
+    throw new TypeError("Registration form-intent API returned an invalid response");
+  }
+  return { formIntentToken: response.formIntentToken, expiresAt: response.expiresAt };
+}
+
 export async function createRegistration(
   input: CreateRegistrationInput,
 ): Promise<CreateRegistrationResult> {
-  const { captchaVerifyParam, ...registrationBody } = input;
   const response = await browserFetch<unknown>("/registrations", {
     method: "POST",
     body: {
-      ...registrationBody,
+      ...input,
       requestId: input.requestId ?? "",
     },
-    captchaVerifyParam,
   });
   if (!isRecord(response)
     || response.status !== "verification_required"

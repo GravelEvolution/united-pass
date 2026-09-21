@@ -9,7 +9,12 @@ import type { MfaMethod } from "@/features/auth/types";
 import { isApiError, type StepUpChallenge } from "@/lib/api/api-error";
 import { completeLoginMfa } from "@/lib/api/browser/auth-commands";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
-import { getInteractiveCaptchaAdapter } from "@/lib/security/interactive-captcha-adapter";
+import {
+  getInteractiveCaptchaAdapter,
+  registerInteractiveCaptchaAdapter,
+} from "@/lib/security/interactive-captcha-adapter";
+import { RECAPTCHA_PROVIDER } from "@/lib/security/interactive-captcha-contract";
+import { officialInteractiveCaptchaAdapter } from "@/lib/security/official-interactive-captcha-adapter";
 import {
   registerRiskStepUpHandler,
   RiskStepUpCancelledError,
@@ -30,8 +35,6 @@ type PendingStepUp = {
 type ReauthenticationContext = {
   action: ReauthenticationAction;
   target: string;
-  applicationId?: string;
-  clientId?: string;
 };
 
 const REAUTHENTICATION_ACTIONS: ReadonlySet<string> = new Set<ReauthenticationAction>([
@@ -50,9 +53,6 @@ const REAUTHENTICATION_ACTIONS: ReadonlySet<string> = new Set<ReauthenticationAc
   "provider.identity.link",
   "policy.publish",
   "audit.export",
-  "application.delete",
-  "client.delete",
-  "client.secret.rotate",
 ]);
 
 export function RiskStepUpProvider({ children }: PropsWithChildren) {
@@ -91,6 +91,9 @@ export function RiskStepUpProvider({ children }: PropsWithChildren) {
     };
     settleRef.current = settle;
 
+    const unregisterCaptcha = registerInteractiveCaptchaAdapter(
+      officialInteractiveCaptchaAdapter,
+    );
     const unregister = registerRiskStepUpHandler((challenge, signal) =>
       new Promise<RiskStepUpResolution>((resolve, reject) => {
         if (signal?.aborted) {
@@ -123,6 +126,7 @@ export function RiskStepUpProvider({ children }: PropsWithChildren) {
     return () => {
       disposed = true;
       unregister();
+      unregisterCaptcha();
       const unavailable = new RiskStepUpUnavailableError();
       const pending = activeRef.current;
       activeRef.current = undefined;
@@ -254,13 +258,11 @@ function InteractiveCaptchaChallenge({
       {adapterError && (
         <Banner type="danger" fullMode={false} bordered description={adapterError} />
       )}
-      <div
-        ref={containerRef}
-        className={styles.captchaContainer}
-        aria-label="互动安全验证"
-        aria-busy={isRunning}
-      >
-        {isRunning && <Spin tip="正在加载验证…" />}
+      <div className={styles.captchaContainer} aria-label="互动安全验证" aria-busy={isRunning}>
+        <div ref={containerRef} className={styles.captchaMount} />
+        {isRunning && challenge.provider === RECAPTCHA_PROVIDER && (
+          <Spin tip="正在进行验证…" />
+        )}
       </div>
       <div className={styles.actions}>
         <Button theme="outline" onClick={onCancel}>取消</Button>
@@ -278,7 +280,11 @@ function InteractiveCaptchaChallenge({
   );
 }
 
-function LoginMfaStepUp({ challenge, onCancel, onComplete }: RiskStepUpModalProps) {
+function LoginMfaStepUp({
+  challenge,
+  onCancel,
+  onComplete,
+}: RiskStepUpModalProps & { challenge: Extract<StepUpChallenge, { method: "mfa" }> }) {
   const mfaContext = parseMfaContext(challenge.providerPayload);
   const [code, setCode] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -336,7 +342,11 @@ function LoginMfaStepUp({ challenge, onCancel, onComplete }: RiskStepUpModalProp
   );
 }
 
-function ReauthenticationStepUp({ challenge, onCancel, onComplete }: RiskStepUpModalProps) {
+function ReauthenticationStepUp({
+  challenge,
+  onCancel,
+  onComplete,
+}: RiskStepUpModalProps & { challenge: Extract<StepUpChallenge, { method: "reauth" }> }) {
   const context = parseReauthenticationContext(challenge.providerPayload);
   const [password, setPassword] = useState("");
   const [mfaChallenge, setMfaChallenge] = useState<ReauthenticationChallenge>();
@@ -353,8 +363,6 @@ function ReauthenticationStepUp({ challenge, onCancel, onComplete }: RiskStepUpM
       const outcome = await browserCommands.requestReauthentication({
         action: context.action,
         target: context.target,
-        applicationId: context.applicationId,
-        clientId: context.clientId,
         password,
       });
       setPassword("");
@@ -494,21 +502,9 @@ function parseReauthenticationContext(
     return undefined;
   }
   if (payload.target !== undefined && typeof payload.target !== "string") return undefined;
-  if (payload.applicationId !== undefined && typeof payload.applicationId !== "string") return undefined;
-  if (payload.clientId !== undefined && typeof payload.clientId !== "string") return undefined;
-
-  const applicationId = typeof payload.applicationId === "string" ? payload.applicationId : undefined;
-  const clientId = typeof payload.clientId === "string" ? payload.clientId : undefined;
-  if (payload.action === "application.delete" && !applicationId) return undefined;
-  if (
-    (payload.action === "client.delete" || payload.action === "client.secret.rotate")
-    && (!applicationId || !clientId)
-  ) return undefined;
   return {
     action: payload.action as ReauthenticationAction,
     target: typeof payload.target === "string" ? payload.target : "",
-    applicationId,
-    clientId,
   };
 }
 

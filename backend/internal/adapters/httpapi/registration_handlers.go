@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,7 +17,6 @@ import (
 
 	"github.com/GravelEvolution/united-pass/backend/internal/platform/observability"
 	"github.com/GravelEvolution/united-pass/backend/internal/registration"
-	"github.com/GravelEvolution/united-pass/backend/internal/riskdefense"
 )
 
 const (
@@ -43,13 +43,25 @@ type RegistrationService interface {
 
 type RegistrationRateChecker interface {
 	CheckRegistrationFormIntent(context.Context, string, registration.Limit) (bool, time.Duration, error)
+	CheckRegistrationFormIntentGlobal(context.Context, string, registration.Limit, registration.AggregateRatePolicy) (bool, time.Duration, error)
+	CheckRegistrationFormIntentDevice(context.Context, string, registration.Limit) (bool, time.Duration, error)
 	CheckRegistrationCreate(context.Context, string, string, string, registration.CreateRatePolicy) (bool, time.Duration, error)
+	CheckRegistrationCreateChain(context.Context, string, string, string, string, registration.CreateRatePolicy, time.Duration) (registration.CreateChainRateOutcome, time.Duration, error)
+	CheckRegistrationCreateChainWithCohorts(context.Context, registration.CreateRateSubject, registration.CreateRatePolicy, time.Duration) (registration.CreateChainRateOutcome, time.Duration, error)
+	RefundRegistrationCreateEmail(context.Context, string, string, string) (bool, error)
+	RefundRegistrationCreateCohorts(context.Context, registration.CreateRateSubject, registration.CreateRatePolicy) (bool, error)
 	CheckRegistrationVerify(context.Context, string, string, registration.Limit) (bool, time.Duration, error)
+	CheckRegistrationVerifyWithGlobal(context.Context, string, string, registration.Limit, registration.AggregateRatePolicy) (bool, time.Duration, error)
 	CheckRegistrationResend(context.Context, string, string, registration.Limit) (bool, time.Duration, error)
+}
+
+type RegistrationAdmission interface {
+	Acquire(context.Context, string, bool) (func(), error)
 }
 
 type RegistrationFormDefense interface {
 	Issue(context.Context, registration.FormIntentBinding) (registration.FormIntentResult, error)
+	BindEmail(context.Context, string, registration.FormIntentBinding) error
 	Consume(context.Context, string, registration.FormIntentBinding) error
 	IsBlocked(context.Context, registration.AbuseFingerprint) (bool, error)
 	RecordHit(context.Context, registration.AbuseFingerprint, registration.HoneypotReason, string) (registration.AbuseDisposition, error)
@@ -66,6 +78,9 @@ type RegistrationHandlers struct {
 	logger         *slog.Logger
 	risk           *RiskGuard
 	formDefense    RegistrationFormDefense
+	emailRisk      registration.EmailRiskAssessor
+	admission      RegistrationAdmission
+	allowIPBlocks  bool
 }
 
 type RegistrationHandlerOption func(*RegistrationHandlers)
@@ -76,6 +91,18 @@ func WithRegistrationRiskGuard(guard *RiskGuard) RegistrationHandlerOption {
 
 func WithRegistrationFormDefense(defense RegistrationFormDefense) RegistrationHandlerOption {
 	return func(h *RegistrationHandlers) { h.formDefense = defense }
+}
+
+func WithRegistrationEmailRisk(assessor registration.EmailRiskAssessor) RegistrationHandlerOption {
+	return func(h *RegistrationHandlers) { h.emailRisk = assessor }
+}
+
+func WithRegistrationAdmission(admission RegistrationAdmission) RegistrationHandlerOption {
+	return func(h *RegistrationHandlers) { h.admission = admission }
+}
+
+func WithRegistrationHoneypotIPBlocks(enabled bool) RegistrationHandlerOption {
+	return func(h *RegistrationHandlers) { h.allowIPBlocks = enabled }
 }
 
 func NewRegistrationHandlers(service RegistrationService, rate RegistrationRateChecker, enabled bool, expectedOrigin string, policy registration.RatePolicy, logger *slog.Logger, options ...RegistrationHandlerOption) *RegistrationHandlers {
@@ -149,7 +176,7 @@ func (h *RegistrationHandlers) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnprocessableEntity, codeRegistrationFormInvalid, "注册页面已更新，请刷新后重试。", nil)
 		return
 	}
-	if body.FormIntentToken == "" {
+	if body.FormIntentToken == "" || len(body.FormIntentToken) > 512 {
 		writeError(w, r, http.StatusUnprocessableEntity, codeRegistrationFormInvalid, "注册页面已更新，请刷新后重试。", nil)
 		return
 	}
@@ -160,17 +187,7 @@ func (h *RegistrationHandlers) Create(w http.ResponseWriter, r *http.Request) {
 		if !h.consumeRegistrationFormIntent(w, r, body.FormIntentToken) {
 			return
 		}
-		h.rejectAutomatedRegistration(w, r, registrationFingerprint(r), reason)
-		return
-	}
-	fingerprint := registrationFingerprint(r)
-	blocked, err := h.formDefense.IsBlocked(r.Context(), fingerprint)
-	if err != nil {
-		WriteProviderUnavailable(w, r)
-		return
-	}
-	if blocked {
-		h.writeDecoyRegistration(w, r)
+		h.rejectAutomatedRegistration(w, r, h.registrationFingerprint(r), reason)
 		return
 	}
 	input := registration.CreateInput{
@@ -181,25 +198,194 @@ func (h *RegistrationHandlers) Create(w http.ResponseWriter, r *http.Request) {
 		h.writeServiceError(w, r, "create", err)
 		return
 	}
-	if !h.checkRate(w, r, "create", strings.ToLower(strings.TrimSpace(body.Email))) {
+	intentBinding := registrationFormIntentBinding(r, h.policy)
+	intentBinding.EmailHash = registration.HashAbuseValue(strings.ToLower(strings.TrimSpace(body.Email)))
+	if !h.bindRegistrationFormIntentEmail(w, r, body.FormIntentToken, intentBinding) {
 		return
 	}
-	if h.risk != nil && !h.risk.Require(w, r, riskdefense.OperationRegistration, hashRiskValue(strings.ToLower(strings.TrimSpace(body.Email)))) {
+	fingerprint := h.registrationFingerprint(r)
+	blocked, err := h.formDefense.IsBlocked(r.Context(), fingerprint)
+	if err != nil {
+		WriteProviderUnavailable(w, r)
 		return
 	}
-	if !h.consumeRegistrationFormIntent(w, r, body.FormIntentToken) {
+	if blocked {
+		if !h.consumeRegistrationFormIntentWithBinding(w, r, body.FormIntentToken, intentBinding) {
+			return
+		}
+		h.writeDecoyRegistration(w, r)
+		return
+	}
+	if h.risk == nil {
+		// Public registration must never silently run without the mandatory
+		// interactive gate, even if risk defense was accidentally omitted from
+		// bootstrap configuration.
+		WriteProviderUnavailable(w, r)
+		return
+	}
+	if h.emailRisk == nil || h.admission == nil {
+		WriteProviderUnavailable(w, r)
+		return
+	}
+	domainProfile, err := h.emailRisk.Profile(body.Email)
+	if err != nil {
+		h.writeServiceError(w, r, "create", err)
+		return
+	}
+	releaseAdmission, err := h.admission.Acquire(r.Context(), domainProfile.Domain, !domainProfile.Established)
+	if err != nil {
+		if errors.Is(err, registration.ErrAdmissionBusy) {
+			seconds := int((h.policy.AdmissionWait + time.Second - 1) / time.Second)
+			if seconds <= 0 {
+				seconds = 1
+			}
+			WriteRateLimited(w, r, seconds)
+			return
+		}
+		WriteProviderUnavailable(w, r)
+		return
+	}
+	defer releaseAdmission()
+	if !h.risk.RequireRegistration(w, r, registrationRiskIdentifier(
+		body.Email,
+		body.FormIntentToken,
+		h.expectedOrigin,
+	), intentBinding.ClientNetworkHash) {
+		return
+	}
+	assessment, err := h.emailRisk.Assess(r.Context(), body.Email)
+	if err != nil {
+		h.writeServiceError(w, r, "create", err)
+		return
+	}
+	if assessment.Domain != domainProfile.Domain || assessment.DomainGroup == "" || assessment.DomainEstablished != domainProfile.Established ||
+		(!assessment.MXEstablished && len(assessment.MXGroups) == 0) {
+		h.logger.Error("registration email assessment invariant failed", "requestId", requestID(r))
+		WriteProviderUnavailable(w, r)
+		return
+	}
+	// Preserve the production ordering: an unsolved form cannot spend another
+	// address's create budget. Once the exact challenge is complete, charge all
+	// ordinary buckets atomically. The one bound replay keeps a transient final
+	// intent-consumption failure from charging the same browser chain twice.
+	rateSubject := h.registrationCreateRateSubject(r, strings.ToLower(strings.TrimSpace(body.Email)), body.FormIntentToken, assessment)
+	if !h.checkCreateChainRate(w, r, rateSubject) {
+		return
+	}
+	if !h.consumeRegistrationFormIntentWithBinding(w, r, body.FormIntentToken, intentBinding) {
 		return
 	}
 	result, err := h.service.Create(r.Context(), input)
 	if err != nil {
+		if errors.Is(err, registration.ErrConflict) {
+			h.refundRegistrationConflictCohorts(r, rateSubject)
+		}
 		h.writeServiceError(w, r, "create", err)
 		return
 	}
 	h.writeCreated(w, r, result.RegistrationToken, result.ExpiresAt)
 }
 
+// A deterministic account conflict creates no new account and sends no
+// verification message. Do not let repeated attempts with an already-used
+// address poison the long-lived email creation budget. The shorter client,
+// network and client/email buckets remain charged, so this is not a bypass for
+// automated conflict probing. The Redis adapter binds the refund to the exact
+// form-intent marker and applies it at most once.
+func (h *RegistrationHandlers) refundRegistrationConflictCohorts(r *http.Request, subject registration.CreateRateSubject) {
+	refundCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), time.Second)
+	defer cancel()
+	if _, err := h.rate.RefundRegistrationCreateCohorts(refundCtx, subject, h.policy.Create); err != nil {
+		h.logger.Error("registration conflict email-rate refund failed", "requestId", requestID(r), "errorClass", observability.ClassifyError(err))
+	}
+}
+
+// registrationRiskIdentifier binds the step-up trust to the exact form intent,
+// normalized email and already-validated Origin. NUL separators make the tuple
+// unambiguous; raw registration values never enter the risk store.
+func registrationRiskIdentifier(email, formIntentToken, expectedOrigin string) string {
+	return hashRiskValue(
+		strings.ToLower(strings.TrimSpace(email)) + "\x00" +
+			formIntentToken + "\x00" + expectedOrigin,
+	)
+}
+
+func (h *RegistrationHandlers) checkCreateChainRate(w http.ResponseWriter, r *http.Request, subject registration.CreateRateSubject) bool {
+	outcome, retryAfter, err := h.rate.CheckRegistrationCreateChainWithCohorts(
+		r.Context(), subject, h.policy.Create, h.policy.FormIntentTTL,
+	)
+	if err != nil {
+		h.logger.Error("registration create-chain rate limit failed", "requestId", requestID(r), "errorClass", observability.ClassifyError(err))
+		WriteRateLimited(w, r, int(h.policy.Create.ClientIP.Window.Seconds()))
+		return false
+	}
+	if outcome.Allowed() {
+		return true
+	}
+	if outcome == registration.CreateChainRateBindingMismatch || outcome == registration.CreateChainRateReplayExhausted {
+		writeError(w, r, http.StatusUnprocessableEntity, codeRegistrationFormInvalid, "注册页面已失效，请刷新后重试。", nil)
+		return false
+	}
+	seconds := int((retryAfter + time.Second - 1) / time.Second)
+	if seconds <= 0 {
+		seconds = int(h.policy.Create.ClientIP.Window.Seconds())
+	}
+	WriteRateLimited(w, r, seconds)
+	return false
+}
+
+func (h *RegistrationHandlers) registrationCreateRateSubject(r *http.Request, normalizedEmail, formIntentToken string, assessment registration.EmailAssessment) registration.CreateRateSubject {
+	client := clientIP(r)
+	subject := registration.CreateRateSubject{
+		ClientIP:       client,
+		ClientNetwork:  clientNetwork(client, h.policy.Create.IPv4NetBits, h.policy.Create.IPv6NetBits),
+		EmailHash:      registration.HashAbuseValue(normalizedEmail),
+		FormIntentHash: registration.HashAbuseValue(formIntentToken),
+	}
+	if family := registration.MailboxFamilyRateIdentity(normalizedEmail); family != "" {
+		subject.MailboxFamilyHash = registration.HashAbuseValue(family)
+	}
+	if !assessment.DomainEstablished {
+		domainGroup := assessment.DomainGroup
+		if domainGroup == "" {
+			domainGroup = assessment.Domain
+		}
+		if domainGroup != "" {
+			subject.DomainHash = registration.HashAbuseValue(domainGroup)
+		}
+	}
+	if !assessment.MXEstablished && len(assessment.MXGroups) > 0 {
+		subject.MXHashes = make([]string, 0, len(assessment.MXGroups))
+		for _, group := range assessment.MXGroups {
+			if group != "" {
+				subject.MXHashes = append(subject.MXHashes, registration.HashAbuseValue(group))
+			}
+		}
+		sort.Strings(subject.MXHashes)
+	}
+	return subject
+}
+
 func (h *RegistrationHandlers) consumeRegistrationFormIntent(w http.ResponseWriter, r *http.Request, token string) bool {
-	if err := h.formDefense.Consume(r.Context(), token, registrationFormIntentBinding(r, h.policy)); err != nil {
+	return h.consumeRegistrationFormIntentWithBinding(w, r, token, registrationFormIntentBinding(r, h.policy))
+}
+
+func (h *RegistrationHandlers) bindRegistrationFormIntentEmail(w http.ResponseWriter, r *http.Request, token string, binding registration.FormIntentBinding) bool {
+	if err := h.formDefense.BindEmail(r.Context(), token, binding); err != nil {
+		return h.writeRegistrationFormIntentError(w, r, err)
+	}
+	return true
+}
+
+func (h *RegistrationHandlers) consumeRegistrationFormIntentWithBinding(w http.ResponseWriter, r *http.Request, token string, binding registration.FormIntentBinding) bool {
+	if err := h.formDefense.Consume(r.Context(), token, binding); err != nil {
+		return h.writeRegistrationFormIntentError(w, r, err)
+	}
+	return true
+}
+
+func (h *RegistrationHandlers) writeRegistrationFormIntentError(w http.ResponseWriter, r *http.Request, err error) bool {
+	if err != nil {
 		switch {
 		case errors.Is(err, registration.ErrFormIntentTooYoung):
 			writeError(w, r, http.StatusUnprocessableEntity, codeRegistrationFormNotReady, "请稍候片刻再提交注册。", nil)
@@ -221,6 +407,10 @@ func (h *RegistrationHandlers) IssueFormIntent(w http.ResponseWriter, r *http.Re
 		WriteProviderUnavailable(w, r)
 		return
 	}
+	if h.risk == nil {
+		WriteProviderUnavailable(w, r)
+		return
+	}
 	var body registrationFormIntentRequest
 	if !decodeRegistrationJSON(w, r, &body) {
 		return
@@ -231,7 +421,12 @@ func (h *RegistrationHandlers) IssueFormIntent(w http.ResponseWriter, r *http.Re
 		return
 	}
 	networkHash := registration.HashAbuseValue(clientNetwork(clientIP(r), h.policy.Create.IPv4NetBits, h.policy.Create.IPv6NetBits))
-	allowed, retryAfter, err := h.rate.CheckRegistrationFormIntent(r.Context(), networkHash, h.policy.FormIntent)
+	// Charge the distributed global/network funnel before allocating a new
+	// 30-day device record or a 20-minute form intent. This is the boundary
+	// that remains effective when every request rotates IP, network and cookie.
+	allowed, retryAfter, err := h.rate.CheckRegistrationFormIntentGlobal(
+		r.Context(), networkHash, h.policy.FormIntent, h.policy.FormIntentGlobal,
+	)
 	if err != nil {
 		h.logger.Error("registration form-intent rate limit failed", "requestId", requestID(r), "errorClass", observability.ClassifyError(err))
 		WriteProviderUnavailable(w, r)
@@ -242,7 +437,24 @@ func (h *RegistrationHandlers) IssueFormIntent(w http.ResponseWriter, r *http.Re
 		WriteRateLimited(w, r, seconds)
 		return
 	}
-	result, err := h.formDefense.Issue(r.Context(), registrationFormIntentBinding(r, h.policy))
+	deviceID, ok := h.risk.EnsureDevice(w, r)
+	if !ok {
+		return
+	}
+	allowed, retryAfter, err = h.rate.CheckRegistrationFormIntentDevice(
+		r.Context(), registration.HashAbuseValue(deviceID), h.policy.FormIntentDevice,
+	)
+	if err != nil {
+		h.logger.Error("registration form-intent device rate limit failed", "requestId", requestID(r), "errorClass", observability.ClassifyError(err))
+		WriteProviderUnavailable(w, r)
+		return
+	}
+	if !allowed {
+		seconds := int((retryAfter + time.Second - 1) / time.Second)
+		WriteRateLimited(w, r, seconds)
+		return
+	}
+	result, err := h.formDefense.Issue(r.Context(), registrationFormIntentBindingWithDevice(r, h.policy, deviceID))
 	if err != nil {
 		WriteProviderUnavailable(w, r)
 		return
@@ -287,7 +499,7 @@ func (h *RegistrationHandlers) writeDecoyRegistration(w http.ResponseWriter, r *
 	h.writeCreated(w, r, result.Token, result.ExpiresAt)
 }
 
-func registrationFingerprint(r *http.Request) registration.AbuseFingerprint {
+func (h *RegistrationHandlers) registrationFingerprint(r *http.Request) registration.AbuseFingerprint {
 	deviceID := readCookie(r, RiskDeviceCookieName)
 	deviceHash := ""
 	if deviceID != "" {
@@ -295,23 +507,27 @@ func registrationFingerprint(r *http.Request) registration.AbuseFingerprint {
 	}
 	return registration.AbuseFingerprint{
 		ClientIPHash:          registration.HashAbuseValue(clientIP(r)),
-		ClientIPBlockEligible: clientIPAbuseEligible(r),
+		ClientIPBlockEligible: h.allowIPBlocks && clientIPAbuseEligible(r),
 		DeviceIDHash:          deviceHash,
 		UserAgentHash:         registration.HashAbuseValue(r.UserAgent()),
 	}
 }
 
 func registrationFormIntentBinding(r *http.Request, policy registration.RatePolicy) registration.FormIntentBinding {
-	deviceID := readCookie(r, RiskDeviceCookieName)
+	return registrationFormIntentBindingWithDevice(r, policy, readCookie(r, RiskDeviceCookieName))
+}
+
+func registrationFormIntentBindingWithDevice(r *http.Request, policy registration.RatePolicy, deviceID string) registration.FormIntentBinding {
+	client := clientIP(r)
 	deviceHash := ""
 	if deviceID != "" {
 		deviceHash = registration.HashAbuseValue(deviceID)
 	}
-	client := clientIP(r)
 	return registration.FormIntentBinding{
 		UserAgentHash:     registration.HashAbuseValue(r.UserAgent()),
 		ClientNetworkHash: registration.HashAbuseValue(clientNetwork(client, policy.Create.IPv4NetBits, policy.Create.IPv6NetBits)),
 		DeviceIDHash:      deviceHash,
+		OriginHash:        registration.HashAbuseValue(strings.TrimRight(r.Header.Get("Origin"), "/")),
 	}
 }
 
@@ -331,6 +547,21 @@ func (h *RegistrationHandlers) VerifyEmail(w http.ResponseWriter, r *http.Reques
 	if !h.checkRate(w, r, "verify", body.UserID) {
 		return
 	}
+	if h.admission == nil {
+		WriteProviderUnavailable(w, r)
+		return
+	}
+	releaseAdmission, err := h.admission.Acquire(r.Context(), "verification", false)
+	if err != nil {
+		if errors.Is(err, registration.ErrAdmissionBusy) {
+			seconds := int((h.policy.AdmissionWait + time.Second - 1) / time.Second)
+			WriteRateLimited(w, r, seconds)
+			return
+		}
+		WriteProviderUnavailable(w, r)
+		return
+	}
+	defer releaseAdmission()
 	result, err := h.service.Verify(r.Context(), input)
 	if err != nil {
 		h.writeServiceError(w, r, "verify", err)
@@ -389,7 +620,7 @@ func (h *RegistrationHandlers) checkRate(w http.ResponseWriter, r *http.Request,
 			r.Context(), client, clientNetwork(client, h.policy.Create.IPv4NetBits, h.policy.Create.IPv6NetBits), keyHash, h.policy.Create,
 		)
 	case "verify":
-		allowed, retryAfter, err = h.rate.CheckRegistrationVerify(r.Context(), client, keyHash, h.policy.Verify)
+		allowed, retryAfter, err = h.rate.CheckRegistrationVerifyWithGlobal(r.Context(), client, keyHash, h.policy.Verify, h.policy.VerifyGlobal)
 	default:
 		allowed, retryAfter, err = h.rate.CheckRegistrationResend(r.Context(), client, keyHash, h.policy.Resend)
 	}

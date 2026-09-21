@@ -16,12 +16,6 @@ export type MfaChallengeState =
 
 export type MfaMethod = "totp" | "passkey" | "recovery_code";
 
-export type LoginMfaMethod = Exclude<MfaMethod, "recovery_code">;
-
-export type LoginMfaVerification =
-  | { method: "totp"; code: string }
-  | { method: "passkey"; passkeyAssertion: unknown };
-
 export type LoginResult =
   | { status: "success"; redirectUrl: string }
   | { status: "mfa_required"; mfaToken: string; availableMethods: MfaMethod[] }
@@ -33,8 +27,3 @@ export type PasswordResetResult =
   | { status: "invalid_token" }
   | { status: "expired_token" }
   | { status: "rate_limited"; retryAfter: number };
-
-export type EmailVerificationResult =
-  | { status: "success" }
-  | { status: "invalid_token" }
-  | { status: "expired_token" };

@@ -36,6 +36,7 @@
 
 .headerInfo {
   display: grid;
+  min-width: 0;
   gap: 6px;
 }
 
@@ -43,6 +44,7 @@
   margin: 0;
   font-size: 22px;
   letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
 }
 
 .headerInfo p {
@@ -279,6 +281,17 @@
   line-height: 1.5;
 }
 
+.mockBadge {
+  display: inline-flex;
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: var(--up-brand);
+  background: var(--up-brand-soft);
+  font-size: 12px;
+  font-weight: 760;
+  letter-spacing: 0.12em;
+}
+
 @media (max-width: 700px) {
   .headerCard {
     flex-direction: column;
@@ -287,4 +300,11 @@
   .descriptionList {
     grid-template-columns: 1fr;
   }
+
+  .tabContent { padding: 18px 16px; }
+  .uriRow { grid-template-columns: 1fr; }
+  .scopeRow { flex-wrap: wrap; }
+  .dangerItem { align-items: stretch; flex-direction: column; }
+  .dangerItem > div { min-width: 0; }
+  .dangerItem :global(.semi-button) { width: 100%; min-height: 44px; }
 }

@@ -55,4 +55,10 @@
   .countGrid { grid-template-columns: repeat(2, 1fr); }
   .reviewHeader { flex-direction: column; }
   .answerList > div { grid-template-columns: 1fr; gap: 7px; }
+  .answerCard, .actionCard { padding: 20px 16px; }
+  .routeState { padding: 26px 18px; }
+  .tableCard :global(.semi-table) { min-width: 760px; }
+  .formField :global(.semi-select),
+  .formField :global(.semi-input-wrapper) { width: 100% !important; }
+  .actionCard :global(.semi-button) { min-height: 44px; }
 }

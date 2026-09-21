@@ -9,7 +9,7 @@ import (
 )
 
 func TestIdentityAccessWorkflowMigrationPersistsEveryGrantBinding(t *testing.T) {
-	path := filepath.Join(findBackendRoot(t), "migrations", "00013_production_lineage_bridge.sql")
+	path := filepath.Join(findBackendRoot(t), "migrations", "00013_identity_access_workflow.sql")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read migration: %v", err)
@@ -25,7 +25,7 @@ func TestIdentityAccessWorkflowMigrationPersistsEveryGrantBinding(t *testing.T) 
 		}
 	}
 	down := sql[strings.Index(sql, "-- +goose Down"):]
-	if !strings.Contains(down, "RAISE EXCEPTION") || regexp.MustCompile(`(?im)^\s*(?:DROP|DELETE|TRUNCATE|ALTER|CREATE|INSERT|UPDATE)\b`).MatchString(down) {
-		t.Fatal("Down must abort without mutating schema or data")
+	if !strings.Contains(down, "intentionally irreversible") || regexp.MustCompile(`(?i)\b(?:DROP|DELETE|TRUNCATE|ALTER)\b`).MatchString(down) {
+		t.Fatal("Down must be intentionally inert")
 	}
 }

@@ -170,8 +170,8 @@ func resetTestSchemaData(t *testing.T, db *sql.DB) {
 	statements := []string{
 		`ALTER TABLE security_events DROP CONSTRAINT IF EXISTS test_reject_consent_audit`,
 		`ALTER TABLE security_events DROP CONSTRAINT IF EXISTS test_reject_wechat_pending_phone_audit`,
+		`ALTER TABLE security_events DROP CONSTRAINT IF EXISTS test_reject_sms_phone_audit`,
 		`TRUNCATE TABLE
-			contact_change_requests, user_avatars,
 			admin_operator_approvals, admin_operation_outbox,
 			identity_access_grant_fields, identity_access_grants, identity_access_request_fields, identity_access_requests,
 			protected_operation_reasons, admin_step_up_state, admin_challenges,
@@ -230,7 +230,6 @@ func dropTestSchemaObjects(t *testing.T, db *sql.DB) error {
 	}
 	statements := []string{
 		`DROP TABLE IF EXISTS
-			contact_change_requests, user_avatars,
 			admin_operator_approvals, admin_operation_outbox,
 			identity_access_grant_fields, identity_access_grants, identity_access_request_fields, identity_access_requests,
 			protected_operation_reasons, admin_step_up_state, admin_challenges,
@@ -272,18 +271,18 @@ func TestIntegration_MigrationCleanupSupportsSecondFreshInstallInSameSchema(t *t
 	if err := goose.UpContext(ctx, db, migrations); err != nil {
 		t.Fatalf("first fresh migration: %v", err)
 	}
-	if !tableExists(t, db, "wechat_registration_provider_intents") || !tableExists(t, db, "admin_operation_outbox") || !tableExists(t, db, "contact_change_requests") {
+	if !tableExists(t, db, "wechat_registration_provider_intents") || !tableExists(t, db, "admin_operation_outbox") {
 		t.Fatal("first fresh migration did not reach head")
 	}
 	dropTestSchemaObjects(t, db)
 	if err := goose.UpContext(ctx, db, migrations); err != nil {
 		t.Fatalf("second fresh migration in same schema: %v", err)
 	}
-	if !tableExists(t, db, "wechat_registration_provider_intents") || !tableExists(t, db, "admin_operation_outbox") || !tableExists(t, db, "contact_change_requests") {
+	if !tableExists(t, db, "wechat_registration_provider_intents") || !tableExists(t, db, "admin_operation_outbox") {
 		t.Fatal("second fresh migration did not recreate head tables")
 	}
 	version, err := goose.GetDBVersion(db)
-	if err != nil || version != 16 {
+	if err != nil || version != 15 {
 		t.Fatalf("second fresh migration version=%d err=%v", version, err)
 	}
 }
@@ -708,6 +707,12 @@ func TestIntegration_RegistrationPendingIdentityActivatesIdempotently(t *testing
 	if len(pending.Personas) != 1 || pending.Personas[0] != identity.PersonaConsumer {
 		t.Fatalf("pending personas = %v", pending.Personas)
 	}
+	if isPending, err := repo.IsPending(ctx, userID); err != nil || !isPending {
+		t.Fatalf("local pending guard=%v err=%v, want true", isPending, err)
+	}
+	if isPending, err := repo.IsPending(ctx, "user_ffffffffffffffffffffffffffffffff"); err != nil || isPending {
+		t.Fatalf("unknown pending guard=%v err=%v, want false", isPending, err)
+	}
 	link, err := users.GetIdentityLink(ctx, "zitadel", "project_registration", userID)
 	if err != nil || string(link.UserID) != userID || link.ProviderSubject != userID {
 		t.Fatalf("exact identity link = %#v err=%v", link, err)
@@ -719,6 +724,9 @@ func TestIntegration_RegistrationPendingIdentityActivatesIdempotently(t *testing
 	active, err := users.GetByID(ctx, identity.UserID(userID))
 	if err != nil || !active.Status.CanAuthenticate() || !active.EmailVerified {
 		t.Fatalf("active user = %#v err=%v", active, err)
+	}
+	if isPending, err := repo.IsPending(ctx, userID); err != nil || isPending {
+		t.Fatalf("active account remained pending=%v err=%v", isPending, err)
 	}
 	version := active.Version
 	if err := repo.ActivateVerified(ctx, userID); err != nil {

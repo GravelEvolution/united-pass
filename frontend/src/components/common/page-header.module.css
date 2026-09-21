@@ -52,4 +52,14 @@
   .action {
     width: 100%;
   }
+
+  .action :global(.semi-button),
+  .action > a {
+    min-height: 44px;
+  }
+
+  .action > a:only-child,
+  .action > a:only-child :global(.semi-button) {
+    width: 100%;
+  }
 }

@@ -19,15 +19,30 @@ func TestFixedDreamUPRoleMatrix(t *testing.T) {
 		{adminroles.RoleAdmin, ActionContactSubmissionManage, true},
 		{adminroles.RoleAdmin, ActionContentManage, true},
 		{adminroles.RoleAdmin, ActionIdentityAccessRequest, false},
+		{adminroles.RoleAdmin, ActionInspectionPerform, true},
+		{adminroles.RoleAdmin, ActionAssetCustodyTransfer, true},
+		{adminroles.RoleAdmin, ActionAssetReservationManage, false},
+		{adminroles.RoleAdmin, ActionAssetManage, false},
+		{adminroles.RoleAdmin, ActionQRPrintSingle, true},
+		{adminroles.RoleAdmin, ActionQRPrintBulk, false},
 		{adminroles.RoleSeniorAdmin, ActionIdentityAccessRequest, true},
 		{adminroles.RoleSeniorAdmin, ActionApplicationApproveAdmission, true},
 		{adminroles.RoleSeniorAdmin, ActionContactSubmissionManage, true},
 		{adminroles.RoleSeniorAdmin, ActionContentManage, true},
 		{adminroles.RoleSeniorAdmin, ActionApplicationDecide, false},
+		{adminroles.RoleSeniorAdmin, ActionInspectionReview, true},
+		{adminroles.RoleSeniorAdmin, ActionAssetReservationManage, true},
+		{adminroles.RoleSeniorAdmin, ActionAssetInventoryAdjust, false},
 		{adminroles.RoleSuperAdmin, ActionApplicationDecide, true},
 		{adminroles.RoleSuperAdmin, ActionLegalRead, true},
 		{adminroles.RoleSuperAdmin, ActionContentManage, true},
 		{adminroles.RoleSuperAdmin, ActionOperationReceiptRead, false},
+		{adminroles.RoleSuperAdmin, ActionInspectionPointManage, true},
+		{adminroles.RoleSuperAdmin, ActionAssetManage, true},
+		{adminroles.RoleSuperAdmin, ActionAssetInventoryAdjust, true},
+		{adminroles.RoleSuperAdmin, ActionPersonalAssetAssignment, true},
+		{adminroles.RoleSuperAdmin, ActionAssetCodeRotate, true},
+		{adminroles.RoleSuperAdmin, ActionQRPrintBulk, true},
 	}
 	for _, tc := range cases {
 		if got := FixedRoleAllows(tc.role, tc.action); got != tc.allow {
@@ -44,6 +59,10 @@ func TestDreamUPDelegationActionSetsAreExact(t *testing.T) {
 		ActionIdentityGrantConsume, ActionIdentityReadRestricted, ActionLegalRead,
 		ActionApplicationExport, ActionAuditRead, ActionContactSubmissionManage,
 		ActionContentManage, ActionRoleMigrationRead,
+		ActionInspectionPointRead, ActionInspectionPointManage, ActionInspectionPerform, ActionInspectionReview,
+		ActionAssetRead, ActionAssetManage, ActionAssetReservationManage, ActionAssetCustodyTransfer,
+		ActionAssetInventoryAdjust, ActionPersonalAssetAssignment, ActionAssetCodeRotate,
+		ActionQRPrintSingle, ActionQRPrintBulk,
 	}
 	highRisk := map[Action]bool{
 		ActionApplicationReview: true, ActionApplicationApproveAdmission: true, ActionApplicationDecide: true,
@@ -51,6 +70,10 @@ func TestDreamUPDelegationActionSetsAreExact(t *testing.T) {
 		ActionIdentityGrantConsume: true, ActionIdentityReadRestricted: true, ActionLegalRead: true,
 		ActionApplicationExport: true, ActionAuditRead: true, ActionContactSubmissionManage: true,
 		ActionContentManage: true, ActionRoleMigrationRead: true,
+		ActionInspectionPointManage: true, ActionInspectionPerform: true, ActionInspectionReview: true,
+		ActionAssetManage: true, ActionAssetReservationManage: true, ActionAssetCustodyTransfer: true,
+		ActionAssetInventoryAdjust: true, ActionPersonalAssetAssignment: true, ActionAssetCodeRotate: true,
+		ActionQRPrintSingle: true, ActionQRPrintBulk: true,
 	}
 	if len(dreamUPDelegatedAdministratorActions) != len(delegated) || len(dreamUPHighRiskDelegatedAdministratorActions) != len(highRisk) {
 		t.Fatalf("delegated=%d/%d highRisk=%d/%d", len(dreamUPDelegatedAdministratorActions), len(delegated), len(dreamUPHighRiskDelegatedAdministratorActions), len(highRisk))
@@ -67,6 +90,41 @@ func TestDreamUPDelegationActionSetsAreExact(t *testing.T) {
 		if IsDreamUPDelegatedAdministratorAction(unsupported) || IsDreamUPHighRiskDelegatedAdministratorAction(unsupported) {
 			t.Errorf("unsupported action %q entered delegation contract", unsupported)
 		}
+	}
+}
+
+func TestParseDreamUPReauthenticationTarget(t *testing.T) {
+	canonical := func(kind, id string) string {
+		return `["dreamup-admin-target/v1","evt_shanghai","` + kind + `","` + id + `"]`
+	}
+	tests := []struct {
+		name   string
+		action Action
+		target string
+		kind   string
+		id     string
+		ok     bool
+	}{
+		{name: "event content", action: ActionContentManage, target: canonical("event", "evt_shanghai"), kind: "event", id: "evt_shanghai", ok: true},
+		{name: "application review", action: ActionApplicationReview, target: canonical("application", "app_1"), kind: "application", id: "app_1", ok: true},
+		{name: "bulk print result", action: ActionQRPrintBulk, target: canonical("qr_print_job", "print_1"), kind: "qr_print_job", id: "print_1", ok: true},
+		{name: "bulk print event", action: ActionQRPrintBulk, target: canonical("event", "evt_shanghai"), kind: "event", id: "evt_shanghai", ok: true},
+		{name: "inspection perform rejects broad event", action: ActionInspectionPerform, target: canonical("event", "evt_shanghai")},
+		{name: "wrong resource kind", action: ActionApplicationReview, target: canonical("asset_unit", "unit_1")},
+		{name: "wrong event", action: ActionContentManage, target: `["dreamup-admin-target/v1","evt_other","event","evt_other"]`},
+		{name: "non canonical JSON", action: ActionContentManage, target: `[ "dreamup-admin-target/v1", "evt_shanghai", "event", "evt_shanghai" ]`},
+		{name: "ordinary action", action: ActionDashboardRead, target: canonical("event", "evt_shanghai")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resource, ok := ParseDreamUPReauthenticationTarget("evt_shanghai", test.action, test.target)
+			if ok != test.ok {
+				t.Fatalf("ok=%v want=%v resource=%+v", ok, test.ok, resource)
+			}
+			if ok && (resource.Kind != test.kind || resource.ID != test.id || resource.EventID != "evt_shanghai") {
+				t.Fatalf("resource=%+v", resource)
+			}
+		})
 	}
 }
 

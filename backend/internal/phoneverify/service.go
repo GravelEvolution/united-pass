@@ -28,7 +28,11 @@ import (
 var (
 	ErrInvalidInput       = errors.New("phoneverify: invalid input")
 	ErrVerificationFailed = errors.New("phoneverify: verification failed")
-	ErrUnavailable        = errors.New("phoneverify: unavailable")
+	// ErrPhoneConflict means the freshly verified number is already owned by
+	// another United Pass account. Callers must never merge accounts or
+	// overwrite the existing owner in response to this error.
+	ErrPhoneConflict = errors.New("phoneverify: verified phone conflicts with account authority")
+	ErrUnavailable   = errors.New("phoneverify: unavailable")
 )
 
 // phonePattern accepts a +CC number (10–15 digits).
@@ -145,10 +149,14 @@ func (s *Service) Verify(ctx context.Context, input VerifyInput) (string, error)
 		return "", ErrVerificationFailed
 	}
 	if err := s.repo.UpdatePhone(ctx, input.UserID, phone); err != nil {
-		if errors.Is(err, identity.ErrUserNotFound) {
+		switch {
+		case errors.Is(err, ErrPhoneConflict):
+			return "", ErrPhoneConflict
+		case errors.Is(err, identity.ErrUserNotFound):
 			return "", ErrVerificationFailed
+		default:
+			return "", ErrUnavailable
 		}
-		return "", ErrUnavailable
 	}
 	return phone, nil
 }

@@ -26,8 +26,12 @@ const (
 )
 
 var (
-	ErrInvalidInput       = errors.New("registration: invalid input")
-	ErrConflict           = errors.New("registration: account conflict")
+	ErrInvalidInput = errors.New("registration: invalid input")
+	ErrConflict     = errors.New("registration: account conflict")
+	// ErrPhoneConflict preserves the public conflict class while allowing
+	// WeChat onboarding to return a stable, phone-specific error. Callers must
+	// never use the phone to select or merge an account.
+	ErrPhoneConflict      = fmt.Errorf("%w: verified phone belongs to another account", ErrConflict)
 	ErrVerificationFailed = errors.New("registration: verification failed")
 	ErrTokenNotFound      = errors.New("registration: token not found")
 	ErrUnavailable        = errors.New("registration: unavailable")
@@ -100,6 +104,7 @@ type Provider interface {
 type Repository interface {
 	CreatePending(context.Context, PendingUser) error
 	DeletePending(context.Context, string) error
+	IsPending(context.Context, string) (bool, error)
 	ActivateVerified(context.Context, string) error
 }
 
@@ -216,6 +221,16 @@ func (s *Service) Verify(ctx context.Context, input VerifyInput) (VerifyResult, 
 	}
 	if err := ValidateVerify(input); err != nil {
 		return VerifyResult{}, err
+	}
+	pending, err := s.repo.IsPending(ctx, input.UserID)
+	if err != nil {
+		return VerifyResult{}, ErrUnavailable
+	}
+	if !pending {
+		// Keep the public result indistinguishable from a bad provider code,
+		// while avoiding an identity-provider RPC for random syntactically valid
+		// user IDs or already-settled registrations.
+		return VerifyResult{}, ErrVerificationFailed
 	}
 	if err := s.provider.VerifyEmail(ctx, VerifyEmailInput{UserID: input.UserID, Code: input.Code}); err != nil {
 		if errors.Is(err, ErrVerificationFailed) {

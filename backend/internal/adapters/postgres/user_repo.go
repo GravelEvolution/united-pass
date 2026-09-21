@@ -12,12 +12,54 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/phoneverify"
 )
+
+const (
+	phoneVerifySnapshotUserSQL = `
+SELECT phone
+  FROM users
+ WHERE id = $1`
+
+	phoneVerifyLockUserSQL = `
+SELECT status, phone, phone_verified, version, security_epoch
+  FROM users
+ WHERE id = $1
+ FOR UPDATE`
+
+	phoneVerifyLockOtherOwnerSQL = `
+SELECT id
+  FROM users
+ WHERE phone = $1
+   AND id <> $2
+ ORDER BY id
+ LIMIT 1
+ FOR UPDATE`
+
+	phoneVerifyAdvanceUserSQL = `
+UPDATE users
+   SET phone = $2,
+       phone_verified = TRUE,
+       updated_at = NOW(),
+       version = version + 1,
+       security_epoch = security_epoch + 1
+ WHERE id = $1
+   AND status = 'active'
+   AND version = $3
+   AND security_epoch = $4
+ RETURNING version, security_epoch`
+)
+
+const phoneVerifySerializableAttempts = 3
+
+var errPhoneVerifySnapshotChanged = errors.New("postgres: phone authority snapshot changed")
 
 // userColumns lists the users table columns in the fixed SELECT order used by
 // scanUser. Keeping this order stable across all user queries prevents silent
@@ -167,22 +209,133 @@ func (r *UserRepository) UpdateAvatar(ctx context.Context, userID identity.UserI
 	return nil
 }
 
-// UpdatePhone sets the user's verified phone number and increments the
-// optimistic-concurrency version. Returns identity.ErrUserNotFound when no row
-// matches the given ID.
+// UpdatePhone atomically binds the exact SMS-verified phone to one active user.
+// It never selects or merges accounts by phone. The user, previous phone and
+// requested phone use the same advisory-lock namespaces as WeChat onboarding;
+// another owner therefore fails closed with phoneverify.ErrPhoneConflict.
+// A successful authority change advances both version and security_epoch and
+// appends its audit plus notification intent in the same transaction.
 func (r *UserRepository) UpdatePhone(ctx context.Context, userID identity.UserID, phone string) error {
-	tag, err := r.pool.Exec(ctx,
-		`UPDATE users
-            SET phone = $2, phone_verified = TRUE, updated_at = NOW(), version = version + 1
-          WHERE id = $1`,
-		string(userID),
-		phone,
-	)
-	if err != nil {
-		return fmt.Errorf("postgres: update user phone: %w", err)
+	if r == nil || r.pool == nil || userID == "" || phone == "" || phone != strings.TrimSpace(phone) {
+		return phoneverify.ErrInvalidInput
 	}
-	if tag.RowsAffected() == 0 {
+
+	var lastErr error
+	for attempt := 0; attempt < phoneVerifySerializableAttempts; attempt++ {
+		err := r.updatePhoneOnce(ctx, userID, phone)
+		if err == nil {
+			return nil
+		}
+		if !isAuthoritySerializationFailure(err) && !errors.Is(err, errPhoneVerifySnapshotChanged) {
+			return err
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	return fmt.Errorf("postgres: serializable SMS phone settlement exhausted: %w", lastErr)
+}
+
+func (r *UserRepository) updatePhoneOnce(ctx context.Context, userID identity.UserID, phone string) error {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return fmt.Errorf("postgres: begin SMS phone authority transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// The initial snapshot discovers the previous phone so both releasing it
+	// and claiming the requested one participate in the global lock order. A
+	// concurrent change is detected after the locks and retried in a fresh
+	// serializable transaction.
+	var snapshotPhone string
+	if err := tx.QueryRow(ctx, phoneVerifySnapshotUserSQL, string(userID)).Scan(&snapshotPhone); errors.Is(err, pgx.ErrNoRows) {
 		return identity.ErrUserNotFound
+	} else if err != nil {
+		return fmt.Errorf("postgres: read SMS phone authority snapshot: %w", err)
+	}
+
+	lockKeys := sortedAuthorityLockKeys(
+		authorityUserLockKey(userID),
+		authorityPhoneLockKey(snapshotPhone),
+		authorityPhoneLockKey(phone),
+	)
+	for _, key := range lockKeys {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key); err != nil {
+			return fmt.Errorf("postgres: lock SMS phone authority key: %w", err)
+		}
+	}
+
+	var status, currentPhone string
+	var phoneVerified bool
+	var version int
+	var securityEpoch int64
+	err = tx.QueryRow(ctx, phoneVerifyLockUserSQL, string(userID)).Scan(
+		&status, &currentPhone, &phoneVerified, &version, &securityEpoch,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return identity.ErrUserNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("postgres: lock SMS phone target: %w", err)
+	}
+	if status != string(identity.UserStatusActive) {
+		return identity.ErrUserNotFound
+	}
+	if currentPhone != snapshotPhone {
+		return errPhoneVerifySnapshotChanged
+	}
+
+	var conflictingUserID string
+	ownerErr := tx.QueryRow(ctx, phoneVerifyLockOtherOwnerSQL, phone, string(userID)).Scan(&conflictingUserID)
+	if ownerErr == nil {
+		return phoneverify.ErrPhoneConflict
+	}
+	if !errors.Is(ownerErr, pgx.ErrNoRows) {
+		return fmt.Errorf("postgres: lock SMS phone owner: %w", ownerErr)
+	}
+
+	// A consumed SMS proof for the already-verified exact phone is an
+	// idempotent no-op. In particular it does not churn security generations
+	// or duplicate the notification outbox.
+	if currentPhone == phone && phoneVerified {
+		return nil
+	}
+
+	previousVersion, previousEpoch := version, securityEpoch
+	err = tx.QueryRow(ctx, phoneVerifyAdvanceUserSQL,
+		string(userID), phone, previousVersion, previousEpoch,
+	).Scan(&version, &securityEpoch)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return identity.ErrUserNotFound
+	}
+	if err != nil {
+		if isUniqueViolation(err) {
+			return phoneverify.ErrPhoneConflict
+		}
+		return fmt.Errorf("postgres: advance SMS phone security state: %w", err)
+	}
+
+	digest, err := DeriveWeChatAuthorityReplayDigest(WeChatAuthorityReplayMaterial{
+		Flow:             WeChatAuthorityFlowSMSPhoneVerified,
+		TargetUserID:     userID,
+		AuthorityVersion: int64(previousVersion),
+		SecurityEpoch:    previousEpoch,
+	})
+	if err != nil {
+		return fmt.Errorf("postgres: derive SMS phone authority effect: %w", err)
+	}
+	if _, err := NewWeChatAuthorityEffectStore().RecordTx(ctx, tx, WeChatAuthorityEffect{
+		ReplayDigest: digest,
+		Kind:         WeChatAuthorityEffectSMSPhoneVerified,
+		TargetUserID: userID,
+		OccurredAt:   time.Now().UTC(),
+	}); err != nil {
+		return fmt.Errorf("postgres: append SMS phone authority effect: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit SMS phone authority transaction: %w", err)
 	}
 	return nil
 }
@@ -209,21 +362,42 @@ func (r *UserRepository) GetIdentityLink(ctx context.Context, provider, provider
 
 // GetIdentityLinkByUserID loads the identity link binding a United Pass user
 // to a provider subject within a provider tenant. Returns
-// identity.ErrUserNotFound when no link matches.
+// identity.ErrUserNotFound when no link matches and
+// identity.ErrIdentityLinkConflict when legacy data contains more than one
+// candidate. Callers must never select an arbitrary provider subject.
 func (r *UserRepository) GetIdentityLinkByUserID(ctx context.Context, provider, providerTenantID string, userID identity.UserID) (identity.IdentityLink, error) {
-	row := r.pool.QueryRow(ctx,
+	rows, err := r.pool.Query(ctx,
 		`SELECT `+identityLinkColumns+`
            FROM identity_links
           WHERE provider = $1
             AND provider_tenant_id = $2
-            AND user_id = $3`,
+			AND user_id = $3
+		  ORDER BY id
+		  LIMIT 2`,
 		provider, providerTenantID, string(userID))
-
-	link, err := scanIdentityLink(row)
 	if err != nil {
-		return identity.IdentityLink{}, mapUserError(err, "get identity link by user id")
+		return identity.IdentityLink{}, fmt.Errorf("postgres: get identity link by user id: %w", err)
 	}
-	return link, nil
+	defer rows.Close()
+
+	links := make([]identity.IdentityLink, 0, 2)
+	for rows.Next() {
+		link, scanErr := scanIdentityLink(rows)
+		if scanErr != nil {
+			return identity.IdentityLink{}, fmt.Errorf("postgres: scan identity link by user id: %w", scanErr)
+		}
+		links = append(links, link)
+	}
+	if err := rows.Err(); err != nil {
+		return identity.IdentityLink{}, fmt.Errorf("postgres: iterate identity links by user id: %w", err)
+	}
+	if len(links) == 0 {
+		return identity.IdentityLink{}, identity.ErrUserNotFound
+	}
+	if len(links) != 1 {
+		return identity.IdentityLink{}, identity.ErrIdentityLinkConflict
+	}
+	return links[0], nil
 }
 
 // CreateIdentityLink inserts a new external identity link binding a provider
@@ -356,3 +530,5 @@ func mapUserError(err error, op string) error {
 	}
 	return fmt.Errorf("postgres: %s: %w", op, err)
 }
+
+var _ phoneverify.Repository = (*UserRepository)(nil)

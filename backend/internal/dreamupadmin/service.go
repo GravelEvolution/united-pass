@@ -23,6 +23,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/dreamupdelegation"
 	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
+	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 )
 
 var (
@@ -35,6 +36,35 @@ var (
 	receiptMetadataPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$`)
 )
 
+// eventSummaryCapabilities is the finite set understood by the DreamUP
+// administrator UI. ListEvents evaluates every entry through the same scoped
+// authorizer used by the corresponding BFF route. The list is an advisory UI
+// snapshot only; every object-level request is authorized again against its
+// exact resource before it is proxied.
+var eventSummaryCapabilities = []permissions.Action{
+	permissions.ActionDashboardRead,
+	permissions.ActionApplicationReadBasic,
+	permissions.ActionApplicationReview,
+	permissions.ActionApplicationApproveAdmission,
+	permissions.ActionApplicationDecide,
+	permissions.ActionIdentityReadRestricted,
+	permissions.ActionCheckinScan,
+	permissions.ActionContactSubmissionManage,
+	permissions.ActionContentManage,
+	permissions.ActionInspectionPointRead,
+	permissions.ActionInspectionPointManage,
+	permissions.ActionInspectionReview,
+	permissions.ActionAssetRead,
+	permissions.ActionAssetManage,
+	permissions.ActionAssetReservationManage,
+	permissions.ActionAssetCustodyTransfer,
+	permissions.ActionAssetInventoryAdjust,
+	permissions.ActionPersonalAssetAssignment,
+	permissions.ActionAssetCodeRotate,
+	permissions.ActionQRPrintSingle,
+	permissions.ActionQRPrintBulk,
+}
+
 type ServiceDependencies struct {
 	Authorizer      permissions.Authorizer
 	Registry        EventRegistry
@@ -45,6 +75,10 @@ type ServiceDependencies struct {
 	Client          UpstreamClient
 	UnitOfWork      adminstore.UnitOfWork
 	Fingerprinter   OperationFingerprinter
+	// ReasonUnitOfWork deliberately points at the authority database, while
+	// UnitOfWork above remains the isolated operational receipt database.
+	ReasonUnitOfWork adminstore.UnitOfWork
+	ReasonCipher     adminstepup.QuestionCipher
 }
 
 type ServiceConfig struct {
@@ -63,6 +97,8 @@ type Service struct {
 	client                  UpstreamClient
 	uow                     adminstore.UnitOfWork
 	fingerprinter           OperationFingerprinter
+	reasonUOW               adminstore.UnitOfWork
+	reasonCipher            adminstepup.QuestionCipher
 	now                     func() time.Time
 	requireDurableMutations bool
 	mutationLease           time.Duration
@@ -78,10 +114,11 @@ func NewService(dependencies ServiceDependencies, config ServiceConfig) (*Servic
 	if config.MutationLease == 0 {
 		config.MutationLease = 30 * time.Second
 	}
-	if config.MutationLease < time.Second || config.MutationLease > 10*time.Minute || (config.RequireDurableMutations && (dependencies.UnitOfWork == nil || dependencies.Fingerprinter == nil)) {
+	if config.MutationLease < time.Second || config.MutationLease > 10*time.Minute ||
+		(config.RequireDurableMutations && (dependencies.UnitOfWork == nil || dependencies.Fingerprinter == nil || dependencies.ReasonUnitOfWork == nil || dependencies.ReasonCipher == nil)) {
 		return nil, ErrInvalidRequest
 	}
-	return &Service{authorizer: dependencies.Authorizer, registry: dependencies.Registry, stepups: dependencies.StepUps, accountSecurity: dependencies.AccountSecurity, reauthGrants: dependencies.ReauthGrants, signer: dependencies.Signer, client: dependencies.Client, uow: dependencies.UnitOfWork, fingerprinter: dependencies.Fingerprinter, now: config.Now, requireDurableMutations: config.RequireDurableMutations, mutationLease: config.MutationLease}, nil
+	return &Service{authorizer: dependencies.Authorizer, registry: dependencies.Registry, stepups: dependencies.StepUps, accountSecurity: dependencies.AccountSecurity, reauthGrants: dependencies.ReauthGrants, signer: dependencies.Signer, client: dependencies.Client, uow: dependencies.UnitOfWork, fingerprinter: dependencies.Fingerprinter, reasonUOW: dependencies.ReasonUnitOfWork, reasonCipher: dependencies.ReasonCipher, now: config.Now, requireDurableMutations: config.RequireDurableMutations, mutationLease: config.MutationLease}, nil
 }
 
 // Eligible reports whether the authenticated actor has at least one active,
@@ -160,9 +197,36 @@ func (s *Service) ListEvents(ctx context.Context, actor Actor) ([]EventSummary, 
 			}
 			return nil, stepErr
 		}
-		result = append(result, EventSummary{EventID: event.EventID, DisplayName: event.DisplayName, Slug: event.Slug, Role: decision.Role, Counts: s.fetchEventCounts(ctx, actor, event.EventID)})
+		capabilities, capabilityErr := s.authorizedEventCapabilities(ctx, actor, event.EventID, decision)
+		if capabilityErr != nil {
+			return nil, capabilityErr
+		}
+		result = append(result, EventSummary{EventID: event.EventID, DisplayName: event.DisplayName, Slug: event.Slug, Role: decision.Role, Capabilities: capabilities, Counts: s.fetchEventCounts(ctx, actor, event.EventID)})
 	}
 	return result, nil
+}
+
+func (s *Service) authorizedEventCapabilities(ctx context.Context, actor Actor, eventID string, dashboard permissions.Decision) ([]permissions.Action, error) {
+	capabilities := make([]permissions.Action, 0, len(eventSummaryCapabilities))
+	resource := permissions.Resource{Kind: "event", ID: eventID, EventID: eventID}
+	for _, action := range eventSummaryCapabilities {
+		if !permissions.FixedRoleAllows(dashboard.Role, action) {
+			continue
+		}
+		decision := dashboard
+		if action != permissions.ActionDashboardRead {
+			var err error
+			decision, err = s.authorizer.Check(ctx, actor.UserID, action, resource)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if !decision.Allowed || !permissions.FixedRoleAllows(decision.Role, action) || decision.Role != dashboard.Role || decision.BindingID != dashboard.BindingID || decision.BindingVersion != dashboard.BindingVersion {
+			continue
+		}
+		capabilities = append(capabilities, action)
+	}
+	return capabilities, nil
 }
 
 // OperationStatus replays only the durable, allowlisted outcome metadata for
@@ -213,6 +277,49 @@ func (s *Service) OperationStatus(ctx context.Context, actor Actor, eventID, ide
 		return MutationStatus{}, ErrNotFound
 	}
 	return mutationStatusFromItem(item)
+}
+
+// AuthorizeNativeReauthentication validates a fresh native proof request
+// against the same event registry, fixed role ceiling, Cerbos decision,
+// binding generation and account security epoch used by the eventual BFF
+// operation. The caller may mint a one-shot token only from this result.
+func (s *Service) AuthorizeNativeReauthentication(ctx context.Context, actor Actor, input NativeReauthenticationRequest) (NativeReauthenticationAuthorization, error) {
+	if s == nil || !validActor(actor) || actor.AuthenticationTransport != AuthenticationTransportNativeMiniProgramBearer || !opaqueValuePattern.MatchString(input.EventID) || !permissions.IsDreamUPHighRiskDelegatedAdministratorAction(input.Action) {
+		return NativeReauthenticationAuthorization{}, ErrInvalidRequest
+	}
+	resource, ok := permissions.ParseDreamUPReauthenticationTarget(input.EventID, input.Action, input.Target)
+	if !ok {
+		return NativeReauthenticationAuthorization{}, ErrInvalidRequest
+	}
+	event, err := s.registry.GetExact(ctx, input.EventID)
+	if err != nil {
+		if errors.Is(err, adminroles.ErrEventRegistryNotFound) || errors.Is(err, adminroles.ErrEventRegistryDisabled) {
+			return NativeReauthenticationAuthorization{}, ErrNotFound
+		}
+		return NativeReauthenticationAuthorization{}, err
+	}
+	if !validRegisteredEvent(event) {
+		return NativeReauthenticationAuthorization{}, ErrNotFound
+	}
+	decision, err := s.authorizer.Check(ctx, actor.UserID, input.Action, resource)
+	if err != nil {
+		return NativeReauthenticationAuthorization{}, err
+	}
+	if !decision.Allowed || !permissions.FixedRoleAllows(decision.Role, input.Action) || decision.BindingID == "" || decision.BindingVersion <= 0 {
+		return NativeReauthenticationAuthorization{}, ErrForbidden
+	}
+	state, err := s.validAdministratorSession(ctx, actor, decision)
+	if err != nil {
+		return NativeReauthenticationAuthorization{}, err
+	}
+	if state.ChallengeVersion <= 0 || state.SecurityEpoch <= 0 {
+		return NativeReauthenticationAuthorization{}, ErrStepUpRequired
+	}
+	return NativeReauthenticationAuthorization{
+		Action: input.Action, Target: input.Target,
+		ChallengeVersion: state.ChallengeVersion,
+		SecurityEpoch:    securitystate.Epoch(state.SecurityEpoch),
+	}, nil
 }
 
 // fetchEventCounts returns the admission counts for one event by listing its
@@ -318,32 +425,27 @@ func (s *Service) Proxy(ctx context.Context, actor Actor, input ProxyRequest) (P
 				return ProxyResponse{}, proofErr
 			}
 			stepUpAt, challengeVersion, reauthProofID = proof.CreatedAt, proof.ChallengeVersion, proof.GrantID
-		} else if actor.AuthenticationTransport == AuthenticationTransportNativeMiniProgramBearer {
-			// The native Mini Program no longer exposes the administrator security-
-			// question workflow. Its short-lived, transport-bound server session is
-			// revalidated against the account security epoch and the exact event role
-			// binding here. A fresh opaque proof ID is then bound into the signed,
-			// method/path/body-specific downstream assertion for this one request.
-			sessionProof, proofErr := s.validNativeAdministratorSession(ctx, actor, decision)
+		} else {
+			// DreamUP management no longer asks an already authenticated operator
+			// for a second password/MFA challenge. Revalidate the short-lived login,
+			// current account security epoch and exact event role binding, then mint
+			// a request-scoped internal proof for the existing signed Worker contract.
+			// Explicit tokens still use the strict one-shot path above and never
+			// downgrade when invalid.
+			sessionProof, proofErr := s.validAdministratorSession(ctx, actor, decision)
 			if proofErr != nil {
 				return ProxyResponse{}, proofErr
 			}
-			reauthProofID, proofErr = randomNativeAuthorizationID()
+			reauthProofID, proofErr = randomAdministratorSessionAuthorizationID()
 			if proofErr != nil {
 				return ProxyResponse{}, ErrUpstream
 			}
 			stepUpAt, challengeVersion = s.now().UTC(), sessionProof.ChallengeVersion
-		} else {
-			stepUp, stepErr := s.validLegacyCookieHighRiskStepUp(ctx, actor, decision)
-			if stepErr != nil {
-				return ProxyResponse{}, stepErr
-			}
-			stepUpAt, challengeVersion, reauthProofID = stepUp.VerifiedAt, stepUp.ChallengeVersion, stepUp.ID
 		}
 	} else {
-		// Ordinary actions retain the longer durable administrator-session
-		// proof. Supplying a bearer to an ordinary action is rejected rather
-		// than silently broadening where the credential can travel.
+		// Ordinary actions use the current epoch-bound login session. Supplying a
+		// one-shot credential to an ordinary action is rejected rather than
+		// silently broadening where the credential can travel.
 		if input.ReauthenticationToken != "" {
 			return ProxyResponse{}, ErrInvalidRequest
 		}
@@ -352,6 +454,11 @@ func (s *Service) Proxy(ctx context.Context, actor Actor, input ProxyRequest) (P
 			return ProxyResponse{}, stepErr
 		}
 		stepUpAt, challengeVersion = stepUp.VerifiedAt, stepUp.ChallengeVersion
+	}
+	if input.Capability == permissions.ActionIdentityReadRestricted {
+		if _, _, err := validateReviewIdentityReasonRequest(actor, input); err != nil {
+			return ProxyResponse{}, err
+		}
 	}
 	assertion, err := s.signer.SignAdministrator(dreamupdelegation.AdministratorAssertion{
 		Subject: actor.UserID, JWTID: input.RequestID, Capability: capability,
@@ -372,6 +479,31 @@ func (s *Service) Proxy(ctx context.Context, actor Actor, input ProxyRequest) (P
 		}
 	} else if input.Method != http.MethodGet && s.requireDurableMutations {
 		return ProxyResponse{}, ErrUpstream
+	}
+	if input.Capability == permissions.ActionIdentityReadRestricted {
+		// Establish the isolated operational intent before consuming the
+		// authority-plane reason. The reason transaction still completes before
+		// any request can reach DreamUP, so the data plane never observes an
+		// unaudited reason reference.
+		if operation == nil {
+			return ProxyResponse{}, ErrUpstream
+		}
+		if err := s.persistReviewIdentityReason(ctx, actor, input); err != nil {
+			finalizeCtx, cancel := mutationFinalizeContext(ctx)
+			defer cancel()
+			if abortErr := s.abortMutationBeforeSend(finalizeCtx, *operation, http.StatusServiceUnavailable); abortErr != nil {
+				return ProxyResponse{}, ErrUpstream
+			}
+			return ProxyResponse{}, err
+		}
+		refreshed, refreshErr := s.renewMutationClaim(ctx, *operation)
+		if refreshErr != nil {
+			finalizeCtx, cancel := mutationFinalizeContext(ctx)
+			defer cancel()
+			_ = s.abortMutationBeforeSend(finalizeCtx, *operation, http.StatusServiceUnavailable)
+			return ProxyResponse{}, ErrUpstream
+		}
+		operation = &refreshed
 	}
 	response, err := s.client.Execute(ctx, UpstreamRequest{
 		Method: input.Method, Path: input.Path, Query: cloneQuery(input.Query), Body: append([]byte(nil), input.Body...), Assertion: assertion,
@@ -401,42 +533,42 @@ func (s *Service) Proxy(ctx context.Context, actor Actor, input ProxyRequest) (P
 	return ProxyResponse{StatusCode: response.StatusCode, Body: append([]byte(nil), response.Body...), RequestID: response.RequestID, ETag: response.ETag}, nil
 }
 
-func randomNativeAuthorizationID() (string, error) {
+func randomAdministratorSessionAuthorizationID() (string, error) {
 	buffer := make([]byte, 18)
 	if _, err := rand.Read(buffer); err != nil {
 		return "", err
 	}
-	return "nma_" + base64.RawURLEncoding.EncodeToString(buffer), nil
+	return "asa_" + base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
-// validAdministratorSession keeps the deployed browser security-question
-// contract intact while using the native Mini Program's already validated,
-// short-lived bearer session as its administrator-session proof.
+// validAdministratorSession derives the ordinary administrator proof from the
+// already validated browser or native session. The retired security-question
+// state is deliberately not consulted: current session security_epoch and the
+// authoritative account epoch are the invalidation boundary.
 func (s *Service) validAdministratorSession(ctx context.Context, actor Actor, decision permissions.Decision) (adminstepup.StepUpState, error) {
-	if actor.AuthenticationTransport == AuthenticationTransportNativeMiniProgramBearer {
-		return s.validNativeAdministratorSession(ctx, actor, decision)
+	if actor.AuthenticationTransport != AuthenticationTransportNativeMiniProgramBearer && actor.AuthenticationTransport != AuthenticationTransportBrowserCookie {
+		return adminstepup.StepUpState{}, ErrAuthenticationRequired
 	}
-	return s.validStepUp(ctx, actor, decision)
-}
-
-func (s *Service) validNativeAdministratorSession(ctx context.Context, actor Actor, decision permissions.Decision) (adminstepup.StepUpState, error) {
-	if actor.AuthenticationTransport != AuthenticationTransportNativeMiniProgramBearer || actor.SecurityEpoch < 1 || s.accountSecurity == nil || decision.BindingID == "" || decision.BindingVersion <= 0 {
-		return adminstepup.StepUpState{}, ErrStepUpRequired
+	if actor.SecurityEpoch < 1 || s.accountSecurity == nil || decision.BindingID == "" || decision.BindingVersion <= 0 {
+		return adminstepup.StepUpState{}, ErrAuthenticationRequired
 	}
 	now := s.now().UTC()
 	authenticatedAt := actor.AuthenticatedAt.UTC()
 	if authenticatedAt.IsZero() || authenticatedAt.After(now.Add(dreamupdelegation.MaxClockSkew)) || now.Sub(authenticatedAt) > dreamupdelegation.MaxAdministratorLoginAge {
-		return adminstepup.StepUpState{}, ErrStepUpRequired
+		return adminstepup.StepUpState{}, ErrAuthenticationRequired
 	}
 	currentEpoch, err := s.accountSecurity.CurrentEpoch(ctx, actor.UserID)
-	if err != nil || currentEpoch < 1 || currentEpoch != actor.SecurityEpoch {
-		return adminstepup.StepUpState{}, ErrStepUpRequired
+	if err != nil {
+		return adminstepup.StepUpState{}, ErrUpstream
+	}
+	if currentEpoch < 1 || currentEpoch != actor.SecurityEpoch {
+		return adminstepup.StepUpState{}, ErrAuthenticationRequired
 	}
 	challengeVersion := decision.ChallengeVersion
 	if challengeVersion <= 0 {
 		// The assertion schema requires a positive authorization generation. For
-		// native accounts without a legacy security question, the authoritative
-		// account epoch is the generation that invalidates all existing sessions.
+		// accounts without a legacy security question, the authoritative account
+		// epoch is the generation that invalidates all existing sessions.
 		challengeVersion = int64(currentEpoch)
 	}
 	return adminstepup.StepUpState{
@@ -459,35 +591,57 @@ func (s *Service) consumeHighRiskGrant(ctx context.Context, actor Actor, input P
 	}
 	now := s.now().UTC()
 	createdAt := proof.CreatedAt.UTC()
-	if proof.UserID != actor.UserID || proof.SessionID != actor.SessionID || proof.Action != string(input.Capability) || proof.Target != target || proof.ApplicationID != "" || proof.ClientID != "" || proof.GrantID == "" || proof.ChallengeVersion <= 0 || proof.ChallengeVersion != decision.ChallengeVersion || proof.SecurityEpoch < 1 || createdAt.IsZero() || createdAt.After(now.Add(dreamupdelegation.MaxClockSkew)) || createdAt.Before(actor.AuthenticatedAt.UTC().Add(-dreamupdelegation.MaxClockSkew)) || now.Sub(createdAt) > dreamupdelegation.MaxHighRiskStepUpAge {
+	expectedGeneration := decision.ChallengeVersion
+	if proof.ChallengeVersion == 0 {
+		// Password reauthentication is provider-backed and predates the retired
+		// DreamUP security-question generation. Its current account security epoch
+		// is the authorization generation; the verifier already checked that epoch
+		// atomically before returning the grant.
+		expectedGeneration = int64(proof.SecurityEpoch)
+		proof.ChallengeVersion = expectedGeneration
+	}
+	if proof.UserID != actor.UserID || proof.SessionID != actor.SessionID || proof.Action != string(input.Capability) || proof.Target != target || proof.ApplicationID != "" || proof.ClientID != "" || proof.GrantID == "" || proof.ChallengeVersion <= 0 || proof.ChallengeVersion != expectedGeneration || proof.SecurityEpoch < 1 || createdAt.IsZero() || createdAt.After(now.Add(dreamupdelegation.MaxClockSkew)) || createdAt.Before(actor.AuthenticatedAt.UTC().Add(-dreamupdelegation.MaxClockSkew)) || now.Sub(createdAt) > dreamupdelegation.MaxHighRiskStepUpAge {
 		return auth.ReauthGrantData{}, ErrStepUpRequired
 	}
 	return proof, nil
 }
 
-// validLegacyCookieHighRiskStepUp preserves the already deployed DreamUP
-// website contract without weakening the native Mini Program contract. The
-// durable proof is bound to the exact browser session and user by the
-// repository, revalidated here against the current challenge generation, and
-// narrowed from its ordinary lifetime to the same five-minute signer window.
+// validLegacyCookieHighRiskStepUp preserves the browser's five-minute
+// password/MFA freshness window without consulting the retired security
+// question. The generic reauthentication handler writes this proof only after
+// successful provider verification; it is bound to the exact session, user and
+// current account security epoch. Native Mini Program requests never use it.
 // Its stable database ID occupies the existing reauth_grant_id claim so the
 // private DreamUP verifier sees the unchanged assertion schema.
 func (s *Service) validLegacyCookieHighRiskStepUp(ctx context.Context, actor Actor, decision permissions.Decision) (adminstepup.StepUpState, error) {
 	if actor.AuthenticationTransport != AuthenticationTransportBrowserCookie {
 		return adminstepup.StepUpState{}, ErrStepUpRequired
 	}
-	state, err := s.validStepUp(ctx, actor, decision)
-	if err != nil {
-		return adminstepup.StepUpState{}, err
-	}
-	if s.accountSecurity == nil {
-		return adminstepup.StepUpState{}, ErrStepUpRequired
-	}
-	currentEpoch, err := s.accountSecurity.CurrentEpoch(ctx, actor.UserID)
-	if err != nil || int64(currentEpoch) < 1 || state.SecurityEpoch != int64(currentEpoch) {
-		return adminstepup.StepUpState{}, ErrStepUpRequired
+	if actor.SecurityEpoch < 1 || s.accountSecurity == nil || decision.BindingID == "" || decision.BindingVersion <= 0 {
+		return adminstepup.StepUpState{}, ErrAuthenticationRequired
 	}
 	now := s.now().UTC()
+	authenticatedAt := actor.AuthenticatedAt.UTC()
+	if authenticatedAt.IsZero() || authenticatedAt.After(now.Add(dreamupdelegation.MaxClockSkew)) || now.Sub(authenticatedAt) > dreamupdelegation.MaxAdministratorLoginAge {
+		return adminstepup.StepUpState{}, ErrAuthenticationRequired
+	}
+	currentEpoch, err := s.accountSecurity.CurrentEpoch(ctx, actor.UserID)
+	if err != nil {
+		return adminstepup.StepUpState{}, ErrUpstream
+	}
+	if currentEpoch < 1 || currentEpoch != actor.SecurityEpoch {
+		return adminstepup.StepUpState{}, ErrAuthenticationRequired
+	}
+	state, err := s.stepups.GetActiveForSession(ctx, actor.SessionID, actor.UserID, now)
+	if err != nil {
+		if errors.Is(err, adminstepup.ErrNotFound) {
+			return adminstepup.StepUpState{}, ErrStepUpRequired
+		}
+		return adminstepup.StepUpState{}, ErrUpstream
+	}
+	if !opaqueValuePattern.MatchString(state.ID) || state.SessionID != actor.SessionID || state.UserID != actor.UserID || state.SecurityEpoch != int64(currentEpoch) || state.ChallengeVersion != int64(currentEpoch) || state.VerifiedAt.IsZero() || !now.Before(state.ExpiresAt) || state.RevokedAt != nil {
+		return adminstepup.StepUpState{}, ErrStepUpRequired
+	}
 	verifiedAt := state.VerifiedAt.UTC()
 	if verifiedAt.After(now.Add(dreamupdelegation.MaxClockSkew)) || verifiedAt.Before(actor.AuthenticatedAt.UTC().Add(-dreamupdelegation.MaxClockSkew)) || now.Sub(verifiedAt) > dreamupdelegation.MaxHighRiskStepUpAge {
 		return adminstepup.StepUpState{}, ErrStepUpRequired
@@ -513,6 +667,52 @@ func highRiskGrantTarget(input ProxyRequest) (string, bool) {
 	case permissions.ActionRegistrationManage, permissions.ActionCheckinScan, permissions.ActionCheckinManageWindow,
 		permissions.ActionApplicationExport, permissions.ActionAuditRead, permissions.ActionRoleMigrationRead:
 		return dreamUPGrantTarget(input.EventID, "event", input.EventID), true
+	case permissions.ActionInspectionPointManage:
+		if input.ResourceKind == "inspection_point" {
+			return dreamUPGrantTarget(input.EventID, input.ResourceKind, input.ResourceID), input.ResourceID != ""
+		}
+		return dreamUPGrantTarget(input.EventID, "event", input.EventID), input.ResourceKind == "event"
+	case permissions.ActionInspectionPerform:
+		if input.ResourceKind == "inspection_point" || input.ResourceKind == "inspection_photo_upload" {
+			return dreamUPGrantTarget(input.EventID, input.ResourceKind, input.ResourceID), input.ResourceID != ""
+		}
+		return "", false
+	case permissions.ActionInspectionReview:
+		if input.ResourceKind == "inspection_record" {
+			return dreamUPGrantTarget(input.EventID, input.ResourceKind, input.ResourceID), input.ResourceID != ""
+		}
+		return dreamUPGrantTarget(input.EventID, "event", input.EventID), input.ResourceKind == "event"
+	case permissions.ActionAssetManage:
+		if input.ResourceKind == "event_asset" {
+			return dreamUPGrantTarget(input.EventID, input.ResourceKind, input.ResourceID), input.ResourceID != ""
+		}
+		return dreamUPGrantTarget(input.EventID, "event", input.EventID), input.ResourceKind == "event"
+	case permissions.ActionAssetReservationManage:
+		if input.ResourceKind == "asset_reservation" {
+			return dreamUPGrantTarget(input.EventID, input.ResourceKind, input.ResourceID), input.ResourceID != ""
+		}
+		return dreamUPGrantTarget(input.EventID, "event", input.EventID), input.ResourceKind == "event"
+	case permissions.ActionAssetCustodyTransfer:
+		return dreamUPGrantTarget(input.EventID, "asset_unit", input.ResourceID), input.ResourceKind == "asset_unit" && input.ResourceID != ""
+	case permissions.ActionAssetInventoryAdjust:
+		return dreamUPGrantTarget(input.EventID, input.ResourceKind, input.ResourceID), (input.ResourceKind == "event_asset" || input.ResourceKind == "asset_unit") && input.ResourceID != ""
+	case permissions.ActionPersonalAssetAssignment:
+		if input.ResourceKind == "personal_asset_assignment" {
+			return dreamUPGrantTarget(input.EventID, input.ResourceKind, input.ResourceID), input.ResourceID != ""
+		}
+		return dreamUPGrantTarget(input.EventID, "event", input.EventID), input.ResourceKind == "event"
+	case permissions.ActionAssetCodeRotate:
+		return dreamUPGrantTarget(input.EventID, "asset_unit", input.ResourceID), input.ResourceKind == "asset_unit" && input.ResourceID != ""
+	case permissions.ActionQRPrintSingle:
+		return dreamUPGrantTarget(input.EventID, input.ResourceKind, input.ResourceID), (input.ResourceKind == "entity_code" || input.ResourceKind == "qr_print_job") && input.ResourceID != ""
+	case permissions.ActionQRPrintBulk:
+		if input.Method == http.MethodGet && input.ResourceKind == "qr_print_job" && input.ResourceID != "" {
+			return dreamUPGrantTarget(input.EventID, "qr_print_job", input.ResourceID), true
+		}
+		if input.Method == http.MethodPost && input.ResourceKind == "event" && input.ResourceID == input.EventID {
+			return dreamUPGrantTarget(input.EventID, "event", input.EventID), true
+		}
+		return "", false
 	default:
 		return "", false
 	}
@@ -633,6 +833,26 @@ func (s *Service) failMutation(ctx context.Context, item adminstore.OutboxItem, 
 	})
 }
 
+func (s *Service) abortMutationBeforeSend(ctx context.Context, item adminstore.OutboxItem, responseStatus int) error {
+	now := s.now().UTC()
+	return s.uow.Within(ctx, func(repositories adminstore.Repositories) error {
+		payload := operationResultPayload(item)
+		payload["response_status"] = strconv.Itoa(responseStatus)
+		return repositories.Outbox.AbortBeforeSend(ctx, item.ID, item.Version, item.ClaimToken, adminstore.AllowlistedResult{Code: "operation.failed", Payload: payload}, now)
+	})
+}
+
+func (s *Service) renewMutationClaim(ctx context.Context, item adminstore.OutboxItem) (adminstore.OutboxItem, error) {
+	err := s.uow.Within(ctx, func(repositories adminstore.Repositories) error {
+		return repositories.Outbox.RenewClaim(ctx, item.ID, item.Version, item.ClaimToken, s.mutationLease)
+	})
+	if err != nil {
+		return item, err
+	}
+	item.Version++
+	return item, nil
+}
+
 func operationResultPayload(item adminstore.OutboxItem) map[string]string {
 	payload := map[string]string{
 		"event_id":             item.Result.Payload["event_id"],
@@ -661,6 +881,33 @@ func expectedMutationReceipt(input ProxyRequest) (mutationReceiptExpectation, er
 	base := "/internal/v1/events/" + url.PathEscape(input.EventID)
 	switch input.Capability {
 	case permissions.ActionContentManage:
+		if input.ResourceKind == "event_content" && input.ResourceID == input.EventID &&
+			input.Method == http.MethodPost && input.Path == base+"/announcement-background-image-upload-intents" {
+			return mutationReceiptExpectation{Action: "admin_image_upload_intent.created", TargetType: "admin_image_upload_intent"}, nil
+		}
+		if input.ResourceKind == "splash_poster" {
+			if input.ResourceID != input.EventID {
+				return mutationReceiptExpectation{}, ErrInvalidRequest
+			}
+			switch {
+			case input.Method == http.MethodPost && input.Path == base+"/splash-poster-image-upload-intents":
+				return mutationReceiptExpectation{Action: "admin_image_upload_intent.created", TargetType: "admin_image_upload_intent"}, nil
+			case input.Method == http.MethodPut && input.Path == base+"/splash-ad":
+				var splashBody struct {
+					Action string `json:"action"`
+				}
+				if err := json.Unmarshal(input.Body, &splashBody); err != nil {
+					return mutationReceiptExpectation{}, ErrInvalidRequest
+				}
+				switch splashBody.Action {
+				case "publish":
+					return mutationReceiptExpectation{Action: "splash_poster.published", TargetType: "splash_poster"}, nil
+				case "disable":
+					return mutationReceiptExpectation{Action: "splash_poster.disabled", TargetType: "splash_poster"}, nil
+				}
+			}
+			return mutationReceiptExpectation{}, ErrInvalidRequest
+		}
 		var body struct {
 			Action string `json:"action"`
 		}
@@ -706,9 +953,84 @@ func expectedMutationReceipt(input ProxyRequest) (mutationReceiptExpectation, er
 				return mutationReceiptExpectation{Action: "application.waitlisted", TargetType: "application", TargetID: input.ResourceID}, nil
 			}
 		}
+	case permissions.ActionIdentityReadRestricted:
+		if input.Method == http.MethodPost && input.ResourceKind == "application" && input.ResourceID != "" &&
+			input.Path == base+"/applications/"+url.PathEscape(input.ResourceID)+"/review-identity" {
+			return mutationReceiptExpectation{Action: "identity.read_restricted", TargetType: "application", TargetID: input.ResourceID}, nil
+		}
 	case permissions.ActionCheckinScan:
 		if input.Method == http.MethodPost && input.ResourceKind == "event" && input.ResourceID == input.EventID && input.Path == base+"/checkins/scan" {
 			return mutationReceiptExpectation{Action: "checkin.completed", TargetType: "application"}, nil
+		}
+	case permissions.ActionInspectionPointManage:
+		switch {
+		case input.Method == http.MethodPost && input.ResourceKind == "event" && input.ResourceID == input.EventID && input.Path == base+"/inspection-point-image-upload-intents":
+			return mutationReceiptExpectation{Action: "admin_image_upload_intent.created", TargetType: "admin_image_upload_intent"}, nil
+		case input.Method == http.MethodPost && input.ResourceKind == "event" && input.ResourceID == input.EventID && input.Path == base+"/inspection-points":
+			return mutationReceiptExpectation{Action: "inspection_point.created", TargetType: "inspection_point"}, nil
+		case input.Method == http.MethodPatch && input.ResourceKind == "inspection_point" && input.Path == base+"/inspection-points/"+url.PathEscape(input.ResourceID):
+			return mutationReceiptExpectation{Action: "inspection_point.updated", TargetType: "inspection_point", TargetID: input.ResourceID}, nil
+		case input.Method == http.MethodPost && input.ResourceKind == "inspection_point" && input.Path == base+"/inspection-points/"+url.PathEscape(input.ResourceID)+"/code-rotations":
+			return mutationReceiptExpectation{Action: "inspection_point.code_rotated", TargetType: "inspection_point", TargetID: input.ResourceID}, nil
+		}
+	case permissions.ActionInspectionPerform:
+		switch {
+		case input.Method == http.MethodPost && input.ResourceKind == "inspection_point" && input.Path == base+"/inspection-points/"+url.PathEscape(input.ResourceID)+"/inspections":
+			return mutationReceiptExpectation{Action: "inspection_attempt.started", TargetType: "inspection_attempt"}, nil
+		case input.Method == http.MethodPost && input.ResourceKind == "inspection_photo_upload" && input.Path == base+"/inspection-photo-uploads/"+url.PathEscape(input.ResourceID)+"/finalize":
+			return mutationReceiptExpectation{Action: "inspection.completed", TargetType: "inspection_photo_upload", TargetID: input.ResourceID}, nil
+		}
+	case permissions.ActionAssetManage:
+		switch {
+		case input.Method == http.MethodPost && input.ResourceKind == "event" && input.ResourceID == input.EventID && input.Path == base+"/asset-image-upload-intents":
+			return mutationReceiptExpectation{Action: "admin_image_upload_intent.created", TargetType: "admin_image_upload_intent"}, nil
+		case input.Method == http.MethodPost && input.ResourceKind == "event" && input.ResourceID == input.EventID && input.Path == base+"/assets":
+			return mutationReceiptExpectation{Action: "event_asset.created", TargetType: "event_asset"}, nil
+		case input.Method == http.MethodPatch && input.ResourceKind == "event_asset" && input.Path == base+"/assets/"+url.PathEscape(input.ResourceID):
+			return mutationReceiptExpectation{Action: "event_asset.updated", TargetType: "event_asset", TargetID: input.ResourceID}, nil
+		}
+	case permissions.ActionAssetCodeRotate:
+		if input.Method == http.MethodPost && input.ResourceKind == "asset_unit" && input.Path == base+"/asset-units/"+url.PathEscape(input.ResourceID)+"/code-rotations" {
+			return mutationReceiptExpectation{Action: "asset_unit.code_rotated", TargetType: "asset_unit", TargetID: input.ResourceID}, nil
+		}
+	case permissions.ActionAssetInventoryAdjust:
+		if input.Method == http.MethodPost && input.ResourceKind == "asset_unit" && input.Path == base+"/asset-units/"+url.PathEscape(input.ResourceID)+"/inventory-adjustments" {
+			return mutationReceiptExpectation{Action: "asset_unit.inventory_adjusted", TargetType: "asset_unit", TargetID: input.ResourceID}, nil
+		}
+	case permissions.ActionAssetReservationManage:
+		if input.Method == http.MethodPatch && input.ResourceKind == "asset_reservation" && input.Path == base+"/asset-reservations/"+url.PathEscape(input.ResourceID) {
+			return mutationReceiptExpectation{Action: "asset_reservation.updated", TargetType: "asset_reservation", TargetID: input.ResourceID}, nil
+		}
+	case permissions.ActionAssetCustodyTransfer:
+		if input.Method == http.MethodPost && input.ResourceKind == "asset_unit" {
+			prefix := base + "/asset-units/" + url.PathEscape(input.ResourceID) + "/"
+			switch input.Path {
+			case prefix + "checkout":
+				return mutationReceiptExpectation{Action: "asset_unit.checked_out", TargetType: "asset_unit", TargetID: input.ResourceID}, nil
+			case prefix + "checkin":
+				return mutationReceiptExpectation{Action: "asset_unit.checked_in", TargetType: "asset_unit", TargetID: input.ResourceID}, nil
+			case prefix + "transfers":
+				return mutationReceiptExpectation{Action: "asset_unit.transferred", TargetType: "asset_unit", TargetID: input.ResourceID}, nil
+			}
+		}
+	case permissions.ActionPersonalAssetAssignment:
+		switch {
+		case input.Method == http.MethodPost && input.ResourceKind == "event" && input.ResourceID == input.EventID && input.Path == base+"/personal-asset-image-upload-intents":
+			return mutationReceiptExpectation{Action: "admin_image_upload_intent.created", TargetType: "admin_image_upload_intent"}, nil
+		case input.Method == http.MethodPost && input.ResourceKind == "event" && input.ResourceID == input.EventID && input.Path == base+"/personal-asset-assignments":
+			return mutationReceiptExpectation{Action: "personal_asset_assignment.created", TargetType: "personal_asset_assignment"}, nil
+		case input.Method == http.MethodPatch && input.ResourceKind == "personal_asset_assignment" && input.Path == base+"/personal-asset-assignments/"+url.PathEscape(input.ResourceID):
+			return mutationReceiptExpectation{Action: "personal_asset_assignment.updated", TargetType: "personal_asset_assignment", TargetID: input.ResourceID}, nil
+		case input.Method == http.MethodPost && input.ResourceKind == "personal_asset_assignment" && input.Path == base+"/personal-asset-assignments/"+url.PathEscape(input.ResourceID)+"/code-rotations":
+			return mutationReceiptExpectation{Action: "personal_asset_assignment.code_rotated", TargetType: "personal_asset_assignment", TargetID: input.ResourceID}, nil
+		}
+	case permissions.ActionQRPrintSingle:
+		if input.Method == http.MethodPost && input.ResourceKind == "entity_code" && input.Path == base+"/entity-codes/"+url.PathEscape(input.ResourceID)+"/print-jobs" {
+			return mutationReceiptExpectation{Action: "qr_print_job.created", TargetType: "qr_print_job"}, nil
+		}
+	case permissions.ActionQRPrintBulk:
+		if input.Method == http.MethodPost && input.ResourceKind == "event" && input.ResourceID == input.EventID && input.Path == base+"/qr-print-jobs/bulk" {
+			return mutationReceiptExpectation{Action: "qr_print_job.created", TargetType: "qr_print_job"}, nil
 		}
 	}
 	return mutationReceiptExpectation{}, ErrInvalidRequest
@@ -759,7 +1081,7 @@ func mutationStatusFromItem(item adminstore.OutboxItem) (MutationStatus, error) 
 		}
 		status.Status = "succeeded"
 	case "failed":
-		if item.Result.Code != "operation.failed" || item.Result.Digest != "" || item.DeliveryPhase != adminstore.DeliveryPhaseSent || item.TerminalAt == nil {
+		if item.Result.Code != "operation.failed" || item.Result.Digest != "" || (item.DeliveryPhase != adminstore.DeliveryPhaseSent && item.DeliveryPhase != adminstore.DeliveryPhaseNotSent) || item.TerminalAt == nil {
 			return MutationStatus{}, ErrUpstream
 		}
 		status.Status = "failed"
@@ -773,7 +1095,9 @@ func mutationStatusFromItem(item adminstore.OutboxItem) (MutationStatus, error) 
 	}
 	if raw := item.Result.Payload["response_status"]; raw != "" {
 		value, err := strconv.Atoi(raw)
-		if err != nil || value < 200 || value > 599 || (status.Status == "succeeded" && value >= 300) || (status.Status == "failed" && (value < 400 || value >= 500)) {
+		if err != nil || value < 200 || value > 599 || (status.Status == "succeeded" && value >= 300) ||
+			(status.Status == "failed" && ((item.DeliveryPhase == adminstore.DeliveryPhaseSent && (value < 400 || value >= 500)) ||
+				(item.DeliveryPhase == adminstore.DeliveryPhaseNotSent && value != http.StatusServiceUnavailable))) {
 			return MutationStatus{}, ErrUpstream
 		}
 		status.ResponseStatus = &value
@@ -796,21 +1120,6 @@ func randomOperationID() (string, error) {
 		return "", err
 	}
 	return "aop_" + base64.RawURLEncoding.EncodeToString(buffer), nil
-}
-
-func (s *Service) validStepUp(ctx context.Context, actor Actor, decision permissions.Decision) (adminstepup.StepUpState, error) {
-	now := s.now().UTC()
-	// No role can manufacture freshness. A non-positive challenge version is
-	// an unenrolled/invalid authorization state, including for super and top
-	// administrators, and therefore fails closed.
-	if decision.ChallengeVersion <= 0 {
-		return adminstepup.StepUpState{}, ErrStepUpRequired
-	}
-	state, err := s.stepups.GetActiveForSession(ctx, actor.SessionID, actor.UserID, now)
-	if err != nil || !opaqueValuePattern.MatchString(state.ID) || state.SessionID != actor.SessionID || state.UserID != actor.UserID || state.ChallengeVersion != decision.ChallengeVersion || state.VerifiedAt.IsZero() || state.VerifiedAt.After(now.Add(time.Minute)) || !now.Before(state.ExpiresAt) || state.RevokedAt != nil {
-		return adminstepup.StepUpState{}, ErrStepUpRequired
-	}
-	return state, nil
 }
 
 func validateProxyRequest(input ProxyRequest) error {

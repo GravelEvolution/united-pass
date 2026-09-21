@@ -22,12 +22,13 @@ import (
 )
 
 var (
-	ErrInvalidRequest = errors.New("dreamupadmin: invalid request")
-	ErrForbidden      = errors.New("dreamupadmin: forbidden")
-	ErrNotFound       = errors.New("dreamupadmin: not found")
-	ErrStepUpRequired = errors.New("dreamupadmin: administrator step-up required")
-	ErrConflict       = errors.New("dreamupadmin: conflict")
-	ErrUpstream       = errors.New("dreamupadmin: upstream unavailable")
+	ErrInvalidRequest         = errors.New("dreamupadmin: invalid request")
+	ErrAuthenticationRequired = errors.New("dreamupadmin: authentication required")
+	ErrForbidden              = errors.New("dreamupadmin: forbidden")
+	ErrNotFound               = errors.New("dreamupadmin: not found")
+	ErrStepUpRequired         = errors.New("dreamupadmin: administrator step-up required")
+	ErrConflict               = errors.New("dreamupadmin: conflict")
+	ErrUpstream               = errors.New("dreamupadmin: upstream unavailable")
 )
 
 type Actor struct {
@@ -35,10 +36,10 @@ type Actor struct {
 	SessionID       string
 	AuthenticatedAt time.Time
 	// SecurityEpoch is copied from the already validated server-side session
-	// record. Native Mini Program administrator authorization compares it with
-	// the authoritative account epoch before every privileged request, so a
-	// password or account-security change still invalidates the bearer even
-	// though the Mini Program no longer asks a separate security question.
+	// record. Both browser-cookie and native Mini Program administrator
+	// authorization compare it with the authoritative account epoch before
+	// every privileged request, so a password or account-security change still
+	// invalidates the session without relying on the retired security question.
 	SecurityEpoch securitystate.Epoch
 	// AuthenticationTransport is set by the HTTP boundary after it has
 	// validated the request credential and client shape. It prevents either
@@ -48,9 +49,8 @@ type Actor struct {
 }
 
 // AuthenticationTransport records the already-authenticated HTTP transport
-// used for one DreamUP administrator request. It is authority-relevant only
-// for the narrow legacy cookie compatibility path; unknown transports never
-// receive that fallback.
+// used for one DreamUP administrator request. Unknown transports never receive
+// an administrator session proof or the browser-only fresh-proof fallback.
 type AuthenticationTransport string
 
 const (
@@ -59,11 +59,12 @@ const (
 )
 
 type EventSummary struct {
-	EventID     string          `json:"eventId"`
-	DisplayName string          `json:"displayName"`
-	Slug        string          `json:"slug,omitempty"`
-	Role        adminroles.Role `json:"role,omitempty"`
-	Counts      EventCounts     `json:"counts"`
+	EventID      string               `json:"eventId"`
+	DisplayName  string               `json:"displayName"`
+	Slug         string               `json:"slug,omitempty"`
+	Role         adminroles.Role      `json:"role,omitempty"`
+	Capabilities []permissions.Action `json:"capabilities"`
+	Counts       EventCounts          `json:"counts"`
 }
 
 // EventCounts is the admission-count summary shown on the admin dashboard.
@@ -98,6 +99,26 @@ type ProxyResponse struct {
 	Body       json.RawMessage
 	RequestID  string
 	ETag       string
+}
+
+// NativeReauthenticationRequest is the exact action-and-target tuple the
+// Mini Program asks to authorize after proving a fresh wx.login code. Target
+// remains the canonical server contract and is re-derived again when the
+// eventual operation consumes the single-use grant.
+type NativeReauthenticationRequest struct {
+	EventID string
+	Action  permissions.Action
+	Target  string
+}
+
+// NativeReauthenticationAuthorization is the server-authoritative binding
+// written into a short-lived one-shot grant. It contains no provider proof or
+// bearer material.
+type NativeReauthenticationAuthorization struct {
+	Action           permissions.Action
+	Target           string
+	ChallengeVersion int64
+	SecurityEpoch    securitystate.Epoch
 }
 
 type MutationStatus struct {

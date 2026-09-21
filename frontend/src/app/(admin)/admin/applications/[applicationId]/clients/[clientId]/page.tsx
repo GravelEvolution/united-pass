@@ -35,11 +35,9 @@ export default async function ClientDetailPage({
   params: Promise<{ applicationId: string; clientId: string }>;
 }) {
   const { applicationId, clientId } = await params;
-  const [appDetail, client, availableScopes, permissions] = await Promise.all([
+  const [appDetail, client] = await Promise.all([
     serverQueries.getApplicationDetail(applicationId),
     serverQueries.getClientDetail(applicationId, clientId),
-    serverQueries.getAvailableScopes(),
-    serverQueries.getCurrentPermissions(),
   ]);
 
   if (!appDetail || !client) {
@@ -52,10 +50,6 @@ export default async function ClientDetailPage({
         applicationId={applicationId}
         applicationName={appDetail.name}
         applicationStatus={appDetail.status}
-        applicationAudience={appDetail.audience}
-        availableScopes={availableScopes}
-        canManage={permissions.applicationManage}
-        canRotateSecret={permissions.applicationSecretRotate}
         client={client}
       />
     </Suspense>

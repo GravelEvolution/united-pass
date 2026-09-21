@@ -3,6 +3,7 @@ package httpapi
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -22,7 +23,6 @@ func TestOpenAPIMiniProgramAndQRContracts(t *testing.T) {
 	for _, path := range []string{
 		"/api/v1/auth/miniprogram/sessions",
 		"/api/v1/auth/miniprogram/sessions/mfa",
-		"/api/v1/auth/wechat/sessions",
 	} {
 		operation := openAPIMap(t, openAPIMap(t, paths, path), "post")
 		if !openAPIHasParameterRef(operation, "#/components/parameters/X-MiniProgram-Client") {
@@ -37,22 +37,50 @@ func TestOpenAPIMiniProgramAndQRContracts(t *testing.T) {
 			t.Fatalf("%s native response declares Set-Cookie", path)
 		}
 	}
+	if _, exists := paths["/api/v1/auth/wechat/sessions"]; exists {
+		t.Fatal("OpenAPI still exposes the identity-only WeChat session bypass")
+	}
 
 	protected := map[string]string{
-		"/api/v1/me/miniprogram/profile":                                            "post",
-		"/api/v1/me/wechat/phone":                                                   "post",
-		"/api/v1/auth/qr/challenges/{challengeId}/approve":                          "post",
-		"/api/v1/dreamup/mobile/assertions":                                         "post",
-		"/api/v1/dreamup/mobile/resume-upload-assertions":                           "post",
-		"/api/v1/admin/dreamup/eligibility":                                         "get",
-		"/api/v1/admin/dreamup/events/{eventId}/operations/status":                  "get",
-		"/api/v1/admin/dreamup/events/{eventId}/content":                            "get",
-		"/api/v1/admin/dreamup/events/{eventId}/content/intro":                      "put",
-		"/api/v1/admin/dreamup/events/{eventId}/announcements":                      "post",
-		"/api/v1/admin/dreamup/events/{eventId}/announcements/{contentId}":          "patch",
-		"/api/v1/admin/dreamup/events/{eventId}/teams":                              "get",
-		"/api/v1/admin/dreamup/events/{eventId}/contact-submissions":                "get",
-		"/api/v1/admin/dreamup/events/{eventId}/contact-submissions/{submissionId}": "get",
+		"/api/v1/me/miniprogram/profile":                                                      "post",
+		"/api/v1/me/wechat/phone":                                                             "post",
+		"/api/v1/auth/qr/challenges/{challengeId}/approve":                                    "post",
+		"/api/v1/dreamup/mobile/assertions":                                                   "post",
+		"/api/v1/dreamup/mobile/resume-upload-assertions":                                     "post",
+		"/api/v1/admin/dreamup/eligibility":                                                   "get",
+		"/api/v1/admin/dreamup/events/{eventId}/operations/status":                            "get",
+		"/api/v1/admin/dreamup/events/{eventId}/content":                                      "get",
+		"/api/v1/admin/dreamup/events/{eventId}/splash-ad":                                    "get",
+		"/api/v1/admin/dreamup/events/{eventId}/splash-poster-image-upload-intents":           "post",
+		"/api/v1/admin/dreamup/events/{eventId}/announcement-background-image-upload-intents": "post",
+		"/api/v1/admin/dreamup/events/{eventId}/content/intro":                                "put",
+		"/api/v1/admin/dreamup/events/{eventId}/announcements":                                "post",
+		"/api/v1/admin/dreamup/events/{eventId}/announcements/{contentId}":                    "patch",
+		"/api/v1/admin/dreamup/events/{eventId}/teams":                                        "get",
+		"/api/v1/admin/dreamup/events/{eventId}/contact-submissions":                          "get",
+		"/api/v1/admin/dreamup/events/{eventId}/contact-submissions/{submissionId}":           "get",
+	}
+	for path, method := range map[string]string{
+		"/api/v1/admin/dreamup/events/{eventId}/splash-ad":                                    "put",
+		"/api/v1/admin/dreamup/events/{eventId}/splash-poster-image-upload-intents":           "post",
+		"/api/v1/admin/dreamup/events/{eventId}/announcement-background-image-upload-intents": "post",
+	} {
+		item := openAPIMap(t, paths, path)
+		operation := openAPIMap(t, item, method)
+		security, _ := operation["security"].([]any)
+		if !openAPIHasSecurityScheme(security, "MiniProgramBearer") || !openAPIHasParameterRef(item, "#/components/parameters/X-MiniProgram-Client-When-Bearer") {
+			t.Fatalf("%s %s is not bound to native bearer plus the Mini Program marker", method, path)
+		}
+		for _, parameter := range []string{
+			"#/components/parameters/X-CSRF-Token",
+			"#/components/parameters/DreamUP-X-Reauthentication-Token",
+			"#/components/parameters/Idempotency-Key",
+			"#/components/parameters/DreamUP-If-Match",
+		} {
+			if !openAPIHasParameterRef(operation, parameter) {
+				t.Fatalf("%s %s missing required state-control parameter %s", method, path, parameter)
+			}
+		}
 	}
 	for path, method := range protected {
 		item := openAPIMap(t, paths, path)
@@ -64,6 +92,30 @@ func TestOpenAPIMiniProgramAndQRContracts(t *testing.T) {
 		if !openAPIHasParameterRef(operation, "#/components/parameters/X-MiniProgram-Client") && !openAPIHasParameterRef(operation, "#/components/parameters/X-MiniProgram-Client-When-Bearer") && !openAPIHasParameterRef(item, "#/components/parameters/X-MiniProgram-Client-When-Bearer") {
 			t.Fatalf("%s %s missing native marker", method, path)
 		}
+	}
+	splashSchemas := openAPIMap(t, openAPIMap(t, document, "components"), "schemas")
+	splashMutation := openAPIMap(t, splashSchemas, "DreamUPSplashPosterMutationRequest")
+	splashDescription, _ := splashMutation["description"].(string)
+	if !strings.Contains(splashDescription, "first splash poster requires `image`") || !strings.Contains(splashDescription, "existing poster may be republished") {
+		t.Fatalf("splash mutation omits state-dependent image contract: %q", splashDescription)
+	}
+	branches, _ := splashMutation["oneOf"].([]any)
+	foundPublish := false
+	for _, rawBranch := range branches {
+		branch, _ := rawBranch.(map[string]any)
+		properties, _ := branch["properties"].(map[string]any)
+		action, _ := properties["action"].(map[string]any)
+		if action["const"] != "publish" {
+			continue
+		}
+		foundPublish = true
+		required, _ := branch["required"].([]any)
+		if slices.Contains(required, any("image")) || !slices.Contains(required, any("action")) || !slices.Contains(required, any("altText")) || properties["image"] == nil {
+			t.Fatalf("splash publish branch must require action+altText and allow an optional image: %v", branch)
+		}
+	}
+	if !foundPublish {
+		t.Fatal("splash mutation is missing the publish branch")
 	}
 
 	consume := openAPIMap(t, openAPIMap(t, paths, "/api/v1/auth/qr/challenges/{challengeId}/consume"), "post")
@@ -256,6 +308,27 @@ func TestOpenAPIWeChatOnboardingContract(t *testing.T) {
 	}
 
 	schemas := openAPIMap(t, openAPIMap(t, document, "components"), "schemas")
+	beginRequest := openAPIMap(t, schemas, "WeChatOnboardingBeginRequest")
+	required, _ := beginRequest["required"].([]any)
+	if !openAPIStringListContains(required, "loginCode") || !openAPIStringListContains(required, "phoneCode") {
+		t.Fatalf("onboarding begin required fields=%#v, want loginCode and phoneCode", required)
+	}
+	completeRequest := openAPIMap(t, schemas, "WeChatOnboardingCompleteRequest")
+	completeRequired, _ := completeRequest["required"].([]any)
+	for _, field := range []string{"onboardingToken", "email", "password", "acceptedTerms"} {
+		if !openAPIStringListContains(completeRequired, field) {
+			t.Fatalf("onboarding complete required fields=%#v, missing %s", completeRequired, field)
+		}
+	}
+	for _, field := range []string{"username", "displayName"} {
+		if openAPIStringListContains(completeRequired, field) {
+			t.Fatalf("onboarding complete requires new-account-only field %s: %#v", field, completeRequired)
+		}
+		property := openAPIMap(t, openAPIMap(t, completeRequest, "properties"), field)
+		if minimum, ok := property["minLength"].(int); ok && minimum > 0 {
+			t.Fatalf("onboarding complete %s rejects empty existing-account value: minLength=%d", field, minimum)
+		}
+	}
 	mfaRequired := openAPIMap(t, schemas, "WeChatOnboardingMFARequiredResponse")
 	mfaToken := openAPIMap(t, openAPIMap(t, mfaRequired, "properties"), "mfaToken")
 	if got, _ := mfaToken["pattern"].(string); got != "^[A-Za-z0-9_-]{43}$" {
@@ -271,6 +344,8 @@ func TestOpenAPIWeChatOnboardingContract(t *testing.T) {
 		"wechat.onboarding_expired",
 		"wechat.onboarding_email_password_mismatch",
 		"wechat.onboarding_conflict",
+		"wechat.phone_required",
+		"wechat.phone_conflict",
 		"此邮箱已存在账号，请设定原始密码以进行绑定",
 	} {
 		if !strings.Contains(contract, stable) {
@@ -306,6 +381,84 @@ func TestOpenAPIDreamUPEligibilityContentAndContactDetailContracts(t *testing.T)
 	eligibilityProperties := openAPIMap(t, eligibilitySchema, "properties")
 	if eligibilitySchema["additionalProperties"] != false || len(eligibilityProperties) != 1 || eligibilityProperties["eligible"] == nil {
 		t.Fatalf("eligibility leaked fields: %v", eligibilitySchema)
+	}
+
+	eventsOperation := openAPIMap(t, openAPIMap(t, paths, "/api/v1/admin/dreamup/events"), "get")
+	eventsSuccess := openAPIMap(t, openAPIMap(t, eventsOperation, "responses"), "200")
+	eventsRef, _ := openAPIMap(t, openAPIMap(t, openAPIMap(t, eventsSuccess, "content"), "application/json"), "schema")["$ref"].(string)
+	if eventsRef != "#/components/schemas/DreamUPAdminEventsResponse" {
+		t.Fatalf("events schema=%q", eventsRef)
+	}
+	eventsSchema := openAPIMap(t, schemas, "DreamUPAdminEventsResponse")
+	if eventsSchema["additionalProperties"] != false {
+		t.Fatalf("events response is not closed: %v", eventsSchema)
+	}
+	eventSchema := openAPIMap(t, schemas, "DreamUPAdminEventSummary")
+	eventProperties := openAPIMap(t, eventSchema, "properties")
+	capabilities := openAPIMap(t, eventProperties, "capabilities")
+	capabilityRef, _ := openAPIMap(t, capabilities, "items")["$ref"].(string)
+	capabilityEnum, _ := openAPIMap(t, schemas, "DreamUPAdminCapability")["enum"].([]any)
+	if eventSchema["additionalProperties"] != false || capabilityRef != "#/components/schemas/DreamUPAdminCapability" || capabilities["uniqueItems"] != true || len(capabilityEnum) != 20 {
+		t.Fatalf("event capability contract event=%v capabilities=%v enum=%v", eventSchema, capabilities, capabilityEnum)
+	}
+
+	sessionOperation := openAPIMap(t, openAPIMap(t, paths, "/api/v1/admin/dreamup/session"), "get")
+	sessionSuccess := openAPIMap(t, openAPIMap(t, sessionOperation, "responses"), "200")
+	sessionRef, _ := openAPIMap(t, openAPIMap(t, openAPIMap(t, sessionSuccess, "content"), "application/json"), "schema")["$ref"].(string)
+	if sessionRef != "#/components/schemas/DreamUPAdminSessionResponse" {
+		t.Fatalf("session schema=%q", sessionRef)
+	}
+	sessionVariants, _ := openAPIMap(t, schemas, "DreamUPAdminSessionResponse")["oneOf"].([]any)
+	if len(sessionVariants) != 2 {
+		t.Fatalf("session variants=%v", sessionVariants)
+	}
+	browserSession := openAPIMap(t, schemas, "DreamUPAdminBrowserSessionResponse")
+	nativeSession := openAPIMap(t, schemas, "DreamUPAdminNativeSessionResponse")
+	browserProperties := openAPIMap(t, browserSession, "properties")
+	nativeProperties := openAPIMap(t, nativeSession, "properties")
+	csrf := openAPIMap(t, browserProperties, "csrfToken")
+	if browserSession["additionalProperties"] != false || nativeSession["additionalProperties"] != false || csrf["pattern"] != "^[A-Za-z0-9_-]{43}$" || nativeProperties["csrfToken"] != nil {
+		t.Fatalf("session response contract browser=%v native=%v", browserSession, nativeSession)
+	}
+
+	nativeReauth := openAPIMap(t, openAPIMap(t, paths, "/api/v1/admin/dreamup/reauthentication"), "post")
+	security, _ := nativeReauth["security"].([]any)
+	if len(security) != 1 {
+		t.Fatalf("native reauthentication security=%v", security)
+	}
+	securityRequirement, _ := security[0].(map[string]any)
+	if len(securityRequirement) != 1 || securityRequirement["MiniProgramBearer"] == nil {
+		t.Fatalf("native reauthentication must be Mini Program bearer only: %v", securityRequirement)
+	}
+	if !openAPIHasParameterRef(nativeReauth, "#/components/parameters/X-MiniProgram-Client") || openAPIHasParameterRef(nativeReauth, "#/components/parameters/X-CSRF-Token") {
+		t.Fatalf("native reauthentication parameters=%v", nativeReauth["parameters"])
+	}
+	nativeReauthBody := openAPIMap(t, openAPIMap(t, openAPIMap(t, nativeReauth, "requestBody"), "content"), "application/json")
+	if got, _ := openAPIMap(t, nativeReauthBody, "schema")["$ref"].(string); got != "#/components/schemas/DreamUPNativeReauthenticationRequest" {
+		t.Fatalf("native reauthentication request schema=%q", got)
+	}
+	nativeReauthSchema := openAPIMap(t, schemas, "DreamUPNativeReauthenticationRequest")
+	nativeRequired, _ := nativeReauthSchema["required"].([]any)
+	for _, field := range []string{"loginCode", "eventId", "action", "target"} {
+		if !openAPIStringListContains(nativeRequired, field) {
+			t.Fatalf("native reauthentication required=%v, missing %s", nativeRequired, field)
+		}
+	}
+	nativeAction := openAPIMap(t, openAPIMap(t, nativeReauthSchema, "properties"), "action")
+	nativeActions, _ := nativeAction["enum"].([]any)
+	for _, action := range []string{"event.application.review", "event.content.manage", "event.asset.custody.transfer", "event.qr.print.bulk"} {
+		if !openAPIStringListContains(nativeActions, action) {
+			t.Fatalf("native reauthentication action enum missing %q", action)
+		}
+	}
+	passwordReauthSchema := openAPIMap(t, schemas, "ReauthenticationRequest")
+	passwordReauthProperties := openAPIMap(t, passwordReauthSchema, "properties")
+	if passwordReauthProperties["eventId"] == nil {
+		t.Fatal("password reauthentication omits the DreamUP event binding")
+	}
+	passwordActions, _ := openAPIMap(t, passwordReauthProperties, "action")["enum"].([]any)
+	if !openAPIStringListContains(passwordActions, "event.content.manage") || !openAPIStringListContains(passwordActions, "event.application.review") {
+		t.Fatalf("password reauthentication omits DreamUP actions: %v", passwordActions)
 	}
 
 	operationStatus := openAPIMap(t, openAPIMap(t, paths, "/api/v1/admin/dreamup/events/{eventId}/operations/status"), "get")
@@ -361,9 +514,17 @@ func TestOpenAPIDreamUPEligibilityContentAndContactDetailContracts(t *testing.T)
 			t.Errorf("%s %s request schema=%q", contract.method, contract.path, got)
 		}
 		successSchema := openAPIMap(t, openAPIMap(t, openAPIMap(t, openAPIMap(t, openAPIMap(t, operation, "responses"), "200"), "content"), "application/json"), "schema")
-		if got, _ := successSchema["$ref"].(string); got != "#/components/schemas/DreamUPContentResponse" {
+		if got, _ := successSchema["$ref"].(string); got != "#/components/schemas/DreamUPContentMutationResponse" {
 			t.Errorf("%s %s response schema=%q", contract.method, contract.path, got)
 		}
+	}
+	mutationResponse := openAPIMap(t, schemas, "DreamUPContentMutationResponse")
+	if mutationResponse["additionalProperties"] != false {
+		t.Fatalf("content mutation response must be closed: %v", mutationResponse)
+	}
+	mutationProperties := openAPIMap(t, mutationResponse, "properties")
+	if mutationProperties["mutationDocumentId"] == nil {
+		t.Fatal("content mutation response does not identify the exact saved document")
 	}
 	introAction := openAPIMap(t, openAPIMap(t, openAPIMap(t, schemas, "DreamUPIntroMutationRequest"), "properties"), "action")
 	introValues, _ := introAction["enum"].([]any)
@@ -434,7 +595,17 @@ func TestOpenAPIWeChatRegistrationAndEmailChangeSecurityContracts(t *testing.T) 
 	paths := openAPIMap(t, document, "paths")
 	wechat := openAPIMap(t, openAPIMap(t, paths, "/api/v1/registrations/wechat"), "post")
 	description, _ := wechat["description"].(string)
-	for _, requirement := range []string{"UP_WECHAT_MINIPROGRAM_ENABLED", "UP_WECHAT_MINIPROGRAM_REGISTRATION_ENABLED", "UP_PUBLIC_REGISTRATION_ENABLED", "X-UnitedPass-Client: dreamup-miniprogram", "retryable"} {
+	for _, requirement := range []string{
+		"UP_WECHAT_MINIPROGRAM_ENABLED",
+		"UP_WECHAT_MINIPROGRAM_REGISTRATION_ENABLED",
+		"UP_PUBLIC_REGISTRATION_ENABLED",
+		"X-UnitedPass-Client: dreamup-miniprogram",
+		"retryable",
+		"source-IP budget",
+		"over-budget source cannot create per-code Redis keys",
+		"only after",
+		"verified both identity and phone proofs",
+	} {
 		if !strings.Contains(description, requirement) {
 			t.Fatalf("WeChat registration description missing %q", requirement)
 		}
@@ -611,6 +782,7 @@ func TestOpenAPIDreamUPAdmissionBFFContract(t *testing.T) {
 		method string
 	}{
 		{"/api/v1/admin/dreamup/events/{eventId}/contact-submissions/{submissionId}/resolution", "post"},
+		{"/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/review-identity", "post"},
 		{"/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/reviews/me", "put"},
 		{"/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus/approval", "put"},
 		{"/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus/approval", "delete"},
@@ -630,6 +802,24 @@ func TestOpenAPIDreamUPAdmissionBFFContract(t *testing.T) {
 	withdraw := openAPIMap(t, openAPIMap(t, paths, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus/approval"), "delete")
 	if _, present := withdraw["requestBody"]; present {
 		t.Fatal("bodyless admission approval withdrawal unexpectedly requires a request body")
+	}
+	for _, path := range []string{
+		"/api/v1/admin/dreamup/step-up/challenge",
+		"/api/v1/admin/dreamup/step-up/enroll",
+		"/api/v1/admin/dreamup/step-up/verify",
+	} {
+		method := "post"
+		if strings.HasSuffix(path, "/challenge") {
+			method = "get"
+		}
+		operation := openAPIMap(t, openAPIMap(t, paths, path), method)
+		security, _ := operation["security"].([]any)
+		if len(security) != 1 || !openAPIHasSecurityScheme(security, "SessionCookie") || openAPIHasSecurityScheme(security, "MiniProgramBearer") {
+			t.Fatalf("retired native security-question route %s security=%v", path, security)
+		}
+		if openAPIHasParameterRef(operation, "#/components/parameters/X-MiniProgram-Client-When-Bearer") {
+			t.Fatalf("retired native security-question route %s still declares Mini Program transport", path)
+		}
 	}
 	componentParameters := openAPIMap(t, openAPIMap(t, document, "components"), "parameters")
 	dreamUPReauth := openAPIMap(t, componentParameters, "DreamUP-X-Reauthentication-Token")
@@ -692,9 +882,45 @@ func TestOpenAPIDreamUPAdmissionBFFContract(t *testing.T) {
 	}
 	verifyOperation := openAPIMap(t, openAPIMap(t, paths, "/api/v1/admin/dreamup/step-up/verify"), "post")
 	verifyDescription, _ := verifyOperation["description"].(string)
-	for _, requirement := range []string{"30 minutes", "Every mutation", "application review", "check-in scan", "native Mini Program", "existing cookie website", "cannot fall back"} {
+	for _, requirement := range []string{"30 minutes", "Every mutation", "application review", "check-in scan", "Native Mini Program bearer", "callers are rejected", "fresh `wx.login`", "existing cookie website", "cannot fall back"} {
 		if !strings.Contains(verifyDescription, requirement) {
 			t.Fatalf("admin step-up verify description omits %q: %q", requirement, verifyDescription)
+		}
+	}
+
+	requestAndResponseRefs := []struct {
+		path, method, requestRef, responseRef string
+	}{
+		{"/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/review-identity", "post", "#/components/schemas/DreamUPEmptyMutationRequest", "#/components/schemas/DreamUPAdminReviewIdentityResponse"},
+		{"/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/reviews/me", "put", "#/components/schemas/DreamUPAdminOwnReviewMutationRequest", "#/components/schemas/DreamUPAdminOwnReviewMutationResponse"},
+		{"/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus/approval", "put", "#/components/schemas/DreamUPEmptyMutationRequest", "#/components/schemas/DreamUPAdminAdmissionConsensusResponse"},
+		{"/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/decision", "post", "#/components/schemas/DreamUPAdminDecisionRequest", "#/components/schemas/DreamUPAdminApplicationDetail"},
+	}
+	for _, contract := range requestAndResponseRefs {
+		operation := openAPIMap(t, openAPIMap(t, paths, contract.path), contract.method)
+		body := openAPIMap(t, openAPIMap(t, operation, "requestBody"), "content")
+		requestSchema := openAPIMap(t, openAPIMap(t, body, "application/json"), "schema")
+		if requestSchema["$ref"] != contract.requestRef {
+			t.Fatalf("%s %s request schema=%v", contract.method, contract.path, requestSchema)
+		}
+		success := openAPIMap(t, openAPIMap(t, operation, "responses"), "200")
+		responseSchema := openAPIMap(t, openAPIMap(t, openAPIMap(t, success, "content"), "application/json"), "schema")
+		if responseSchema["$ref"] != contract.responseRef {
+			t.Fatalf("%s %s response schema=%v", contract.method, contract.path, responseSchema)
+		}
+	}
+	consensus := openAPIMap(t, openAPIMap(t, paths, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus"), "get")
+	consensusSuccess := openAPIMap(t, openAPIMap(t, consensus, "responses"), "200")
+	consensusSchema := openAPIMap(t, openAPIMap(t, openAPIMap(t, consensusSuccess, "content"), "application/json"), "schema")
+	if consensusSchema["$ref"] != "#/components/schemas/DreamUPAdminAdmissionConsensusResponse" {
+		t.Fatalf("consensus response schema=%v", consensusSchema)
+	}
+	for _, schemaName := range []string{
+		"DreamUPAdminOwnReviewMutationRequest", "DreamUPAdminReviewRecord", "DreamUPAdminOwnReviewMutationResponse",
+		"DreamUPAdminAdmissionConsensus", "DreamUPAdminAdmissionConsensusResponse", "DreamUPAdminDecisionRequest",
+	} {
+		if openAPIMap(t, schemas, schemaName)["additionalProperties"] != false {
+			t.Fatalf("DreamUP review schema %s is not closed", schemaName)
 		}
 	}
 }
@@ -706,6 +932,133 @@ func openAPIStringListContains(values []any, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestOpenAPIDreamUPBasicApplicationDetailExcludesRestrictedIdentity(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "openapi", "openapi.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	paths := openAPIMap(t, document, "paths")
+	operation := openAPIMap(t, openAPIMap(t, paths, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}"), "get")
+	description, _ := operation["description"].(string)
+	for _, phrase := range []string{"event.application.read_basic", "legalName", "email", "mobile", "restrictedIdentity", "SuperAdmin-only", "one-shot", "fail-closed read audit"} {
+		if !strings.Contains(description, phrase) {
+			t.Fatalf("basic application detail description omits %q: %q", phrase, description)
+		}
+	}
+	responses := openAPIMap(t, operation, "responses")
+	for _, status := range []string{"401", "403", "404", "502"} {
+		if _, ok := responses[status]; !ok {
+			t.Fatalf("basic application detail omits %s response", status)
+		}
+	}
+	success := openAPIMap(t, responses, "200")
+	schema := openAPIMap(t, openAPIMap(t, openAPIMap(t, success, "content"), "application/json"), "schema")
+	if got, _ := schema["$ref"].(string); got != "#/components/schemas/DreamUPAdminApplicationDetail" {
+		t.Fatalf("basic application detail schema=%q", got)
+	}
+	schemas := openAPIMap(t, openAPIMap(t, document, "components"), "schemas")
+	detail := openAPIMap(t, schemas, "DreamUPAdminApplicationDetail")
+	if detail["additionalProperties"] != false {
+		t.Fatalf("basic application detail is not closed: %v", detail)
+	}
+	detailProperties := openAPIMap(t, detail, "properties")
+	if len(detailProperties) != 2 || detailProperties["application"] == nil || detailProperties["ownReview"] == nil {
+		t.Fatalf("basic application detail properties=%v", detailProperties)
+	}
+	basic := openAPIMap(t, schemas, "DreamUPAdminBasicApplication")
+	if basic["additionalProperties"] != false {
+		t.Fatalf("basic application schema is not closed: %v", basic)
+	}
+	basicProperties := openAPIMap(t, basic, "properties")
+	for _, forbidden := range []string{"legalName", "email", "mobile", "restrictedIdentity"} {
+		if detailProperties[forbidden] != nil || basicProperties[forbidden] != nil {
+			t.Fatalf("restricted field %q is declared on basic application detail", forbidden)
+		}
+	}
+	reviewAnswers := openAPIMap(t, schemas, "DreamUPAdminReviewAnswers")
+	if reviewAnswers["additionalProperties"] != false {
+		t.Fatalf("review-safe answer schema is not closed: %v", reviewAnswers)
+	}
+	reviewAnswerProperties := openAPIMap(t, reviewAnswers, "properties")
+	for _, forbidden := range []string{"legalName", "contactEmail", "contact_email", "mobile", "wechatId", "restrictedIdentity", "privacyNotice"} {
+		if reviewAnswerProperties[forbidden] != nil {
+			t.Fatalf("restricted answer %q is declared review-safe", forbidden)
+		}
+	}
+	ownReview := openAPIMap(t, schemas, "DreamUPAdminOwnReview")
+	if ownReview["additionalProperties"] != false {
+		t.Fatalf("own-review schema is not closed: %v", ownReview)
+	}
+}
+
+func TestOpenAPIDreamUPReviewIdentityIsExplicitClosedAndAudited(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "openapi", "openapi.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	paths := openAPIMap(t, document, "paths")
+	operation := openAPIMap(t, openAPIMap(t, paths, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/review-identity"), "post")
+	description, _ := operation["description"].(string)
+	for _, phrase := range []string{"event.identity.read_restricted", "stable United Pass user ID", "durable DreamUP read audit", "never exposes the provider subject", "server-authored"} {
+		if !strings.Contains(description, phrase) {
+			t.Fatalf("review identity description omits %q: %q", phrase, description)
+		}
+	}
+	for _, parameter := range []string{
+		"#/components/parameters/X-CSRF-Token",
+		"#/components/parameters/DreamUP-X-Reauthentication-Token",
+		"#/components/parameters/Idempotency-Key",
+		"#/components/parameters/DreamUP-If-Match",
+	} {
+		if !openAPIHasParameterRef(operation, parameter) {
+			t.Fatalf("review identity operation omits %s", parameter)
+		}
+	}
+	responses := openAPIMap(t, operation, "responses")
+	for _, status := range []string{"401", "403", "404", "409", "502"} {
+		if responses[status] == nil {
+			t.Fatalf("review identity operation omits %s response", status)
+		}
+	}
+	schemas := openAPIMap(t, openAPIMap(t, document, "components"), "schemas")
+	response := openAPIMap(t, schemas, "DreamUPAdminReviewIdentityResponse")
+	if response["additionalProperties"] != false {
+		t.Fatalf("review identity response is not closed: %v", response)
+	}
+	properties := openAPIMap(t, response, "properties")
+	identitySchema := openAPIMap(t, properties, "identity")
+	if identitySchema["additionalProperties"] != false {
+		t.Fatalf("review identity object is not closed: %v", identitySchema)
+	}
+	identityProperties := openAPIMap(t, identitySchema, "properties")
+	if len(identityProperties) != 4 || identityProperties["userId"] == nil || identityProperties["legalName"] == nil || identityProperties["email"] == nil || identityProperties["mobile"] == nil {
+		t.Fatalf("review identity properties=%v", identityProperties)
+	}
+	if identityProperties["providerSubject"] != nil || identityProperties["subject"] != nil {
+		t.Fatalf("private authority subject is public: %v", identityProperties)
+	}
+	userID := openAPIMap(t, identityProperties, "userId")
+	if userID["pattern"] != `^user_[A-Za-z0-9._:-]{1,123}$` {
+		t.Fatalf("stable userId contract=%v", userID)
+	}
+	receipt := openAPIMap(t, properties, "receipt")
+	if receipt["additionalProperties"] != false {
+		t.Fatalf("review identity receipt is not closed: %v", receipt)
+	}
+	receiptProperties := openAPIMap(t, receipt, "properties")
+	if len(receiptProperties) != 3 || receiptProperties["operationId"] == nil || receiptProperties["receiptHash"] == nil || receiptProperties["consumedAt"] == nil {
+		t.Fatalf("review identity receipt properties=%v", receiptProperties)
+	}
 }
 
 func TestOpenAPIIdentityAccessContract(t *testing.T) {
@@ -806,6 +1159,31 @@ func TestOpenAPIRegistrationContract(t *testing.T) {
 		schema := openAPIMap(t, openAPIMap(t, openAPIMap(t, response, "content"), "application/json"), "schema")
 		if got, _ := schema["$ref"].(string); got != contract.schema {
 			t.Errorf("%s success schema=%q want=%q", path, got, contract.schema)
+		}
+	}
+
+	formIntentOperation := openAPIMap(t, openAPIMap(t, paths, "/api/v1/registrations/form-intents"), "post")
+	formIntentDescription, _ := formIntentOperation["description"].(string)
+	for _, required := range []string{"one-use", "exact Origin", "server-issued risk device"} {
+		if !strings.Contains(formIntentDescription, required) {
+			t.Errorf("registration form-intent description missing %q", required)
+		}
+	}
+	if !openAPIHasParameterRef(formIntentOperation, "#/components/parameters/RegistrationOrigin") {
+		t.Error("registration form-intent missing strict Origin parameter")
+	}
+
+	createOperation := openAPIMap(t, openAPIMap(t, paths, "/api/v1/registrations"), "post")
+	createDescription, _ := createOperation["description"].(string)
+	for _, required := range []string{
+		"moonstone_image_digits",
+		"normalized email",
+		"exact form-intent token",
+		"exact Origin",
+		"never degrades to proof-of-work",
+	} {
+		if !strings.Contains(createDescription, required) {
+			t.Errorf("registration create description missing %q", required)
 		}
 	}
 
@@ -925,6 +1303,281 @@ func TestOpenAPIRegistrationBlockRevokeContract(t *testing.T) {
 	if !foundUnblockAction {
 		t.Fatal("reauthentication contract must expose registration.abuse.unblock")
 	}
+}
+
+func TestOpenAPIDreamUPOperationalAdminContracts(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "openapi", "openapi.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	paths := openAPIMap(t, document, "paths")
+	schemas := openAPIMap(t, openAPIMap(t, document, "components"), "schemas")
+
+	type contract struct {
+		method, path, request string
+		success               map[string]string
+		mutation, reauth      bool
+	}
+	read := func(method, path, schema string, reauth bool) contract {
+		return contract{method: method, path: path, success: map[string]string{"200": schema}, reauth: reauth}
+	}
+	mutate := func(method, path, request, schema string, created bool) contract {
+		success := map[string]string{"200": schema}
+		if created {
+			success["201"] = schema
+		}
+		return contract{method: method, path: path, request: request, success: success, mutation: true, reauth: true}
+	}
+	contracts := []contract{
+		read("get", "/api/v1/admin/dreamup/events/{eventId}/operations/status", "DreamUPMutationStatusResponse", false),
+		read("get", "/api/v1/admin/dreamup/events/{eventId}/inspection-points", "DreamUPInspectionPointPage", false),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/inspection-points", "DreamUPInspectionPointCreateRequest", "DreamUPInspectionPointMutationResponse", true),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/inspection-point-image-upload-intents", "DreamUPAdminImageUploadIntentRequest", "DreamUPAdminImageUploadIntent", true),
+		read("get", "/api/v1/admin/dreamup/events/{eventId}/inspection-points/{pointId}", "DreamUPInspectionPointItemResponse", false),
+		mutate("patch", "/api/v1/admin/dreamup/events/{eventId}/inspection-points/{pointId}", "DreamUPInspectionPointUpdateRequest", "DreamUPInspectionPointMutationResponse", false),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/inspection-points/{pointId}/code-rotations", "DreamUPEmptyMutationRequest", "DreamUPInspectionPointMutationResponse", false),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/inspection-points/{pointId}/inspections", "DreamUPInspectionStartRequest", "DreamUPInspectionStartResponse", true),
+		read("get", "/api/v1/admin/dreamup/events/{eventId}/inspections", "DreamUPInspectionPage", true),
+		read("get", "/api/v1/admin/dreamup/events/{eventId}/inspections/{inspectionId}", "DreamUPInspectionItemResponse", true),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/inspection-photo-uploads/{uploadId}/finalize", "DreamUPInspectionFinalizeRequest", "DreamUPInspectionFinalizeResponse", true),
+		read("get", "/api/v1/admin/dreamup/events/{eventId}/assets", "DreamUPAssetPage", false),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/assets", "DreamUPAssetCreateRequest", "DreamUPAssetMutationResponse", true),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/asset-image-upload-intents", "DreamUPAdminImageUploadIntentRequest", "DreamUPAdminImageUploadIntent", true),
+		read("get", "/api/v1/admin/dreamup/events/{eventId}/assets/{assetId}", "DreamUPAssetItemResponse", false),
+		mutate("patch", "/api/v1/admin/dreamup/events/{eventId}/assets/{assetId}", "DreamUPAssetUpdateRequest", "DreamUPAssetMutationResponse", false),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/code-rotations", "DreamUPEmptyMutationRequest", "DreamUPAssetMutationResponse", false),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/inventory-adjustments", "DreamUPInventoryAdjustmentRequest", "DreamUPAssetMutationResponse", false),
+		read("get", "/api/v1/admin/dreamup/events/{eventId}/asset-reservations", "DreamUPReservationPage", true),
+		mutate("patch", "/api/v1/admin/dreamup/events/{eventId}/asset-reservations/{reservationId}", "DreamUPReservationDecisionRequest", "DreamUPReservationItemResponse", false),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/checkout", "DreamUPAssetCheckoutRequest", "DreamUPAssetMutationResponse", false),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/checkin", "DreamUPAssetCheckinRequest", "DreamUPAssetMutationResponse", false),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/transfers", "DreamUPAssetTransferRequest", "DreamUPAssetMutationResponse", false),
+		read("get", "/api/v1/admin/dreamup/events/{eventId}/personal-asset-assignments", "DreamUPPersonalAssetPage", true),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/personal-asset-assignments", "DreamUPPersonalAssetCreateRequest", "DreamUPPersonalAssetMutationResponse", true),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/personal-asset-image-upload-intents", "DreamUPAdminImageUploadIntentRequest", "DreamUPAdminImageUploadIntent", true),
+		mutate("patch", "/api/v1/admin/dreamup/events/{eventId}/personal-asset-assignments/{assignmentId}", "DreamUPPersonalAssetEndRequest", "DreamUPPersonalAssetMutationResponse", false),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/personal-asset-assignments/{assignmentId}/code-rotations", "DreamUPEmptyMutationRequest", "DreamUPPersonalAssetMutationResponse", false),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/entity-codes/{codeId}/print-jobs", "DreamUPQRPrintSingleRequest", "DreamUPQRPrintJobResponse", true),
+		mutate("post", "/api/v1/admin/dreamup/events/{eventId}/qr-print-jobs/bulk", "DreamUPQRPrintBulkRequest", "DreamUPQRPrintJobResponse", true),
+		read("get", "/api/v1/admin/dreamup/events/{eventId}/qr-print-jobs/{printJobId}", "DreamUPQRPrintJobResponse", true),
+		read("get", "/api/v1/admin/dreamup/events/{eventId}/qr-print-jobs/{printJobId}/bulk", "DreamUPQRPrintJobResponse", true),
+	}
+	if len(contracts) != 32 {
+		t.Fatalf("operational contract count=%d want=32", len(contracts))
+	}
+	for _, contract := range contracts {
+		t.Run(contract.method+" "+contract.path, func(t *testing.T) {
+			item := openAPIMap(t, paths, contract.path)
+			operation := openAPIMap(t, item, contract.method)
+			security, _ := operation["security"].([]any)
+			if !openAPIHasSecurityScheme(security, "SessionCookie") || !openAPIHasSecurityScheme(security, "MiniProgramBearer") {
+				t.Fatalf("security=%v", security)
+			}
+			if !openAPIHasParameterRef(operation, "#/components/parameters/X-MiniProgram-Client-When-Bearer") && !openAPIHasParameterRef(item, "#/components/parameters/X-MiniProgram-Client-When-Bearer") {
+				t.Fatal("missing conditional native-client marker")
+			}
+			if got := openAPIHasParameterRef(operation, "#/components/parameters/DreamUP-X-Reauthentication-Token"); got != contract.reauth {
+				t.Fatalf("conditional reauthentication=%v want=%v", got, contract.reauth)
+			}
+			responses := openAPIMap(t, operation, "responses")
+			for status, schemaName := range contract.success {
+				response := openAPIMap(t, responses, status)
+				schema := openAPIMap(t, openAPIMap(t, openAPIMap(t, response, "content"), "application/json"), "schema")
+				want := "#/components/schemas/" + schemaName
+				if got, _ := schema["$ref"].(string); got != want {
+					t.Fatalf("success %s schema=%q want=%q", status, got, want)
+				}
+				if openAPIMap(t, schemas, schemaName)["additionalProperties"] != false {
+					t.Fatalf("response schema %s must be closed", schemaName)
+				}
+			}
+			for _, status := range []string{"401", "403", "502"} {
+				if _, ok := responses[status]; !ok {
+					t.Errorf("missing stable error %s", status)
+				}
+			}
+			if !contract.mutation {
+				return
+			}
+			for _, parameter := range []string{
+				"#/components/parameters/X-CSRF-Token",
+				"#/components/parameters/DreamUP-X-Reauthentication-Token",
+				"#/components/parameters/Idempotency-Key",
+				"#/components/parameters/DreamUP-If-Match",
+			} {
+				if !openAPIHasParameterRef(operation, parameter) {
+					t.Errorf("missing mutation parameter %s", parameter)
+				}
+			}
+			for _, status := range []string{"404", "409", "422"} {
+				if _, ok := responses[status]; !ok {
+					t.Errorf("missing mutation error %s", status)
+				}
+			}
+			body := openAPIMap(t, operation, "requestBody")
+			if body["required"] != true {
+				t.Fatal("mutation request body is not required")
+			}
+			requestSchema := openAPIMap(t, openAPIMap(t, openAPIMap(t, body, "content"), "application/json"), "schema")
+			want := "#/components/schemas/" + contract.request
+			if got, _ := requestSchema["$ref"].(string); got != want {
+				t.Fatalf("request schema=%q want=%q", got, want)
+			}
+			if openAPIMap(t, schemas, contract.request)["additionalProperties"] != false {
+				t.Fatalf("request schema %s must be closed", contract.request)
+			}
+		})
+	}
+
+	statusOperation := openAPIMap(t, openAPIMap(t, paths, "/api/v1/admin/dreamup/events/{eventId}/operations/status"), "get")
+	if !openAPIHasParameterRef(statusOperation, "#/components/parameters/Idempotency-Key") {
+		t.Fatal("operation status must be keyed by the original idempotency key")
+	}
+	for _, schemaName := range []string{"DreamUPInspectionPointPage", "DreamUPInspectionPage", "DreamUPAssetPage", "DreamUPReservationPage", "DreamUPPersonalAssetPage"} {
+		properties := openAPIMap(t, openAPIMap(t, schemas, schemaName), "properties")
+		items := openAPIMap(t, properties, "items")
+		if items["maxItems"] != 100 {
+			t.Errorf("%s maxItems=%v", schemaName, items["maxItems"])
+		}
+		nextCursor := openAPIMap(t, properties, "nextCursor")
+		types, _ := nextCursor["type"].([]any)
+		if len(types) != 2 || types[0] != "string" || types[1] != "null" || nextCursor["nullable"] != nil {
+			t.Errorf("%s nextCursor must use OpenAPI 3.1 nullability: %v", schemaName, nextCursor)
+		}
+	}
+	bulkPrint := openAPIMap(t, schemas, "DreamUPQRPrintBulkRequest")
+	codeIDs := openAPIMap(t, openAPIMap(t, bulkPrint, "properties"), "codeIds")
+	if codeIDs["minItems"] != 1 || codeIDs["maxItems"] != 100 || codeIDs["uniqueItems"] != true {
+		t.Fatalf("bulk codeIds bounds=%v", codeIDs)
+	}
+}
+
+func TestOpenAPIDreamUPHighRiskStepUpUsesUnauthorizedContract(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "openapi", "openapi.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	components := openAPIMap(t, document, "components")
+	responses := openAPIMap(t, components, "responses")
+	schemas := openAPIMap(t, components, "schemas")
+	stepUpResponse := openAPIMap(t, responses, "DreamUPAdminUnauthorizedOrStepUp")
+	description, _ := stepUpResponse["description"].(string)
+	if !strings.Contains(description, "admin_stepup.required") || !strings.Contains(description, "HTTP 401") || !strings.Contains(description, "never HTTP 428") {
+		t.Fatalf("step-up response description does not lock runtime status/code: %q", description)
+	}
+	content := openAPIMap(t, stepUpResponse, "content")
+	applicationJSON := openAPIMap(t, content, "application/json")
+	responseSchema := openAPIMap(t, applicationJSON, "schema")
+	oneOf, _ := responseSchema["oneOf"].([]any)
+	wantBranches := map[string]bool{
+		"#/components/schemas/DreamUPAuthenticationRequiredErrorResponse": false,
+		"#/components/schemas/DreamUPAdminStepUpRequiredErrorResponse":    false,
+	}
+	for _, candidate := range oneOf {
+		branch, _ := candidate.(map[string]any)
+		if reference, _ := branch["$ref"].(string); reference != "" {
+			if _, ok := wantBranches[reference]; ok {
+				wantBranches[reference] = true
+			}
+		}
+	}
+	for reference, found := range wantBranches {
+		if !found {
+			t.Errorf("401 response omits exact branch %s", reference)
+		}
+	}
+	for schemaName, code := range map[string]string{
+		"DreamUPAuthenticationRequiredErrorResponse": "authentication_required",
+		"DreamUPAdminStepUpRequiredErrorResponse":    "admin_stepup.required",
+	} {
+		envelope := openAPIMap(t, schemas, schemaName)
+		if envelope["additionalProperties"] != false {
+			t.Errorf("%s must be closed", schemaName)
+		}
+		errorProperty := openAPIMap(t, openAPIMap(t, envelope, "properties"), "error")
+		if errorProperty["additionalProperties"] != false {
+			t.Errorf("%s.error must be closed", schemaName)
+		}
+		codeProperty := openAPIMap(t, openAPIMap(t, errorProperty, "properties"), "code")
+		if got, _ := codeProperty["const"].(string); got != code {
+			t.Errorf("%s code=%q want=%q", schemaName, got, code)
+		}
+	}
+
+	paths := openAPIMap(t, document, "paths")
+	highRiskOperations := 0
+	for path, rawPathItem := range paths {
+		if !strings.HasPrefix(path, "/api/v1/admin/dreamup/") {
+			continue
+		}
+		pathItem, _ := rawPathItem.(map[string]any)
+		for method, rawOperation := range pathItem {
+			if method != "get" && method != "post" && method != "put" && method != "patch" && method != "delete" {
+				continue
+			}
+			operation, _ := rawOperation.(map[string]any)
+			if !openAPIHasParameterRef(operation, "#/components/parameters/DreamUP-X-Reauthentication-Token") {
+				continue
+			}
+			highRiskOperations++
+			operationResponses := openAPIMap(t, operation, "responses")
+			unauthorized := openAPIMap(t, operationResponses, "401")
+			if got, _ := unauthorized["$ref"].(string); got != "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" {
+				t.Errorf("%s %s 401=%q", strings.ToUpper(method), path, got)
+			}
+			if _, exists := operationResponses["428"]; exists {
+				t.Errorf("%s %s incorrectly declares HTTP 428 for admin_stepup.required", strings.ToUpper(method), path)
+			}
+		}
+	}
+	if highRiskOperations != 45 {
+		t.Fatalf("high-risk DreamUP operation count=%d want=45", highRiskOperations)
+	}
+}
+
+func TestOpenAPIComponentReferencesResolve(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "openapi", "openapi.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	components := openAPIMap(t, document, "components")
+	var visit func(any)
+	visit = func(value any) {
+		switch current := value.(type) {
+		case map[string]any:
+			if ref, ok := current["$ref"].(string); ok && strings.HasPrefix(ref, "#/components/") {
+				parts := strings.Split(ref, "/")
+				if len(parts) != 4 || parts[0] != "#" || parts[1] != "components" {
+					t.Errorf("invalid local component reference %q", ref)
+				} else {
+					section, ok := components[parts[2]].(map[string]any)
+					if !ok || section[parts[3]] == nil {
+						t.Errorf("unresolved local component reference %q", ref)
+					}
+				}
+			}
+			for _, nested := range current {
+				visit(nested)
+			}
+		case []any:
+			for _, nested := range current {
+				visit(nested)
+			}
+		}
+	}
+	visit(document)
 }
 
 func openAPIMap(t *testing.T, value any, key string) map[string]any {

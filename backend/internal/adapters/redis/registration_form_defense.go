@@ -28,7 +28,7 @@ func NewRegistrationFormDefenseStore(client *Client) *RegistrationFormDefenseSto
 }
 
 func (s *RegistrationFormDefenseStore) CreateFormIntent(ctx context.Context, rawToken string, record registration.FormIntentRecord, ttl time.Duration) error {
-	if s == nil || s.client == nil || rawToken == "" || record.UserAgentHash == "" || ttl <= 0 {
+	if s == nil || s.client == nil || rawToken == "" || record.UserAgentHash == "" || record.ClientNetworkHash == "" || record.DeviceIDHash == "" || record.OriginHash == "" || record.EmailHash != "" || ttl <= 0 {
 		return registration.ErrUnavailable
 	}
 	payload, err := formIntentPayload(record)
@@ -46,20 +46,97 @@ func (s *RegistrationFormDefenseStore) CreateFormIntent(ctx context.Context, raw
 	return nil
 }
 
+var validateRegistrationFormIntentScript = goredis.NewScript(`
+local payload = redis.call('GET', KEYS[1])
+if not payload then return 0 end
+local record = cjson.decode(payload)
+if record.userAgentHash ~= ARGV[1] then return -1 end
+if record.clientNetworkHash ~= ARGV[2] then return -1 end
+if record.deviceIdHash ~= ARGV[3] then return -1 end
+if record.originHash ~= ARGV[4] then return -1 end
+local emailHash = record.emailHash or ''
+if ARGV[5] ~= '' and emailHash ~= '' and emailHash ~= ARGV[5] then return -1 end
+if tonumber(ARGV[6]) < tonumber(record.notBeforeUnixMilli) then return -2 end
+if tonumber(ARGV[6]) >= tonumber(record.expiresAtUnixMilli) then
+    redis.call('DEL', KEYS[1])
+    return 0
+end
+return 1
+`)
+
+func (s *RegistrationFormDefenseStore) ValidateFormIntent(ctx context.Context, rawToken string, binding registration.FormIntentBinding, now time.Time) error {
+	if s == nil || s.client == nil || rawToken == "" || binding.UserAgentHash == "" || binding.ClientNetworkHash == "" || binding.DeviceIDHash == "" || binding.OriginHash == "" {
+		return registration.ErrFormIntentInvalid
+	}
+	key := s.client.buildKey(registrationFormIntentSegment, session.HashToken(rawToken))
+	result, err := validateRegistrationFormIntentScript.Run(ctx, s.client.rdb, []string{key}, binding.UserAgentHash, binding.ClientNetworkHash, binding.DeviceIDHash, binding.OriginHash, binding.EmailHash, now.UTC().UnixMilli()).Int()
+	if err != nil {
+		return fmt.Errorf("redis: validate registration form intent: %w", err)
+	}
+	switch result {
+	case 1:
+		return nil
+	case -2:
+		return registration.ErrFormIntentTooYoung
+	default:
+		return registration.ErrFormIntentInvalid
+	}
+}
+
+var bindRegistrationFormIntentEmailScript = goredis.NewScript(`
+local payload = redis.call('GET', KEYS[1])
+if not payload then return 0 end
+local record = cjson.decode(payload)
+if record.userAgentHash ~= ARGV[1] then return -1 end
+if record.clientNetworkHash ~= ARGV[2] then return -1 end
+if record.deviceIdHash ~= ARGV[3] then return -1 end
+if record.originHash ~= ARGV[4] then return -1 end
+if tonumber(ARGV[6]) < tonumber(record.notBeforeUnixMilli) then return -2 end
+if tonumber(ARGV[6]) >= tonumber(record.expiresAtUnixMilli) then
+    redis.call('DEL', KEYS[1])
+    return 0
+end
+if record.emailHash and record.emailHash ~= '' and record.emailHash ~= ARGV[5] then return -1 end
+if not record.emailHash or record.emailHash == '' then
+    local ttl = redis.call('PTTL', KEYS[1])
+    if ttl <= 0 then return 0 end
+    record.emailHash = ARGV[5]
+    redis.call('SET', KEYS[1], cjson.encode(record), 'PX', ttl)
+end
+return 1
+`)
+
+func (s *RegistrationFormDefenseStore) BindFormIntentEmail(ctx context.Context, rawToken string, binding registration.FormIntentBinding, now time.Time) error {
+	if s == nil || s.client == nil || rawToken == "" || binding.UserAgentHash == "" || binding.ClientNetworkHash == "" || binding.DeviceIDHash == "" || binding.OriginHash == "" || binding.EmailHash == "" {
+		return registration.ErrFormIntentInvalid
+	}
+	key := s.client.buildKey(registrationFormIntentSegment, session.HashToken(rawToken))
+	result, err := bindRegistrationFormIntentEmailScript.Run(ctx, s.client.rdb, []string{key}, binding.UserAgentHash, binding.ClientNetworkHash, binding.DeviceIDHash, binding.OriginHash, binding.EmailHash, now.UTC().UnixMilli()).Int()
+	if err != nil {
+		return fmt.Errorf("redis: bind registration form intent email: %w", err)
+	}
+	switch result {
+	case 1:
+		return nil
+	case -2:
+		return registration.ErrFormIntentTooYoung
+	default:
+		return registration.ErrFormIntentInvalid
+	}
+}
+
 var consumeRegistrationFormIntentScript = goredis.NewScript(`
 local payload = redis.call('GET', KEYS[1])
 if not payload then return 0 end
 local record = cjson.decode(payload)
 if record.userAgentHash ~= ARGV[1] then return -1 end
 if record.clientNetworkHash ~= ARGV[2] then return -1 end
-local storedDevice = record.deviceIdHash or ''
--- A risk challenge can mint the browser's first server-issued device cookie
--- between intent issuance and the browser's one permitted retry. An intent
--- that was issued without a device therefore accepts that first cookie. Once
--- an intent was issued with a device, replacement remains a hard mismatch.
-if storedDevice ~= '' and storedDevice ~= ARGV[3] then return -1 end
-if tonumber(ARGV[4]) < tonumber(record.notBeforeUnixMilli) then return -2 end
-if tonumber(ARGV[4]) >= tonumber(record.expiresAtUnixMilli) then
+if record.deviceIdHash ~= ARGV[3] then return -1 end
+if record.originHash ~= ARGV[4] then return -1 end
+local emailHash = record.emailHash or ''
+if emailHash ~= ARGV[5] then return -1 end
+if tonumber(ARGV[6]) < tonumber(record.notBeforeUnixMilli) then return -2 end
+if tonumber(ARGV[6]) >= tonumber(record.expiresAtUnixMilli) then
     redis.call('DEL', KEYS[1])
     return 0
 end
@@ -70,17 +147,19 @@ return 1
 type redisFormIntentRecord struct {
 	UserAgentHash      string `json:"userAgentHash"`
 	ClientNetworkHash  string `json:"clientNetworkHash"`
-	DeviceIDHash       string `json:"deviceIdHash,omitempty"`
+	DeviceIDHash       string `json:"deviceIdHash"`
+	OriginHash         string `json:"originHash"`
+	EmailHash          string `json:"emailHash,omitempty"`
 	NotBeforeUnixMilli int64  `json:"notBeforeUnixMilli"`
 	ExpiresAtUnixMilli int64  `json:"expiresAtUnixMilli"`
 }
 
 func (s *RegistrationFormDefenseStore) ConsumeFormIntent(ctx context.Context, rawToken string, binding registration.FormIntentBinding, now time.Time) error {
-	if s == nil || s.client == nil || rawToken == "" || binding.UserAgentHash == "" || binding.ClientNetworkHash == "" {
+	if s == nil || s.client == nil || rawToken == "" || binding.UserAgentHash == "" || binding.ClientNetworkHash == "" || binding.DeviceIDHash == "" || binding.OriginHash == "" {
 		return registration.ErrFormIntentInvalid
 	}
 	key := s.client.buildKey(registrationFormIntentSegment, session.HashToken(rawToken))
-	result, err := consumeRegistrationFormIntentScript.Run(ctx, s.client.rdb, []string{key}, binding.UserAgentHash, binding.ClientNetworkHash, binding.DeviceIDHash, now.UTC().UnixMilli()).Int()
+	result, err := consumeRegistrationFormIntentScript.Run(ctx, s.client.rdb, []string{key}, binding.UserAgentHash, binding.ClientNetworkHash, binding.DeviceIDHash, binding.OriginHash, binding.EmailHash, now.UTC().UnixMilli()).Int()
 	if err != nil {
 		return fmt.Errorf("redis: consume registration form intent: %w", err)
 	}
@@ -98,7 +177,8 @@ func (s *RegistrationFormDefenseStore) ConsumeFormIntent(ctx context.Context, ra
 // time.Time's textual JSON format inside its atomic Lua validation.
 func formIntentPayload(record registration.FormIntentRecord) ([]byte, error) {
 	return json.Marshal(redisFormIntentRecord{
-		UserAgentHash: record.UserAgentHash, ClientNetworkHash: record.ClientNetworkHash, DeviceIDHash: record.DeviceIDHash,
+		UserAgentHash: record.UserAgentHash, ClientNetworkHash: record.ClientNetworkHash,
+		DeviceIDHash: record.DeviceIDHash, OriginHash: record.OriginHash, EmailHash: record.EmailHash,
 		NotBeforeUnixMilli: record.NotBefore.UTC().UnixMilli(),
 		ExpiresAtUnixMilli: record.ExpiresAt.UTC().UnixMilli(),
 	})

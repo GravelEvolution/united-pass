@@ -62,13 +62,17 @@ belongs to `UP_TRUSTED_PROXY_CIDRS`; otherwise it uses the transport peer.
 Malformed, duplicate, or comma-separated values fail safely to the peer.
 
 Registration limits are independent from login limits. Creation atomically
-advances four Redis buckets with separately configurable limits and windows:
+checks four Redis buckets with separately configurable limits and windows:
 exact client address, IPv4/IPv6 network prefix, normalized email, and the
-client/email pair. This prevents a caller from resetting the cross-account
-budget by rotating email addresses. Email verification and resend have their
-own budgets. Redis failure denies the request. The existing PostgreSQL
-case-folded email advisory lock and existence check still commit before any
-provider call that can send mail.
+client/email pair. All four advance only when every bucket has capacity, so a
+saturated shared client or network bucket cannot consume an unrelated email's
+long-lived budget. A deterministic account conflict refunds only its bound
+email charge; the shorter client, network and client/email charges remain.
+This prevents a caller from resetting the cross-account budget by rotating
+email addresses without permanently penalizing an already-used address. Email
+verification and resend have their own budgets. Redis failure denies the
+request. The existing PostgreSQL case-folded email advisory lock and existence
+check still commit before any provider call that can send mail.
 
 ## Consequences
 

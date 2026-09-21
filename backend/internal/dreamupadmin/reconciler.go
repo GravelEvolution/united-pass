@@ -104,7 +104,7 @@ func (r *Reconciler) reconcileOne(ctx context.Context, item adminstore.OutboxIte
 		}
 		return r.deferReceipt(ctx, item, now)
 	}
-	receipt, valid := parseReceiptResponse(response.Body, operationRequestID)
+	receipt, valid := parseReceiptResponse(response.Body, eventID, operationRequestID)
 	receiptCreatedAt := time.UnixMilli(receipt.CreatedAtUnixMS).UTC()
 	if response.StatusCode != http.StatusOK || !valid || !receiptMatchesOperation(item, receipt) || receiptCreatedAt.Before(item.CreatedAt.Add(-dreamupdelegation.MaxClockSkew)) || receiptCreatedAt.After(now.Add(dreamupdelegation.MaxClockSkew)) {
 		return r.markNeedsOperator(ctx, item, now)
@@ -123,7 +123,8 @@ func validReceiptReconciliationItem(item adminstore.OutboxItem, eventID, operati
 
 func receiptMatchesOperation(item adminstore.OutboxItem, receipt operationReceipt) bool {
 	expectedTargetID := item.Result.Payload["receipt_target_id"]
-	return receipt.Action == item.Result.Payload["receipt_action"] && receipt.TargetType == item.Result.Payload["receipt_target_type"] &&
+	return receipt.EventID == item.Result.Payload["event_id"] &&
+		receipt.Action == item.Result.Payload["receipt_action"] && receipt.TargetType == item.Result.Payload["receipt_target_type"] &&
 		(expectedTargetID == "" || receipt.TargetID == expectedTargetID)
 }
 
@@ -158,6 +159,7 @@ func (r *Reconciler) markNeedsOperator(ctx context.Context, item adminstore.Outb
 }
 
 type operationReceipt struct {
+	EventID         string `json:"event_id"`
 	Action          string `json:"action"`
 	TargetType      string `json:"target_type"`
 	TargetID        string `json:"target_id"`
@@ -168,7 +170,7 @@ type operationReceipt struct {
 	CreatedAtUnixMS int64  `json:"created_at"`
 }
 
-func parseReceiptResponse(raw json.RawMessage, operationRequestID string) (operationReceipt, bool) {
+func parseReceiptResponse(raw json.RawMessage, eventID, operationRequestID string) (operationReceipt, bool) {
 	var response struct {
 		Receipt operationReceipt `json:"receipt"`
 	}
@@ -183,7 +185,8 @@ func parseReceiptResponse(raw json.RawMessage, operationRequestID string) (opera
 	}
 	receipt := response.Receipt
 	validVersion := receipt.ResultVersion == nil || *receipt.ResultVersion > 0
-	valid := receipt.RequestID == operationRequestID && receiptMetadataPattern.MatchString(receipt.Action) && receiptMetadataPattern.MatchString(receipt.TargetType) && receiptMetadataPattern.MatchString(receipt.TargetID) && receipt.Outcome == "success" && validVersion && receiptHashPattern.MatchString(receipt.ReceiptHash) && receipt.CreatedAtUnixMS > 0
+	valid := receipt.EventID == eventID && opaqueValuePattern.MatchString(receipt.EventID) &&
+		receipt.RequestID == operationRequestID && receiptMetadataPattern.MatchString(receipt.Action) && receiptMetadataPattern.MatchString(receipt.TargetType) && receiptMetadataPattern.MatchString(receipt.TargetID) && receipt.Outcome == "success" && validVersion && receiptHashPattern.MatchString(receipt.ReceiptHash) && receipt.CreatedAtUnixMS > 0
 	return receipt, valid
 }
 

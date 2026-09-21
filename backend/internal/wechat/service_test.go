@@ -31,13 +31,15 @@ func (f fakeBindingReader) GetByID(context.Context, identity.UserID) (identity.U
 }
 
 type fakePhoneWriter struct {
-	userID identity.UserID
-	phone  string
-	err    error
+	userID  identity.UserID
+	tenant  string
+	subject string
+	phone   string
+	err     error
 }
 
-func (f *fakePhoneWriter) UpdatePhone(_ context.Context, userID identity.UserID, phone string) error {
-	f.userID, f.phone = userID, phone
+func (f *fakePhoneWriter) CompleteLinkedWithVerifiedPhone(_ context.Context, userID identity.UserID, tenant, subject, phone string) error {
+	f.userID, f.tenant, f.subject, f.phone = userID, tenant, subject, phone
 	return f.err
 }
 
@@ -72,7 +74,15 @@ func TestBindVerifiedPhoneWritesOnlyProvenPhone(t *testing.T) {
 	if err := service.BindVerifiedPhone(context.Background(), "user_current", "login", "phone"); err != nil {
 		t.Fatalf("BindVerifiedPhone: %v", err)
 	}
-	if writer.userID != "user_current" || writer.phone != "+8613800138000" {
-		t.Fatalf("phone write = %q %q", writer.userID, writer.phone)
+	if writer.userID != "user_current" || writer.tenant != "app" || writer.subject != "subject" || writer.phone != "+8613800138000" {
+		t.Fatalf("phone write = %q %q %q %q", writer.userID, writer.tenant, writer.subject, writer.phone)
+	}
+}
+
+func TestBindVerifiedPhoneReturnsExplicitConflictWithoutFallback(t *testing.T) {
+	writer := &fakePhoneWriter{err: ErrPhoneConflict}
+	service := NewService(fakeVerifier{registration: IdentityProof{TenantID: "app", Subject: "subject", Phone: "+8613800138000"}}, fakeBindingReader{link: identity.IdentityLink{UserID: "user_current"}}, writer)
+	if err := service.BindVerifiedPhone(context.Background(), "user_current", "login", "phone"); !errors.Is(err, ErrPhoneConflict) {
+		t.Fatalf("BindVerifiedPhone error = %v, want ErrPhoneConflict", err)
 	}
 }

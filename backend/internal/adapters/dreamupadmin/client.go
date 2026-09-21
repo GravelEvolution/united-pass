@@ -560,6 +560,7 @@ func mapIdentityAccessError(err error) error {
 }
 
 type OperationReceipt struct {
+	EventID       string    `json:"event_id"`
 	Action        string    `json:"action"`
 	TargetType    string    `json:"target_type"`
 	TargetID      string    `json:"target_id"`
@@ -592,7 +593,7 @@ func (c *Client) LookupOperationReceipt(ctx context.Context, eventID, operationR
 		return OperationReceipt{}, &UpstreamError{kind: ErrProtocol, status: http.StatusOK}
 	}
 	receipt := response.Receipt
-	if receipt.Action == "" || receipt.TargetType == "" || receipt.TargetID == "" || receipt.Outcome == "" || receipt.ResultVersion <= 0 || receipt.ReceiptHash == "" || !validRequestID(receipt.RequestID) || receipt.CreatedAt.IsZero() {
+	if receipt.EventID != eventID || receipt.Action == "" || receipt.TargetType == "" || receipt.TargetID == "" || receipt.Outcome == "" || receipt.ResultVersion <= 0 || receipt.ReceiptHash == "" || !validRequestID(receipt.RequestID) || receipt.CreatedAt.IsZero() {
 		return OperationReceipt{}, &UpstreamError{kind: ErrProtocol, status: http.StatusOK}
 	}
 	return receipt, nil

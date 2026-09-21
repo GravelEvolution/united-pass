@@ -156,41 +156,6 @@ describe("OAuth application lifecycle", () => {
     expect(created?.tokenEndpointAuthMethod).toBe("none");
   });
 
-  it("updates, disables, re-enables and deletes a child client", async () => {
-    const app = await createTestApplication(dataSource, { name: "Client CRUD App", audience: "external" });
-    const created = await dataSource.createOAuthClient({
-      applicationId: app.applicationId,
-      name: "Managed Client",
-      profile: "web_server",
-      redirectUris: ["https://example.com/callback"],
-      logoutUri: "https://example.com/logout",
-      allowedScopes: ["openid"],
-      consentMode: "always",
-    });
-
-    const updated = await dataSource.updateOAuthClient(app.applicationId, created.clientId, {
-      name: "Updated Client",
-      redirectUris: ["https://example.com/new-callback"],
-      logoutUri: "",
-      allowedScopes: ["openid", "profile"],
-      consentMode: "first_authorization",
-    });
-    expect(updated.name).toBe("Updated Client");
-    expect(updated.redirectUris.map((entry) => entry.uri)).toEqual(["https://example.com/new-callback"]);
-    expect(updated.logoutUri).toBeNull();
-    expect(updated.allowedScopes.map((scope) => scope.scope)).toEqual(["openid", "profile"]);
-
-    await expect(dataSource.updateOAuthClientStatus(app.applicationId, created.clientId, "disabled"))
-      .resolves.toMatchObject({ status: "disabled" });
-    await expect(dataSource.updateOAuthClientStatus(app.applicationId, created.clientId, "active"))
-      .resolves.toMatchObject({ status: "active" });
-
-    await dataSource.deleteOAuthClient(app.applicationId, created.clientId);
-    await expect(dataSource.getClientDetail(app.applicationId, created.clientId)).resolves.toBeNull();
-    const detail = await dataSource.getApplicationDetail(app.applicationId);
-    expect(detail?.clients).toHaveLength(1);
-  });
-
   it("creates a web_server client without openid (OAuth-only authorization)", async () => {
     const app = await createTestApplication(dataSource, { name: "OAuth-Only App" });
 

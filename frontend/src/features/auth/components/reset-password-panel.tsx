@@ -13,29 +13,48 @@ import { useState } from "react";
 import Link from "next/link";
 import { Banner, Button, Input, Spin } from "@douyinfe/semi-ui";
 import { IconKey, IconTick, IconAlertTriangle, IconHourglass } from "@douyinfe/semi-icons";
-import { browserFetch } from "@/lib/api/browser/browser-http-client";
-import { isApiError } from "@/lib/api/api-error";
+import type { PasswordResetResult } from "@/features/auth/types";
 import styles from "./credential-panel.module.css";
 
 type ResetPasswordPanelProps = {
-  userId: string;
-  code: string;
+  token: string;
 };
 
 type ResetPhase =
   | { phase: "form" }
   | { phase: "submitting" }
   | { phase: "success" }
-  | { phase: "error"; kind: "invalid" | "rate_limited" | "server"; retryAfter?: number; message?: string };
+  | { phase: "error"; result: Extract<PasswordResetResult, { status: "invalid_token" | "expired_token" | "rate_limited" }> };
 
 const PASSWORD_MIN_LENGTH = 12;
 
-export function ResetPasswordPanel({ userId, code }: ResetPasswordPanelProps) {
+const TOKEN_HINTS = [
+  { token: "demo-reset-valid", label: "有效令牌" },
+  { token: "demo-reset-expired", label: "令牌已过期" },
+  { token: "demo-reset-invalid", label: "令牌无效" },
+  { token: "demo-reset-rate", label: "请求过于频繁" },
+];
+
+function resolveMockReset(token: string): PasswordResetResult {
+  const normalized = token.toLowerCase();
+  if (normalized.includes("expired")) {
+    return { status: "expired_token" };
+  }
+  if (normalized.includes("invalid")) {
+    return { status: "invalid_token" };
+  }
+  if (normalized.includes("rate")) {
+    return { status: "rate_limited", retryAfter: 60 };
+  }
+  return { status: "success" };
+}
+
+export function ResetPasswordPanel({ token }: ResetPasswordPanelProps) {
   const [phase, setPhase] = useState<ResetPhase>({ phase: "form" });
   const [passwordError, setPasswordError] = useState<string>();
   const [confirmPasswordError, setConfirmPasswordError] = useState<string>();
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     const formData = new FormData(event.currentTarget);
@@ -56,34 +75,15 @@ export function ResetPasswordPanel({ userId, code }: ResetPasswordPanelProps) {
     setConfirmPasswordError(undefined);
     setPhase({ phase: "submitting" });
 
-    try {
-      await browserFetch<unknown>("/auth/password-reset/confirm", {
-        method: "POST",
-        body: { userId, code, newPassword: password },
-      });
-      setPhase({ phase: "success" });
-    } catch (error) {
-      if (isApiError(error)) {
-        if (error.kind === "rate_limited") {
-          setPhase({ phase: "error", kind: "rate_limited", retryAfter: error.retryAfter });
-          return;
-        }
-        if (error.code === "password_reset.invalid_code") {
-          setPhase({ phase: "error", kind: "invalid" });
-          return;
-        }
-        if (error.kind === "validation") {
-          // The new password failed the server-side complexity policy; surface
-          // it on the password field so the user can correct and retry.
-          setPasswordError(error.message || "密码不符合要求，请重新设置。");
-          setPhase({ phase: "form" });
-          return;
-        }
-        setPhase({ phase: "error", kind: "server", message: error.message });
-        return;
+    const result = resolveMockReset(token);
+    const isFailure = result.status !== "success";
+    window.setTimeout(() => {
+      if (isFailure) {
+        setPhase({ phase: "error", result });
+      } else {
+        setPhase({ phase: "success" });
       }
-      setPhase({ phase: "error", kind: "server" });
-    }
+    }, 700);
   }
 
   if (phase.phase === "success") {
@@ -101,42 +101,44 @@ export function ResetPasswordPanel({ userId, code }: ResetPasswordPanelProps) {
             </Link>
           </div>
         </div>
+        <p className={styles.notice}>当前为界面 mock，不会修改任何真实账户凭据。</p>
       </div>
     );
   }
 
   if (phase.phase === "error") {
-    const { kind, retryAfter, message } = phase;
+    const { result } = phase;
     return (
       <div className={styles.panel}>
         <div className={styles.heading}>
+          <span className={styles.mockBadge}>MOCK PREVIEW</span>
           <h1>无法重置密码</h1>
           <p>密码重置链接存在问题，请根据以下提示处理。</p>
         </div>
-        {kind === "invalid" && (
-          <div role="alert">
-            <Banner
-              type="danger"
-              icon={<IconAlertTriangle />}
-              description="该密码重置链接无效、已失效或已被使用。请确认链接完整，或重新申请重置密码。"
-            />
-          </div>
-        )}
-        {kind === "rate_limited" && (
+        {result.status === "expired_token" && (
           <div role="alert">
             <Banner
               type="warning"
               icon={<IconHourglass />}
-              description={`操作过于频繁，请在 ${retryAfter ?? 60} 秒后再试。`}
+              description="该密码重置链接已过期。请重新申请重置密码以获取新的链接。"
             />
           </div>
         )}
-        {kind === "server" && (
+        {result.status === "invalid_token" && (
           <div role="alert">
             <Banner
               type="danger"
               icon={<IconAlertTriangle />}
-              description={message ?? "密码重置服务暂时不可用，请稍后重试。"}
+              description="该密码重置链接无效或已被使用。请确认链接完整，或重新申请重置密码。"
+            />
+          </div>
+        )}
+        {result.status === "rate_limited" && (
+          <div role="alert">
+            <Banner
+              type="warning"
+              icon={<IconHourglass />}
+              description={`操作过于频繁，请在 ${result.retryAfter} 秒后再试。`}
             />
           </div>
         )}
@@ -145,6 +147,8 @@ export function ResetPasswordPanel({ userId, code }: ResetPasswordPanelProps) {
             <Button theme="solid" type="primary" size="large" block>重新申请重置密码</Button>
           </Link>
         </div>
+        <p className={styles.notice}>当前为界面 mock，不会修改任何真实账户凭据。</p>
+        <ResetDemoLinks currentToken={token} />
       </div>
     );
   }
@@ -152,6 +156,7 @@ export function ResetPasswordPanel({ userId, code }: ResetPasswordPanelProps) {
   return (
     <div className={styles.panel}>
       <div className={styles.heading}>
+        <span className={styles.mockBadge}>MOCK PREVIEW</span>
         <h1>设置新密码</h1>
         <p>为你的统一门户账户设置一个新的登录密码。</p>
       </div>
@@ -214,7 +219,7 @@ export function ResetPasswordPanel({ userId, code }: ResetPasswordPanelProps) {
           disabled={phase.phase === "submitting"}
           loading={phase.phase === "submitting"}
         >
-          {phase.phase === "submitting" ? "正在重置…" : "重置密码"}
+          {phase.phase === "submitting" ? "正在重置…" : "重置密码（Mock）"}
         </Button>
       </form>
 
@@ -225,9 +230,29 @@ export function ResetPasswordPanel({ userId, code }: ResetPasswordPanelProps) {
         </div>
       )}
 
+      <p className={styles.notice}>当前为界面 mock，不会提交密码或修改任何账户凭据。</p>
       <p className={styles.switchMode}>
         已想起密码？<Link href="/login">返回登录</Link>
       </p>
+      <ResetDemoLinks currentToken={token} />
+    </div>
+  );
+}
+
+function ResetDemoLinks({ currentToken }: { currentToken: string }) {
+  return (
+    <div className={styles.demoLinks}>
+      <p>Mock 状态演示（点击切换 token）</p>
+      <ul>
+        {TOKEN_HINTS.map((hint) => (
+          <li key={hint.token}>
+            {hint.token === currentToken ? "→ " : ""}
+            <Link href={`/reset-password?token=${encodeURIComponent(hint.token)}`}>
+              <code>{hint.token}</code> — {hint.label}
+            </Link>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

@@ -26,6 +26,17 @@
   padding: 30px;
 }
 
+.heroCard::after {
+  position: absolute;
+  top: -70px;
+  right: -35px;
+  width: 210px;
+  height: 210px;
+  border-radius: 45% 55% 48% 52%;
+  background: linear-gradient(145deg, var(--up-brand-soft), color-mix(in srgb, var(--up-brand) 34%, var(--up-surface)));
+  content: "";
+  transform: rotate(28deg);
+}
 
 .avatar {
   display: grid;
@@ -36,21 +47,19 @@
   border-radius: 21px;
   color: white;
   background: linear-gradient(145deg, var(--up-brand-gradient-start), var(--up-brand-gradient-end));
+  background-size: contain;
   font-size: 26px;
   font-weight: 700;
   box-shadow: 0 12px 28px rgb(36 87 214 / 22%);
 }
 
-.avatarWithImage {
-  background-color: var(--up-brand-soft);
-  background-position: center;
-  background-size: cover;
-}
-
+.avatar,
+.heroCopy,
+.stableId { position: relative; z-index: 1; }
 .heroCopy { min-width: 0; }
 .label { color: var(--up-muted-soft); font-size: 12px; font-weight: 750; letter-spacing: 0.13em; }
-.heroCopy h2 { margin: 4px 0 2px; font-size: 23px; }
-.heroCopy p { margin: 0; color: var(--up-muted); font-size: 13px; }
+.heroCopy h2 { margin: 4px 0 2px; font-size: 23px; overflow-wrap: anywhere; }
+.heroCopy p { margin: 0; color: var(--up-muted); font-size: 13px; overflow-wrap: anywhere; }
 .badges { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; }
 
 .stableId {
@@ -171,11 +180,11 @@
 .factorCopy,
 .sessionCopy { min-width: 0; flex: 1; }
 .factorTitle,
-.sessionTitle { display: flex; align-items: center; gap: 9px; }
+.sessionTitle { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .factorTitle h3,
 .sessionTitle h2 { margin: 0; font-size: 14px; }
 .factorCopy p,
-.sessionCopy p { margin: 5px 0; color: var(--up-muted); font-size: 12px; line-height: 1.5; }
+.sessionCopy p { margin: 5px 0; color: var(--up-muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .factorCopy > span,
 .sessionCopy > span { color: var(--up-muted-soft); font-size: 12px; }
 
@@ -216,16 +225,39 @@
   text-align: center;
 }
 
-@media (max-width: 760px) {
+@media (max-width: 1100px) {
   .overviewGrid { grid-template-columns: 1fr; }
   .heroCard { align-items: flex-start; flex-wrap: wrap; padding: 24px 20px; }
   .stableId { width: 100%; min-width: 0; margin-left: 0; }
+}
+
+@media (max-width: 760px) {
   .card { padding: 22px 18px; }
   .detailList > div { grid-template-columns: 1fr; gap: 7px; }
-  .contactValue { align-items: flex-start; }
+  .heroCard::after { opacity: 0.38; }
+  .stableId code { overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
+  .cardHeading { flex-wrap: wrap; }
   .factorRow,
   .sessionRow { align-items: flex-start; flex-wrap: wrap; }
   .factorRow > button,
-  .sessionRow > button { margin-left: 60px; }
+  .sessionRow > button { min-height: 44px; margin-left: 60px; }
   .dangerCard { align-items: stretch; flex-direction: column; }
+}
+
+@media (max-width: 520px) {
+  .heroCard { gap: 14px; padding: 20px 16px; }
+  .heroCard::after { right: -92px; opacity: 0.28; }
+  .avatar { width: 58px; height: 58px; border-radius: 17px; font-size: 22px; }
+  .heroCopy { flex: 1 1 calc(100% - 74px); }
+  .card { padding: 20px 16px; }
+  .contactValue { align-items: stretch; flex-direction: column; }
+  .contactValue :global(.semi-button) { width: 100%; min-height: 44px; }
+  .profileActions { align-items: stretch; flex-direction: column-reverse; }
+  .profileActions :global(.semi-button) { width: 100%; min-height: 44px; }
+  .mockCode { align-items: flex-start; flex-direction: column; }
+  .mockCode code { font-size: 18px; letter-spacing: 0.08em; overflow-wrap: anywhere; }
+  .factorRow > button,
+  .sessionRow > button { width: 100%; margin-left: 0; }
+  .recoveryCodesGrid { grid-template-columns: 1fr; padding: 12px; }
+  .dangerCard :global(.semi-button) { width: 100%; min-height: 44px; }
 }

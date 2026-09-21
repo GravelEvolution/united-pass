@@ -26,7 +26,7 @@ type reconcileClientStub struct{ input UpstreamRequest }
 
 func (s *reconcileClientStub) Execute(_ context.Context, input UpstreamRequest) (UpstreamResponse, error) {
 	s.input = input
-	return UpstreamResponse{StatusCode: http.StatusOK, Body: json.RawMessage(`{"receipt":{"action":"application.review_saved","target_type":"application","target_id":"app_1","outcome":"success","result_version":2,"receipt_hash":"abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890","request_id":"req_operation_1","created_at":1786960800000}}`)}, nil
+	return UpstreamResponse{StatusCode: http.StatusOK, Body: json.RawMessage(`{"receipt":{"event_id":"evt_shanghai","action":"application.review_saved","target_type":"application","target_id":"app_1","outcome":"success","result_version":2,"receipt_hash":"abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890","request_id":"req_operation_1","created_at":1786960800000}}`)}, nil
 }
 
 type reconcileUOW struct{ outbox *reconcileOutbox }
@@ -48,6 +48,9 @@ func (r *reconcileOutbox) ClaimReceiptsDue(context.Context, time.Time, int, time
 func (r *reconcileOutbox) MarkDeliveryPhase(_ context.Context, _ string, _ int64, _ string, p adminstore.DeliveryPhase, _ time.Time) error {
 	r.phase = p
 	return nil
+}
+func (*reconcileOutbox) RenewClaim(context.Context, string, int64, string, time.Duration) error {
+	panic("unexpected")
 }
 func (r *reconcileOutbox) Settle(_ context.Context, _ string, _ int64, _ string, result adminstore.AllowlistedResult, _ time.Time) error {
 	r.settled = true
@@ -76,6 +79,9 @@ func (*reconcileOutbox) MarkNeedsOperator(context.Context, string, int64, string
 	panic("unexpected")
 }
 func (*reconcileOutbox) Fail(context.Context, string, int64, string, adminstore.AllowlistedResult, time.Time) error {
+	panic("unexpected")
+}
+func (*reconcileOutbox) AbortBeforeSend(context.Context, string, int64, string, adminstore.AllowlistedResult, time.Time) error {
 	panic("unexpected")
 }
 func (*reconcileOutbox) MarkAuditReconciled(context.Context, string, int64, time.Time) error {
@@ -115,11 +121,13 @@ func TestReconcilePendingUsesServiceReceiptOnlyAndSettles(t *testing.T) {
 }
 
 func TestReceiptProjectionRejectsUnboundOrNonCanonicalOutcomeEvidence(t *testing.T) {
-	valid := `{"receipt":{"action":"application.review_saved","target_type":"application","target_id":"app_1","outcome":"success","result_version":null,"receipt_hash":"abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890","request_id":"req_operation_1","created_at":1786960800000}}`
-	if receipt, ok := parseReceiptResponse(json.RawMessage(valid), "req_operation_1"); !ok || receipt.ResultVersion != nil {
+	valid := `{"receipt":{"event_id":"evt_shanghai","action":"application.review_saved","target_type":"application","target_id":"app_1","outcome":"success","result_version":null,"receipt_hash":"abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890","request_id":"req_operation_1","created_at":1786960800000}}`
+	if receipt, ok := parseReceiptResponse(json.RawMessage(valid), "evt_shanghai", "req_operation_1"); !ok || receipt.ResultVersion != nil {
 		t.Fatalf("valid receipt=%+v ok=%v", receipt, ok)
 	}
 	for name, raw := range map[string]string{
+		"missing event":    strings.Replace(valid, `"event_id":"evt_shanghai",`, "", 1),
+		"wrong event":      strings.Replace(valid, "evt_shanghai", "evt_beijing", 1),
 		"wrong request":    strings.Replace(valid, "req_operation_1", "req_operation_2", 1),
 		"short digest":     strings.Replace(valid, "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890", "abcdef12", 1),
 		"bad outcome":      strings.Replace(valid, `"success"`, `"failure"`, 1),
@@ -127,7 +135,7 @@ func TestReceiptProjectionRejectsUnboundOrNonCanonicalOutcomeEvidence(t *testing
 		"string timestamp": strings.Replace(valid, `1786960800000`, `"2026-08-17T10:00:00Z"`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, ok := parseReceiptResponse(json.RawMessage(raw), "req_operation_1"); ok {
+			if _, ok := parseReceiptResponse(json.RawMessage(raw), "evt_shanghai", "req_operation_1"); ok {
 				t.Fatal("invalid receipt accepted")
 			}
 		})
@@ -171,13 +179,14 @@ func TestReceiptReconciliationFailsClosedOnCorruptLedgerState(t *testing.T) {
 
 func TestReceiptProjectionRequiresExactPersistedActionAndTarget(t *testing.T) {
 	item := adminstore.OutboxItem{Result: adminstore.AllowlistedResult{Payload: map[string]string{
-		"receipt_action": "application.review_saved", "receipt_target_type": "application", "receipt_target_id": "app_1",
+		"event_id": "evt_shanghai", "receipt_action": "application.review_saved", "receipt_target_type": "application", "receipt_target_id": "app_1",
 	}}}
-	receipt := operationReceipt{Action: "application.review_saved", TargetType: "application", TargetID: "app_1"}
+	receipt := operationReceipt{EventID: "evt_shanghai", Action: "application.review_saved", TargetType: "application", TargetID: "app_1"}
 	if !receiptMatchesOperation(item, receipt) {
 		t.Fatal("exact receipt binding rejected")
 	}
 	for name, mutate := range map[string]func(*operationReceipt){
+		"event":  func(receipt *operationReceipt) { receipt.EventID = "evt_beijing" },
 		"action": func(receipt *operationReceipt) { receipt.Action = "identity_access.consumed" },
 		"type":   func(receipt *operationReceipt) { receipt.TargetType = "restricted_identity" },
 		"id":     func(receipt *operationReceipt) { receipt.TargetID = "app_2" },

@@ -176,6 +176,7 @@ paths:
     get:
       tags: [Administrator Step-up]
       summary: List authorized DreamUP events
+      description: Returns only active event bindings authorized for dashboard access. The capability array is a fail-closed, policy-evaluated UI snapshot; every subsequent BFF request is authorized again against its exact resource.
       operationId: listAuthorizedDreamUPEvents
       security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
       parameters:
@@ -183,9 +184,12 @@ paths:
       responses:
         "200":
           description: Authorized event summaries
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/DreamUPAdminEventsResponse" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
@@ -200,9 +204,12 @@ paths:
       responses:
         "200":
           description: Authenticated user; browser-cookie callers also receive their CSRF value in the body.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/DreamUPAdminSessionResponse" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
@@ -232,15 +239,51 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /api/v1/admin/dreamup/reauthentication:
+    post:
+      tags: [Administrator Step-up]
+      summary: Mint a one-shot DreamUP administrator grant from a fresh WeChat proof
+      operationId: reauthenticateDreamUPNativeAdministrator
+      description: |
+        Native Mini Program only. Exchanges a fresh, one-use `wx.login` code,
+        verifies that it belongs to the same user as the current native bearer,
+        and revalidates the current event role, binding version and account
+        security epoch. Success returns a short-lived grant bound to exactly one
+        high-risk action and canonical target. The grant is consumed atomically
+        by the matching administrator request and is never persisted by the
+        Mini Program.
+      security: [{ MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-MiniProgram-Client"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DreamUPNativeReauthenticationRequest" }
+      responses:
+        "200":
+          description: Fresh action-and-target-bound single-use grant issued.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReauthenticationGrantResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
   /api/v1/admin/dreamup/step-up/challenge:
     get:
       tags: [Administrator Step-up]
       summary: Read the DreamUP administrator step-up challenge
       operationId: getDreamUPAdminStepUpChallenge
-      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      description: Browser-cookie compatibility endpoint only. Native Mini Program callers must use the fresh `wx.login` `/api/v1/admin/dreamup/reauthentication` flow and are rejected before this handler.
+      security: [{ SessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/DreamUPEventIdQuery"
-        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
       responses:
         "200":
           description: Current administrator step-up state and public question.
@@ -256,11 +299,10 @@ paths:
       tags: [Administrator Step-up]
       summary: Enroll the DreamUP administrator step-up answer
       operationId: enrollDreamUPAdminStepUp
-      description: Cookie callers provide CSRF; native bearer callers provide the Mini Program marker instead. A fresh provider-backed primary login is always required. Existing TOTP, passkey, or recovery MFA is accepted; only an active system-scoped super_admin or top_admin with no existing challenge may use the initial-enrollment bootstrap exception without existing MFA. A federated session lacking provider session proof receives session.reauthentication_required.
-      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      description: Browser-cookie compatibility endpoint only; native Mini Program bearer callers are rejected and use fresh wx.login reauthentication instead. Cookie callers provide CSRF. A fresh provider-backed primary login is always required. Existing TOTP, passkey, or recovery MFA is accepted; only an active system-scoped super_admin or top_admin with no existing challenge may use the initial-enrollment bootstrap exception without existing MFA. A federated session lacking provider session proof receives session.reauthentication_required.
+      security: [{ SessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/X-CSRF-Token"
-        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
         - $ref: "#/components/parameters/Idempotency-Key"
       requestBody:
         required: true
@@ -283,21 +325,19 @@ paths:
       summary: Verify the DreamUP administrator step-up answer
       operationId: verifyDreamUPAdminStepUp
       description: |
-        Cookie callers provide CSRF; native bearer callers provide the Mini
-        Program marker instead. The provider-backed primary login must be no
-        older than 30 minutes. Every mutation, including application review
-        and check-in scan, is high risk. Verification returns a five-minute,
-        action-and-target-bound single-use token, which a native Mini Program
-        client must hold in memory and send exactly once as
-        `X-Reauthentication-Token`. Verification also refreshes the durable
-        session-bound proof used by the existing cookie website; that website
-        may omit the header only while this proof is no more than five minutes
-        old. A cookie request that supplies a token gets strict single-use
-        semantics and cannot fall back after token rejection.
-      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+        Browser cookie compatibility endpoint only. Native Mini Program bearer
+        callers are rejected and must use the fresh `wx.login`
+        `/api/v1/admin/dreamup/reauthentication` flow. The provider-backed
+        primary login must be no older than 30 minutes. Every mutation,
+        including application review and check-in scan, is high risk.
+        Verification refreshes the durable session-bound proof used by the
+        existing cookie website; that website may omit the header only while
+        this proof is no more than five minutes old. A cookie request that
+        supplies a token gets strict single-use semantics and cannot fall back
+        after token rejection.
+      security: [{ SessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/X-CSRF-Token"
-        - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
         - $ref: "#/components/parameters/Idempotency-Key"
       requestBody:
         required: true
@@ -324,9 +364,11 @@ paths:
       summary: Read the durable outcome of a DreamUP administration mutation
       operationId: getDreamUPAdminMutationStatus
       description: |
-        Returns only the authoritative United Pass mutation-ledger status for
-        the supplied idempotency key. Access requires the initiating account,
-        a current event dashboard binding, and active administrator step-up.
+        Returns only the authoritative United Pass mutation-ledger status from
+        the dedicated operational store for the supplied idempotency key. The
+        ledger is physically separate from the authority database. Access
+        requires the initiating account, a current event dashboard binding,
+        and active administrator step-up.
         This endpoint never reissues the mutation and never returns the private
         DreamUP receipt hash or the original request/response body. After a
         succeeded result, refetch the authoritative DreamUP resource state.
@@ -362,14 +404,838 @@ paths:
       operationId: listDreamUPAdminTeams
       description: Requires the event dashboard-read capability and an active administrator session. Participant contact details and application answers are not disclosed.
       security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUPAdminLimitQuery"
+        - $ref: "#/components/parameters/DreamUPAdminCursorQuery"
       responses:
         "200":
           description: Review-safe team summaries for the selected event
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/DreamUPAdminTeamPage" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/admin/dreamup/events/{eventId}/inspection-points:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    get:
+      tags: [DreamUP Operations]
+      summary: List DreamUP inspection points
+      operationId: listDreamUPInspectionPoints
+      description: Requires `event.inspection.point.read`. The route is unavailable until isolated feature schema v2 is ready.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUPAdminLimitQuery"
+        - $ref: "#/components/parameters/DreamUPAdminCursorQuery"
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, inactive, archived] }
+      responses:
+        "200":
+          description: Stable inspection-point page.
+          headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionPointPage" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+    post:
+      tags: [DreamUP Operations]
+      summary: Create a DreamUP inspection point
+      operationId: createDreamUPInspectionPoint
+      description: Requires `event.inspection.point.manage` and a fresh action/target-bound proof.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionPointCreateRequest" } } }
+      responses:
+        "200":
+          description: Idempotent replay of the original create result.
+          content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionPointMutationResponse" } } }
+        "201":
+          description: Created point and optional one-time entity code.
+          headers: { ETag: { $ref: "#/components/headers/ETag" }, Cache-Control: { schema: { type: string, const: no-store } } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionPointMutationResponse" } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/inspection-point-image-upload-intents:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    post:
+      tags: [DreamUP Operations]
+      summary: Create a private inspection-point image upload intent
+      operationId: createDreamUPInspectionPointImageUploadIntent
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntentRequest" } } }
+      responses:
+        "200": { description: Idempotent replay., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntent" } } } }
+        "201": { description: Signed, short-lived private upload intent., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntent" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/inspection-points/{pointId}:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: pointId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    get:
+      tags: [DreamUP Operations]
+      summary: Read a DreamUP inspection point
+      operationId: getDreamUPInspectionPoint
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      responses:
+        "200": { description: Inspection point., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionPointItemResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+    patch:
+      tags: [DreamUP Operations]
+      summary: Update a DreamUP inspection point
+      operationId: updateDreamUPInspectionPoint
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionPointUpdateRequest" } } }
+      responses:
+        "200": { description: Updated point and optional one-time code., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionPointMutationResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/inspection-points/{pointId}/code-rotations:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: pointId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    post:
+      tags: [DreamUP Operations]
+      summary: Rotate an inspection-point QR code
+      operationId: rotateDreamUPInspectionPointCode
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPEmptyMutationRequest" } } }
+      responses:
+        "200": { description: Rotated code returned once., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionPointMutationResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/inspection-points/{pointId}/inspections:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: pointId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    post:
+      tags: [DreamUP Operations]
+      summary: Start an inspection with a fresh scan receipt
+      operationId: startDreamUPInspection
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionStartRequest" } } }
+      responses:
+        "200": { description: Idempotent replay of the original inspection upload grant., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionStartResponse" } } } }
+        "201": { description: Inspection attempt and private upload grant., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionStartResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/inspections:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    get:
+      tags: [DreamUP Operations]
+      summary: List inspection evidence
+      operationId: listDreamUPInspections
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/DreamUPAdminLimitQuery"
+        - $ref: "#/components/parameters/DreamUPAdminCursorQuery"
+        - name: status
+          in: query
+          schema: { type: string, enum: [passed, failed, needs_attention] }
+        - name: pointId
+          in: query
+          schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+      responses:
+        "200": { description: Stable inspection page., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionPage" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/inspections/{inspectionId}:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: inspectionId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    get:
+      tags: [DreamUP Operations]
+      summary: Read inspection evidence and a short-lived photo grant
+      operationId: getDreamUPInspection
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+      responses:
+        "200": { description: Inspection evidence., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionItemResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/inspection-photo-uploads/{uploadId}/finalize:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: uploadId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    post:
+      tags: [DreamUP Operations]
+      summary: Finalize verified inspection evidence
+      operationId: finalizeDreamUPInspection
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionFinalizeRequest" } } }
+      responses:
+        "200": { description: Idempotent replay of the finalized inspection., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionFinalizeResponse" } } } }
+        "201": { description: Immutable inspection evidence created., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInspectionFinalizeResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/assets:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    get:
+      tags: [DreamUP Operations]
+      summary: List public event assets
+      operationId: listDreamUPAssets
+      description: Requires `event.asset.read`. The BFF returns `502 upstream_unavailable` while feature schema v2 is unavailable.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUPAdminLimitQuery"
+        - $ref: "#/components/parameters/DreamUPAdminCursorQuery"
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, inactive, archived, available, reserved, checked_out, maintenance, quarantined, retired] }
+        - name: kind
+          in: query
+          schema: { type: string, enum: [serialized, quantity, fixed, consumable] }
+      responses:
+        "200": { description: Stable asset page., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetPage" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+    post:
+      tags: [DreamUP Operations]
+      summary: Create a public event asset
+      operationId: createDreamUPAsset
+      description: 'Requires `event.asset.manage`, an event-bound fresh proof, `If-Match: "0"`, and an idempotency key.'
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetCreateRequest" } } }
+      responses:
+        "200": { description: Idempotent replay of the original creation., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetMutationResponse" } } } }
+        "201": { description: Created asset and one-time entity code., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetMutationResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/asset-image-upload-intents:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    post:
+      tags: [DreamUP Operations]
+      summary: Create a private asset image upload intent
+      operationId: createDreamUPAssetImageUploadIntent
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntentRequest" } } }
+      responses:
+        "200": { description: Idempotent replay., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntent" } } } }
+        "201": { description: Signed, short-lived private upload intent., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntent" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/assets/{assetId}:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: assetId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    get:
+      tags: [DreamUP Operations]
+      summary: Read a public event asset
+      operationId: getDreamUPAsset
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      responses:
+        "200": { description: Current asset state., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetItemResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+    patch:
+      tags: [DreamUP Operations]
+      summary: Update a public event asset
+      operationId: updateDreamUPAsset
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetUpdateRequest" } } }
+      responses:
+        "200": { description: Updated asset, optionally with a one-time code., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetMutationResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/code-rotations:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: unitId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    post:
+      tags: [DreamUP Operations]
+      summary: Rotate an asset-unit QR code
+      operationId: rotateDreamUPAssetCode
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPEmptyMutationRequest" } } }
+      responses:
+        "200": { description: Current asset and one-time replacement code., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetMutationResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/inventory-adjustments:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: unitId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    post:
+      tags: [DreamUP Operations]
+      summary: Adjust asset-unit inventory
+      operationId: adjustDreamUPAssetInventory
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPInventoryAdjustmentRequest" } } }
+      responses:
+        "200": { description: Updated asset state., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetMutationResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/asset-reservations:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    get:
+      tags: [DreamUP Operations]
+      summary: List asset reservations
+      operationId: listDreamUPAssetReservations
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/DreamUPAdminLimitQuery"
+        - $ref: "#/components/parameters/DreamUPAdminCursorQuery"
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, approved, rejected, cancelled, fulfilled, expired] }
+        - name: assetId
+          in: query
+          schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+      responses:
+        "200": { description: Stable reservation page., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPReservationPage" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/asset-reservations/{reservationId}:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: reservationId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    patch:
+      tags: [DreamUP Operations]
+      summary: Decide or close an asset reservation
+      operationId: updateDreamUPAssetReservation
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPReservationDecisionRequest" } } }
+      responses:
+        "200": { description: Updated reservation., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPReservationItemResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/checkout:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: unitId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    post:
+      tags: [DreamUP Operations]
+      summary: Check out an asset unit
+      operationId: checkoutDreamUPAssetUnit
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetCheckoutRequest" } } }
+      responses:
+        "200": { description: Updated asset state., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetMutationResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/checkin:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: unitId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    post:
+      tags: [DreamUP Operations]
+      summary: Check in an asset unit
+      operationId: checkinDreamUPAssetUnit
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetCheckinRequest" } } }
+      responses:
+        "200": { description: Updated asset state., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetMutationResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/transfers:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: unitId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    post:
+      tags: [DreamUP Operations]
+      summary: Transfer an asset unit
+      operationId: transferDreamUPAssetUnit
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetTransferRequest" } } }
+      responses:
+        "200": { description: Updated asset state., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAssetMutationResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/personal-asset-assignments:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    get:
+      tags: [DreamUP Operations]
+      summary: List personal asset assignments
+      operationId: listDreamUPPersonalAssetAssignments
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/DreamUPAdminLimitQuery"
+        - $ref: "#/components/parameters/DreamUPAdminCursorQuery"
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, ended] }
+      responses:
+        "200": { description: Stable personal-asset page., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPPersonalAssetPage" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+    post:
+      tags: [DreamUP Operations]
+      summary: Create a personal asset assignment
+      operationId: createDreamUPPersonalAssetAssignment
+      description: The BFF resolves `ownerSubject` to an existing United Pass user and never accepts an authority user identifier from the client.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPPersonalAssetCreateRequest" } } }
+      responses:
+        "200": { description: Idempotent replay of the original creation., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPPersonalAssetMutationResponse" } } } }
+        "201": { description: Created assignment and one-time entity code., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPPersonalAssetMutationResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/personal-asset-image-upload-intents:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    post:
+      tags: [DreamUP Operations]
+      summary: Create a private personal-asset image upload intent
+      operationId: createDreamUPPersonalAssetImageUploadIntent
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntentRequest" } } }
+      responses:
+        "200": { description: Idempotent replay., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntent" } } } }
+        "201": { description: Signed, short-lived private upload intent., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntent" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/personal-asset-assignments/{assignmentId}:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: assignmentId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    patch:
+      tags: [DreamUP Operations]
+      summary: End a personal asset assignment
+      operationId: endDreamUPPersonalAssetAssignment
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPPersonalAssetEndRequest" } } }
+      responses:
+        "200": { description: Ended assignment., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPPersonalAssetMutationResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/personal-asset-assignments/{assignmentId}/code-rotations:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: assignmentId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    post:
+      tags: [DreamUP Operations]
+      summary: Rotate a personal-asset QR code
+      operationId: rotateDreamUPPersonalAssetCode
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPEmptyMutationRequest" } } }
+      responses:
+        "200": { description: Current assignment and one-time replacement code., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPPersonalAssetMutationResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/entity-codes/{codeId}/print-jobs:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: codeId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    post:
+      tags: [DreamUP Operations]
+      summary: Create a single-code QR print job
+      operationId: createDreamUPSingleQRPrintJob
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPQRPrintSingleRequest" } } }
+      responses:
+        "200": { description: Idempotent replay., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPQRPrintJobResponse" } } } }
+        "201": { description: Created single-code print job., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPQRPrintJobResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/qr-print-jobs/bulk:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    post:
+      tags: [DreamUP Operations]
+      summary: Create a bulk QR print job
+      operationId: createDreamUPBulkQRPrintJob
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPQRPrintBulkRequest" } } }
+      responses:
+        "200": { description: Idempotent replay., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPQRPrintJobResponse" } } } }
+        "201": { description: Created bulk print job., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPQRPrintJobResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/qr-print-jobs/{printJobId}:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: printJobId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    get:
+      tags: [DreamUP Operations]
+      summary: Read a single-code QR print job
+      operationId: getDreamUPSingleQRPrintJob
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+      responses:
+        "200": { description: Print job and authorized one-time QR payload., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPQRPrintJobResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/qr-print-jobs/{printJobId}/bulk:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: printJobId
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+    get:
+      tags: [DreamUP Operations]
+      summary: Read a bulk QR print job
+      operationId: getDreamUPBulkQRPrintJob
+      description: Requires the immutable bulk-print capability and role-binding snapshot stored on the job.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+      responses:
+        "200": { description: Bulk print job and authorized one-time QR payloads., content: { application/json: { schema: { $ref: "#/components/schemas/DreamUPQRPrintJobResponse" } } } }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
 
   /api/v1/admin/dreamup/events/{eventId}/content:
     parameters:
@@ -383,6 +1249,8 @@ paths:
       security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
       parameters:
         - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/DreamUPAdminLimitQuery"
+        - $ref: "#/components/parameters/DreamUPAdminCursorQuery"
       responses:
         "200":
           description: Current introduction and announcement administration state.
@@ -393,9 +1261,158 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DreamUPContentResponse" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/admin/dreamup/events/{eventId}/splash-ad:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    get:
+      tags: [Administrator Step-up]
+      summary: Read the administrator-visible DreamUP splash poster
+      operationId: getDreamUPAdminSplashPoster
+      description: Requires `event.content.manage` and a fresh five-minute administrator proof. Native Mini Program bearer callers require an action-and-target-bound one-shot token; the existing cookie website may use its session-bound durable proof. The route accepts no query parameters and the response is private and no-store.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+      responses:
+        "200":
+          description: Current splash-poster administration state, or null before first publication.
+          headers:
+            ETag: { $ref: "#/components/headers/ETag" }
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPSplashPosterResponse" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+    put:
+      tags: [Administrator Step-up]
+      summary: Publish or disable the DreamUP Mini Program splash poster
+      operationId: putDreamUPAdminSplashPoster
+      description: Requires `event.content.manage`, a fresh five-minute administrator proof, CSRF for cookie callers, a strong `If-Match`, and an idempotency key. Native Mini Program bearer callers require an action-and-target-bound one-shot token. Publish consumes an event-bound private image upload intent; disable retains immutable history.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DreamUPSplashPosterMutationRequest" }
+      responses:
+        "200":
+          description: Exact idempotent replay or the splash poster after a successful CAS mutation.
+          headers:
+            ETag: { $ref: "#/components/headers/ETag" }
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPSplashPosterResponse" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/splash-poster-image-upload-intents:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    post:
+      tags: [Administrator Step-up]
+      summary: Create a private splash-poster image upload intent
+      operationId: postDreamUPAdminSplashPosterImageUploadIntent
+      description: Requires `event.content.manage`, a fresh five-minute administrator proof, CSRF for cookie callers, an `If-Match` value of `"0"`, and an idempotency key. The closed request accepts only a JPEG or PNG descriptor of at most 5 MiB and 8,000,000 pixels; SVG is forbidden.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntentRequest" }
+      responses:
+        "200":
+          description: Exact idempotent replay.
+          headers:
+            ETag: { $ref: "#/components/headers/ETag" }
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntent" }
+        "201":
+          description: Signed, short-lived private splash-poster upload intent.
+          headers:
+            ETag: { $ref: "#/components/headers/ETag" }
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntent" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/announcement-background-image-upload-intents:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+    post:
+      tags: [Administrator Step-up]
+      summary: Create a private announcement-background image upload intent
+      operationId: postDreamUPAdminAnnouncementBackgroundImageUploadIntent
+      description: Requires `event.content.manage`, a fresh five-minute administrator proof, CSRF for cookie callers, an `If-Match` value of `"0"`, and an idempotency key. JPEG and PNG are limited to 5 MiB and 8,000,000 pixels. `entityId` binds replacement bytes to an existing announcement; omission reserves an announcement identifier for a subsequent create mutation.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntentRequest" }
+      responses:
+        "200":
+          description: Exact idempotent replay.
+          headers:
+            ETag: { $ref: "#/components/headers/ETag" }
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntent" }
+        "201":
+          description: Signed, short-lived private announcement-background upload intent.
+          headers:
+            ETag: { $ref: "#/components/headers/ETag" }
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPAdminImageUploadIntent" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/FieldValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
 
   /api/v1/admin/dreamup/events/{eventId}/content/intro:
     parameters:
@@ -426,8 +1443,8 @@ paths:
               schema: { type: string, const: no-store }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/DreamUPContentResponse" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+              schema: { $ref: "#/components/schemas/DreamUPContentMutationResponse" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -462,8 +1479,8 @@ paths:
               schema: { type: string, const: no-store }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/DreamUPContentResponse" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+              schema: { $ref: "#/components/schemas/DreamUPContentMutationResponse" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -499,8 +1516,8 @@ paths:
               schema: { type: string, const: no-store }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/DreamUPContentResponse" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+              schema: { $ref: "#/components/schemas/DreamUPContentMutationResponse" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -592,7 +1609,7 @@ paths:
                     type: [string, "null"]
                     maxLength: 512
                     pattern: "^[A-Za-z0-9_-]+$"
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/admin/dreamup/events/{eventId}/contact-submissions/{submissionId}:
@@ -623,7 +1640,7 @@ paths:
                 required: [submission]
                 properties:
                   submission: { $ref: "#/components/schemas/DreamUPContactSubmission" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -678,7 +1695,7 @@ paths:
                       version: { type: integer, minimum: 1 }
                       note: { type: string, minLength: 2, maxLength: 1000 }
                       updatedAt: { type: string, format: date-time }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
 
@@ -691,12 +1708,28 @@ paths:
       summary: List review-safe DreamUP applications
       operationId: listDreamUPReviewApplications
       security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DreamUPAdminLimitQuery"
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [submitted, under_review, accepted, waitlisted, rejected, withdrawn]
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [updated_asc, updated_desc]
+            default: updated_desc
+        - $ref: "#/components/parameters/DreamUPAdminCursorQuery"
       responses:
         "200":
           description: Review-safe applications
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/DreamUPAdminApplicationPage" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
@@ -710,16 +1743,56 @@ paths:
         schema: { type: string, minLength: 1, maxLength: 160 }
     get:
       tags: [Administrator Step-up]
-      summary: Read one review-safe DreamUP application
+      summary: Read one redacted basic-review DreamUP application
       operationId: getDreamUPReviewApplication
+      description: Requires the exact event.application.read_basic capability. Returns only review-basic answers and the caller's own review. legalName, email, mobile, restrictedIdentity, legal records and other restricted identity data are excluded; those fields are available only through the SuperAdmin-only event.identity.read_restricted flow with an exact one-shot reauthentication token and a durable fail-closed read audit.
       security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
       responses:
         "200":
-          description: Review-safe application and caller review
+          description: Redacted basic-review application and caller review; no restricted identity
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/DreamUPAdminApplicationDetail" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/review-identity:
+    parameters:
+      - $ref: "#/components/parameters/DreamUPEventIdPath"
+      - $ref: "#/components/parameters/X-MiniProgram-Client-When-Bearer"
+      - name: applicationId
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 160 }
+    post:
+      tags: [Administrator Step-up]
+      summary: Read the applicant identity required during application review
+      operationId: postDreamUPReviewIdentity
+      description: Requires event.identity.read_restricted for the exact application. The BFF fixes the field set to legal name, email and mobile, resolves the private provider subject to the stable United Pass user ID, encrypts a server-authored reason together with the exact action, event, application target and request fingerprint, retains it in the authority plane for 24 months, forwards only its opaque ID for a durable DreamUP read audit, and never exposes the provider subject. The browser body is empty; subject, fields and reason context are server-authored.
+      security: [{ SessionCookie: [] }, { MiniProgramBearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/X-CSRF-Token"
+        - $ref: "#/components/parameters/DreamUP-X-Reauthentication-Token"
+        - $ref: "#/components/parameters/Idempotency-Key"
+        - $ref: "#/components/parameters/DreamUP-If-Match"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DreamUPEmptyMutationRequest" }
+      responses:
+        "200":
+          description: Audited review identity with a stable United Pass user ID
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DreamUPAdminReviewIdentityResponse" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
 
   /api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/reviews/me:
     parameters:
@@ -744,13 +1817,14 @@ paths:
         required: true
         content:
           application/json:
-            schema: { type: object, additionalProperties: false }
+            schema: { $ref: "#/components/schemas/DreamUPAdminOwnReviewMutationRequest" }
       responses:
         "200":
           description: Saved own review
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/DreamUPAdminOwnReviewMutationResponse" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
         "409": { $ref: "#/components/responses/Conflict" }
 
   /api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus:
@@ -774,7 +1848,8 @@ paths:
           description: Admission consensus
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/DreamUPAdminAdmissionConsensusResponse" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
 
   /api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus/approval:
     parameters:
@@ -799,13 +1874,14 @@ paths:
         required: true
         content:
           application/json:
-            schema: { type: object, maxProperties: 0 }
+            schema: { $ref: "#/components/schemas/DreamUPEmptyMutationRequest" }
       responses:
         "200":
           description: Updated consensus
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/DreamUPAdminAdmissionConsensusResponse" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
     delete:
       tags: [Administrator Step-up]
       summary: Withdraw the caller's admission approval
@@ -822,7 +1898,8 @@ paths:
           description: Updated consensus
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/DreamUPAdminAdmissionConsensusResponse" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
 
   /api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/decision:
     parameters:
@@ -847,13 +1924,14 @@ paths:
         required: true
         content:
           application/json:
-            schema: { type: object, additionalProperties: false }
+            schema: { $ref: "#/components/schemas/DreamUPAdminDecisionRequest" }
       responses:
         "200":
-          description: Updated application
+          description: Updated redacted basic-review application and caller review; no restricted identity
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/DreamUPAdminApplicationDetail" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
 
   /api/v1/admin/dreamup/events/{eventId}/checkins/scan:
     parameters:
@@ -886,7 +1964,7 @@ paths:
           content:
             application/json:
               schema: { type: object }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "401": { $ref: "#/components/responses/DreamUPAdminUnauthorizedOrStepUp" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
@@ -951,9 +2029,19 @@ paths:
       summary: Issue a short-lived registration form intent
       description: |
         Creates a one-use, server-timed intent bound to digests of the current
-        user agent, trusted client network, and optional server-issued risk
-        device. The registration mutation rejects missing, expired, replayed,
-        or implausibly immediate intents before provisioning an identity.
+        user agent, trusted client network, exact Origin, and a mandatory
+        server-issued risk device. Issuance establishes the HttpOnly risk-device
+        cookie when needed. The registration mutation rejects missing, expired,
+        replayed, or implausibly immediate intents before provisioning an identity.
+        Its first clean submission atomically pins the normalized email before
+        email rate budgets or CAPTCHA resources are allocated. Email and pair
+        creation budgets are charged only after that exact tuple completes its
+        interactive challenge. The post-proof create charge is atomic and one
+        same-network, same-email final-commit retry is idempotent. A request
+        rejected by any saturated creation bucket does not advance the other
+        buckets. A deterministic account conflict releases only the bound
+        long-lived email charge while retaining the shorter client, network
+        and client/email charges.
       operationId: issueRegistrationFormIntent
       parameters:
         - $ref: "#/components/parameters/RegistrationOrigin"
@@ -990,6 +2078,24 @@ paths:
         legacy browser surface is absent unless
         `UP_PUBLIC_REGISTRATION_ENABLED=true`; enabling Mini Program
         registration does not expose it.
+
+        Every valid form intent must complete one interactive
+        `moonstone_image_digits` challenge before a pending identity can be
+        provisioned. The challenge trust is bound to the server device, user
+        agent, trusted client network, normalized email, exact form-intent token and exact Origin. It is
+        not bypassed by a first low-risk attempt, an authenticated session or a
+        login allowlist, and it never degrades to proof-of-work. Only the exact
+        automatic retry may reach account creation; the form intent is then
+        atomically consumed. A forged intent is rejected before it can spend an
+        email rate-limit bucket or allocate a challenge.
+
+        One exact form-intent/device/network tuple may have only one active
+        challenge. Repeated or concurrent issuance returns 429 without creating
+        another provider answer. Device/network issuance and cross-challenge
+        completion budgets prevent cookie, intent or challenge rotation from
+        resetting the verification budget. A completed trust is bound to the
+        registration operation and exact composite identifier and cannot be
+        reused for login.
       operationId: createRegistration
       parameters:
         - $ref: "#/components/parameters/RegistrationOrigin"
@@ -1005,7 +2111,7 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/RegistrationCreateResponse"}
         "403":
-          description: Origin rejected, or objective abuse signals require step-up.
+          description: Origin rejected, or the mandatory registration image challenge must be completed.
           content:
             application/json:
               schema: {$ref: "#/components/schemas/ErrorResponse"}
@@ -1101,6 +2207,11 @@ paths:
         browser surface. Requests must carry the exact
         `X-UnitedPass-Client: dreamup-miniprogram` transport marker; the marker
         grants no authority and a missing or incorrect value fails closed.
+        Before contacting WeChat, the server atomically advances a dedicated
+        source-IP budget and claims both hashed one-time codes; an over-budget source cannot create per-code Redis keys. The ordinary registration
+        IP, network, normalized-email and IP/email budgets advance only after
+        WeChat has verified both identity and phone proofs, so random
+        format-valid codes cannot exhaust another user's email budget.
       operationId: createWeChatRegistration
       parameters:
         - $ref: "#/components/parameters/X-MiniProgram-Client"
@@ -1423,14 +2534,16 @@ paths:
       tags: [WeChat Mini Program]
       summary: Begin explicit WeChat account onboarding or restore an existing link
       description: |
-        Exchanges a fresh `wx.login` code only on the server. A
-        `getPhoneNumber` code may accompany the same Mini Program action; it is
-        best effort and its absence or rejection does not create another client
-        flow. An already-linked active account receives a normal short-lived
-        native bearer. An unlinked WeChat identity receives only a restricted,
-        single-use onboarding token, never an account session. An exact linked
-        pending reservation may re-enter only to reconcile that same pending
-        user after a prior provider/token-store interruption. OpenID, UnionID,
+        Exchanges fresh `wx.login` and `getPhoneNumber` codes only on the
+        server. Both proofs are mandatory: absence, rejection or provider
+        failure creates neither an account, onboarding challenge nor session.
+        An already-linked active account receives a normal short-lived native
+        bearer only after the verified phone is atomically reconciled against
+        that exact linked account. An unlinked WeChat identity receives only a
+        restricted, single-use onboarding token, never an account session. An
+        exact linked pending reservation may re-enter only to reconcile that
+        same pending user after a prior provider/token-store interruption.
+        OpenID, UnionID,
         `session_key`, decoded phone data and provider credentials are never
         returned to the Mini Program. All three onboarding routes are absent
         unless `UP_WECHAT_MINIPROGRAM_ENABLED`,
@@ -1457,9 +2570,10 @@ paths:
               schema: {$ref: "#/components/schemas/WeChatOnboardingRequiredResponse"}
         "401": {$ref: "#/components/responses/Unauthorized"}
         "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/WeChatOnboardingConflict"}
         "413": {$ref: "#/components/responses/BadRequest"}
         "415": {$ref: "#/components/responses/BadRequest"}
-        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "422": {$ref: "#/components/responses/WeChatOnboardingPhoneRequired"}
         "429": {$ref: "#/components/responses/TooManyRequests"}
         "502": {$ref: "#/components/responses/ProviderUnavailable"}
 
@@ -1468,7 +2582,8 @@ paths:
       tags: [WeChat Mini Program]
       summary: Complete United Pass account details for a verified WeChat identity
       description: |
-        Consumes a restricted onboarding challenge. A new email creates a
+        Consumes a restricted onboarding challenge containing a mandatory,
+        server-verified phone proof. A new email creates a
         pending account through the existing provider and email-verification
         lifecycle. An email already owned by exactly one active account treats
         `password` only as that account's current credential proof; it never
@@ -1507,7 +2622,7 @@ paths:
         "409": {$ref: "#/components/responses/WeChatOnboardingConflict"}
         "413": {$ref: "#/components/responses/BadRequest"}
         "415": {$ref: "#/components/responses/BadRequest"}
-        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "422": {$ref: "#/components/responses/WeChatOnboardingPhoneRequired"}
         "429": {$ref: "#/components/responses/TooManyRequests"}
         "502": {$ref: "#/components/responses/ProviderUnavailable"}
 
@@ -1540,39 +2655,7 @@ paths:
         "409": {$ref: "#/components/responses/WeChatOnboardingConflict"}
         "413": {$ref: "#/components/responses/BadRequest"}
         "415": {$ref: "#/components/responses/BadRequest"}
-        "422": {$ref: "#/components/responses/FieldValidationFailed"}
-        "429": {$ref: "#/components/responses/TooManyRequests"}
-        "502": {$ref: "#/components/responses/ProviderUnavailable"}
-
-  /api/v1/auth/wechat/sessions:
-    post:
-      tags: [WeChat Mini Program]
-      summary: Establish a United Pass session from a verified WeChat Mini Program code
-      description: |
-        Exchanges a fresh `wx.login` one-time code only on the server and
-        resolves it to an existing explicit WeChat identity link. It is also
-        the only cold-start recovery path: success mints a new short-lived
-        native bearer and failure leaves the client logged out. No cookie or
-        provider credential is returned. This route is absent unless the
-        server-side WeChat Mini Program switch is enabled.
-      operationId: createWeChatMiniProgramSession
-      parameters:
-        - $ref: "#/components/parameters/X-MiniProgram-Client"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: "#/components/schemas/WeChatLoginRequest"}
-      responses:
-        "200":
-          description: Short-lived native bearer established; no Set-Cookie header is emitted.
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/MiniProgramSessionResponse"}
-        "401": {$ref: "#/components/responses/Unauthorized"}
-        "413": {$ref: "#/components/responses/BadRequest"}
-        "415": {$ref: "#/components/responses/BadRequest"}
-        "422": {$ref: "#/components/responses/FieldValidationFailed"}
+        "422": {$ref: "#/components/responses/WeChatOnboardingPhoneRequired"}
         "429": {$ref: "#/components/responses/TooManyRequests"}
         "502": {$ref: "#/components/responses/ProviderUnavailable"}
 
@@ -1602,6 +2685,7 @@ paths:
               schema: {$ref: "#/components/schemas/WeChatPhoneBindResponse"}
         "401": {$ref: "#/components/responses/Unauthorized"}
         "403": {$ref: "#/components/responses/Forbidden"}
+        "409": {$ref: "#/components/responses/WeChatPhoneConflict"}
         "413": {$ref: "#/components/responses/BadRequest"}
         "415": {$ref: "#/components/responses/BadRequest"}
         "422": {$ref: "#/components/responses/FieldValidationFailed"}
@@ -1752,7 +2836,9 @@ paths:
               schema: { $ref: "#/components/schemas/DreamUPMobileAssertionResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
         "413": { $ref: "#/components/responses/BadRequest" }
         "415": { $ref: "#/components/responses/BadRequest" }
         "422": { $ref: "#/components/responses/FieldValidationFailed" }
@@ -1801,7 +2887,9 @@ paths:
               schema: { $ref: "#/components/schemas/DreamUPMobileAssertionResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
         "413": { $ref: "#/components/responses/BadRequest" }
         "415": { $ref: "#/components/responses/BadRequest" }
         "422": { $ref: "#/components/responses/FieldValidationFailed" }
@@ -4972,405 +6060,6 @@ paths:
         "429": {$ref: "#/components/responses/TooManyRequests"}
         "500": {$ref: "#/components/responses/InternalError"}
 
-  /api/v1/password-reset-requests:
-    post:
-      tags: [Account Lifecycle]
-      summary: Request password-reset instructions
-      description: |
-        Always returns the same accepted response after syntax and rate-limit
-        checks. Account absence, unverified contact, missing local binding and
-        provider-notification failure are intentionally indistinguishable.
-        Requires JSON and an exact same-origin `Origin`.
-      operationId: requestPublicPasswordReset
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/PasswordResetRequest"
-      responses:
-        "202":
-          description: Request accepted; no account-existence signal is returned.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-
-  /api/v1/password-resets:
-    post:
-      tags: [Account Lifecycle]
-      summary: Complete a provider-verified password reset
-      description: |
-        Opens the short-lived encrypted United Pass lifecycle token, verifies
-        the provider code, changes the provider-owned password and advances the
-        user's security epoch so all older sessions are invalidated. The local
-        token contains no email, provider subject, password or code.
-      operationId: completePublicPasswordReset
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/PasswordResetCompletionRequest"
-      responses:
-        "204":
-          description: Password reset completed and older sessions invalidated.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "409":
-          $ref: "#/components/responses/Conflict"
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "502":
-          $ref: "#/components/responses/ProviderUnavailable"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/email-verifications:
-    post:
-      tags: [Account Lifecycle]
-      summary: Verify a pending registration email
-      description: |
-        Verifies the provider-issued email code for the exact provider subject
-        bound inside a short-lived encrypted lifecycle token, then activates
-        only the matching pending United Pass user. Provider readback repairs a
-        consumed-code/response-loss retry without trusting browser identity data.
-      operationId: verifyPublicRegistrationEmail
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/EmailVerificationRequest"
-      responses:
-        "204":
-          description: Email verified and pending account activated.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "410":
-          $ref: "#/components/responses/Gone"
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "502":
-          $ref: "#/components/responses/ProviderUnavailable"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/me/avatar:
-    post:
-      tags: [Account]
-      summary: Replace the current user's avatar
-      description: |
-        Accepts exactly one multipart file, capped at 2 MiB. Current clients
-        use the `file` field and receive a versioned, session-protected JPEG
-        URL; earlier clients may use `avatar` and receive an immutable public
-        PNG URL. Both paths decode, bound and re-encode the image before it is
-        stored. Supplying both fields is rejected.
-      operationId: uploadCurrentUserAvatar
-      security:
-        - SessionCookie: []
-      parameters:
-        - $ref: "#/components/parameters/X-CSRF-Token"
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              oneOf:
-                - type: object
-                  required: [file]
-                  additionalProperties: false
-                  properties:
-                    file:
-                      type: string
-                      format: binary
-                - type: object
-                  required: [avatar]
-                  additionalProperties: false
-                  properties:
-                    avatar:
-                      type: string
-                      format: binary
-      responses:
-        "200":
-          description: Filesystem-backed avatar stored for a current client.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AvatarUploadResponse"
-        "201":
-          description: Immutable PostgreSQL-backed avatar stored for an earlier client.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AvatarUploadResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "413":
-          description: Multipart request or avatar file exceeds the configured limit.
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/media/avatars/{avatarFile}:
-    get:
-      tags: [Account]
-      summary: Read a sanitized avatar
-      description: |
-        An opaque `avt_<random>.png` identifier reads the earlier public,
-        immutable PNG object. A stable user identifier reads the current
-        private JPEG object and requires a valid session. Both forms serve
-        only server-reencoded bytes.
-      operationId: getSanitizedAvatar
-      security:
-        - {}
-        - SessionCookie: []
-      parameters:
-        - $ref: "#/components/parameters/AvatarFilePath"
-        - name: If-None-Match
-          in: header
-          required: false
-          schema: { type: string }
-      responses:
-        "200":
-          description: Sanitized PNG avatar.
-          headers:
-            ETag:
-              schema: { type: string }
-            Cache-Control:
-              schema: { type: string, example: "public, max-age=31536000, immutable" }
-          content:
-            image/png:
-              schema:
-                type: string
-                format: binary
-            image/jpeg:
-              schema:
-                type: string
-                format: binary
-        "304":
-          description: The supplied ETag matches the current immutable object.
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/me/email-change-requests:
-    post:
-      tags: [Account]
-      summary: Begin a verified email change
-      description: |
-        Persists a short-lived, session-bound request and asks the identity
-        provider to send a verification code. The returned capability is
-        stored only as a SHA-256 digest and prior active requests are superseded.
-      operationId: requestCurrentUserEmailChange
-      security:
-        - SessionCookie: []
-      parameters:
-        - $ref: "#/components/parameters/X-CSRF-Token"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ContactChangeRequest"
-      responses:
-        "201":
-          description: Verification request created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ContactChangeResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "502":
-          $ref: "#/components/responses/ProviderUnavailable"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/me/email-change-requests/{requestId}/verify:
-    post:
-      tags: [Account]
-      summary: Verify and commit an email change
-      description: |
-        Claims the exact user- and session-bound request, verifies the code at
-        the provider, then mirrors the provider-verified email locally in one
-        transaction. Concurrent verification has a single live claimant.
-      operationId: verifyCurrentUserEmailChange
-      security:
-        - SessionCookie: []
-      parameters:
-        - $ref: "#/components/parameters/ContactRequestIdPath"
-        - $ref: "#/components/parameters/X-CSRF-Token"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ContactVerificationRequest"
-      responses:
-        "204":
-          description: Provider-verified email committed.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "502":
-          $ref: "#/components/responses/ProviderUnavailable"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/me/phone-change-requests:
-    post:
-      tags: [Account]
-      summary: Begin a verified phone change
-      operationId: requestCurrentUserPhoneChange
-      security:
-        - SessionCookie: []
-      parameters:
-        - $ref: "#/components/parameters/X-CSRF-Token"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ContactChangeRequest"
-      responses:
-        "201":
-          description: Verification request created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ContactChangeResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "502":
-          $ref: "#/components/responses/ProviderUnavailable"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/me/phone-change-requests/{requestId}/verify:
-    post:
-      tags: [Account]
-      summary: Verify and commit a phone change
-      operationId: verifyCurrentUserPhoneChange
-      security:
-        - SessionCookie: []
-      parameters:
-        - $ref: "#/components/parameters/ContactRequestIdPath"
-        - $ref: "#/components/parameters/X-CSRF-Token"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ContactVerificationRequest"
-      responses:
-        "204":
-          description: Provider-verified phone committed.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
-        "422":
-          $ref: "#/components/responses/FieldValidationFailed"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "502":
-          $ref: "#/components/responses/ProviderUnavailable"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /api/v1/admin/dashboard:
-    get:
-      tags: [Admin Dashboard]
-      summary: Get the permission-scoped administration overview
-      description: |
-        Returns only aggregates independently authorized for the caller:
-        `user.read` unlocks user and employee counts, `application.read`
-        unlocks application counts, and `audit.read` unlocks denied-event
-        counts plus three already-redacted recent audit events. Possessing a
-        different administration capability permits the overview shell but
-        does not leak unauthorized counts.
-      operationId: getAdminDashboard
-      security:
-        - SessionCookie: []
-      responses:
-        "200":
-          description: Authorized dashboard slices.
-          headers:
-            Cache-Control:
-              schema: { type: string, enum: [no-store] }
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AdminDashboard"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
 components:
   securitySchemes:
     SessionCookie:
@@ -5397,6 +6086,12 @@ components:
         ambient-cookie CSRF because no cookie participates in authentication.
 
   headers:
+    ETag:
+      description: Strong quoted resource version returned for optimistic concurrency.
+      schema:
+        type: string
+        pattern: '^"[1-9][0-9]*"$'
+
     X-Request-ID:
       description: |
         The request ID used for log, error and audit correlation. The server
@@ -5450,28 +6145,6 @@ components:
         example: up_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax
 
   parameters:
-    AvatarFilePath:
-      name: avatarFile
-      in: path
-      required: true
-      description: Immutable avatar object name or current stable user identifier.
-      schema:
-        oneOf:
-          - type: string
-            pattern: "^avt_[0-9a-f]{32}\\.png$"
-          - type: string
-            pattern: "^[A-Za-z0-9_-]{1,80}$"
-
-    ContactRequestIdPath:
-      name: requestId
-      in: path
-      required: true
-      description: Opaque, short-lived contact-change capability returned once to this session.
-      schema:
-        type: string
-        minLength: 1
-        maxLength: 4096
-
     RegistrationOrigin:
       name: Origin
       in: header
@@ -5644,6 +6317,17 @@ components:
         minLength: 1
         maxLength: 4096
 
+    DreamUPAdminCursorQuery:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque signed cursor returned by the preceding DreamUP administrative page; it is bound to the event, filters, and sort order.
+      schema:
+        type: string
+        minLength: 45
+        maxLength: 2048
+        pattern: '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$'
+
     LimitQuery:
       name: limit
       in: query
@@ -5654,6 +6338,17 @@ components:
         minimum: 1
         maximum: 100
         default: 20
+
+    DreamUPAdminLimitQuery:
+      name: limit
+      in: query
+      required: false
+      description: Maximum rows returned in one stable DreamUP administrative page; defaults to 50 and is capped at 100.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
 
     SearchQuery:
       name: query
@@ -5821,26 +6516,6 @@ components:
         pattern: '^"(0|[1-9][0-9]*)"$'
 
   responses:
-    Gone:
-      description: The short-lived lifecycle capability has expired.
-      headers:
-        X-Request-ID:
-          $ref: "#/components/headers/X-Request-ID"
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorResponse"
-    RateLimited:
-      $ref: "#/components/responses/TooManyRequests"
-    UnsupportedMediaType:
-      description: The credential-bearing request must use `application/json`.
-      headers:
-        X-Request-ID:
-          $ref: "#/components/headers/X-Request-ID"
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorResponse"
     BadRequest:
       description: Malformed request, unknown JSON field, or invalid cursor.
       headers:
@@ -5859,6 +6534,17 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    DreamUPAdminUnauthorizedOrStepUp:
+      description: Missing or invalid session, or a high-risk DreamUP operation requiring a fresh administrator proof. The latter always uses the stable error code `admin_stepup.required` and HTTP 401; it is never HTTP 428.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/DreamUPAuthenticationRequiredErrorResponse"
+              - $ref: "#/components/schemas/DreamUPAdminStepUpRequiredErrorResponse"
     Forbidden:
       description: Session is valid but the operation is not authorized.
       headers:
@@ -5908,6 +6594,8 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    RateLimited:
+      $ref: "#/components/responses/TooManyRequests"
     Locked:
       description: The challenge is temporarily locked after repeated failed verification.
       headers:
@@ -5937,9 +6625,10 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
     ProviderUnavailable:
       description: |
-        The identity provider rejected or failed the provisioning call. The
-        response carries a stable internal error class only — never raw
-        provider errors.
+        An upstream identity or business provider rejected or failed the call.
+        For DreamUP operational routes this also covers an unavailable isolated
+        feature store or a feature schema that is not yet v2-ready. The response
+        carries a stable internal error class only — never raw provider details.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/X-Request-ID"
@@ -6013,7 +6702,29 @@ components:
                   message: "账户验证失败，请重试。"
                   requestId: req_0123456789abcdef
     WeChatOnboardingConflict:
-      description: The WeChat identity, normalized email, target account, or optional verified phone cannot be linked safely.
+      description: The WeChat identity, normalized email, target account, or mandatory verified phone cannot be linked safely. No account is selected or merged by phone.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            identityConflict:
+              value:
+                error:
+                  code: wechat.onboarding_conflict
+                  message: "无法安全绑定该账户，请检查信息或联系支持。"
+                  requestId: req_0123456789abcdef
+            phoneConflict:
+              value:
+                error:
+                  code: wechat.phone_conflict
+                  message: "该手机号已绑定其他统一账户，或与当前账户信息冲突；系统未自动合并，请使用原账户登录或联系支持。"
+                  requestId: req_0123456789abcdef
+    WeChatOnboardingPhoneRequired:
+      description: A fresh server-verified getPhoneNumber proof is required. No account, challenge or session was created.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/X-Request-ID"
@@ -6023,128 +6734,106 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
           example:
             error:
-              code: wechat.onboarding_conflict
-              message: "无法安全绑定该账户，请检查信息或联系支持。"
+              code: wechat.phone_required
+              message: "微信登录需要授权手机号，请重新发起。"
+              requestId: req_0123456789abcdef
+    WeChatPhoneConflict:
+      description: The verified phone is owned by another account or differs from the linked account's authoritative phone. No automatic merge or overwrite occurred.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: wechat.phone_conflict
+              message: "该手机号已绑定其他统一账户，或与当前账户信息冲突；系统未自动合并，请使用原账户登录或联系支持。"
               requestId: req_0123456789abcdef
 
   schemas:
-    PasswordResetRequest:
-      type: object
-      required: [identifier]
-      additionalProperties: false
-      properties:
-        identifier:
-          type: string
-          minLength: 1
-          maxLength: 254
-          description: Account name or email; the response never signals existence.
+    DreamUPAdminSessionResponse:
+      oneOf:
+        - $ref: "#/components/schemas/DreamUPAdminBrowserSessionResponse"
+        - $ref: "#/components/schemas/DreamUPAdminNativeSessionResponse"
 
-    PasswordResetCompletionRequest:
+    DreamUPAdminBrowserSessionResponse:
       type: object
-      required: [token, code, newPassword]
       additionalProperties: false
+      required: [authenticated, userId, csrfToken]
       properties:
-        token:
-          type: string
-          minLength: 1
-          maxLength: 4096
-          writeOnly: true
-        code:
-          type: string
-          minLength: 4
-          maxLength: 20
-          pattern: "^[A-Za-z0-9]+$"
-          writeOnly: true
-        newPassword:
-          type: string
-          format: password
-          minLength: 12
-          maxLength: 200
-          writeOnly: true
+        authenticated: { type: boolean, const: true }
+        userId: { type: string, minLength: 1, maxLength: 160 }
+        csrfToken: { type: string, minLength: 43, maxLength: 43, pattern: "^[A-Za-z0-9_-]{43}$", readOnly: true }
 
-    EmailVerificationRequest:
+    DreamUPAdminNativeSessionResponse:
       type: object
-      required: [token, code]
       additionalProperties: false
+      required: [authenticated, userId]
       properties:
-        token:
-          type: string
-          minLength: 1
-          maxLength: 4096
-          writeOnly: true
-        code:
-          type: string
-          minLength: 4
-          maxLength: 20
-          pattern: "^[A-Za-z0-9]+$"
-          writeOnly: true
+        authenticated: { type: boolean, const: true }
+        userId: { type: string, minLength: 1, maxLength: 160 }
 
-    AvatarUploadResponse:
-      type: object
-      required: [avatarUrl]
-      additionalProperties: false
-      properties:
-        avatarUrl:
-          type: string
-          pattern: "^/api/v1/media/avatars/(?:avt_[0-9a-f]{32}\\.png|[A-Za-z0-9_-]{1,80}(?:\\?v=[0-9]+)?)$"
+    DreamUPAdminCapability:
+      type: string
+      enum:
+        - event.dashboard.read
+        - event.application.read_basic
+        - event.application.review
+        - event.application.approve_admission
+        - event.application.decide
+        - event.checkin.scan
+        - event.contact_submission.manage
+        - event.content.manage
+        - event.inspection.point.read
+        - event.inspection.point.manage
+        - event.inspection.review
+        - event.asset.read
+        - event.asset.manage
+        - event.asset.reservation.manage
+        - event.asset.custody.transfer
+        - event.asset.inventory.adjust
+        - event.personal_asset.assignment.manage
+        - event.asset.code.rotate
+        - event.qr.print.single
+        - event.qr.print.bulk
 
-    ContactChangeRequest:
+    DreamUPAdminEventCounts:
       type: object
-      required: [value]
       additionalProperties: false
+      required: [total, pending, accepted, rejected]
       properties:
-        value:
-          type: string
-          minLength: 1
-          maxLength: 320
-          description: Email or E.164 phone selected by the endpoint.
+        total: { type: integer, format: int64, minimum: 0 }
+        pending: { type: integer, format: int64, minimum: 0 }
+        accepted: { type: integer, format: int64, minimum: 0 }
+        rejected: { type: integer, format: int64, minimum: 0 }
 
-    ContactChangeResponse:
+    DreamUPAdminEventSummary:
       type: object
-      required: [requestId]
       additionalProperties: false
+      required: [eventId, displayName, slug, role, capabilities, counts]
       properties:
-        requestId:
-          type: string
-          minLength: 1
-          description: Opaque capability returned once and bound to the current session.
-
-    ContactVerificationRequest:
-      type: object
-      required: [code]
-      additionalProperties: false
-      properties:
-        code:
-          type: string
-          minLength: 4
-          maxLength: 20
-          pattern: "^[A-Za-z0-9]+$"
-          writeOnly: true
-
-    DashboardMetric:
-      type: object
-      required: [label, value, change, tone]
-      additionalProperties: false
-      properties:
-        label: { type: string }
-        value: { type: string }
-        change: { type: string }
-        tone: { type: string, enum: [neutral, positive, attention] }
-
-    AdminDashboard:
-      type: object
-      required: [metrics, recentEvents]
-      additionalProperties: false
-      properties:
-        metrics:
+        eventId: { type: string, minLength: 1, maxLength: 200, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }
+        displayName: { type: string, minLength: 1, maxLength: 240 }
+        slug: { type: string, minLength: 1, maxLength: 160 }
+        role: { type: string, enum: [admin, senior_admin, super_admin, top_admin] }
+        capabilities:
           type: array
-          items:
-            $ref: "#/components/schemas/DashboardMetric"
-        recentEvents:
+          maxItems: 20
+          uniqueItems: true
+          items: { $ref: "#/components/schemas/DreamUPAdminCapability" }
+        counts: { $ref: "#/components/schemas/DreamUPAdminEventCounts" }
+
+    DreamUPAdminEventsResponse:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
           type: array
-          maxItems: 3
-          items:
-            $ref: "#/components/schemas/AuditEvent"
+          maxItems: 100
+          items: { $ref: "#/components/schemas/DreamUPAdminEventSummary" }
 
     DreamUPAdminEligibilityResponse:
       type: object
@@ -6207,6 +6896,10 @@ components:
         action:
           type: string
           enum: [save_draft, publish, archive]
+        background:
+          oneOf:
+            - $ref: "#/components/schemas/DreamUPAnnouncementBackgroundImage"
+            - type: "null"
 
     DreamUPContentBlock:
       oneOf:
@@ -6243,6 +6936,209 @@ components:
             label: { type: string }
             action: { type: string, enum: [apply, team, feedback, sponsor] }
 
+    DreamUPAdminReviewAnswers:
+      type: object
+      additionalProperties: false
+      maxProperties: 40
+      description: Explicit allowlist of review-safe application fields. Restricted identity, legal and participant-private keys are rejected by the BFF even if an upstream response is misclassified.
+      properties:
+        city: { type: string }
+        affiliation_type: { type: string }
+        affiliation_name: { type: string }
+        primary_role: { type: string }
+        experience_level: { type: string }
+        skill_tags: { type: array, maxItems: 5, items: { type: string } }
+        problem_to_solve: { type: string }
+        first_build_step: { type: string }
+        what_you_bring: { type: string }
+        collaboration_goal: { type: string }
+        portfolio_urls: { type: array, maxItems: 3, items: { type: string } }
+        vibe_coding_foundation: { type: string }
+        last_word_to_moonstone: { type: string }
+        view_on_tech_democratization: { type: string }
+        when_tech_singularity: { type: string }
+        ai_human_relationship: { type: string }
+        team_preference: { type: string }
+        existing_team_details: { type: string }
+        affiliationType: { type: string, deprecated: true }
+        affiliationName: { type: string, deprecated: true }
+        primaryRole: { type: string, deprecated: true }
+        experienceLevel: { type: string, deprecated: true }
+        skillTags: { type: array, maxItems: 5, items: { type: string }, deprecated: true }
+        problemToSolve: { type: string, deprecated: true }
+        firstBuildStep: { type: string, deprecated: true }
+        whatYouBring: { type: string, deprecated: true }
+        collaborationGoal: { type: string, deprecated: true }
+        portfolioUrls: { type: array, maxItems: 3, items: { type: string }, deprecated: true }
+        vibeCodingFoundation: { type: string, deprecated: true }
+        lastWordToMoonstone: { type: string, deprecated: true }
+        viewOnTechDemocratization: { type: string, deprecated: true }
+        whenTechSingularity: { type: string, deprecated: true }
+        aiHumanRelationship: { type: string, deprecated: true }
+        teamPreference: { type: string, deprecated: true }
+        existingTeamDetails: { type: string, deprecated: true }
+        organization: { type: string, deprecated: true }
+        role_skills: { type: string, deprecated: true }
+        motivation: { type: string, deprecated: true }
+
+    DreamUPAdminOwnReviewMutationRequest:
+      type: object
+      additionalProperties: false
+      required: [recommendation, note]
+      properties:
+        recommendation: { type: string, enum: [accept, waitlist, reject, needs_discussion] }
+        note: { type: string, maxLength: 2000 }
+
+    DreamUPAdminReviewRecord:
+      type: object
+      additionalProperties: false
+      required: [recommendation, note, version, updatedAt]
+      properties:
+        recommendation: { type: string, enum: [accept, waitlist, reject, needs_discussion] }
+        note: { type: string, maxLength: 2000 }
+        version: { type: integer, minimum: 1 }
+        updatedAt: { type: integer, minimum: 0 }
+
+    DreamUPAdminOwnReviewMutationResponse:
+      type: object
+      additionalProperties: false
+      required: [review]
+      properties:
+        review: { $ref: "#/components/schemas/DreamUPAdminReviewRecord" }
+
+    DreamUPAdminAdmissionConsensus:
+      type: object
+      additionalProperties: false
+      required: [roundId, roundNumber, status, version, approvalCount, requiredApprovals, ownApproval, applicationStatus]
+      properties:
+        roundId: { type: [string, "null"], minLength: 1, maxLength: 160 }
+        roundNumber: { type: integer, minimum: 0 }
+        status: { type: string, enum: [not_started, open, finalized, cancelled] }
+        version: { type: integer, minimum: 0 }
+        approvalCount: { type: integer, minimum: 0, maximum: 3 }
+        requiredApprovals: { type: integer, const: 3 }
+        ownApproval: { type: boolean }
+        applicationStatus: { type: string, enum: [submitted, under_review, accepted, waitlisted, rejected, withdrawn] }
+
+    DreamUPAdminAdmissionConsensusResponse:
+      type: object
+      additionalProperties: false
+      required: [consensus]
+      properties:
+        consensus: { $ref: "#/components/schemas/DreamUPAdminAdmissionConsensus" }
+
+    DreamUPAdminDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [status, reason]
+      properties:
+        status: { type: string, enum: [rejected, waitlisted] }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+
+    DreamUPAdminBasicApplication:
+      type: object
+      additionalProperties: false
+      required: [id, eventId, displayHandle, status, version, reviewAnswers, submittedAt, updatedAt]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 160 }
+        eventId: { type: string, minLength: 1, maxLength: 160 }
+        displayHandle: { type: string, minLength: 8, maxLength: 80 }
+        status: { type: string, enum: [submitted, under_review, accepted, waitlisted, rejected, withdrawn] }
+        version: { type: integer, minimum: 1 }
+        reviewAnswers: { $ref: "#/components/schemas/DreamUPAdminReviewAnswers" }
+        submittedAt: { type: [integer, "null"], minimum: 0 }
+        updatedAt: { type: integer, minimum: 0 }
+
+    DreamUPAdminOwnReview:
+      type: object
+      additionalProperties: false
+      required: [recommendation, note, version]
+      properties:
+        recommendation: { type: string, enum: [accept, waitlist, reject, needs_discussion] }
+        note: { type: string, maxLength: 2000 }
+        version: { type: integer, minimum: 1 }
+
+    DreamUPAdminApplicationDetail:
+      type: object
+      additionalProperties: false
+      required: [application, ownReview]
+      properties:
+        application: { $ref: "#/components/schemas/DreamUPAdminBasicApplication" }
+        ownReview:
+          oneOf:
+            - $ref: "#/components/schemas/DreamUPAdminOwnReview"
+            - type: "null"
+
+    DreamUPAdminReviewIdentityResponse:
+      type: object
+      additionalProperties: false
+      required: [identity, receipt]
+      properties:
+        identity:
+          type: object
+          additionalProperties: false
+          required: [userId, legalName, email, mobile]
+          properties:
+            userId: { type: string, pattern: '^user_[A-Za-z0-9._:-]{1,123}$' }
+            legalName: { type: [string, "null"], maxLength: 120 }
+            email: { type: [string, "null"], maxLength: 320 }
+            mobile: { type: [string, "null"], maxLength: 40 }
+        receipt:
+          type: object
+          additionalProperties: false
+          required: [operationId, receiptHash, consumedAt]
+          properties:
+            operationId: { type: string, pattern: '^[A-Za-z0-9_-]{32,160}$' }
+            receiptHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+            consumedAt: { type: integer, minimum: 1 }
+
+    DreamUPAdminApplicationPage:
+      type: object
+      additionalProperties: false
+      required: [applications, nextCursor]
+      properties:
+        applications:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/DreamUPAdminBasicApplication" }
+        nextCursor: { type: [string, "null"], minLength: 45, maxLength: 2048, pattern: '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$' }
+
+    DreamUPAdminTeamPage:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, name, description, status, captainDisplayHandle, memberCount, seatConfirmedCount, publicRecruiting, createdAt, members]
+            properties:
+              id: { type: string }
+              name: { type: string }
+              description: { type: string }
+              status: { type: string, enum: [active, locked, dissolved] }
+              captainDisplayHandle: { type: string, minLength: 8, maxLength: 80 }
+              memberCount: { type: integer, minimum: 0, maximum: 5 }
+              seatConfirmedCount: { type: integer, minimum: 0, maximum: 5 }
+              publicRecruiting: { type: boolean }
+              createdAt: { type: string, format: date-time }
+              members:
+                type: array
+                maxItems: 5
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [displayHandle, role, seatConfirmed, joinedAt]
+                  properties:
+                    displayHandle: { type: string, minLength: 8, maxLength: 80 }
+                    role: { type: string, enum: [captain, member] }
+                    seatConfirmed: { type: boolean }
+                    joinedAt: { type: string, format: date-time }
+        nextCursor: { type: [string, "null"], minLength: 45, maxLength: 2048, pattern: '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$' }
+
     DreamUPContentResponse:
       type: object
       additionalProperties: false
@@ -6254,13 +7150,49 @@ components:
             - type: "null"
         announcements:
           type: array
+          maxItems: 100
           items:
             $ref: "#/components/schemas/DreamUPContentDocument"
+        nextCursor: { type: [string, "null"], minLength: 45, maxLength: 2048, pattern: '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$' }
+
+    DreamUPContentMutationResponse:
+      type: object
+      additionalProperties: false
+      required: [intro, announcements, mutationDocumentId]
+      properties:
+        intro:
+          oneOf:
+            - $ref: "#/components/schemas/DreamUPContentDocument"
+            - type: "null"
+        announcements:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/DreamUPContentDocument"
+        mutationDocumentId: { type: string, minLength: 1, maxLength: 200, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$' }
+        nextCursor: { type: [string, "null"], minLength: 45, maxLength: 2048, pattern: '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$' }
+
+    DreamUPAnnouncementBackgroundImage:
+      type: object
+      additionalProperties: false
+      required: [objectKey, contentType, byteSize, width, height, sha256]
+      properties:
+        objectKey:
+          type: string
+          minLength: 64
+          maxLength: 512
+          pattern: '^private/events/[A-Za-z0-9._:-]+/announcements/announcement_[A-Za-z0-9._:-]{1,115}/backgrounds/cleared/admin_image_upload_[0-9a-f]{40}[.](jpg|png)$'
+          description: Private R2 key issued by the announcement-background upload-intent route and retained with each referencing revision.
+        contentType: { type: string, enum: [image/jpeg, image/png] }
+        byteSize: { type: integer, minimum: 1, maximum: 5242880 }
+        width: { type: integer, minimum: 1, maximum: 16384 }
+        height: { type: integer, minimum: 1, maximum: 16384 }
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
 
     DreamUPContentDocument:
       type: object
       additionalProperties: false
-      required: [id, kind, status, title, summary, blocks, version, revision, publishedAt, updatedAt]
+      required: [id, kind, status, title, summary, blocks, background, version, revision, publishedAt, updatedAt]
       properties:
         id: { type: string }
         kind: { type: string, enum: [intro, announcement] }
@@ -6270,6 +7202,10 @@ components:
         blocks:
           type: array
           items: { $ref: "#/components/schemas/DreamUPContentBlock" }
+        background:
+          oneOf:
+            - $ref: "#/components/schemas/DreamUPAnnouncementBackgroundImage"
+            - type: "null"
         version: { type: integer, minimum: 1 }
         revision: { type: integer, minimum: 1 }
         publishedAt: { type: [string, "null"], format: date-time }
@@ -6563,22 +7499,10 @@ components:
           minLength: 1
           maxLength: 2048
 
-    WeChatLoginRequest:
-      type: object
-      additionalProperties: false
-      required: [code]
-      properties:
-        code:
-          type: string
-          writeOnly: true
-          minLength: 1
-          maxLength: 2048
-          description: Fresh `wx.login` one-time code. Never stored or returned.
-
     WeChatOnboardingBeginRequest:
       type: object
       additionalProperties: false
-      required: [loginCode]
+      required: [loginCode, phoneCode]
       properties:
         loginCode:
           type: string
@@ -6591,7 +7515,7 @@ components:
           writeOnly: true
           minLength: 1
           maxLength: 2048
-          description: Optional code supplied by the same `getPhoneNumber` action. Absence or provider rejection continues without a phone.
+          description: Fresh mandatory `getPhoneNumber` code. Absence, rejection or provider failure creates no account, challenge or session.
 
     WeChatOnboardingRequiredResponse:
       type: object
@@ -6608,7 +7532,7 @@ components:
     WeChatOnboardingCompleteRequest:
       type: object
       additionalProperties: false
-      required: [onboardingToken, username, displayName, email, password, acceptedTerms]
+      required: [onboardingToken, email, password, acceptedTerms]
       properties:
         onboardingToken:
           type: string
@@ -6616,14 +7540,12 @@ components:
           pattern: "^[A-Za-z0-9_-]{43}$"
         username:
           type: string
-          minLength: 3
           maxLength: 64
-          description: Used only when a new account is created; never overwrites an existing account.
+          description: Optional/empty for existing-account binding. Required and validated only when a new account is created; never overwrites an existing account.
         displayName:
           type: string
-          minLength: 1
           maxLength: 100
-          description: Used only when a new account is created; never overwrites an existing account.
+          description: Optional/empty for existing-account binding. Required and validated only when a new account is created; never overwrites an existing account.
         email: {type: string, format: email, maxLength: 254}
         password:
           type: string
@@ -6720,6 +7642,34 @@ components:
       properties:
         status: {type: string, enum: [verified]}
 
+    DreamUPAuthenticationRequiredErrorResponse:
+      type: object
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          additionalProperties: false
+          properties:
+            code: { type: string, const: authentication_required }
+            message: { type: string }
+            requestId: { type: string }
+
+    DreamUPAdminStepUpRequiredErrorResponse:
+      type: object
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          additionalProperties: false
+          properties:
+            code: { type: string, const: admin_stepup.required }
+            message: { type: string }
+            requestId: { type: string }
+
     ErrorResponse:
       type: object
       required: [error]
@@ -6772,8 +7722,8 @@ components:
           type: string
           description: |
             Server-selected identifier. Current interactive values are
-            `cloudflare_turnstile` and `google_recaptcha`; clients cannot
-            choose or override this value.
+            `moonstone_image_digits`, `cloudflare_turnstile`, and
+            `google_recaptcha`; clients cannot choose or override this value.
         providerReady:
           type: boolean
           description: False means high-risk verification is fail-closed until a provider is configured.
@@ -6783,8 +7733,9 @@ components:
           description: |
             Server-issued public SDK parameters. Turnstile uses exactly
             `siteKey`, `action`, and `cdata`; reCAPTCHA uses exactly `siteKey`
-            and the unique per-challenge `action`. No provider secret or URL
-            is returned.
+            and the unique per-challenge `action`; the first-party provider
+            uses exactly a bounded inline raster PNG `imageDataUrl` and a
+            digit count. No answer, provider secret, or remote URL is returned.
         completionPath:
           type: string
           enum: [/api/v1/auth/step-up, /api/v1/auth/sessions/mfa, /api/v1/auth/reauthentication]
@@ -6866,7 +7817,7 @@ components:
         registrationToken:
           type: string
           minLength: 1
-          description: Short-lived opaque token usable only to resend this registration's email.
+          description: Returned only after the mandatory image challenge and account creation; usable solely to resend this registration's verification email.
         expiresAt: {type: string, format: date-time}
 
     RegistrationVerifyRequest:
@@ -7747,12 +8698,62 @@ components:
           type: boolean
           description: Whether the scope is mandatory for the client profile.
 
+    DreamUPNativeReauthenticationRequest:
+      type: object
+      additionalProperties: false
+      required: [loginCode, eventId, action, target]
+      properties:
+        loginCode:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 2048
+          description: Fresh one-use `wx.login` code. Never stored, logged, or returned.
+        eventId:
+          $ref: "#/components/schemas/DreamUPOpaqueOperationalId"
+        action:
+          type: string
+          description: Exact high-risk DreamUP administrator capability authorized by the grant.
+          enum:
+            - event.application.review
+            - event.application.approve_admission
+            - event.application.decide
+            - event.registration.manage
+            - event.checkin.scan
+            - event.checkin.manage_window
+            - event.identity_access.consume
+            - event.identity.read_restricted
+            - event.legal.read
+            - event.application.export
+            - event.audit.read
+            - event.contact_submission.manage
+            - event.content.manage
+            - event.inspection.point.manage
+            - event.inspection.perform
+            - event.inspection.review
+            - event.asset.manage
+            - event.asset.reservation.manage
+            - event.asset.custody.transfer
+            - event.asset.inventory.adjust
+            - event.personal_asset.assignment.manage
+            - event.asset.code.rotate
+            - event.qr.print.single
+            - event.qr.print.bulk
+            - system.role_migration.read
+        target:
+          type: string
+          minLength: 1
+          maxLength: 900
+          description: Canonical JSON tuple `["dreamup-admin-target/v1", eventId, resourceKind, resourceId]`; alternate JSON encodings and cross-event targets are rejected.
+
     ReauthenticationRequest:
       type: object
       description: |
         Declares the high-risk action being prepared and verifies the current
         session user's password. Target resource IDs must match the eventual
-        operation; the grant is bound to them.
+        operation; the grant is bound to them. DreamUP administrator actions
+        additionally require `eventId` and a canonical target tuple, and forbid
+        `applicationId` and `clientId`.
       required: [action, password]
       additionalProperties: false
       properties:
@@ -7772,7 +8773,34 @@ components:
             - user.sessions.revoke
             - employee.offboard
             - registration.abuse.unblock
+            - event.application.review
+            - event.application.approve_admission
+            - event.application.decide
+            - event.registration.manage
+            - event.checkin.scan
+            - event.checkin.manage_window
+            - event.identity_access.consume
+            - event.identity.read_restricted
+            - event.legal.read
+            - event.application.export
+            - event.audit.read
+            - event.contact_submission.manage
+            - event.content.manage
+            - event.inspection.point.manage
+            - event.inspection.perform
+            - event.inspection.review
+            - event.asset.manage
+            - event.asset.reservation.manage
+            - event.asset.custody.transfer
+            - event.asset.inventory.adjust
+            - event.personal_asset.assignment.manage
+            - event.asset.code.rotate
+            - event.qr.print.single
+            - event.qr.print.bulk
+            - system.role_migration.read
           description: The high-risk action the grant will authorize.
+        eventId:
+          $ref: "#/components/schemas/DreamUPOpaqueOperationalId"
         applicationId:
           type: string
           description: Target application for application-scoped actions; must be empty for account actions.
@@ -7787,6 +8815,8 @@ components:
             `registration.abuse.unblock`, use the exact server-defined binding
             `<dimension>_<sha256>` returned or derived by the operator tool;
             the revoke request must present a grant bound to the same target.
+            DreamUP actions require the canonical JSON tuple
+            `["dreamup-admin-target/v1", eventId, resourceKind, resourceId]`.
             Forbidden for actions that do not define a target.
         password:
           type: string
@@ -8972,3 +10002,755 @@ components:
           type: array
           maxItems: 2
           items: {$ref: "#/components/schemas/PublicLegalPublication"}
+
+    DreamUPOpaqueOperationalId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      description: Opaque event-scoped identifier. Clients must not infer type or ownership from its prefix.
+
+    DreamUPEmptyMutationRequest:
+      type: object
+      additionalProperties: false
+      maxProperties: 0
+
+    DreamUPImageDescriptor:
+      type: object
+      required: [objectKey, contentType, byteSize, sha256]
+      additionalProperties: false
+      properties:
+        objectKey:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: "^private/events/[A-Za-z0-9._:-]+/[A-Za-z0-9._:/-]+\\.(jpg|png)$"
+          not: { pattern: '(^|/)\.\.(/|$)' }
+          description: Private object key issued by the corresponding upload-intent route; `..` path segments are forbidden.
+        contentType: { type: string, enum: [image/jpeg, image/png] }
+        byteSize: { type: integer, minimum: 1, maximum: 5242880 }
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+
+    DreamUPNullableImageDescriptor:
+      oneOf:
+        - $ref: "#/components/schemas/DreamUPImageDescriptor"
+        - type: "null"
+
+    DreamUPRestrictedImageLink:
+      type: object
+      required: [url, contentType, byteSize, sha256, expiresAt]
+      additionalProperties: false
+      properties:
+        url: { type: string, format: uri, maxLength: 4096 }
+        contentType: { type: string, enum: [image/jpeg, image/png] }
+        byteSize: { type: integer, minimum: 1, maximum: 5242880 }
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        expiresAt: { type: string, format: date-time }
+
+    DreamUPAdminImageUploadIntentRequest:
+      type: object
+      required: [fileName, contentType, byteSize, width, height, sha256]
+      additionalProperties: false
+      properties:
+        fileName:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: "^[^\\r\\n]+$"
+        contentType: { type: string, enum: [image/jpeg, image/png] }
+        byteSize: { type: integer, minimum: 1, maximum: 5242880 }
+        width:
+          type: integer
+          minimum: 1
+          description: Width times height must not exceed 8,000,000 pixels.
+        height:
+          type: integer
+          minimum: 1
+          description: Width times height must not exceed 8,000,000 pixels.
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        entityId:
+          allOf: [{ $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }]
+          description: Optional stable entity identifier with the route-specific point_, asset_, personal_catalog_, splash_poster_, or announcement_ prefix.
+
+    DreamUPAdminImageUploadIntent:
+      type: object
+      required: [uploadId, entityId, entityType, image, uploadUrl, uploadMethod, requiredHeaders, expiresAt, status, version, replayed]
+      additionalProperties: false
+      properties:
+        uploadId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        entityId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        entityType: { type: string, enum: [inspection_point, asset_catalog, personal_asset_assignment, splash_poster, announcement_background] }
+        image: { $ref: "#/components/schemas/DreamUPImageDescriptor" }
+        uploadUrl: { type: string, format: uri, maxLength: 4096 }
+        uploadMethod: { type: string, const: PUT }
+        requiredHeaders:
+          type: object
+          required: [content-type, x-content-sha256]
+          additionalProperties: false
+          properties:
+            content-type: { type: string, enum: [image/jpeg, image/png] }
+            x-content-sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        expiresAt: { type: string, format: date-time }
+        status: { type: string, enum: [issued, uploaded, consumed, purging, expired] }
+        version: { type: integer, minimum: 1 }
+        replayed: { type: boolean }
+
+    DreamUPSplashPosterImage:
+      type: object
+      required: [objectKey, contentType, byteSize, width, height, sha256]
+      additionalProperties: false
+      properties:
+        objectKey:
+          type: string
+          minLength: 64
+          maxLength: 512
+          pattern: '^private/events/[A-Za-z0-9._:-]+/splash-posters/splash_poster_[A-Za-z0-9._:-]{1,114}/images/cleared/admin_image_upload_[0-9a-f]{40}[.](jpg|png)$'
+        contentType: { type: string, enum: [image/jpeg, image/png] }
+        byteSize: { type: integer, minimum: 1, maximum: 5242880 }
+        width: { type: integer, minimum: 1, maximum: 8000000 }
+        height: { type: integer, minimum: 1, maximum: 8000000 }
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+
+    DreamUPSplashPoster:
+      type: object
+      required: [id, status, version, revision, altText, image, updatedAt]
+      additionalProperties: false
+      properties:
+        id: { type: string, pattern: '^splash_poster_[A-Za-z0-9._:-]{1,114}$' }
+        status: { type: string, enum: [published, disabled] }
+        version: { type: integer, minimum: 1 }
+        revision: { type: integer, minimum: 1 }
+        altText: { type: string, minLength: 1, maxLength: 120 }
+        image: { $ref: "#/components/schemas/DreamUPSplashPosterImage" }
+        updatedAt: { type: string, format: date-time }
+
+    DreamUPSplashPosterResponse:
+      type: object
+      required: [splash]
+      additionalProperties: false
+      properties:
+        splash:
+          oneOf:
+            - $ref: "#/components/schemas/DreamUPSplashPoster"
+            - type: "null"
+
+    DreamUPSplashPosterMutationRequest:
+      description: Publishing the first splash poster requires `image`; an existing poster may be republished with only `action` and `altText` to update its accessible description or re-enable it. The server enforces that state-dependent condition.
+      oneOf:
+        - type: object
+          required: [action, altText]
+          additionalProperties: false
+          properties:
+            action: { type: string, const: publish }
+            altText: { type: string, minLength: 1, maxLength: 120 }
+            image: { $ref: "#/components/schemas/DreamUPSplashPosterImage" }
+        - type: object
+          required: [action]
+          additionalProperties: false
+          properties:
+            action: { type: string, const: disable }
+
+    DreamUPIssuedCode:
+      type: object
+      required: [codeId, purpose, entityType, entityId, generation, token, qrToken, version]
+      additionalProperties: false
+      properties:
+        codeId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        purpose: { type: string, enum: [inspection_point, public_asset, personal_asset] }
+        entityType: { type: string, enum: [inspection_point, asset_unit, personal_asset_assignment] }
+        entityId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        generation: { type: integer, minimum: 1 }
+        token: { type: string, pattern: "^[A-Za-z0-9_-]{43}$", readOnly: true }
+        qrToken: { type: string, pattern: "^[A-Za-z0-9_-]{43}$", readOnly: true }
+        version: { type: integer, minimum: 1 }
+
+    DreamUPNullableIssuedCode:
+      oneOf:
+        - $ref: "#/components/schemas/DreamUPIssuedCode"
+        - type: "null"
+
+    DreamUPInspectionPoint:
+      type: object
+      required: [id, pointId, name, location, locationLabel, instructions, image, status, codeGeneration, activeCodeId, activeCodeGeneration, activeCodeVersion, version, updatedAt]
+      additionalProperties: false
+      properties:
+        id: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        pointId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        name: { type: string, minLength: 1, maxLength: 160 }
+        location: { type: string, minLength: 1, maxLength: 255 }
+        locationLabel: { type: string, minLength: 1, maxLength: 255 }
+        instructions: { type: string, minLength: 1, maxLength: 2000 }
+        image: { $ref: "#/components/schemas/DreamUPNullableImageDescriptor" }
+        status: { type: string, enum: [active, inactive, archived] }
+        codeGeneration: { type: integer, minimum: 0 }
+        activeCodeId: { type: [string, "null"], maxLength: 128 }
+        activeCodeGeneration: { type: [integer, "null"], minimum: 1 }
+        activeCodeVersion: { type: [integer, "null"], minimum: 1 }
+        version: { type: integer, minimum: 1 }
+        updatedAt: { type: string, format: date-time }
+
+    DreamUPInspectionPointCreateRequest:
+      type: object
+      required: [name, instructions]
+      additionalProperties: false
+      anyOf:
+        - required: [location]
+        - required: [locationLabel]
+      allOf:
+        - if:
+            required: [status]
+            properties: { status: { const: active } }
+          then:
+            required: [image]
+            properties: { image: { $ref: "#/components/schemas/DreamUPImageDescriptor" } }
+      properties:
+        pointId: { type: string, pattern: "^point_[A-Za-z0-9._:-]{1,122}$" }
+        name: { type: string, minLength: 1, maxLength: 160 }
+        location: { type: string, minLength: 1, maxLength: 255 }
+        locationLabel: { type: string, minLength: 1, maxLength: 255 }
+        instructions: { type: string, minLength: 1, maxLength: 2000 }
+        status: { type: string, enum: [active, inactive], default: inactive }
+        image: { $ref: "#/components/schemas/DreamUPNullableImageDescriptor" }
+
+    DreamUPInspectionPointUpdateRequest:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      allOf:
+        - if:
+            required: [status]
+            properties: { status: { const: active } }
+          then:
+            required: [image]
+            properties: { image: { $ref: "#/components/schemas/DreamUPImageDescriptor" } }
+      properties:
+        name: { type: string, minLength: 1, maxLength: 160 }
+        location: { type: string, minLength: 1, maxLength: 255 }
+        locationLabel: { type: string, minLength: 1, maxLength: 255 }
+        instructions: { type: string, minLength: 1, maxLength: 2000 }
+        status: { type: string, enum: [active, inactive, archived] }
+        image: { $ref: "#/components/schemas/DreamUPNullableImageDescriptor" }
+
+    DreamUPInspectionPointItemResponse:
+      type: object
+      required: [item]
+      additionalProperties: false
+      properties:
+        item: { $ref: "#/components/schemas/DreamUPInspectionPoint" }
+
+    DreamUPInspectionPointMutationResponse:
+      type: object
+      required: [item, code]
+      additionalProperties: false
+      properties:
+        item: { $ref: "#/components/schemas/DreamUPInspectionPoint" }
+        code: { $ref: "#/components/schemas/DreamUPNullableIssuedCode" }
+        replayed: { type: boolean }
+
+    DreamUPInspectionPointPage:
+      type: object
+      required: [items, nextCursor]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/DreamUPInspectionPoint" }
+        nextCursor: { type: [string, "null"], maxLength: 2048 }
+
+    DreamUPInspectionStartRequest:
+      type: object
+      required: [scanReceipt, fileName, contentType, byteSize, width, height, sha256]
+      additionalProperties: false
+      properties:
+        scanReceipt: { type: string, minLength: 1, maxLength: 2048 }
+        fileName: { type: string, minLength: 1, maxLength: 255 }
+        contentType: { type: string, enum: [image/jpeg, image/png] }
+        byteSize: { type: integer, minimum: 1, maximum: 5242880 }
+        width: { type: integer, minimum: 1, description: "Width times height must not exceed 8,000,000 pixels." }
+        height: { type: integer, minimum: 1, description: "Width times height must not exceed 8,000,000 pixels." }
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+
+    DreamUPInspectionStartResponse:
+      type: object
+      required: [attempt, photoObjectId, uploadUrl, uploadMethod, requiredHeaders, expiresAt, replayed]
+      additionalProperties: false
+      properties:
+        attempt:
+          type: object
+          required: [attemptId, pointId, status, version]
+          additionalProperties: false
+          properties:
+            attemptId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+            pointId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+            status: { type: string, const: started }
+            version: { type: integer, minimum: 1 }
+        photoObjectId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        uploadUrl: { type: string, format: uri, maxLength: 4096 }
+        uploadMethod: { type: string, const: PUT }
+        requiredHeaders:
+          type: object
+          required: [content-type, x-content-sha256]
+          additionalProperties: false
+          properties:
+            content-type: { type: string, enum: [image/jpeg, image/png] }
+            x-content-sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        expiresAt: { type: string, format: date-time }
+        replayed: { type: boolean }
+
+    DreamUPInspectionFinalizeRequest:
+      type: object
+      required: [attemptId, outcome, note, observedAt, sha256]
+      additionalProperties: false
+      properties:
+        attemptId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        outcome: { type: string, enum: [passed, failed, needs_attention] }
+        note: { type: string, maxLength: 2000 }
+        observedAt:
+          type: string
+          format: date-time
+          description: Must fall between five minutes before attempt start and five minutes after the earlier completion/expiry boundary.
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+
+    DreamUPInspectionFinalizeResponse:
+      type: object
+      required: [inspection]
+      additionalProperties: false
+      properties:
+        inspection:
+          type: object
+          required: [inspectionId, pointId, outcome, receivedAt]
+          additionalProperties: false
+          properties:
+            inspectionId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+            pointId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+            outcome: { type: string, enum: [passed, failed, needs_attention] }
+            receivedAt: { type: string, format: date-time }
+        replayed: { type: boolean }
+
+    DreamUPInspection:
+      type: object
+      required: [id, inspectionId, attemptId, pointId, pointName, location, inspectorSubject, outcome, note, photoObjectId, photoSecurityStatus, observedAt, receivedAt]
+      additionalProperties: false
+      properties:
+        id: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        inspectionId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        attemptId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        pointId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        pointName: { type: string, minLength: 1, maxLength: 160 }
+        location: { type: string, minLength: 1, maxLength: 255 }
+        inspectorSubject: { type: string, minLength: 1, maxLength: 255 }
+        outcome: { type: string, enum: [passed, failed, needs_attention] }
+        note: { type: string, maxLength: 2000 }
+        photoObjectId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        photoSecurityStatus: { type: string, enum: [quarantined, cleared, rejected, purging, purged] }
+        observedAt: { type: [string, "null"], format: date-time }
+        receivedAt: { type: string, format: date-time }
+        photo:
+          oneOf:
+            - $ref: "#/components/schemas/DreamUPRestrictedImageLink"
+            - type: "null"
+
+    DreamUPInspectionItemResponse:
+      type: object
+      required: [item]
+      additionalProperties: false
+      properties:
+        item: { $ref: "#/components/schemas/DreamUPInspection" }
+
+    DreamUPInspectionPage:
+      type: object
+      required: [items, nextCursor]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/DreamUPInspection" }
+        nextCursor: { type: [string, "null"], maxLength: 2048 }
+
+    DreamUPAsset:
+      type: object
+      required: [id, assetId, unitId, name, displayName, description, trackingMode, image, isFixedAsset, managerName, managerContact, isReservable, quantityUnit, maxReservationQuantity, status, catalogStatus, assetIdentifier, serialNumber, location, custodianSubject, totalQuantity, availableQuantity, codeGeneration, activeCodeId, activeCodeVersion, version, unitVersion, catalogVersion, updatedAt]
+      additionalProperties: false
+      properties:
+        id: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        assetId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        unitId: { type: [string, "null"], maxLength: 128 }
+        name: { type: string, minLength: 1, maxLength: 160 }
+        displayName: { type: string, minLength: 1, maxLength: 160 }
+        description: { type: string, maxLength: 2000 }
+        trackingMode: { type: string, enum: [serialized, quantity] }
+        image: { $ref: "#/components/schemas/DreamUPNullableImageDescriptor" }
+        isFixedAsset: { type: boolean }
+        managerName: { type: string, minLength: 1, maxLength: 100 }
+        managerContact: { type: string, minLength: 1, maxLength: 160 }
+        isReservable: { type: boolean }
+        quantityUnit: { type: string, minLength: 1, maxLength: 32 }
+        maxReservationQuantity: { type: integer, minimum: 1, maximum: 100000 }
+        status: { type: string, enum: [active, inactive, archived, available, reserved, checked_out, maintenance, quarantined, retired] }
+        catalogStatus: { type: string, enum: [active, inactive, archived] }
+        assetIdentifier: { type: [string, "null"], maxLength: 128 }
+        serialNumber: { type: [string, "null"], maxLength: 160 }
+        location: { type: string, maxLength: 160 }
+        custodianSubject: { type: [string, "null"], maxLength: 255 }
+        totalQuantity: { type: integer, minimum: 0, maximum: 100000 }
+        availableQuantity: { type: integer, minimum: 0, maximum: 100000 }
+        codeGeneration: { type: integer, minimum: 0 }
+        activeCodeId: { type: [string, "null"], maxLength: 128 }
+        activeCodeVersion: { type: [integer, "null"], minimum: 1 }
+        version: { type: integer, minimum: 1 }
+        unitVersion: { type: [integer, "null"], minimum: 1 }
+        catalogVersion: { type: integer, minimum: 1 }
+        updatedAt: { type: string, format: date-time }
+
+    DreamUPAssetCreateRequest:
+      type: object
+      required: [managerName, managerContact, quantityUnit, assetIdentifier]
+      additionalProperties: false
+      anyOf:
+        - required: [name]
+        - required: [displayName]
+      allOf:
+        - if:
+            required: [catalogStatus]
+            properties: { catalogStatus: { const: active } }
+          then:
+            required: [image]
+            properties: { image: { $ref: "#/components/schemas/DreamUPImageDescriptor" } }
+        - if:
+            required: [trackingMode]
+            properties: { trackingMode: { const: serialized } }
+          then:
+            required: [serialNumber, totalQuantity]
+            properties:
+              serialNumber: { type: string, minLength: 1, maxLength: 160 }
+              totalQuantity: { const: 1 }
+      properties:
+        assetId: { type: string, pattern: "^asset_[A-Za-z0-9._:-]{1,122}$" }
+        name: { type: string, minLength: 1, maxLength: 160 }
+        displayName: { type: string, minLength: 1, maxLength: 160 }
+        description: { type: string, maxLength: 2000 }
+        category: { type: string, maxLength: 2000, description: Legacy alias for description. }
+        trackingMode: { type: string, enum: [serialized, quantity] }
+        image: { $ref: "#/components/schemas/DreamUPNullableImageDescriptor" }
+        isFixedAsset: { type: boolean }
+        managerName: { type: string, minLength: 1, maxLength: 100 }
+        managerContact: { type: string, minLength: 1, maxLength: 160, pattern: "^[^\\r\\n]+$" }
+        isReservable: { type: boolean }
+        quantityUnit: { type: string, minLength: 1, maxLength: 32 }
+        maxReservationQuantity:
+          type: integer
+          minimum: 1
+          maximum: 100000
+          description: Must not exceed totalQuantity.
+        assetIdentifier: { type: string, minLength: 1, maxLength: 128 }
+        serialNumber: { type: [string, "null"], maxLength: 160 }
+        location: { type: string, minLength: 1, maxLength: 160 }
+        totalQuantity: { type: integer, minimum: 1, maximum: 100000, default: 1 }
+        status: { type: string, enum: [available, reserved, maintenance, quarantined], default: available }
+        catalogStatus: { type: string, enum: [active, inactive], default: inactive }
+
+    DreamUPAssetUpdateRequest:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 160 }
+        displayName: { type: string, minLength: 1, maxLength: 160 }
+        description: { type: string, maxLength: 2000 }
+        image: { $ref: "#/components/schemas/DreamUPNullableImageDescriptor" }
+        isFixedAsset: { type: boolean }
+        managerName: { type: string, minLength: 1, maxLength: 100 }
+        managerContact: { type: string, minLength: 1, maxLength: 160, pattern: "^[^\\r\\n]+$" }
+        isReservable: { type: boolean }
+        quantityUnit: { type: string, minLength: 1, maxLength: 32 }
+        maxReservationQuantity: { type: integer, minimum: 1, maximum: 100000 }
+        catalogStatus: { type: string, enum: [active, inactive, archived] }
+        status: { type: string, enum: [active, inactive, archived], description: Alias for catalogStatus. }
+
+    DreamUPAssetItemResponse:
+      type: object
+      required: [item]
+      additionalProperties: false
+      properties:
+        item: { $ref: "#/components/schemas/DreamUPAsset" }
+
+    DreamUPAssetMutationResponse:
+      type: object
+      required: [item, code]
+      additionalProperties: false
+      properties:
+        item: { $ref: "#/components/schemas/DreamUPAsset" }
+        code: { $ref: "#/components/schemas/DreamUPNullableIssuedCode" }
+        replayed: { type: boolean }
+
+    DreamUPAssetPage:
+      type: object
+      required: [items, nextCursor]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/DreamUPAsset" }
+        nextCursor: { type: [string, "null"], maxLength: 2048 }
+
+    DreamUPOperationalReasonCode:
+      type: string
+      minLength: 1
+      maxLength: 80
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$"
+
+    DreamUPInventoryAdjustmentRequest:
+      type: object
+      required: [stockDelta]
+      additionalProperties: false
+      properties:
+        stockDelta:
+          type: integer
+          minimum: -100000
+          maximum: 100000
+          not: { const: 0 }
+        reasonCode: { $ref: "#/components/schemas/DreamUPOperationalReasonCode" }
+
+    DreamUPAssetCheckoutRequest:
+      type: object
+      required: [reservationId]
+      additionalProperties: false
+      properties:
+        reservationId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        reasonCode: { $ref: "#/components/schemas/DreamUPOperationalReasonCode" }
+
+    DreamUPAssetCheckinRequest:
+      type: object
+      required: [reservationId, toLocation]
+      additionalProperties: false
+      properties:
+        reservationId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        toLocation: { type: string, minLength: 1, maxLength: 160 }
+        reasonCode: { $ref: "#/components/schemas/DreamUPOperationalReasonCode" }
+
+    DreamUPAssetTransferRequest:
+      type: object
+      additionalProperties: false
+      oneOf:
+        - required: [toLocation]
+          not: { required: [toCustodianSubject] }
+        - required: [toCustodianSubject]
+          not: { required: [toLocation] }
+      properties:
+        toLocation: { type: string, minLength: 1, maxLength: 160 }
+        toCustodianSubject: { type: string, minLength: 1, maxLength: 255 }
+        reasonCode: { $ref: "#/components/schemas/DreamUPOperationalReasonCode" }
+
+    DreamUPAssetReservation:
+      type: object
+      required: [id, reservationId, assetId, assetUnitId, assetName, participantDisplayName, requesterSubject, purpose, startsAt, endsAt, quantity, status, decisionReason, decidedAt, checkedOut, checkedIn, version, createdAt]
+      additionalProperties: false
+      properties:
+        id: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        reservationId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        assetId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        assetUnitId: { type: [string, "null"], maxLength: 128 }
+        assetName: { type: string, minLength: 1, maxLength: 160 }
+        participantDisplayName: { type: string, minLength: 1, maxLength: 160 }
+        requesterSubject: { type: string, minLength: 1, maxLength: 255 }
+        purpose: { type: string, minLength: 1, maxLength: 1000 }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        quantity: { type: integer, minimum: 1, maximum: 100000 }
+        status: { type: string, enum: [pending, approved, rejected, cancelled, fulfilled, expired] }
+        decisionReason: { type: [string, "null"], maxLength: 1000 }
+        decidedAt: { type: [string, "null"], format: date-time }
+        checkedOut: { type: boolean }
+        checkedIn: { type: boolean }
+        version: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+
+    DreamUPReservationDecisionRequest:
+      type: object
+      required: [status, reason]
+      additionalProperties: false
+      allOf:
+        - if: { properties: { status: { const: approved } }, required: [status] }
+          then: { required: [assetUnitId] }
+      properties:
+        status: { type: string, enum: [approved, rejected, cancelled, fulfilled] }
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+        assetUnitId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+
+    DreamUPReservationItemResponse:
+      type: object
+      required: [item]
+      additionalProperties: false
+      properties:
+        item: { $ref: "#/components/schemas/DreamUPAssetReservation" }
+        replayed: { type: boolean }
+
+    DreamUPReservationPage:
+      type: object
+      required: [items, nextCursor]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/DreamUPAssetReservation" }
+        nextCursor: { type: [string, "null"], maxLength: 2048 }
+
+    DreamUPPersonalAsset:
+      type: object
+      required: [id, assignmentId, catalogId, unitId, label, equipmentLabel, name, description, image, ownerSubject, ownerDisplayName, ownerContact, returnAddress, assetIdentifier, serialNumber, location, status, unitStatus, codeGeneration, activeCodeId, activeCodeVersion, version, assignmentVersion, updatedAt]
+      additionalProperties: false
+      properties:
+        id: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        assignmentId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        catalogId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        unitId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        label: { type: string, minLength: 1, maxLength: 160 }
+        equipmentLabel: { type: string, minLength: 1, maxLength: 160 }
+        name: { type: string, minLength: 1, maxLength: 160 }
+        description: { type: string, maxLength: 2000 }
+        image: { $ref: "#/components/schemas/DreamUPNullableImageDescriptor" }
+        ownerSubject:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Resolved United Pass user identifier; never trusted directly from authority storage.
+        ownerDisplayName: { type: string, minLength: 1, maxLength: 100 }
+        ownerContact: { type: string, minLength: 1, maxLength: 160 }
+        returnAddress: { type: string, minLength: 1, maxLength: 500 }
+        assetIdentifier: { type: string, minLength: 1, maxLength: 128 }
+        serialNumber: { type: [string, "null"], maxLength: 160 }
+        location: { type: string, maxLength: 160 }
+        status: { type: string, enum: [active, ended] }
+        unitStatus: { type: string, enum: [available, reserved, checked_out, maintenance, quarantined, retired] }
+        codeGeneration: { type: integer, minimum: 0 }
+        activeCodeId: { type: [string, "null"], maxLength: 128 }
+        activeCodeVersion: { type: [integer, "null"], minimum: 1 }
+        version: { type: integer, minimum: 1 }
+        assignmentVersion: { type: integer, minimum: 1 }
+        updatedAt: { type: string, format: date-time }
+
+    DreamUPPersonalAssetCreateRequest:
+      type: object
+      required: [equipmentLabel, ownerSubject, ownerDisplayName, ownerContact, returnAddress, assetIdentifier, image]
+      additionalProperties: false
+      oneOf:
+        - required: [assetId]
+          not: { required: [catalogId] }
+        - required: [catalogId]
+          not: { required: [assetId] }
+      properties:
+        equipmentLabel: { type: string, minLength: 1, maxLength: 160 }
+        ownerSubject:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: United Pass identity reference resolved by the BFF before forwarding.
+        ownerDisplayName: { type: string, minLength: 1, maxLength: 100 }
+        ownerContact: { type: string, minLength: 1, maxLength: 160, pattern: "^[^\\r\\n]+$" }
+        returnAddress: { type: string, minLength: 1, maxLength: 500 }
+        assetIdentifier: { type: string, minLength: 1, maxLength: 128 }
+        image: { $ref: "#/components/schemas/DreamUPImageDescriptor" }
+        assetId: { type: string, pattern: "^personal_catalog_[A-Za-z0-9._:-]{1,111}$" }
+        catalogId: { type: string, pattern: "^personal_catalog_[A-Za-z0-9._:-]{1,111}$" }
+        name: { type: string, minLength: 1, maxLength: 160 }
+        description: { type: string, maxLength: 2000 }
+        serialNumber: { type: [string, "null"], maxLength: 160 }
+        location: { type: string, maxLength: 160 }
+
+    DreamUPPersonalAssetEndRequest:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status: { type: string, const: ended }
+
+    DreamUPPersonalAssetMutationResponse:
+      type: object
+      required: [item, code]
+      additionalProperties: false
+      properties:
+        item: { $ref: "#/components/schemas/DreamUPPersonalAsset" }
+        code: { $ref: "#/components/schemas/DreamUPNullableIssuedCode" }
+        replayed: { type: boolean }
+
+    DreamUPPersonalAssetPage:
+      type: object
+      required: [items, nextCursor]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/DreamUPPersonalAsset" }
+        nextCursor: { type: [string, "null"], maxLength: 2048 }
+
+    DreamUPQRPrintSingleRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        templateVersion: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$", default: label-v1 }
+
+    DreamUPQRPrintBulkRequest:
+      type: object
+      required: [codeIds]
+      additionalProperties: false
+      properties:
+        codeIds:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        templateVersion: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$", default: label-v1 }
+
+    DreamUPQRPrintJobItem:
+      type: object
+      required: [codeId, codeGeneration, entityType, entityId, label, secondaryLabel, location, qrToken]
+      additionalProperties: false
+      properties:
+        codeId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        codeGeneration: { type: integer, minimum: 1 }
+        entityType: { type: string, enum: [inspection_point, asset_unit, personal_asset_assignment] }
+        entityId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        label: { type: string, minLength: 1, maxLength: 160 }
+        secondaryLabel: { type: string, maxLength: 500 }
+        location: { type: [string, "null"], maxLength: 500 }
+        qrToken: { type: [string, "null"], pattern: "^[A-Za-z0-9_-]{43}$", readOnly: true }
+
+    DreamUPQRPrintJob:
+      type: object
+      required: [id, printJobId, kind, purpose, authorizationCapability, templateVersion, itemCount, manifestSha256, status, artifactContentType, errorCode, expiresAt, version, createdAt, updatedAt, items]
+      additionalProperties: false
+      properties:
+        id: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        printJobId: { $ref: "#/components/schemas/DreamUPOpaqueOperationalId" }
+        kind: { type: string, enum: [inspection_point, event_asset, personal_asset] }
+        purpose: { type: string, enum: [inspection_point, public_asset, personal_asset] }
+        authorizationCapability: { type: string, enum: [event.qr.print.single, event.qr.print.bulk] }
+        templateVersion: { type: string, minLength: 1, maxLength: 64 }
+        itemCount: { type: integer, minimum: 1, maximum: 100 }
+        manifestSha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        status: { type: string, enum: [queued, ready, failed, expired] }
+        artifactContentType: { type: [string, "null"], maxLength: 160 }
+        errorCode: { type: [string, "null"], maxLength: 160 }
+        expiresAt: { type: [string, "null"], format: date-time }
+        version: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: "#/components/schemas/DreamUPQRPrintJobItem" }
+
+    DreamUPQRPrintJobResponse:
+      type: object
+      required: [item, replayed]
+      additionalProperties: false
+      properties:
+        item: { $ref: "#/components/schemas/DreamUPQRPrintJob" }
+        replayed: { type: boolean }

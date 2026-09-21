@@ -746,8 +746,7 @@ func challengeState(challenge Challenge) State {
 }
 
 var (
-	idempotencyKeyPattern         = regexp.MustCompile(`^[A-Za-z0-9_-]{32,160}$`)
-	dreamUPTargetComponentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$`)
+	idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{32,160}$`)
 )
 
 func validateMutationIdentity(userID identity.UserID, eventID, requestID, idempotencyKey string) error {
@@ -801,50 +800,10 @@ func validAdminActionTarget(userID identity.UserID, eventID, action, target stri
 	}
 	canonical := permissions.Action(action)
 	if permissions.IsDreamUPHighRiskDelegatedAdministratorAction(canonical) {
-		return validDreamUPDelegationTarget(eventID, canonical, target)
+		_, ok := permissions.ParseDreamUPReauthenticationTarget(eventID, canonical, target)
+		return ok
 	}
 	return true
-}
-
-// validDreamUPDelegationTarget accepts only the canonical tuple that the BFF
-// independently derives from its matched route. Exact JSON re-encoding rejects
-// alternate spellings, extra tuple members and cross-event targets before any
-// answer hash or rate-limit budget is touched.
-func validDreamUPDelegationTarget(eventID string, action permissions.Action, target string) bool {
-	if len(target) == 0 || len(target) > 900 || !dreamUPTargetComponentPattern.MatchString(eventID) {
-		return false
-	}
-	var tuple []string
-	if err := json.Unmarshal([]byte(target), &tuple); err != nil || len(tuple) != 4 {
-		return false
-	}
-	canonical, err := json.Marshal(tuple)
-	if err != nil || string(canonical) != target || tuple[0] != "dreamup-admin-target/v1" || tuple[1] != eventID || !dreamUPTargetComponentPattern.MatchString(tuple[2]) || !dreamUPTargetComponentPattern.MatchString(tuple[3]) {
-		return false
-	}
-	eventTarget := tuple[2] == "event" && tuple[3] == eventID
-	switch action {
-	case permissions.ActionContentManage,
-		permissions.ActionRegistrationManage,
-		permissions.ActionCheckinScan,
-		permissions.ActionCheckinManageWindow,
-		permissions.ActionApplicationExport,
-		permissions.ActionAuditRead,
-		permissions.ActionRoleMigrationRead:
-		return eventTarget
-	case permissions.ActionContactSubmissionManage:
-		return eventTarget || tuple[2] == "contact_submission"
-	case permissions.ActionApplicationReview,
-		permissions.ActionApplicationApproveAdmission,
-		permissions.ActionApplicationDecide,
-		permissions.ActionIdentityReadRestricted,
-		permissions.ActionLegalRead:
-		return tuple[2] == "application"
-	case permissions.ActionIdentityGrantConsume:
-		return tuple[2] == "identity_access_grant"
-	default:
-		return false
-	}
 }
 
 func encodeReceipt(code string, version int64, state State) LocalReceiptResult {

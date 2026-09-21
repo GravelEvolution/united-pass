@@ -18,12 +18,13 @@ import (
 // WeChatRegistrationService creates only pending accounts after server-side
 // verification of Mini Program identity and phone proofs.
 type WeChatRegistrationService interface {
-	Create(context.Context, wechatregistration.CreateInput) (registration.CreateResult, error)
+	VerifyRegistration(context.Context, string, string) (wechat.IdentityProof, error)
+	CreateVerified(context.Context, wechatregistration.CreateVerifiedInput) (registration.CreateResult, error)
 }
 
 type WeChatRegistrationRateChecker interface {
 	CheckRegistrationCreate(context.Context, string, string, string, registration.CreateRatePolicy) (bool, time.Duration, error)
-	ConsumeWeChatRegistrationProofs(context.Context, string, string, time.Duration) (bool, time.Duration, error)
+	ClaimWeChatRegistrationProofs(context.Context, string, string, string, int, time.Duration) (bool, time.Duration, error)
 }
 
 type WeChatRegistrationHandlers struct {
@@ -62,21 +63,23 @@ func (h *WeChatRegistrationHandlers) Create(w http.ResponseWriter, r *http.Reque
 	if !decodeWeChatBody(w, r, &body) {
 		return
 	}
-	input := wechatregistration.CreateInput{
-		Registration: registration.CreateInput{Username: body.Username, DisplayName: body.DisplayName, Email: body.Email, Password: body.Password, AcceptedTerms: body.AcceptedTerms, RequestID: body.RequestID},
-		LoginCode:    body.LoginCode, PhoneCode: body.PhoneCode,
-	}
-	if err := registration.ValidateCreate(input.Registration); err != nil || wechat.ValidateCode(body.LoginCode) != nil || wechat.ValidateCode(body.PhoneCode) != nil {
+	registrationInput := registration.CreateInput{Username: body.Username, DisplayName: body.DisplayName, Email: body.Email, Password: body.Password, AcceptedTerms: body.AcceptedTerms, RequestID: body.RequestID}
+	if err := registration.ValidateCreate(registrationInput); err != nil || wechat.ValidateCode(body.LoginCode) != nil || wechat.ValidateCode(body.PhoneCode) != nil {
 		h.writeServiceError(w, r, registration.ErrInvalidInput)
+		return
+	}
+	if !h.claimProofs(w, r, body.LoginCode, body.PhoneCode) {
+		return
+	}
+	proof, err := h.service.VerifyRegistration(r.Context(), body.LoginCode, body.PhoneCode)
+	if err != nil {
+		h.writeServiceError(w, r, err)
 		return
 	}
 	if !h.checkRate(w, r, strings.ToLower(strings.TrimSpace(body.Email))) {
 		return
 	}
-	if !h.consumeProofs(w, r, body.LoginCode, body.PhoneCode) {
-		return
-	}
-	result, err := h.service.Create(r.Context(), input)
+	result, err := h.service.CreateVerified(r.Context(), wechatregistration.CreateVerifiedInput{Registration: registrationInput, Proof: proof})
 	if err != nil {
 		h.writeServiceError(w, r, err)
 		return
@@ -88,17 +91,19 @@ func (h *WeChatRegistrationHandlers) Create(w http.ResponseWriter, r *http.Reque
 	}{Status: "verification_required", RegistrationToken: result.RegistrationToken, ExpiresAt: result.ExpiresAt})
 }
 
-func (h *WeChatRegistrationHandlers) consumeProofs(w http.ResponseWriter, r *http.Request, loginCode, phoneCode string) bool {
-	allowed, retryAfter, err := h.rate.ConsumeWeChatRegistrationProofs(
+func (h *WeChatRegistrationHandlers) claimProofs(w http.ResponseWriter, r *http.Request, loginCode, phoneCode string) bool {
+	allowed, retryAfter, err := h.rate.ClaimWeChatRegistrationProofs(
 		r.Context(),
+		clientIP(r),
 		hashIdentifier(loginCode),
 		hashIdentifier(phoneCode),
-		h.policy.ClientEmail.Window,
+		h.policy.ClientIP.Max,
+		h.policy.ClientIP.Window,
 	)
 	if err != nil || !allowed {
 		seconds := int((retryAfter + time.Second - 1) / time.Second)
 		if seconds <= 0 {
-			seconds = int(h.policy.ClientEmail.Window.Seconds())
+			seconds = int(h.policy.ClientIP.Window.Seconds())
 		}
 		WriteRateLimited(w, r, seconds)
 		return false

@@ -9,6 +9,7 @@
 .page {
   display: grid;
   min-height: 100vh;
+  min-height: 100dvh;
   grid-template-columns: minmax(0, 3fr) minmax(460px, 2fr);
   background: var(--up-surface);
 }
@@ -17,6 +18,7 @@
   position: relative;
   display: flex;
   min-height: 100vh;
+  min-height: 100dvh;
   flex-direction: column;
   justify-content: space-between;
   overflow: hidden;
@@ -35,6 +37,21 @@
     linear-gradient(0deg, rgb(4 11 25 / 56%) 0%, transparent 58%);
   content: "";
   pointer-events: none;
+}
+
+.brandPanel::after {
+  position: absolute;
+  z-index: 1;
+  right: -150px;
+  bottom: -170px;
+  width: 440px;
+  height: 440px;
+  border: 1px solid rgb(255 255 255 / 42%);
+  border-radius: 44% 56% 65% 35%;
+  content: "";
+  opacity: 0.42;
+  pointer-events: none;
+  transform: rotate(22deg);
 }
 
 .brandCarousel {
@@ -184,7 +201,38 @@
 @media (max-width: 900px) {
   .page { grid-template-columns: 1fr; }
   .brandPanel { display: none; }
-  .contentPanel { min-height: 100vh; justify-content: flex-start; }
+  .contentPanel {
+    min-height: 100vh;
+    min-height: 100dvh;
+    justify-content: flex-start;
+    padding-top: max(40px, env(safe-area-inset-top));
+    padding-right: max(28px, env(safe-area-inset-right));
+    padding-bottom: max(40px, env(safe-area-inset-bottom));
+    padding-left: max(28px, env(safe-area-inset-left));
+  }
   .mobileBrand { display: block; width: min(100%, 430px); margin-bottom: 56px; }
   .themeToggle { top: 20px; right: 20px; }
+}
+
+@media (max-width: 520px) {
+  .contentPanel {
+    padding-top: max(28px, env(safe-area-inset-top));
+    padding-right: max(16px, env(safe-area-inset-right));
+    padding-bottom: max(28px, env(safe-area-inset-bottom));
+    padding-left: max(16px, env(safe-area-inset-left));
+  }
+
+  .mobileBrand {
+    margin-bottom: 42px;
+  }
+
+  .themeToggle {
+    top: max(16px, env(safe-area-inset-top));
+    right: max(16px, env(safe-area-inset-right));
+  }
+
+  .footer {
+    margin-top: 26px;
+    line-height: 1.65;
+  }
 }

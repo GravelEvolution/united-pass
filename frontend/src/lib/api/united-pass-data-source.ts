@@ -53,7 +53,6 @@ import type {
   OAuthClient,
   OAuthClientCreateInput,
   OAuthClientCreationResult,
-  OAuthClientUpdateInput,
   SecretRotationResult,
 } from "@/features/applications/types";
 import type { ConsentResolution, ConsentDecision } from "@/features/authorization/types";
@@ -115,8 +114,8 @@ export interface UnitedPassQueries {
 
 /**
  * Mutations that change server-side state.
- * Both the explicit development fixture and the production HTTP implementation
- * satisfy this contract so pages retain one typed integration boundary.
+ * Both the mock implementation and the future real HTTP-backed implementation
+ * must satisfy this contract so pages can swap data sources without UI changes.
  *
  * Mirrors the backend REST contract: standalone application creation is not
  * exposed (applications are always created with an initial client via
@@ -125,51 +124,20 @@ export interface UnitedPassQueries {
  */
 export interface UnitedPassCommands {
   createOAuthClient(input: OAuthClientCreateInput): Promise<OAuthClientCreationResult>;
-  updateOAuthClient(
-    applicationId: string,
-    clientId: string,
-    input: OAuthClientUpdateInput,
-  ): Promise<OAuthClient>;
-  updateOAuthClientStatus(
-    applicationId: string,
-    clientId: string,
-    status: ApplicationStatus,
-  ): Promise<OAuthClient>;
-  deleteOAuthClient(
-    applicationId: string,
-    clientId: string,
-    reauthToken?: string,
-    options?: BrowserCommandOptions,
-  ): Promise<void>;
   createApplicationWithInitialClient(input: ApplicationWithInitialClientInput): Promise<ApplicationWithInitialClientResult>;
   decideConsent(requestId: string, decision: ConsentDecision): Promise<{ redirectUrl: string }>;
   revokeGrant(grantId: string): Promise<void>;
-  rotateClientSecret(
-    applicationId: string,
-    clientId: string,
-    reauthToken?: string,
-    options?: BrowserCommandOptions,
-  ): Promise<SecretRotationResult>;
-  updateApplicationStatus(
-    applicationId: string,
-    status: ApplicationStatus,
-  ): Promise<OAuthApplicationDetail>;
-  deleteApplication(
-    applicationId: string,
-    reauthToken?: string,
-    options?: BrowserCommandOptions,
-  ): Promise<void>;
-  updateApplication(
-    applicationId: string,
-    input: ApplicationUpdateInput,
-  ): Promise<OAuthApplicationDetail>;
+  rotateClientSecret(applicationId: string, clientId: string): Promise<SecretRotationResult>;
+  updateApplicationStatus(applicationId: string, status: ApplicationStatus): Promise<void>;
+  deleteApplication(applicationId: string): Promise<void>;
+  updateApplication(applicationId: string, input: ApplicationUpdateInput): Promise<void>;
 
   // Account profile
   updateProfile(input: { displayName?: string; nickname?: string }): Promise<void>;
   uploadAvatar(file: File): Promise<{ avatarUrl: string }>;
-  requestEmailChange(email: string, captchaVerifyParam?: string): Promise<{ requestId: string }>;
+  requestEmailChange(email: string): Promise<{ requestId: string }>;
   verifyEmailChange(requestId: string, code: string): Promise<void>;
-  requestPhoneChange(phone: string, captchaVerifyParam?: string): Promise<{ requestId: string }>;
+  requestPhoneChange(phone: string): Promise<{ requestId: string }>;
   verifyPhoneChange(requestId: string, code: string): Promise<void>;
 
   // Security

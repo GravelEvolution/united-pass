@@ -14,12 +14,13 @@ import (
 )
 
 type AdminStepUpRepository struct {
-	exec adminDBTX
-	tx   pgx.Tx
+	exec     adminDBTX
+	beginner adminTxBeginner
+	tx       pgx.Tx
 }
 
 func NewAdminStepUpRepository(pool *pgxpool.Pool) *AdminStepUpRepository {
-	return &AdminStepUpRepository{exec: pool}
+	return &AdminStepUpRepository{exec: pool, beginner: pool}
 }
 func newAdminStepUpRepository(tx pgx.Tx) *AdminStepUpRepository {
 	return &AdminStepUpRepository{exec: tx, tx: tx}
@@ -101,7 +102,21 @@ func (r *AdminStepUpRepository) RecordFailure(ctx context.Context, userID identi
 
 func (r *AdminStepUpRepository) PutStepUp(ctx context.Context, state adminstepup.StepUpState) error {
 	if r.tx == nil {
-		return errors.New("postgres: step-up write requires unit of work")
+		if r.beginner == nil {
+			return errors.New("postgres: step-up write requires unit of work")
+		}
+		tx, err := r.beginner.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		if err != nil {
+			return fmt.Errorf("postgres: begin standalone step-up write: %w", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if err := newAdminStepUpRepository(tx).PutStepUp(ctx, state); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("postgres: commit standalone step-up write: %w", err)
+		}
+		return nil
 	}
 	// Replace the session/user's active proof inside the same transaction.
 	// Re-verifying a high-risk action while the 30-minute general proof is

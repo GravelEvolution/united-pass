@@ -393,7 +393,7 @@ export function AuditExplorer({ records, page, hasPrevious, canExport }: AuditEx
         title="审计事件详情"
         visible={selectedEvent !== null}
         onCancel={() => setSelectedEvent(null)}
-        width={480}
+        width="min(480px, 100vw)"
       >
         {selectedEvent && (
           <div style={{ display: "grid", gap: 16 }}>

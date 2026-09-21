@@ -9,20 +9,20 @@
 "use client";
 
 import type { ChangeEvent, FormEvent } from "react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button, Input, Modal, Toast } from "@douyinfe/semi-ui";
 import { IconDelete, IconEdit, IconUpload } from "@douyinfe/semi-icons";
 import { PageHeader } from "@/components/common/page-header";
 import { StatusBadge } from "@/components/common/status-badge";
+import { UserAvatar } from "@/components/common/user-avatar";
 import type { CurrentUser } from "@/types/identity";
 import { ContactVerificationModal } from "./contact-verification-modal";
 import type { ContactKind } from "../utils/contact-validation";
 import { AvatarValidationError, sanitizeAvatarFile } from "../utils/avatar-file";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
+import { getControlledAvatarUrl } from "@/lib/utils/avatar-url";
 import styles from "./account-panels.module.css";
-
-const DEFAULT_AVATAR_URL =
-  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='50' fill='%23eef1f6'/%3E%3Ccircle cx='50' cy='38' r='16' fill='%23b6bfcc'/%3E%3Cpath d='M50 58c-15 0-26 9-26 21v4h52v-4c0-12-11-21-26-21z' fill='%23b6bfcc'/%3E%3C/svg%3E";
 
 type AccountOverviewProps = {
   currentUser: CurrentUser;
@@ -39,10 +39,6 @@ type ProfileErrors = {
 };
 
 type ContactDetails = Pick<CurrentUser, "email" | "phoneMasked">;
-
-function getControlledAvatarUrl(avatarUrl: string | undefined): string | undefined {
-  return avatarUrl?.startsWith("/api/v1/media/avatars/") ? avatarUrl : undefined;
-}
 
 function createInitialProfile(currentUser: CurrentUser): EditableProfile {
   return {
@@ -65,6 +61,7 @@ function maskPhoneNumber(phoneNumber: string): string {
 }
 
 export function AccountOverview({ currentUser }: AccountOverviewProps) {
+  const router = useRouter();
   const initialProfile = createInitialProfile(currentUser);
   const [profile, setProfile] = useState<EditableProfile>(initialProfile);
   const [profileDraft, setProfileDraft] = useState<EditableProfile>(copyProfile(initialProfile));
@@ -81,6 +78,16 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
   const avatarRequestIdRef = useRef(0);
   const selectedFileRef = useRef<File | null>(null);
   const preferredName = profile.nickname?.trim() || profile.displayName;
+
+  useEffect(() => {
+    const nextProfile = createInitialProfile(currentUser);
+    setProfile(nextProfile);
+    setProfileDraft(copyProfile(nextProfile));
+    setContactDetails({
+      email: currentUser.email,
+      phoneMasked: currentUser.phoneMasked,
+    });
+  }, [currentUser]);
 
   function openProfileEditor() {
     setProfileDraft(copyProfile(profile));
@@ -104,12 +111,13 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
     const requestId = avatarRequestIdRef.current + 1;
     avatarRequestIdRef.current = requestId;
     setIsAvatarProcessing(true);
-    selectedFileRef.current = selectedFile;
+    selectedFileRef.current = null;
     setProfileErrors((currentErrors) => ({ ...currentErrors, avatarFile: undefined }));
 
     try {
       const sanitizedAvatar = await sanitizeAvatarFile(selectedFile);
       if (avatarRequestIdRef.current !== requestId) return;
+      selectedFileRef.current = sanitizedAvatar.uploadFile;
       setProfileDraft((currentDraft) => ({
         ...currentDraft,
         avatarFileName: sanitizedAvatar.fileName,
@@ -121,6 +129,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
         ...currentErrors,
         avatarFile: error instanceof AvatarValidationError ? error.message : "头像处理失败，请选择其他图片。",
       }));
+      selectedFileRef.current = null;
     } finally {
       if (avatarRequestIdRef.current === requestId) setIsAvatarProcessing(false);
     }
@@ -165,6 +174,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
       selectedFileRef.current = null;
       setProfileErrors({});
       setIsEditorVisible(false);
+      router.refresh();
       Toast.success({ content: "资料已更新。" });
     } catch {
       Toast.error({ content: "资料更新失败，请稍后重试。" });
@@ -183,6 +193,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
     }
 
     setVerificationKind(undefined);
+    router.refresh();
   }
 
   return (
@@ -200,12 +211,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
 
       <div className={styles.overviewGrid}>
         <section className={styles.heroCard}>
-          <div
-            className={`${styles.avatar} ${styles.avatarWithImage}`}
-            style={{ backgroundImage: `url(${profile.avatarPreviewUrl ?? DEFAULT_AVATAR_URL})` }}
-            role="img"
-            aria-label={`${profile.displayName}的头像`}
-          />
+          <UserAvatar className={styles.avatar} displayName={profile.displayName} imageUrl={profile.avatarPreviewUrl} />
           <div className={styles.heroCopy}>
             <span className={styles.label}>统一账户</span>
             <h2>{profile.displayName}</h2>
@@ -280,11 +286,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
       >
         <form className={styles.profileForm} method="post" onSubmit={handleProfileSubmit}>
           <div className={styles.profilePreview}>
-            <div
-              className={`${styles.avatar} ${styles.avatarWithImage}`}
-              style={{ backgroundImage: `url(${profileDraft.avatarPreviewUrl ?? DEFAULT_AVATAR_URL})` }}
-              aria-hidden="true"
-            />
+            <UserAvatar className={styles.avatar} displayName={profileDraft.displayName} imageUrl={profileDraft.avatarPreviewUrl} ariaHidden />
             <div>
               <strong>{profileDraft.displayName.trim() || "显示名称"}</strong>
               <span>{profileDraft.nickname?.trim() || "尚未设置昵称"}</span>
@@ -300,7 +302,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
                 setProfileDraft((currentDraft) => ({ ...currentDraft, displayName }));
                 setProfileErrors((currentErrors) => ({ ...currentErrors, displayName: undefined }));
               }}
-              maxLength={80}
+              maxLength={64}
               validateStatus={profileErrors.displayName ? "error" : "default"}
               aria-invalid={Boolean(profileErrors.displayName)}
               aria-errormessage={profileErrors.displayName ? "profile-display-name-error" : undefined}
@@ -316,7 +318,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
               value={profileDraft.nickname}
               onChange={(nickname) => setProfileDraft((currentDraft) => ({ ...currentDraft, nickname }))}
               placeholder="希望其他用户看到的称呼"
-              maxLength={40}
+              maxLength={64}
             />
           </label>
 
@@ -340,7 +342,7 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
               >
                 {profileDraft.avatarPreviewUrl ? "更换头像" : "选择头像"}
               </Button>
-              {profileDraft.avatarPreviewUrl && (
+              {selectedFileRef.current && (
                 <Button
                   htmlType="button"
                   type="danger"
@@ -349,15 +351,16 @@ export function AccountOverview({ currentUser }: AccountOverviewProps) {
                   onClick={() => {
                     avatarRequestIdRef.current += 1;
                     setIsAvatarProcessing(false);
+                    selectedFileRef.current = null;
                     setProfileDraft((currentDraft) => ({
                       ...currentDraft,
-                      avatarFileName: undefined,
-                      avatarPreviewUrl: undefined,
+                      avatarFileName: profile.avatarFileName,
+                      avatarPreviewUrl: profile.avatarPreviewUrl,
                     }));
                     setProfileErrors((currentErrors) => ({ ...currentErrors, avatarFile: undefined }));
                   }}
                 >
-                  移除
+                  取消新头像
                 </Button>
               )}
             </div>

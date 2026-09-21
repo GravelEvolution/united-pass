@@ -3,6 +3,7 @@
   gap: 16px;
   color: var(--semi-color-text-0);
 }
+
 .introduction {
   display: flex;
   align-items: flex-start;
@@ -30,12 +31,21 @@
 }
 
 .captchaContainer {
+  min-width: 0;
   min-height: 92px;
   display: grid;
   place-items: center;
   border: 1px solid var(--semi-color-border);
   border-radius: var(--semi-border-radius-medium);
   background: var(--semi-color-fill-0);
+}
+
+.captchaMount {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 65px;
 }
 
 .field {

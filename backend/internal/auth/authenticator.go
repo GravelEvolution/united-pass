@@ -48,6 +48,10 @@ const (
 	MethodPasskey   AuthenticationMethod = "passkey"
 	MethodRecovery  AuthenticationMethod = "recovery_code"
 	MethodFederated AuthenticationMethod = "federated"
+	// MethodWeChatPhoneVerified is a server-issued assurance marker proving
+	// that the WeChat session passed the mandatory getPhoneNumber boundary.
+	// Clients cannot assert it; it is stamped only after strict onboarding.
+	MethodWeChatPhoneVerified AuthenticationMethod = "wechat_phone_verified"
 )
 
 // MFAMethod is a method available for MFA challenge.

@@ -135,16 +135,6 @@ export type OAuthClientCreateInput = {
   consentMode: ConsentMode;
 };
 
-/** Mutable client settings. The profile is immutable after creation. */
-export type OAuthClientUpdateInput = {
-  name?: string;
-  redirectUris?: string[];
-  /** Send an empty string to clear the logout URI; do not send null. */
-  logoutUri?: string;
-  allowedScopes?: string[];
-  consentMode?: ConsentMode;
-};
-
 export type OAuthClientCreationResult = {
   clientId: string;
   clientSecret?: string;
@@ -173,13 +163,6 @@ export type ApplicationUpdateInput = {
   audience?: ApplicationAudience;
   ownerId?: string;
 };
-
-export function inferClientProfile(client: OAuthClient): ClientProfile {
-  if (client.clientType === "public") return "spa_mobile";
-  return client.grantTypes.includes("client_credentials")
-    ? "server_to_server"
-    : "web_server";
-}
 
 export type ClientProfileConfig = {
   profile: ClientProfile;

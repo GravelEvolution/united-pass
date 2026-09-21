@@ -12,6 +12,11 @@ const futureChallenge: InteractiveCaptchaStepUp = {
   method: "interactive_captcha",
   expiresAt: new Date(Date.now() + 60_000).toISOString(),
   providerReady: true,
+  provider: "google_recaptcha",
+  providerPayload: {
+    siteKey: "public-site-key",
+    action: "united_pass_login_A1-b2",
+  },
   completionPath: "/api/v1/auth/step-up",
 };
 
@@ -21,6 +26,7 @@ afterEach(() => {
   cleanup?.();
   cleanup = undefined;
 });
+
 describe("risk step-up runtime", () => {
   it("forwards an interactive challenge to the installed UI bridge", async () => {
     cleanup = registerRiskStepUpHandler(async (challenge) => ({

@@ -52,15 +52,14 @@ export type BrowserHttpClientOptions = {
   ifMatchVersion?: number;
   /** Caller-generated random idempotency key for a single mutation intent. */
   idempotencyKey?: string;
-  /** Aliyun ESA captcha verify parameter, appended as a query param. */
-  captchaVerifyParam?: string;
 };
 
 export async function browserFetch<T>(
   path: string,
   options: BrowserHttpClientOptions = {},
 ): Promise<T> {
-  const { method = "GET", body, signal, formData, reauthToken, ifMatchVersion, idempotencyKey, captchaVerifyParam } = options;
+  const { method = "GET", body, signal, formData, reauthToken, ifMatchVersion, idempotencyKey } = options;
+  const isLoginSessionCreate = method === "POST" && path === "/auth/sessions";
 
   const headers: Record<string, string> = {};
 
@@ -99,9 +98,8 @@ export async function browserFetch<T>(
       ? JSON.stringify(body)
       : undefined;
 
-  const requestUrl = appendCaptchaParam(browserApiUrl(path), captchaVerifyParam);
   const sendOriginalRequest = (requestHeaders: Record<string, string>) => fetch(
-    requestUrl,
+    browserApiUrl(path),
     {
       method,
       headers: requestHeaders,
@@ -127,6 +125,13 @@ export async function browserFetch<T>(
       || stepUpError instanceof RiskStepUpCancelledError) {
       throw { ...firstError, message: stepUpError.message } satisfies ApiError;
     }
+    if ((isLoginSessionCreate || firstError.stepUp.method === "interactive_captcha")
+      && isApiError(stepUpError)) {
+      throw markChallengeRefreshRequired(stepUpError);
+    }
+    if (isLoginSessionCreate && !signal?.aborted) {
+      throw challengeRefreshNetworkError();
+    }
     throw stepUpError;
   }
 
@@ -135,20 +140,45 @@ export async function browserFetch<T>(
   const retryHeaders = resolution.status === "reauth_granted"
     ? { ...headers, "X-Reauthentication-Token": resolution.reauthToken }
     : headers;
-  const retryResponse = await sendOriginalRequest(retryHeaders);
-  return parseResponse<T>(retryResponse);
+  let retryResponse: Response;
+  try {
+    retryResponse = await sendOriginalRequest(retryHeaders);
+  } catch (retryNetworkError) {
+    if ((isLoginSessionCreate || firstError.stepUp.method === "interactive_captcha")
+      && !signal?.aborted) {
+      throw challengeRefreshNetworkError();
+    }
+    throw retryNetworkError;
+  }
+  if (!retryResponse.ok) {
+    const retryError = await normalizeError(retryResponse);
+    if (isLoginSessionCreate
+      || (firstError.stepUp.method === "interactive_captcha"
+        && retryError.kind === "unauthorized")) {
+      throw markChallengeRefreshRequired(retryError);
+    }
+    throw retryError;
+  }
+  return parseSuccessResponse<T>(retryResponse);
+}
+
+function markChallengeRefreshRequired(error: ApiError): ApiError {
+  return { ...error, requiresChallengeRefresh: true };
+}
+
+function challengeRefreshNetworkError(): ApiError {
+  return {
+    kind: "network",
+    code: "network.challenge_refresh_required",
+    message: "网络状态不确定，需要重新载入安全验证。",
+    requiresChallengeRefresh: true,
+  };
 }
 
 function browserApiUrl(path: string): string {
   if (!path.startsWith("/")) throw new TypeError("API path must be same-origin and absolute");
   if (path === BROWSER_API_BASE_URL || path.startsWith(`${BROWSER_API_BASE_URL}/`)) return path;
   return `${BROWSER_API_BASE_URL}${path}`;
-}
-
-function appendCaptchaParam(url: string, param: string | undefined): string {
-  if (!param) return url;
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}captcha_verify_param=${encodeURIComponent(param)}`;
 }
 
 function readCsrfToken(): string | undefined {
@@ -159,14 +189,6 @@ function readCsrfToken(): string | undefined {
     .map((c) => c.trim())
     .find((c) => c.startsWith(prefix));
   return match?.slice(prefix.length);
-}
-
-async function parseResponse<T>(response: Response): Promise<T> {
-  if (!response.ok) {
-    throw await normalizeError(response);
-  }
-
-  return parseSuccessResponse<T>(response);
 }
 
 async function parseSuccessResponse<T>(response: Response): Promise<T> {
@@ -234,13 +256,21 @@ async function postStepUpCompletion(
   const csrfToken = readCsrfToken();
   if (csrfToken) headers[CSRF_HEADER_NAME] = csrfToken;
 
-  const response = await fetch(browserApiUrl(challenge.completionPath), {
-    method: "POST",
-    headers,
-    credentials: "same-origin",
-    body: JSON.stringify({ challengeToken: challenge.challengeToken, ...proof }),
-    signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(browserApiUrl(challenge.completionPath), {
+      method: "POST",
+      headers,
+      credentials: "same-origin",
+      body: JSON.stringify({ challengeToken: challenge.challengeToken, ...proof }),
+      signal,
+    });
+  } catch (completionNetworkError) {
+    if (challenge.method === "interactive_captcha" && !signal?.aborted) {
+      throw challengeRefreshNetworkError();
+    }
+    throw completionNetworkError;
+  }
   if (!response.ok) throw await normalizeError(response);
   if (response.status !== 204) {
     throw {

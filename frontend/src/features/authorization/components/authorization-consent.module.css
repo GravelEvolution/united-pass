@@ -25,7 +25,8 @@
   text-transform: uppercase;
 }
 
-.application { display: flex; align-items: center; gap: 16px; }
+.application { display: flex; min-width: 0; align-items: center; gap: 16px; }
+.application > div:last-child { min-width: 0; }
 
 .applicationIcon {
   display: grid;
@@ -33,21 +34,22 @@
   height: 56px;
   flex: none;
   place-items: center;
-  overflow: hidden;
-  border: 1px solid var(--up-line);
   border-radius: 16px;
-  background: #fff;
+  color: white;
+  background: linear-gradient(145deg, var(--up-brand-gradient-start), var(--up-brand-gradient-end));
+  overflow: hidden;
 }
 
-.applicationLogo {
+.applicationIcon img {
+  display: block;
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;
 }
 
-.application h1 { margin: 0; font-size: 23px; letter-spacing: -0.025em; }
-.application p { margin: 5px 0 4px; color: var(--up-muted); font-size: 13px; }
-.application span { color: var(--up-muted-soft); font-size: 12px; }
+.application h1 { margin: 0; font-size: 23px; letter-spacing: -0.025em; overflow-wrap: anywhere; }
+.application p { margin: 5px 0 4px; color: var(--up-muted); font-size: 13px; overflow-wrap: anywhere; }
+.application span { color: var(--up-muted-soft); font-size: 12px; overflow-wrap: anywhere; }
 
 .identity {
   display: flex;
@@ -59,12 +61,28 @@
   background: var(--up-surface-subtle);
 }
 
-.identity span,
-.identity strong,
-.identity p { display: block; margin: 0; }
-.identity span { color: var(--up-muted); font-size: 12px; }
-.identity strong { margin-top: 2px; font-size: 13px; }
-.identity p { margin-top: 2px; color: var(--up-muted); font-size: 12px; }
+.identityAvatar {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  flex: none;
+  place-items: center;
+  border-radius: 50%;
+  color: white;
+  background: linear-gradient(145deg, var(--up-brand-gradient-start), var(--up-brand-gradient-end));
+  background-size: contain;
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.identityText { min-width: 0; }
+
+.identityText span,
+.identityText strong,
+.identityText p { display: block; margin: 0; }
+.identityText span { color: var(--up-muted); font-size: 12px; }
+.identityText strong { margin-top: 2px; font-size: 13px; }
+.identityText p { margin-top: 2px; color: var(--up-muted); font-size: 12px; overflow-wrap: anywhere; }
 
 .permissions { margin-top: 28px; }
 .permissions h2 { margin: 0 0 14px; font-size: 14px; }
@@ -142,6 +160,7 @@
 .stateCard code {
   color: var(--up-brand-strong);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .stateActions {
@@ -211,4 +230,10 @@
 @media (max-width: 520px) {
   .card, .stateCard { padding: 24px 20px; border: 0; box-shadow: none; }
   .actions { grid-template-columns: 1fr; }
+  .application { align-items: flex-start; }
+  .applicationIcon { width: 48px; height: 48px; border-radius: 14px; }
+  .application h1 { font-size: 20px; }
+  .stateActions { align-items: stretch; flex-direction: column; }
+  .stateActions :global(.semi-button),
+  .stateActions > a { width: 100%; min-height: 44px; }
 }

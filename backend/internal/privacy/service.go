@@ -34,8 +34,8 @@ type SupportedLegalDocument struct {
 }
 
 var supportedLegalDocuments = map[string]SupportedLegalDocument{
-	"privacy": {Kind: "privacy", Version: "1.2", ContentSHA256: "4cda76af14c0eba4324feb26d45f9e39a8f44e0567f56034d3f97c9b34283703"},
-	"terms":   {Kind: "terms", Version: "1.1", ContentSHA256: "d277370701594a556be7d53a965c9d87ef7825296e7f647af2d46451dc3e24fb"},
+	"privacy": {Kind: "privacy", Version: "1.2", ContentSHA256: "7049fcf671c7de0774bd0a167be5ea98b5ec2c6a399483792f5534b23b3093a7"},
+	"terms":   {Kind: "terms", Version: "1.1", ContentSHA256: "2f9ef24f40273f95c2ac06aa0dae23f0c967bb5db23d232fa0f46e69015dab95"},
 }
 
 func SupportedDocument(kind string) (SupportedLegalDocument, bool) {

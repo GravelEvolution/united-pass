@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -13,6 +14,57 @@ func TestRiskCaptchaProviderIsDisabledWithoutCompleteConfiguration(t *testing.T)
 	provider, err := newRiskCaptchaProvider(config.RiskCaptchaConfig{Region: "mainland_china"})
 	if err != nil || provider != nil {
 		t.Fatalf("provider=%#v err=%v", provider, err)
+	}
+}
+
+type builtInCaptchaStub struct{}
+
+func (*builtInCaptchaStub) Name() string                                               { return captcha.FirstPartyImageProviderName }
+func (*builtInCaptchaStub) Available(context.Context, riskdefense.ProviderRegion) bool { return true }
+func (*builtInCaptchaStub) Begin(context.Context, riskdefense.Operation) (riskdefense.ProviderChallenge, error) {
+	return riskdefense.ProviderChallenge{ID: "built-in-id", Provider: captcha.FirstPartyImageProviderName, PublicPayload: []byte(`{"imageDataUrl":"data:image/png;base64,iVBORw0KGgo=","digits":5}`)}, nil
+}
+func (*builtInCaptchaStub) Verify(context.Context, string, string) error { return nil }
+
+func TestRiskCaptchaProviderUsesBuiltInWithoutExternalCredentials(t *testing.T) {
+	provider, err := newRiskCaptchaProvider(
+		config.RiskCaptchaConfig{Region: "mainland_china"},
+		&builtInCaptchaStub{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := provider.Begin(t.Context(), riskdefense.OperationRegistration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if challenge.Provider != captcha.FirstPartyImageProviderName {
+		t.Fatalf("provider=%q", challenge.Provider)
+	}
+}
+
+func TestRiskCaptchaProviderPinsRegistrationToBuiltInAndRetainsExternalLogin(t *testing.T) {
+	provider, err := newRiskCaptchaProvider(
+		config.RiskCaptchaConfig{
+			Region: "global",
+			Turnstile: config.RiskCaptchaProviderConfig{
+				SiteKey: "turnstile-site", SecretKey: "turnstile-secret", Hostname: "auth.moonstone.org.cn",
+			},
+		},
+		&builtInCaptchaStub{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		challenge, beginErr := provider.Begin(t.Context(), riskdefense.OperationRegistration)
+		if beginErr != nil || challenge.Provider != captcha.FirstPartyImageProviderName {
+			t.Fatalf("registration attempt %d challenge=%#v err=%v", attempt+1, challenge, beginErr)
+		}
+	}
+	login, err := provider.Begin(t.Context(), riskdefense.OperationLogin)
+	if err != nil || login.Provider != captcha.TurnstileProviderName {
+		t.Fatalf("login challenge=%#v err=%v", login, err)
 	}
 }
 

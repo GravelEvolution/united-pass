@@ -94,7 +94,7 @@ func TestParticipantSignerPermitsOnlyParticipantContactSubmissions(t *testing.T)
 		t.Fatal(err)
 	}
 	base := ParticipantAssertion{Subject: "subject-1", JWTID: "req_participant_contact", Method: "POST", BodySHA256: SHA256Digest([]byte(`{"content":"页面无法提交"}`)), HeaderSHA256: ParticipantHeadersSHA256("", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")}
-	for _, path := range []string{"/api/v1/events/dreamup-shanghai/me/feedback", "/api/v1/events/dreamup-shanghai/me/sponsorship-enquiries"} {
+	for _, path := range []string{"/api/v1/events/dreamup-shanghai/me/feedback", "/api/v1/events/dreamup-shanghai/me/sponsorship-enquiries", "/api/v1/events/dreamup-shanghai/me/emergency-reports"} {
 		base.PathAndQuery = path
 		if _, err := signer.SignParticipant(base); err != nil {
 			t.Fatalf("contact route rejected: %s: %v", path, err)
@@ -103,6 +103,41 @@ func TestParticipantSignerPermitsOnlyParticipantContactSubmissions(t *testing.T)
 	base.PathAndQuery = "/api/v1/events/dreamup-shanghai/me/contact-submissions"
 	if _, err := signer.SignParticipant(base); err == nil {
 		t.Fatal("unrecognised contact route accepted")
+	}
+}
+
+func TestParticipantSignerPermitsOnlyExplicitScanAndReservationContracts(t *testing.T) {
+	keyring, _ := loadDelegationTestKeyring(t)
+	signer, err := NewParticipantSigner(keyring, SignerConfig{Issuer: Issuer, Audience: "dreamup-mobile-api", TTL: 15 * time.Second, Now: func() time.Time { return delegationTestNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := ParticipantAssertion{Subject: "subject-1", JWTID: "req_scan_asset_contract", HeaderSHA256: ParticipantHeadersSHA256(`"1"`, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")}
+	for _, test := range []struct{ method, path, body string }{
+		{"POST", "/api/v1/events/dreamup-shanghai/me/code-resolutions", `{"code":"opaque-local-only"}`},
+		{"GET", "/api/v1/events/dreamup-shanghai/me/available-assets", ""},
+		{"GET", "/api/v1/events/dreamup-shanghai/me/asset-reservations", ""},
+		{"POST", "/api/v1/events/dreamup-shanghai/me/asset-reservations", `{"assetId":"asset_1","quantity":1}`},
+		{"DELETE", "/api/v1/events/dreamup-shanghai/me/asset-reservations/reservation_1", ""},
+		{"GET", "/api/v1/events/dreamup-shanghai/me/personal-assets", ""},
+	} {
+		base.Method, base.PathAndQuery, base.BodySHA256 = test.method, test.path, SHA256Digest([]byte(test.body))
+		if _, err := signer.SignParticipant(base); err != nil {
+			t.Fatalf("participant contract rejected: %s %s: %v", test.method, test.path, err)
+		}
+	}
+	for _, test := range []struct{ method, path string }{
+		{"GET", "/api/v1/events/dreamup-shanghai/me/code-resolutions"},
+		{"POST", "/api/v1/events/dreamup-shanghai/me/available-assets"},
+		{"PATCH", "/api/v1/events/dreamup-shanghai/me/asset-reservations/reservation_1"},
+		{"DELETE", "/api/v1/events/dreamup-shanghai/me/asset-reservations/reservation_1/force"},
+		{"GET", "/api/v1/events/dreamup-shanghai/me/personal-assets/other"},
+		{"POST", "/api/v1/events/dreamup-shanghai/me/inspection-attempts"},
+	} {
+		base.Method, base.PathAndQuery, base.BodySHA256 = test.method, test.path, SHA256Digest(nil)
+		if _, err := signer.SignParticipant(base); err == nil {
+			t.Fatalf("unsafe participant contract accepted: %s %s", test.method, test.path)
+		}
 	}
 }
 

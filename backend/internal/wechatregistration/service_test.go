@@ -119,12 +119,46 @@ func TestLegacyCreateStillRejectsMissingPhoneProof(t *testing.T) {
 		Registration: registration.CreateInput{Username: "moonstone", DisplayName: "Moonstone", Email: "player@example.com", Password: "Correct-Horse-Battery-Staple9!", AcceptedTerms: true},
 		LoginCode:    "login-code", PhoneCode: "phone-code",
 	})
-	if !errors.Is(err, registration.ErrUnavailable) || repo.calls != 0 || provider.calls != 0 || tokens.created != "" {
+	if !errors.Is(err, registration.ErrInvalidInput) || repo.calls != 0 || provider.calls != 0 || tokens.created != "" {
 		t.Fatalf("err=%v repo=%#v provider=%#v tokens=%#v", err, repo, provider, tokens)
 	}
 }
 
-func TestCreateVerifiedAllowsIdentityOnlyProofWithoutExchangingCodes(t *testing.T) {
+func TestVerifyRegistrationValidatesAndNormalizesProviderFailuresWithoutCreating(t *testing.T) {
+	validProof := wechat.IdentityProof{TenantID: "wx-app", Subject: "openid-subject", Phone: "+8613812345678"}
+	for _, test := range []struct {
+		name      string
+		loginCode string
+		phoneCode string
+		verifier  verifierStub
+		wantErr   error
+	}{
+		{name: "success", loginCode: "login-code", phoneCode: "phone-code", verifier: verifierStub{proof: validProof}},
+		{name: "malformed code", loginCode: " login-code", phoneCode: "phone-code", verifier: verifierStub{proof: validProof}, wantErr: registration.ErrInvalidInput},
+		{name: "provider rejection", loginCode: "login-code", phoneCode: "phone-code", verifier: verifierStub{err: wechat.ErrRejected}, wantErr: registration.ErrInvalidInput},
+		{name: "provider outage", loginCode: "login-code", phoneCode: "phone-code", verifier: verifierStub{err: errors.New("provider unavailable")}, wantErr: registration.ErrUnavailable},
+		{name: "missing phone", loginCode: "login-code", phoneCode: "phone-code", verifier: verifierStub{proof: wechat.IdentityProof{TenantID: "wx-app", Subject: "openid-subject"}}, wantErr: registration.ErrInvalidInput},
+		{name: "untrimmed subject", loginCode: "login-code", phoneCode: "phone-code", verifier: verifierStub{proof: wechat.IdentityProof{TenantID: "wx-app", Subject: " openid-subject", Phone: "+8613812345678"}}, wantErr: registration.ErrInvalidInput},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider, repo, tokens := &providerStub{}, &repoStub{}, &tokenStub{}
+			service := NewService(test.verifier, provider, repo, tokens, Config{TokenTTL: time.Minute})
+			proof, err := service.VerifyRegistration(t.Context(), test.loginCode, test.phoneCode)
+			if test.wantErr == nil {
+				if err != nil || proof != validProof {
+					t.Fatalf("proof=%#v err=%v", proof, err)
+				}
+			} else if !errors.Is(err, test.wantErr) || proof != (wechat.IdentityProof{}) {
+				t.Fatalf("proof=%#v err=%v want=%v", proof, err, test.wantErr)
+			}
+			if repo.calls != 0 || provider.calls != 0 || tokens.created != "" {
+				t.Fatalf("proof verification created state: repo=%d provider=%d token=%q", repo.calls, provider.calls, tokens.created)
+			}
+		})
+	}
+}
+
+func TestCreateVerifiedRejectsIdentityOnlyProofWithoutCreatingAccount(t *testing.T) {
 	provider, repo, tokens := &providerStub{}, &repoStub{}, &tokenStub{}
 	service := NewService(nil, provider, repo, tokens, Config{
 		PublicOrigin: "https://auth.example.test", TokenTTL: time.Minute,
@@ -136,14 +170,8 @@ func TestCreateVerifiedAllowsIdentityOnlyProofWithoutExchangingCodes(t *testing.
 		Registration: registration.CreateInput{Username: "moonstone", DisplayName: "Moonstone", Email: "player@example.com", Password: "Correct-Horse-Battery-Staple9!", AcceptedTerms: true},
 		Proof:        wechat.IdentityProof{TenantID: "wx-app", Subject: "openid-subject"},
 	})
-	if err != nil {
-		t.Fatalf("CreateVerified: %v", err)
-	}
-	if result.RegistrationToken != "opaque-registration-token" || repo.created.Phone != "" {
-		t.Fatalf("result=%#v pending=%#v", result, repo.created)
-	}
-	if repo.created.TenantID != "wx-app" || repo.created.Subject != "openid-subject" || provider.created.UserID != repo.created.User.UserID {
-		t.Fatalf("verified identity was not preserved: pending=%#v provider=%#v", repo.created, provider.created)
+	if !errors.Is(err, registration.ErrInvalidInput) || result.RegistrationToken != "" || repo.calls != 0 || provider.calls != 0 || tokens.created != "" {
+		t.Fatalf("result=%#v err=%v repo=%#v provider=%#v tokens=%#v", result, err, repo, provider, tokens)
 	}
 }
 
@@ -163,7 +191,7 @@ func TestCreateVerifiedPendingRecoveryRequiresExactExpectedUserID(t *testing.T) 
 	expectedID := "user_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	input := CreateVerifiedInput{
 		Registration:   registration.CreateInput{Username: "moonstone", DisplayName: "Moonstone", Email: "player@example.com", Password: "Correct-Horse-Battery-Staple9!", AcceptedTerms: true},
-		Proof:          wechat.IdentityProof{TenantID: "wx-app", Subject: "openid-subject"},
+		Proof:          wechat.IdentityProof{TenantID: "wx-app", Subject: "openid-subject", Phone: "+8613812345678"},
 		ExpectedUserID: expectedID,
 	}
 	newService := func(repo *repoStub, provider *providerStub, tokens *tokenStub) *Service {

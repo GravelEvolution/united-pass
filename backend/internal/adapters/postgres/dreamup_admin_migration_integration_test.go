@@ -20,100 +20,17 @@ func TestDreamUPAdministrationMigration(t *testing.T) {
 		t.Fatalf("migrate to v11: %v", err)
 	}
 	if tableExists(t, db, "admin_role_bindings") {
-		t.Fatal("DreamUP table exists before lineage bridge")
+		t.Fatal("v12 table exists before v12")
 	}
 	if err := goose.UpToContext(ctx, db, migrations, 12); err != nil {
 		t.Fatalf("migrate v11 to v12: %v", err)
 	}
-	if !tableExists(t, db, "user_avatars") || !tableExists(t, db, "contact_change_requests") {
-		t.Fatal("public v12 account self-service tables are missing")
-	}
-	if tableExists(t, db, "admin_role_bindings") {
-		t.Fatal("public v12 unexpectedly created DreamUP administration tables")
-	}
+	assertDreamUPAdminConstraints(t, db)
 	version, err := goose.GetDBVersion(db)
 	if err != nil || version != 12 {
-		t.Fatalf("public lineage version=%d err=%v", version, err)
-	}
-	if err := goose.UpToContext(ctx, db, migrations, 13); err != nil {
-		t.Fatalf("migrate public v12 through lineage bridge: %v", err)
-	}
-	assertDreamUPAdminConstraints(t, db)
-	if !tableExists(t, db, "identity_access_grant_fields") {
-		t.Fatal("identity-access workflow table is missing after lineage bridge")
-	}
-	version, err = goose.GetDBVersion(db)
-	if err != nil || version != 13 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
-	// Startup uses only Up; the bridge's aborting Down cannot be reached by this path.
-}
-
-func TestPublicV12LineagePreservesAccountDataThroughV16(t *testing.T) {
-	db := openMigrationTestDB(t)
-	ctx := context.Background()
-	migrations := findMigrationsDir(t)
-	if err := goose.UpToContext(ctx, db, migrations, 12); err != nil {
-		t.Fatalf("migrate to public v12: %v", err)
-	}
-	createIntegrationUser(t, db, "u_public_v12")
-	if _, err := db.Exec(`INSERT INTO user_avatars(avatar_id,user_id,content_type,content,etag)
-		VALUES('avt_0123456789abcdef0123456789abcdef','u_public_v12','image/png',decode('01','hex'),repeat('a',64))`); err != nil {
-		t.Fatalf("insert public-v12 avatar fixture: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO contact_change_requests(request_id_hash,user_id,session_id,kind,value,expires_at)
-		VALUES(repeat('b',64),'u_public_v12','session-public-v12','email','next@example.test',NOW()+INTERVAL '1 hour')`); err != nil {
-		t.Fatalf("insert public-v12 contact fixture: %v", err)
-	}
-	if err := goose.UpToContext(ctx, db, migrations, 16); err != nil {
-		t.Fatalf("migrate public v12 to v16: %v", err)
-	}
-	for table := range map[string]struct{}{"user_avatars": {}, "contact_change_requests": {}} {
-		var count int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE user_id='u_public_v12'`).Scan(&count); err != nil || count != 1 {
-			t.Fatalf("preserved %s rows=%d err=%v", table, count, err)
-		}
-	}
-}
-
-func TestProductionV13LineageReconcilesAccountTablesAtV16(t *testing.T) {
-	db := openMigrationTestDB(t)
-	ctx := context.Background()
-	migrations := findMigrationsDir(t)
-	if err := goose.UpToContext(ctx, db, migrations, 13); err != nil {
-		t.Fatalf("build v13 schema fixture: %v", err)
-	}
-	createIntegrationUser(t, db, "u_production_v13")
-	if _, err := db.Exec(`INSERT INTO dreamup_event_registry(event_id,series,slug,display_name,source_version,authoritative_read_at)
-		VALUES('evt_production_v13','dreamup','production-v13','Production V13','fixture-v1',NOW())`); err != nil {
-		t.Fatalf("insert production-v13 DreamUP fixture: %v", err)
-	}
-	// Production used v12/v13 for DreamUP and identity access, so its physical
-	// v13 schema has no account tables even though Goose records versions 12/13.
-	if _, err := db.Exec(`DROP TABLE contact_change_requests, user_avatars`); err != nil {
-		t.Fatalf("shape production-v13 fixture: %v", err)
-	}
-	if err := goose.UpToContext(ctx, db, migrations, 16); err != nil {
-		t.Fatalf("migrate production v13 to v16: %v", err)
-	}
-	if !tableExists(t, db, "user_avatars") || !tableExists(t, db, "contact_change_requests") {
-		t.Fatal("v16 did not reconcile production account tables")
-	}
-	var eventCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM dreamup_event_registry WHERE event_id='evt_production_v13'`).Scan(&eventCount); err != nil || eventCount != 1 {
-		t.Fatalf("production DreamUP data was not preserved: count=%d err=%v", eventCount, err)
-	}
-	version, err := goose.GetDBVersion(db)
-	if err != nil || version != 16 {
-		t.Fatalf("production lineage version=%d err=%v", version, err)
-	}
-	if err := goose.DownContext(ctx, db, migrations); err == nil {
-		t.Fatal("forward-only lineage reconciliation unexpectedly rolled back")
-	}
-	version, err = goose.GetDBVersion(db)
-	if err != nil || version != 16 {
-		t.Fatalf("failed v16 Down drifted migration version=%d err=%v", version, err)
-	}
+	// Startup uses only Up; an intentionally inert Down cannot be reached by this path.
 }
 
 func TestDreamUPOperationRecoveryMigration(t *testing.T) {

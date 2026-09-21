@@ -48,7 +48,8 @@ var (
 	ErrAccountChanged     = errors.New("wechat onboarding: account changed during authentication")
 	ErrEmailAmbiguous     = errors.New("wechat onboarding: email is ambiguous")
 	ErrIdentityConflict   = errors.New("wechat onboarding: identity conflict")
-	ErrPhoneConflict      = errors.New("wechat onboarding: phone conflict")
+	ErrPhoneRequired      = wechat.ErrPhoneRequired
+	ErrPhoneConflict      = wechat.ErrPhoneConflict
 	ErrAuthenticationFail = errors.New("wechat onboarding: authentication failed")
 )
 
@@ -92,9 +93,9 @@ type ChallengeStore interface {
 	IncrementAttempts(context.Context, string, int) (int, error)
 }
 
-// ProofVerifier performs the server-to-server wx.login exchange and treats
-// phone authorization as optional. A phone-code failure must not invalidate a
-// successfully proven WeChat identity.
+// ProofVerifier performs the server-to-server wx.login and getPhoneNumber
+// exchanges. It must fail closed when either proof is absent, rejected or
+// unavailable; callers never receive a partial identity-only proof.
 type ProofVerifier interface {
 	VerifyOnboarding(context.Context, string, string) (wechat.IdentityProof, error)
 }
@@ -106,13 +107,14 @@ type BindingReader interface {
 	GetByID(context.Context, identity.UserID) (identity.User, error)
 }
 
-// AccountRepository performs the only existing-account authority mutation.
-// BindExistingWithWeChat must be one transaction: add the WeChat link, and
-// add the verified phone only when the target phone is empty or identical.
-// It must never overwrite a different phone or any profile/role data.
+// AccountRepository performs the only existing-account authority mutations.
+// Both methods must re-check authority in one transaction. They may add the
+// verified phone only when the target phone is empty or identical, and must
+// never overwrite a different phone or any profile/role data.
 type AccountRepository interface {
 	FindByNormalizedEmail(context.Context, string) (AccountSnapshot, error)
 	BindExistingWithWeChat(context.Context, BindExistingInput) (BindExistingResult, error)
+	CompleteLinkedWithVerifiedPhone(context.Context, identity.UserID, string, string, string) error
 }
 
 // AccountSnapshot binds an authentication attempt to the exact authority row
@@ -163,9 +165,11 @@ type RateChecker interface {
 }
 
 // CompletionRateChecker applies the ordinary registration abuse buckets only
-// after the onboarding challenge has been atomically claimed. Calling it in
-// an unauthenticated HTTP adapter would let forged requests exhaust a victim
-// email's global bucket without possessing a valid WeChat proof.
+// after a claimed, phone-verified onboarding challenge has resolved to an
+// email that does not exist. Existing or pending-account binding must stay on
+// the onboarding subject/target limiters and must never call this port.
+// Calling it in an unauthenticated HTTP adapter would let forged requests
+// exhaust a victim email's global bucket without a valid WeChat proof.
 type CompletionRateChecker interface {
 	CheckRegistrationCreate(context.Context, string, string, string, registration.CreateRatePolicy) (bool, time.Duration, error)
 }

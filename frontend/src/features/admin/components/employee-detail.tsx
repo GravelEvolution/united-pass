@@ -86,7 +86,7 @@ export function EmployeeDetail({
       </div>
 
       <div className={styles.tabContent}>
-        <Tabs type="line" activeKey={activeTab} onChange={handleTabChange}>
+        <Tabs type="line" collapsible="auto" activeKey={activeTab} onChange={handleTabChange}>
           <Tabs.TabPane tab="档案信息" itemKey="profile">
             <ProfileTab
               detail={detail}

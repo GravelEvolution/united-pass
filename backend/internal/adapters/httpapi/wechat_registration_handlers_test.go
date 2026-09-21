@@ -15,23 +15,50 @@ import (
 
 	"github.com/GravelEvolution/united-pass/backend/internal/registration"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
+	"github.com/GravelEvolution/united-pass/backend/internal/wechat"
 	"github.com/GravelEvolution/united-pass/backend/internal/wechatregistration"
 )
 
 type fakeWeChatRegistrationService struct {
-	mu    sync.Mutex
-	input wechatregistration.CreateInput
-	err   error
-	calls int
+	mu          sync.Mutex
+	input       wechatregistration.CreateVerifiedInput
+	proof       wechat.IdentityProof
+	verifyErr   error
+	createErr   error
+	loginCode   string
+	phoneCode   string
+	verifyCalls int
+	createCalls int
+	events      *[]string
 }
 
-func (s *fakeWeChatRegistrationService) Create(_ context.Context, input wechatregistration.CreateInput) (registration.CreateResult, error) {
+func (s *fakeWeChatRegistrationService) VerifyRegistration(_ context.Context, loginCode, phoneCode string) (wechat.IdentityProof, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loginCode, s.phoneCode = loginCode, phoneCode
+	s.verifyCalls++
+	if s.events != nil {
+		*s.events = append(*s.events, "verify")
+	}
+	if s.verifyErr != nil {
+		return wechat.IdentityProof{}, s.verifyErr
+	}
+	if s.proof.TenantID == "" {
+		s.proof = wechat.IdentityProof{TenantID: "wx-app", Subject: "openid-subject", Phone: "+8613812345678"}
+	}
+	return s.proof, nil
+}
+
+func (s *fakeWeChatRegistrationService) CreateVerified(_ context.Context, input wechatregistration.CreateVerifiedInput) (registration.CreateResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.input = input
-	s.calls++
-	if s.err != nil {
-		return registration.CreateResult{}, s.err
+	s.createCalls++
+	if s.events != nil {
+		*s.events = append(*s.events, "create")
+	}
+	if s.createErr != nil {
+		return registration.CreateResult{}, s.createErr
 	}
 	return registration.CreateResult{RegistrationToken: "opaque-registration-token", ExpiresAt: time.Now().Add(time.Minute)}, nil
 }
@@ -39,25 +66,38 @@ func (s *fakeWeChatRegistrationService) Create(_ context.Context, input wechatre
 func (s *fakeWeChatRegistrationService) callCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.calls
+	return s.createCalls
+}
+
+func (s *fakeWeChatRegistrationService) verifyCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.verifyCalls
 }
 
 type fakeRegistrationRate struct {
-	mu         sync.Mutex
-	allow      bool
-	key        string
-	proofErr   error
-	loginHash  string
-	phoneHash  string
-	proofCalls int
-	usedLogins map[string]struct{}
-	usedPhones map[string]struct{}
+	mu          sync.Mutex
+	allow       bool
+	key         string
+	createCalls int
+	proofErr    error
+	claimIP     string
+	loginHash   string
+	phoneHash   string
+	proofCalls  int
+	usedLogins  map[string]struct{}
+	usedPhones  map[string]struct{}
+	events      *[]string
 }
 
 func (r *fakeRegistrationRate) CheckRegistrationCreate(_ context.Context, _, _ string, key string, _ registration.CreateRatePolicy) (bool, time.Duration, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.key = key
+	r.createCalls++
+	if r.events != nil {
+		*r.events = append(*r.events, "public-rate")
+	}
 	return r.allow, time.Minute, nil
 }
 func (r *fakeRegistrationRate) CheckRegistrationVerify(context.Context, string, string, registration.Limit) (bool, time.Duration, error) {
@@ -66,11 +106,14 @@ func (r *fakeRegistrationRate) CheckRegistrationVerify(context.Context, string, 
 func (r *fakeRegistrationRate) CheckRegistrationResend(context.Context, string, string, registration.Limit) (bool, time.Duration, error) {
 	return true, 0, nil
 }
-func (r *fakeRegistrationRate) ConsumeWeChatRegistrationProofs(_ context.Context, loginHash, phoneHash string, _ time.Duration) (bool, time.Duration, error) {
+func (r *fakeRegistrationRate) ClaimWeChatRegistrationProofs(_ context.Context, ip, loginHash, phoneHash string, _ int, _ time.Duration) (bool, time.Duration, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.loginHash, r.phoneHash = loginHash, phoneHash
+	r.claimIP, r.loginHash, r.phoneHash = ip, loginHash, phoneHash
 	r.proofCalls++
+	if r.events != nil {
+		*r.events = append(*r.events, "claim")
+	}
 	if r.proofErr != nil {
 		return false, time.Minute, r.proofErr
 	}
@@ -89,16 +132,22 @@ func (r *fakeRegistrationRate) ConsumeWeChatRegistrationProofs(_ context.Context
 	return true, 0, nil
 }
 
-func (r *fakeRegistrationRate) proofSnapshot() (loginHash, phoneHash string, calls int) {
+func (r *fakeRegistrationRate) proofSnapshot() (ip, loginHash, phoneHash string, calls int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.loginHash, r.phoneHash, r.proofCalls
+	return r.claimIP, r.loginHash, r.phoneHash, r.proofCalls
 }
 
 func (r *fakeRegistrationRate) registrationKey() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.key
+}
+
+func (r *fakeRegistrationRate) registrationCallCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.createCalls
 }
 
 func validWeChatRegistrationBody(email, loginCode, phoneCode string) string {
@@ -123,23 +172,27 @@ func performWeChatRegistration(h *WeChatRegistrationHandlers, body, remoteAddr s
 }
 
 func TestWeChatRegistrationRequiresCodesAndDoesNotRateLimitOnRawProof(t *testing.T) {
-	service, rate := &fakeWeChatRegistrationService{}, &fakeRegistrationRate{allow: true}
+	events := []string{}
+	service, rate := &fakeWeChatRegistrationService{events: &events}, &fakeRegistrationRate{allow: true, events: &events}
 	h := NewWeChatRegistrationHandlers(service, rate, wechatRegistrationTestPolicy(5), testLogger())
 	body := validWeChatRegistrationBody("player@example.com", "login-code", "phone-code")
 	rr := performWeChatRegistration(h, body, "203.0.113.10:1234")
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if service.input.LoginCode != "login-code" || service.input.PhoneCode != "phone-code" {
-		t.Fatalf("input=%#v", service.input)
+	if service.loginCode != "login-code" || service.phoneCode != "phone-code" || service.input.Proof.Subject != "openid-subject" {
+		t.Fatalf("verified input=%#v login=%q phone=%q", service.input, service.loginCode, service.phoneCode)
 	}
 	registrationKey := rate.registrationKey()
 	if registrationKey == "player@example.com" || registrationKey == "login-code" || registrationKey == "phone-code" || registrationKey == "" {
 		t.Fatalf("unsafe rate key=%q", registrationKey)
 	}
-	loginHash, phoneHash, proofCalls := rate.proofSnapshot()
-	if proofCalls != 1 || loginHash == "login-code" || phoneHash == "phone-code" || len(loginHash) != 64 || len(phoneHash) != 64 {
-		t.Fatalf("unsafe proof consumption: login=%q phone=%q calls=%d", loginHash, phoneHash, proofCalls)
+	claimIP, loginHash, phoneHash, proofCalls := rate.proofSnapshot()
+	if proofCalls != 1 || claimIP != "203.0.113.10" || loginHash == "login-code" || phoneHash == "phone-code" || len(loginHash) != 64 || len(phoneHash) != 64 {
+		t.Fatalf("unsafe proof claim: ip=%q login=%q phone=%q calls=%d", claimIP, loginHash, phoneHash, proofCalls)
+	}
+	if got := strings.Join(events, ","); got != "claim,verify,public-rate,create" {
+		t.Fatalf("registration order=%q", got)
 	}
 	if strings.Contains(rr.Body.String(), "login-code") || strings.Contains(rr.Body.String(), "phone-code") {
 		t.Fatalf("response leaked proof: %s", rr.Body.String())
@@ -147,11 +200,14 @@ func TestWeChatRegistrationRequiresCodesAndDoesNotRateLimitOnRawProof(t *testing
 }
 
 func TestWeChatRegistrationDoesNotCreateWhenProviderProofRejected(t *testing.T) {
-	service, rate := &fakeWeChatRegistrationService{err: registration.ErrInvalidInput}, &fakeRegistrationRate{allow: true}
+	service, rate := &fakeWeChatRegistrationService{verifyErr: registration.ErrInvalidInput}, &fakeRegistrationRate{allow: true}
 	h := NewWeChatRegistrationHandlers(service, rate, wechatRegistrationTestPolicy(5), testLogger())
 	rr := performWeChatRegistration(h, validWeChatRegistrationBody("player@example.com", "login-code", "phone-code"), "203.0.113.11:1234")
 	if rr.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rate.registrationCallCount() != 0 || service.callCount() != 0 || service.verifyCount() != 1 {
+		t.Fatalf("rejected proof touched create path: publicRate=%d verify=%d create=%d", rate.registrationCallCount(), service.verifyCount(), service.callCount())
 	}
 }
 
@@ -172,8 +228,8 @@ func TestWeChatRegistrationProofReplayIsGlobalAcrossIPs(t *testing.T) {
 			if first.Code != http.StatusCreated || second.Code != http.StatusTooManyRequests {
 				t.Fatalf("first=%d second=%d secondBody=%s", first.Code, second.Code, second.Body.String())
 			}
-			if service.callCount() != 1 {
-				t.Fatalf("service calls=%d; replay reached provider/account creation", service.callCount())
+			if service.callCount() != 1 || service.verifyCount() != 1 {
+				t.Fatalf("verify=%d create=%d; replay reached verification/account creation", service.verifyCount(), service.callCount())
 			}
 		})
 	}
@@ -210,8 +266,8 @@ func TestWeChatRegistrationConcurrentReplayReachesServiceOnce(t *testing.T) {
 			t.Fatalf("unexpected status=%d", status)
 		}
 	}
-	if created != 1 || denied != attempts-1 || service.callCount() != 1 {
-		t.Fatalf("created=%d denied=%d serviceCalls=%d", created, denied, service.callCount())
+	if created != 1 || denied != attempts-1 || service.callCount() != 1 || service.verifyCount() != 1 {
+		t.Fatalf("created=%d denied=%d verifyCalls=%d createCalls=%d", created, denied, service.verifyCount(), service.callCount())
 	}
 }
 
@@ -220,22 +276,36 @@ func TestWeChatRegistrationRedisProofFailureIsFailClosed(t *testing.T) {
 	rate := &fakeRegistrationRate{allow: true, proofErr: errors.New("redis unavailable")}
 	h := NewWeChatRegistrationHandlers(service, rate, wechatRegistrationTestPolicy(5), testLogger())
 	rr := performWeChatRegistration(h, validWeChatRegistrationBody("player@example.com", "login-code", "phone-code"), "203.0.113.40:1234")
-	if rr.Code != http.StatusTooManyRequests || service.callCount() != 0 {
-		t.Fatalf("status=%d serviceCalls=%d body=%s", rr.Code, service.callCount(), rr.Body.String())
+	if rr.Code != http.StatusTooManyRequests || service.callCount() != 0 || service.verifyCount() != 0 || rate.registrationCallCount() != 0 {
+		t.Fatalf("status=%d verify=%d create=%d publicRate=%d body=%s", rr.Code, service.verifyCount(), service.callCount(), rate.registrationCallCount(), rr.Body.String())
 	}
 	if !strings.Contains(rr.Body.String(), "请求过于频繁，请稍后再试。") {
 		t.Fatalf("rate-limit wording drifted: %s", rr.Body.String())
 	}
 }
 
-func TestWeChatRegistrationPreservesCreateRateLimitBeforeProofConsumption(t *testing.T) {
-	service := &fakeWeChatRegistrationService{}
-	rate := &fakeRegistrationRate{allow: false}
+func TestWeChatRegistrationChecksPublicCreateRateOnlyAfterClaimAndVerification(t *testing.T) {
+	events := []string{}
+	service := &fakeWeChatRegistrationService{events: &events}
+	rate := &fakeRegistrationRate{allow: false, events: &events}
 	h := NewWeChatRegistrationHandlers(service, rate, wechatRegistrationTestPolicy(5), testLogger())
 	rr := performWeChatRegistration(h, validWeChatRegistrationBody("player@example.com", "login-code", "phone-code"), "203.0.113.50:1234")
-	_, _, proofCalls := rate.proofSnapshot()
-	if rr.Code != http.StatusTooManyRequests || proofCalls != 0 || service.callCount() != 0 {
-		t.Fatalf("status=%d proofCalls=%d serviceCalls=%d", rr.Code, proofCalls, service.callCount())
+	_, _, _, proofCalls := rate.proofSnapshot()
+	if rr.Code != http.StatusTooManyRequests || proofCalls != 1 || service.verifyCount() != 1 || rate.registrationCallCount() != 1 || service.callCount() != 0 {
+		t.Fatalf("status=%d proofCalls=%d verify=%d publicRate=%d create=%d", rr.Code, proofCalls, service.verifyCount(), rate.registrationCallCount(), service.callCount())
+	}
+	if got := strings.Join(events, ","); got != "claim,verify,public-rate" {
+		t.Fatalf("rate-denied order=%q", got)
+	}
+}
+
+func TestWeChatRegistrationRandomValidCodesCannotTouchVictimEmailBudget(t *testing.T) {
+	service := &fakeWeChatRegistrationService{verifyErr: registration.ErrInvalidInput}
+	rate := &fakeRegistrationRate{allow: true}
+	h := NewWeChatRegistrationHandlers(service, rate, wechatRegistrationTestPolicy(5), testLogger())
+	rr := performWeChatRegistration(h, validWeChatRegistrationBody("victim@example.com", "format-valid-random-login", "format-valid-random-phone"), "203.0.113.50:1234")
+	if rr.Code != http.StatusUnprocessableEntity || rate.registrationCallCount() != 0 || service.verifyCount() != 1 || service.callCount() != 0 {
+		t.Fatalf("status=%d publicRate=%d verify=%d create=%d body=%s", rr.Code, rate.registrationCallCount(), service.verifyCount(), service.callCount(), rr.Body.String())
 	}
 }
 
@@ -253,9 +323,9 @@ func TestWeChatRegistrationRejectsMalformedProofBeforeAnyRateOrServiceCall(t *te
 			rate := &fakeRegistrationRate{allow: true}
 			h := NewWeChatRegistrationHandlers(service, rate, wechatRegistrationTestPolicy(5), testLogger())
 			rr := performWeChatRegistration(h, validWeChatRegistrationBody("player@example.com", test.loginCode, test.phoneCode), "203.0.113.51:1234")
-			_, _, proofCalls := rate.proofSnapshot()
-			if rr.Code != http.StatusUnprocessableEntity || rate.registrationKey() != "" || proofCalls != 0 || service.callCount() != 0 {
-				t.Fatalf("status=%d registrationKey=%q proofCalls=%d serviceCalls=%d body=%s", rr.Code, rate.registrationKey(), proofCalls, service.callCount(), rr.Body.String())
+			_, _, _, proofCalls := rate.proofSnapshot()
+			if rr.Code != http.StatusUnprocessableEntity || rate.registrationKey() != "" || proofCalls != 0 || service.verifyCount() != 0 || service.callCount() != 0 {
+				t.Fatalf("status=%d registrationKey=%q proofCalls=%d verify=%d create=%d body=%s", rr.Code, rate.registrationKey(), proofCalls, service.verifyCount(), service.callCount(), rr.Body.String())
 			}
 		})
 	}

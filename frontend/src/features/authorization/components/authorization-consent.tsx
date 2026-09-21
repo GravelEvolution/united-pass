@@ -11,7 +11,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Avatar, Button, Toast } from "@douyinfe/semi-ui";
+import { Button, Toast } from "@douyinfe/semi-ui";
 import {
   IconAlertTriangle,
   IconLock,
@@ -22,8 +22,11 @@ import {
 } from "@douyinfe/semi-icons";
 import type { ConsentDecision, ConsentResolution } from "@/features/authorization/types";
 import type { CurrentUser } from "@/types/identity";
+import { UserAvatar } from "@/components/common/user-avatar";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
 import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
+import { BRAND_LOGO_URL } from "@/lib/branding";
+import { getControlledAvatarUrl } from "@/lib/utils/avatar-url";
 import {
   acquireCompletionFlight,
   classifyCompletionFailure,
@@ -31,9 +34,6 @@ import {
   type CompletionFailure,
 } from "@/features/authorization/consent-completion";
 import styles from "./authorization-consent.module.css";
-
-const DEFAULT_AVATAR_URL =
-  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='50' fill='%23eef1f6'/%3E%3Ccircle cx='50' cy='38' r='16' fill='%23b6bfcc'/%3E%3Cpath d='M50 58c-15 0-26 9-26 21v4h52v-4c0-12-11-21-26-21z' fill='%23b6bfcc'/%3E%3C/svg%3E";
 
 type AuthorizationConsentProps = {
   currentUser?: CurrentUser;
@@ -245,12 +245,15 @@ function ConsentCard({
   onDeny: () => void;
 }) {
   const { request } = resolution;
+  const identityAvatarUrl = getControlledAvatarUrl(currentUser.avatarUrl);
 
   return (
     <div className={styles.card}>
       {showMockIndicators && <div className={styles.mockBadge}>授权请求 · MOCK</div>}
       <div className={styles.application}>
-        <div className={styles.applicationIcon}><img className={styles.applicationLogo} src="https://moonstone.org.cn/image/logo.png" alt="MoonStone" /></div>
+        <div className={styles.applicationIcon}>
+          <img src={BRAND_LOGO_URL} alt="" />
+        </div>
         <div>
           <h1>{request.applicationName}</h1>
           <p>{request.applicationDescription}</p>
@@ -259,8 +262,8 @@ function ConsentCard({
       </div>
 
       <section className={styles.identity} aria-labelledby="current-identity-title">
-        <Avatar src={currentUser?.avatarUrl ?? DEFAULT_AVATAR_URL} />
-        <div>
+        <UserAvatar className={styles.identityAvatar} displayName={currentUser.displayName} imageUrl={identityAvatarUrl} />
+        <div className={styles.identityText}>
           <span id="current-identity-title">当前身份</span>
           <strong>{currentUser.displayName}</strong>
           <p>{currentUser.email}</p>

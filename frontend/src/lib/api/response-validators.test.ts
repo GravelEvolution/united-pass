@@ -10,12 +10,14 @@ import { describe, it, expect } from "vitest";
 import {
   ApiResponseShapeError,
   parseAccountDeletion,
-  parseAdminDashboard,
   parseAuthorizedApplications,
   parseAuditEvents,
   parseAuditExport,
   parseConsentResolution,
   parseCurrentUser,
+  parseAvatarUpload,
+  parseContactChangeRequest,
+  parseContactChangeVerification,
   parseDecisionResponse,
   parseDepartmentDetail,
   parseDepartments,
@@ -461,7 +463,6 @@ describe("parseAuthorizedApplications", () => {
     applicationId: "app_001",
     applicationName: "United Workspace",
     applicationOwner: "United",
-    logoUrl: null,
     clientType: "confidential",
     grantedAt: "2026-08-01T00:00:00Z",
     lastUsedAt: null,
@@ -561,6 +562,40 @@ describe("parseCurrentUser", () => {
   });
 });
 
+describe("account profile/contact mutation validators", () => {
+  it("narrows server-issued contact request and verified-contact responses", () => {
+    expect(parseContactChangeRequest({
+      status: "verification_required",
+      requestId: "email_change_0123456789abcdef0123456789abcdef",
+    })).toEqual({ requestId: "email_change_0123456789abcdef0123456789abcdef" });
+    expect(parseContactChangeVerification({
+      status: "verified",
+      email: "new@example.com",
+    }, "email")).toBe("new@example.com");
+  });
+
+  it("accepts only the controlled same-origin avatar path", () => {
+    expect(parseAvatarUpload({
+      avatarUrl: "/api/v1/media/avatars/user_0123?v=7",
+    })).toEqual({ avatarUrl: "/api/v1/media/avatars/user_0123?v=7" });
+    expect(() => parseAvatarUpload({
+      avatarUrl: "/api/v1/media/avatars/user_0123",
+    })).toThrow(ApiResponseShapeError);
+    expect(() => parseAvatarUpload({
+      avatarUrl: "https://attacker.example/avatar.jpg",
+    })).toThrow(ApiResponseShapeError);
+  });
+
+  it("fails closed on incomplete contact mutation responses", () => {
+    expect(() => parseContactChangeRequest({ status: "verification_required" })).toThrow(
+      ApiResponseShapeError,
+    );
+    expect(() => parseContactChangeVerification({ status: "verified" }, "phone")).toThrow(
+      ApiResponseShapeError,
+    );
+  });
+});
+
 describe("parseMfaRequiredResponse", () => {
   it("narrows the 202 login body onto the frozen challenge shape", () => {
     expect(
@@ -570,32 +605,7 @@ describe("parseMfaRequiredResponse", () => {
         availableMethods: ["totp", "recovery_code"],
         expiresAt: "2026-08-07T12:05:30Z",
       }),
-    ).toEqual({
-      mfaToken: "opaque-token",
-      availableMethods: ["totp", "recovery_code"],
-      expiresAt: "2026-08-07T12:05:30Z",
-    });
-  });
-
-  it("preserves a real passkey challenge and requires request options", () => {
-    expect(parseMfaRequiredResponse({
-      status: "mfa_required",
-      mfaToken: "opaque-token",
-      availableMethods: ["passkey"],
-      passkeyRequestOptions: { challenge: "Y2hhbGxlbmdl" },
-      expiresAt: "2026-08-07T12:05:30Z",
-    })).toEqual({
-      mfaToken: "opaque-token",
-      availableMethods: ["passkey"],
-      passkeyRequestOptions: { challenge: "Y2hhbGxlbmdl" },
-      expiresAt: "2026-08-07T12:05:30Z",
-    });
-    expect(() => parseMfaRequiredResponse({
-      status: "mfa_required",
-      mfaToken: "opaque-token",
-      availableMethods: ["passkey"],
-      expiresAt: "2026-08-07T12:05:30Z",
-    })).toThrow(ApiResponseShapeError);
+    ).toEqual({ mfaToken: "opaque-token", availableMethods: ["totp", "recovery_code"] });
   });
 
   it("rejects unknown verification methods", () => {
@@ -619,36 +629,6 @@ describe("parseMfaRequiredResponse", () => {
       parseMfaRequiredResponse({ status: "mfa_required", mfaToken: "t", availableMethods: [] }),
     ).toThrow(ApiResponseShapeError);
     expect(() => parseMfaRequiredResponse(null)).toThrow(ApiResponseShapeError);
-  });
-});
-
-describe("parseAdminDashboard", () => {
-  it("narrows permission-scoped real metrics and audit events", () => {
-    expect(parseAdminDashboard({
-      metrics: [{ label: "活跃用户", value: "2", change: "0 个待激活", tone: "neutral" }],
-      recentEvents: [{
-        eventId: "evt_1",
-        eventType: "session.created",
-        actorName: "User",
-        actorId: "user_1",
-        targetLabel: "session",
-        targetId: "sess_1",
-        occurredAt: "2026-08-16T00:00:00Z",
-        result: "success",
-        requestId: "req_1",
-        details: "session.create",
-      }],
-    }).metrics[0].value).toBe("2");
-  });
-
-  it("rejects fabricated metric tones and malformed event arrays", () => {
-    expect(() => parseAdminDashboard({
-      metrics: [{ label: "x", value: "1", change: "x", tone: "danger" }],
-      recentEvents: [],
-    })).toThrow(ApiResponseShapeError);
-    expect(() => parseAdminDashboard({ metrics: [], recentEvents: {} })).toThrow(
-      ApiResponseShapeError,
-    );
   });
 });
 

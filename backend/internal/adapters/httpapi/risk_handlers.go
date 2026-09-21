@@ -32,6 +32,7 @@ type StepUpDetails struct {
 }
 
 type RiskDefenseService interface {
+	EnsureDevice(context.Context, string) (string, error)
 	Assess(context.Context, riskdefense.Signal) (riskdefense.Decision, error)
 	Complete(context.Context, riskdefense.Completion) (riskdefense.CompleteResult, error)
 }
@@ -57,7 +58,37 @@ func NewRiskGuard(service RiskDefenseService, sessions SessionTrustValidator, at
 	return &RiskGuard{service: service, sessions: sessions, cookieAttrs: attrs, deviceIDTTL: deviceIDTTL, trustTTL: trustTTL}
 }
 
+// EnsureDevice establishes the same server-registered device cookie consumed
+// by risk challenges. It grants no trust and writes no challenge response.
+func (g *RiskGuard) EnsureDevice(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if g == nil || g.service == nil {
+		WriteProviderUnavailable(w, r)
+		return "", false
+	}
+	current := readCookie(r, RiskDeviceCookieName)
+	deviceID, err := g.service.EnsureDevice(r.Context(), current)
+	if err != nil || deviceID == "" {
+		WriteProviderUnavailable(w, r)
+		return "", false
+	}
+	if deviceID != current {
+		setRiskCookie(w, RiskDeviceCookieName, deviceID, g.deviceIDTTL, g.cookieAttrs)
+	}
+	return deviceID, true
+}
+
 func (g *RiskGuard) Require(w http.ResponseWriter, r *http.Request, operation riskdefense.Operation, identifierHash string) bool {
+	return g.require(w, r, operation, identifierHash, "")
+}
+
+// RequireRegistration receives the network digest already derived by the
+// registration form-intent boundary. Risk defense must not parse proxy headers
+// independently or trust a client-supplied network value.
+func (g *RiskGuard) RequireRegistration(w http.ResponseWriter, r *http.Request, identifierHash, clientNetworkHash string) bool {
+	return g.require(w, r, riskdefense.OperationRegistration, identifierHash, clientNetworkHash)
+}
+
+func (g *RiskGuard) require(w http.ResponseWriter, r *http.Request, operation riskdefense.Operation, identifierHash, clientNetworkHash string) bool {
 	if g == nil || g.service == nil {
 		return true
 	}
@@ -68,9 +99,15 @@ func (g *RiskGuard) Require(w http.ResponseWriter, r *http.Request, operation ri
 		Operation: operation, IdentifierHash: identifierHash,
 		DeviceIDToken: deviceID, DeviceTrustToken: deviceTrust,
 		UserAgentHash: hashRiskValue(r.UserAgent()), SessionTrusted: sessionTrusted,
-		SessionAnomaly: sessionAnomaly,
+		SessionAnomaly: sessionAnomaly, ClientNetworkHash: clientNetworkHash,
 	})
 	if err != nil {
+		var rateErr *riskdefense.RateLimitError
+		if errors.As(err, &rateErr) {
+			seconds := int((rateErr.RetryAfter + time.Second - 1) / time.Second)
+			WriteRateLimited(w, r, seconds)
+			return false
+		}
 		WriteInternalError(w, r)
 		return false
 	}

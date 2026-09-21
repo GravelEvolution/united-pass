@@ -180,10 +180,12 @@ type OutboxRepository interface {
 	ClaimExact(context.Context, string, int64, time.Time, time.Duration) (OutboxItem, error)
 	ClaimReceiptsDue(context.Context, time.Time, int, time.Duration) ([]OutboxItem, error)
 	MarkDeliveryPhase(context.Context, string, int64, string, DeliveryPhase, time.Time) error
+	RenewClaim(context.Context, string, int64, string, time.Duration) error
 	DeferReceipt(context.Context, string, int64, string, time.Time, time.Time) error
 	MarkNeedsOperator(context.Context, string, int64, string, time.Time) error
 	Settle(context.Context, string, int64, string, AllowlistedResult, time.Time) error
 	Fail(context.Context, string, int64, string, AllowlistedResult, time.Time) error
+	AbortBeforeSend(context.Context, string, int64, string, AllowlistedResult, time.Time) error
 	MarkAuditReconciled(context.Context, string, int64, time.Time) error
 	ReleaseExpiredClaim(context.Context, string, int64, time.Time) error
 	PurgePayload(context.Context, string, int64, time.Time) error
@@ -206,8 +208,26 @@ type OperatorApprovalRepository interface {
 	MarkTerminal(context.Context, string, time.Time) error
 }
 
+// ProtectedReason is the encrypted authority-plane record for a privileged
+// operation's human-readable reason. The plaintext never belongs in the
+// operational outbox or the DreamUP data plane.
+type ProtectedReason struct {
+	ID            string
+	OwnerUserID   string
+	OperationKind string
+	KeyID         string
+	Nonce         []byte
+	Ciphertext    []byte
+	ConsumedAt    *time.Time
+	TerminalAt    *time.Time
+	ExpiresAt     *time.Time
+	PurgedAt      *time.Time
+	CreatedAt     time.Time
+}
+
 type ProtectedReasonRepository interface {
 	Create(context.Context, string, string, string, []byte, []byte, time.Time) error
+	CreateOrReplay(context.Context, ProtectedReason) (ProtectedReason, bool, error)
 	MarkTerminal(context.Context, string, time.Time, time.Time) error
 	PurgeExpired(context.Context, time.Time, int) (int, error)
 }

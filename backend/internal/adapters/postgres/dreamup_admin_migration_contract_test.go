@@ -9,18 +9,18 @@ import (
 )
 
 func TestDreamUPAdministrationMigrationContract(t *testing.T) {
-	path := filepath.Join(findBackendRoot(t), "migrations", "00013_production_lineage_bridge.sql")
+	path := filepath.Join(findBackendRoot(t), "migrations", "00012_dreamup_administration.sql")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read migration: %v", err)
 	}
 	sql := string(raw)
 	if strings.Count(sql, "-- +goose Up") != 1 || strings.Count(sql, "-- +goose Down") != 1 || strings.Count(sql, "-- +goose StatementBegin") != 2 || strings.Count(sql, "-- +goose StatementEnd") != 2 {
-		t.Fatal("migration must have one transaction-bounded Goose Up and one aborting Down section")
+		t.Fatal("migration must have one transaction-bounded Goose Up and inert Down section")
 	}
 	down := sql[strings.Index(sql, "-- +goose Down"):]
-	if !strings.Contains(down, "RAISE EXCEPTION") || regexp.MustCompile(`(?im)^\s*(?:DROP|DELETE|TRUNCATE|ALTER|CREATE|INSERT|UPDATE)\b`).MatchString(down) {
-		t.Fatal("Down must abort and contain no destructive SQL")
+	if !strings.Contains(down, "intentionally irreversible") || regexp.MustCompile(`(?i)\b(?:DROP|DELETE|TRUNCATE|ALTER)\b`).MatchString(down) {
+		t.Fatal("Down must be intentionally inert and contain no destructive SQL")
 	}
 	required := []string{
 		"admin_role_bindings", "dreamup_event_registry", "admin_challenges", "admin_step_up_state",
@@ -46,19 +46,10 @@ func TestDreamUPAdministrationMigrationContract(t *testing.T) {
 			t.Errorf("migration missing %q", term)
 		}
 	}
-	for _, term := range []string{
-		"existing_tables NOT IN (0, 11)",
-		"partial DreamUP v12 lineage detected",
-		"DreamUP v12 lineage is incomplete or drifted",
-	} {
-		if !strings.Contains(sql, term) {
-			t.Errorf("lineage bridge missing %q", term)
-		}
-	}
 }
 
 func TestDreamUPAdministrationMigrationAcceptsStepUpReceiptVocabulary(t *testing.T) {
-	path := filepath.Join(findBackendRoot(t), "migrations", "00013_production_lineage_bridge.sql")
+	path := filepath.Join(findBackendRoot(t), "migrations", "00012_dreamup_administration.sql")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read migration: %v", err)

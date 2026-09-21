@@ -17,9 +17,8 @@ import type { AuthorizedApplication } from "@/features/account/types";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
 import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
+import { BRAND_LOGO_URL } from "@/lib/branding";
 import styles from "./authorized-application-list.module.css";
-
-const DEFAULT_APP_LOGO_URL = "https://moonstone.org.cn/image/logo.png";
 
 type AuthorizedApplicationListProps = {
   applications: AuthorizedApplication[];
@@ -79,11 +78,7 @@ function GrantCard({ grant }: { grant: AuthorizedApplication }) {
       <div className={styles.grantHeader}>
         <div className={styles.grantIdentity}>
           <div className={styles.appIcon} aria-hidden="true">
-            <img
-              src={grant.logoUrl ?? DEFAULT_APP_LOGO_URL}
-              alt=""
-              style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit" }}
-            />
+            <img src={BRAND_LOGO_URL} alt="" />
           </div>
           <div>
             <div className={styles.grantTitle}>

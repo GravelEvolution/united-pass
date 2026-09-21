@@ -124,6 +124,8 @@ func (h *WeChatHandlers) BindPhone(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, wechat.ErrInvalidCode), errors.Is(err, wechat.ErrRejected), errors.Is(err, wechat.ErrBindingMismatch):
 			WriteValidation(w, r, "微信身份或手机号授权无效，请重新验证。", nil)
+		case errors.Is(err, wechat.ErrPhoneConflict):
+			writeError(w, r, http.StatusConflict, codeWeChatPhoneConflict, "该手机号已绑定其他统一账户，或与当前账户信息冲突；系统未自动合并，请使用原账户登录或联系支持。", nil)
 		case errors.Is(err, wechat.ErrNotRegistered):
 			WriteUnauthorized(w, r)
 		default:

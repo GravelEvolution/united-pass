@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -58,6 +59,24 @@ func TestEmailDeliveryValidatorAcceptsNormalMXAndCachesResult(t *testing.T) {
 	}
 }
 
+func TestEmailDeliveryAssessmentCacheDoesNotExposeMutableMXGroups(t *testing.T) {
+	t.Parallel()
+	resolver := &mailResolverStub{mx: []*net.MX{{Host: "mx.original-provider.net.", Pref: 10}}}
+	validator := newEmailDeliveryValidator(resolver, time.Second, time.Minute)
+	first, err := validator.Assess(t.Context(), "person@rare.example")
+	if err != nil || len(first.MXGroups) != 1 {
+		t.Fatalf("first assessment=%#v err=%v", first, err)
+	}
+	first.MXGroups[0] = "attacker-controlled.example"
+	second, err := validator.Assess(t.Context(), "person@rare.example")
+	if err != nil || len(second.MXGroups) != 1 || second.MXGroups[0] != "original-provider.net" {
+		t.Fatalf("cached assessment=%#v err=%v", second, err)
+	}
+	if resolver.mxCalls != 1 {
+		t.Fatalf("LookupMX calls=%d, want one cached lookup", resolver.mxCalls)
+	}
+}
+
 func TestEmailDeliveryValidatorAllowsRFCFallbackAddress(t *testing.T) {
 	t.Parallel()
 	resolver := &mailResolverStub{
@@ -67,6 +86,65 @@ func TestEmailDeliveryValidatorAllowsRFCFallbackAddress(t *testing.T) {
 	validator := newEmailDeliveryValidator(resolver, time.Second, time.Minute)
 	if err := validator.Validate(t.Context(), "person@example.net"); err != nil {
 		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestEmailDeliveryAssessmentUsesIndependentUnfamiliarMXOperators(t *testing.T) {
+	t.Parallel()
+	resolver := &mailResolverStub{mx: []*net.MX{
+		{Host: "mx.two-provider.org.", Pref: 20},
+		{Host: "backup.one-provider.net.", Pref: 30},
+		{Host: "mx.one-provider.net.", Pref: 10},
+	}}
+	validator := newEmailDeliveryValidator(resolver, time.Second, time.Minute)
+	assessment, err := validator.Assess(t.Context(), "person@rare.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"one-provider.net", "two-provider.org"}
+	if strings.Join(assessment.MXGroups, ",") != strings.Join(want, ",") || assessment.MXEstablished {
+		t.Fatalf("assessment = %#v, want independent MX groups %#v", assessment, want)
+	}
+}
+
+func TestEmailDeliveryAssessmentDoesNotPenalizeEstablishedRecipientForMXRouting(t *testing.T) {
+	t.Parallel()
+	resolver := &mailResolverStub{mx: []*net.MX{{Host: "mx.unlisted-provider.net.", Pref: 10}}}
+	validator := newEmailDeliveryValidator(resolver, time.Second, time.Minute)
+	assessment, err := validator.Assess(t.Context(), "person@163.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !assessment.DomainEstablished || !assessment.MXEstablished || len(assessment.MXGroups) != 0 {
+		t.Fatalf("established recipient assessment = %#v", assessment)
+	}
+}
+
+func TestEmailDeliveryAssessmentRejectsExcessiveIndependentMXOperators(t *testing.T) {
+	t.Parallel()
+	mx := make([]*net.MX, 0, MaxCreateRateMXCohorts+1)
+	for index := 0; index <= MaxCreateRateMXCohorts; index++ {
+		mx = append(mx, &net.MX{Host: "mx.provider-" + strconv.Itoa(index) + ".net.", Pref: uint16(index)})
+	}
+	validator := newEmailDeliveryValidator(&mailResolverStub{mx: mx}, time.Second, time.Minute)
+	if _, err := validator.Assess(t.Context(), "person@rare.example"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("excessive MX assessment error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestEmailDeliveryAssessmentFallbackUsesRegistrableRecipientDomain(t *testing.T) {
+	t.Parallel()
+	resolver := &mailResolverStub{
+		mxErr:     &net.DNSError{IsNotFound: true},
+		addresses: []net.IPAddr{{IP: net.ParseIP("192.0.2.10")}},
+	}
+	validator := newEmailDeliveryValidator(resolver, time.Second, time.Minute)
+	assessment, err := validator.Assess(t.Context(), "person@mail.dept.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assessment.DomainGroup != "example.com" || len(assessment.MXGroups) != 1 || assessment.MXGroups[0] != "example.com" {
+		t.Fatalf("fallback assessment = %#v, want registrable domain grouping", assessment)
 	}
 }
 

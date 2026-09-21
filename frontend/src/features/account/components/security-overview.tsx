@@ -786,8 +786,6 @@ function replaceAbortController(
 type AccountReauthenticationFormProps = {
   action: ReauthenticationAction;
   target: string;
-  applicationId?: string;
-  clientId?: string;
   submitLabel: string;
   browserOperationRef: MutableRefObject<AbortController | null>;
   onGranted: (reauthToken: string, signal: AbortSignal) => Promise<void>;
@@ -799,8 +797,6 @@ type AccountReauthenticationFormProps = {
 export function AccountReauthenticationForm({
   action,
   target,
-  applicationId,
-  clientId,
   submitLabel,
   browserOperationRef,
   onGranted,
@@ -846,7 +842,7 @@ export function AccountReauthenticationForm({
     const controller = replaceAbortController(browserOperationRef);
     try {
       const outcome = await browserCommands.requestReauthentication(
-        { action, target, applicationId, clientId, password },
+        { action, target, password },
         { signal: controller.signal },
       );
       setPassword("");

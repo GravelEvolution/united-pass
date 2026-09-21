@@ -48,8 +48,8 @@ describe("validateContactValue (phone)", () => {
     expect(validateContactValue("phone", "")).toBe("请输入新手机号码。");
   });
 
-  it("accepts phone without country code", () => {
-    expect(validateContactValue("phone", "13800138000")).toBeUndefined();
+  it("rejects phone without country code", () => {
+    expect(validateContactValue("phone", "13800138000")).toBeDefined();
   });
 
   it("rejects phone with invalid country code", () => {

@@ -1,7 +1,7 @@
 # United Pass 前端 API 接入清单
 
-- 状态：Frozen v1 + P4–P8 + Production Seam Completion + Objective Risk/Public Registration Amendments
-- 日期：2026-08-30（当前生产 seam、公开注册与客观风险 Step-up 修订）
+- 状态：Frozen v1 + P4/P5/P6/P7/P8 Frozen Amendments
+- 日期：2026-08-11（P8 Launch privacy/legal real-seam 接入修订）
 - 基础路径建议：同源 `/api/v1`
 - 协议边界：OAuth 2.0、OpenID Connect
 
@@ -105,9 +105,12 @@ type ApiError = {
   `difficulty`。前端在 Worker 中寻找 nonce，再向
   `POST /api/v1/auth/step-up` 提交 `{challengeToken, nonce}`。该计算只增加
   自动化成本，不代表真人验证。
-- `interactive_captcha`：前端只把已注册 Provider 组件返回的 opaque proof
-  作为 `{challengeToken, providerProof}` 提交。`providerReady=false` 时必须
-  明确提示当前无法验证并停止，不得模拟成功。
+- `interactive_captcha`：当前只接受服务端选择的
+  `cloudflare_turnstile`（固定 `challenges.cloudflare.com`）或
+  `google_recaptcha`（固定 `recaptcha.net`）公开参数；前端不能选择
+  Provider 或脚本地址。前端只把组件返回的 opaque proof 作为
+  `{challengeToken, providerProof}` 提交。`providerReady=false` 时必须明确
+  提示当前无法验证并停止，不得模拟成功。Provider Secret 永远不进入响应。
 - 完成接口成功返回 204 并设置 HttpOnly 短期信任 Cookie。前端随后以原 body
   和原 `Idempotency-Key` 重试一次；第二次仍要求 step-up 时不得循环。
 - 当前风险门禁不根据称呼、姓名、文本内容或写作风格判断，也不替代登录后
@@ -145,12 +148,31 @@ type PermissionCapabilities = {
 | MFA 挑战 | `POST /api/v1/auth/sessions/mfa` | 提交 TOTP / Passkey / 恢复码 | challenge 限时；限速；过多尝试锁定 |
 | 高危操作重认证 | `POST /api/v1/auth/reauthentication` | 为删除应用/删除 Client/轮换 Secret 等高危操作重新验证密码 | 需要会话 + CSRF；返回授权（200）或 MFA 挑战（202）；限速；授权令牌一次性 |
 | 重认证 MFA 完成 | `POST /api/v1/auth/reauthentication/mfa` | 以 TOTP / Passkey 完成重认证挑战 | 与登录 MFA 相同的原子消费语义；成功后签发一次性授权令牌 |
-| `/forgot-password` | `POST /api/v1/password-reset-requests` | 请求向已验证联系方式发送重置说明 | 限速；始终返回通用结果，不能泄露账户是否存在 |
-| 密码重置落地页 | `POST /api/v1/password-resets` | 使用一次性令牌设置新密码 | 令牌限时、一次性、不可写入日志；成功后按策略撤销会话 |
+| `/forgot-password` | `POST /api/v1/auth/password-reset` | 请求向已验证联系方式发送重置说明 | 限速；对不存在或不可投递账户返回相同 202，不能泄露账户是否存在 |
+| 密码重置落地页 | `POST /api/v1/auth/password-reset/confirm` | 使用一次性验证码设置新密码 | 验证码限时、一次性、不可写入日志；失败响应不区分过期、已用或未知账户 |
 | 邮箱验证落地页 | `POST /api/v1/registrations/email/verify` | 验证 pending 注册邮箱并激活账户 | `userId` 与验证码来自 URL fragment；页面立即清除 fragment；限速 |
 | 注册等待页 | `POST /api/v1/registrations/email/resend` | 重新发送验证邮件 | 只接受短期 opaque registration token，不接受任意 `userId` |
 | 全局退出 | `DELETE /api/v1/auth/session` | 撤销当前浏览器会话 | 清除服务端会话与 Cookie |
 | `/register` | `POST /api/v1/registrations` | 创建普通用户账户 | 邮箱验证；稳定 `userId`；不得预建独立员工账户 |
+
+### 小程序原生会话、微信与扫码登录
+
+原生请求必须同时携带 `X-UnitedPass-Client: dreamup-miniprogram` 与内存中的 `Authorization: Bearer …`；它不使用浏览器 Cookie 或 CSRF。浏览器 Cookie 也不能作为原生 bearer 使用。所有能力由独立开关显式挂载，关闭时返回 404。
+
+| 流程 | 方法与路径 | 关键边界 |
+| --- | --- | --- |
+| 原生密码会话 | `POST /api/v1/auth/miniprogram/sessions`、`POST /api/v1/auth/miniprogram/sessions/mfa` | 只签发短期原生 bearer；不写入浏览器 Cookie、本地存储或日志 |
+| 微信快捷登录 | `POST /api/v1/auth/wechat/sessions` | 只接受一次性 `wx.login` code；服务端向微信换取身份并要求既有显式绑定 |
+| 微信强制注册 | `POST /api/v1/registrations/wechat` | 微信身份、经微信授权的手机号及本地账户必须全部成功绑定后才能激活 |
+| 微信手机号绑定 | `POST /api/v1/me/wechat/phone` | 要求当前原生 bearer、全新 login code 与 phone code；禁止客户端提供手机号 |
+| 浏览器创建扫码挑战 | `POST /api/v1/auth/qr/challenges` | 二维码只含随机 challenge ID；receiver proof 只存在 HttpOnly Cookie |
+| 浏览器消费扫码结果 | `POST /api/v1/auth/qr/challenges/{challengeId}/consume` | pending 为 202，确认后原子消费并建立当前浏览器会话；轮询受 TTL 与退避上限约束 |
+| 小程序确认扫码 | `POST /api/v1/auth/qr/challenges/{challengeId}/approve` | 要求原生 bearer 和用户显式确认；挑战只能成功消费一次 |
+| DreamUP 小程序断言公钥 | `GET/HEAD /.well-known/dreamup-mobile-jwks.json` | 仅公开专用 Ed25519 验证公钥；必须与管理员 delegation keyring、路径和当前 KID 隔离 |
+| DreamUP 请求断言 | `POST /api/v1/dreamup/mobile/assertions` | 绑定主体、方法、路径、正文摘要、版本头和幂等键，短时且防重放 |
+| DreamUP 简历断言 | `POST /api/v1/dreamup/mobile/resume-upload-assertions` | 仅绑定文件元数据与 SHA-256；原始文件字节不经过 United Pass |
+
+`POST /api/v1/auth/step-up` 是注册/登录客观风险挑战的完成接口，不得与登录 MFA、管理员近期登录或敏感操作重认证互相替代。
 
 登录请求使用统一标识字段：
 
@@ -242,12 +264,12 @@ Account action 的 `applicationId` / `clientId` 必须为空；只有
 | 页面 | 方法与路径 | 数据/操作 | 权限 |
 | --- | --- | --- | --- |
 | `/account` | `GET /api/v1/me` | `userId`、姓名、邮箱、脱敏手机、personas、可选员工档案 | 当前会话用户 |
-| `/account` | `PATCH /api/v1/me/profile` | 修改允许自助维护的公开资料 | 当前会话用户 |
+| `/account` | `PATCH /api/v1/me` | 修改允许自助维护的公开资料 | 当前会话用户 |
 | `/account` | `POST /api/v1/me/avatar` | multipart 上传头像并返回受控媒体地址 | 当前会话用户；CSRF 防护；文件解码与重编码 |
-| `/account` | `POST /api/v1/me/email-change` | 为新邮箱创建验证请求并发送验证码 | 当前会话用户；限速；可要求人机验证 |
-| `/account` | `POST /api/v1/me/email-change/verify` | 以 `{requestId, code}` 校验验证码并原子更新邮箱 | 当前会话用户；一次性、限时验证码 |
-| `/account` | `POST /api/v1/me/phone-change` | 为新手机号创建验证请求并发送验证码 | 当前会话用户；限速；可要求人机验证 |
-| `/account` | `POST /api/v1/me/phone-change/verify` | 以 `{requestId, code}` 校验验证码并原子更新手机号 | 当前会话用户；一次性、限时验证码 |
+| `/account` | `POST /api/v1/me/email-change-requests` | 为新邮箱创建验证请求并发送验证码 | 当前会话用户；限速；可要求重认证 |
+| `/account` | `POST /api/v1/me/email-change-requests/{requestId}/verify` | 校验验证码并原子更新邮箱 | 当前会话用户；一次性、限时验证码 |
+| `/account` | `POST /api/v1/me/phone-change-requests` | 为新手机号创建验证请求并发送验证码 | 当前会话用户；限速；可要求重认证 |
+| `/account` | `POST /api/v1/me/phone-change-requests/{requestId}/verify` | 校验验证码并原子更新手机号 | 当前会话用户；一次性、限时验证码 |
 | `/account/security` | `GET /api/v1/me/security` | 密码、TOTP、Passkey 列表与 Recovery Codes capability | 当前会话用户；provider readback |
 | `/account/security` | `POST /api/v1/me/security/totp/enrollment` | 开始 TOTP 绑定 | `account.totp.enroll` 重认证；密钥只在绑定阶段返回 |
 | `/account/security` | `POST /api/v1/me/security/totp/enrollment/confirm` | 确认 TOTP 绑定 | enrollmentToken + 首次 TOTP 码 |
@@ -349,7 +371,7 @@ ADR-0008 定义的 claim-aware expiry cleanup 结算 provider pending state；wo
 Recovery Codes 在当前 provider baseline 下为架构性 Deferred：真实模式隐藏，
 不存在 generate/rotate API；Mock mode 可继续展示原型。
 
-`PATCH /me/profile` 当前页面需要支持以下公开资料字段，未提供的字段保持不变：
+`PATCH /me` 当前页面需要支持以下公开资料字段，未提供的字段保持不变：
 
 ```json
 {
@@ -364,17 +386,12 @@ Recovery Codes 在当前 provider baseline 下为架构性 Deferred：真实模�
 
 | 页面 | 方法与路径 | 权限标识建议 |
 | --- | --- | --- |
-| `/admin` | `GET /api/v1/admin/dashboard` | 至少一个管理 capability；各数据切片独立授权 |
+| `/admin` | `GET /api/v1/admin/dashboard` | `admin.dashboard.read` |
 | 管理导航/操作能力 | `GET /api/v1/me/permissions` | 后端返回显式 `PermissionCapabilities` |
 
-前端权限仅用于导航和控件可用性。后端分别以 `user.read` 决定用户/员工计数、
-`application.read` 决定应用计数、`audit.read` 决定近 30 天 denied 计数和最多三条
-脱敏最近事件。调用者即使拥有其他管理 capability，也不能获得未授权切片。
+前端权限仅用于导航和控件可用性。以下每个请求仍须由后端执行 ABAC 决策，不能依赖角色名称或前端传入的权限结论。
 
-用户、员工、部门、OAuth Application / Client 与仪表盘均已接入真实 API。搜索词、
-游标、页容量、排序和筛选随对应 `GET /api/v1/admin/*` 请求发送，由服务端在权限过滤
-和字段裁剪后返回当前页；浏览器不接收完整用户或员工集合再做本地过滤。显式 Mock
-模式仅保留同合同的开发 fixture，生产不存在静默回落。
+P5 用户、员工和部门目录已接入真实 API。搜索词、游标、页容量、排序和筛选随对应 `GET /api/v1/admin/*` 请求发送，由服务端在权限过滤和字段裁剪后返回当前页；浏览器不接收完整用户或员工集合再做本地过滤。尚未迁移的管理目录仍可在 Mock mode 保留显式字段的本地原型搜索。
 
 ## OAuth Application 与 Client
 
@@ -526,16 +543,9 @@ simulation 只预览当前 working copy，不安装到 PDP，也不参与真实�
 | `updateApplication(applicationId, input)` | `PATCH /api/v1/admin/applications/{applicationId}` |
 | `updateApplicationStatus(applicationId, status)` | `POST /api/v1/admin/applications/{applicationId}/enable\|disable` |
 | `deleteApplication(applicationId)` | `DELETE /api/v1/admin/applications/{applicationId}` |
-| `updateOAuthClient(applicationId, clientId, input)` | `PATCH /api/v1/admin/applications/{applicationId}/clients/{clientId}`；Profile 不可变，清空 Logout URI 发送空字符串 |
-| `updateOAuthClientStatus(applicationId, clientId, status)` | `POST /api/v1/admin/applications/{applicationId}/clients/{clientId}/enable\|disable` |
-| `deleteOAuthClient(applicationId, clientId, reauthToken)` | `DELETE /api/v1/admin/applications/{applicationId}/clients/{clientId}` + target-bound reauth header |
 | `rotateClientSecret(applicationId, clientId)` | `POST /api/v1/admin/applications/{applicationId}/clients/{clientId}/secret-rotations` |
 | `decideConsent(requestId, decision)` | `POST /api/v1/authorization/requests/{requestId}/decision` |
 | `revokeGrant(grantId)` | `DELETE /api/v1/me/authorized-applications/{grantId}` |
-| `updateProfile(input)` | `PATCH /api/v1/me/profile` |
-| `uploadAvatar(file)` | `POST /api/v1/me/avatar`；multipart 字段名为 `file` |
-| `requestEmailChange(email)` / `verifyEmailChange(requestId, code)` | `POST /api/v1/me/email-change` / `/api/v1/me/email-change/verify` |
-| `requestPhoneChange(phone)` / `verifyPhoneChange(requestId, code)` | `POST /api/v1/me/phone-change` / `/api/v1/me/phone-change/verify` |
 | `requestReauthentication(input)` | `POST /api/v1/auth/reauthentication` |
 | `completeReauthenticationMfa(input)` | `POST /api/v1/auth/reauthentication/mfa` |
 | `startPasskeyEnrollment(reauthToken)` | `POST /api/v1/me/security/passkeys/enrollment` + `X-Reauthentication-Token` |

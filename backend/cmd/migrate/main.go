@@ -10,7 +10,7 @@
 //
 // Usage:
 //
-//	go run ./cmd/migrate up          # Apply all pending migrations
+//	go run ./cmd/migrate up          # Apply authority migrations through v13
 //	go run ./cmd/migrate status       # Show migration status
 //	go run ./cmd/migrate version      # Show current migration version
 //	go run ./cmd/migrate reset        # Roll back to the first forward-only barrier (requires --confirm)
@@ -34,12 +34,19 @@ import (
 	"github.com/pressly/goose/v3"
 )
 
+// authorityMigrationCeiling is the last migration owned by the production
+// United Pass authority database. Migrations 14 and 15 are retained only as
+// historical compatibility material for legacy shared-store installations;
+// current DreamUP and Mini Program operational state belongs in the distinct
+// isolated database managed by cmd/migrate-isolated.
+const authorityMigrationCeiling int64 = 13
+
 func main() {
 	confirmReset := flag.Bool("confirm", false, "Required for destructive operations (reset)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <command>\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Commands:\n")
-		fmt.Fprintf(os.Stderr, "  up       Apply all pending migrations\n")
+		fmt.Fprintf(os.Stderr, "  up       Apply authority migrations through v%d\n", authorityMigrationCeiling)
 		fmt.Fprintf(os.Stderr, "  status   Show migration status\n")
 		fmt.Fprintf(os.Stderr, "  version  Show current migration version\n")
 		fmt.Fprintf(os.Stderr, "  reset    Roll back until a forward-only migration refuses (requires --confirm)\n")
@@ -123,11 +130,11 @@ func main() {
 
 	switch command {
 	case "up":
-		if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
+		if err := migrateAuthorityUp(ctx, db, migrationsDir); err != nil {
 			fmt.Fprintf(os.Stderr, "error applying migrations: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("Migrations applied successfully.")
+		fmt.Printf("Authority migrations applied successfully through v%d.\n", authorityMigrationCeiling)
 
 	case "status":
 		if err := goose.StatusContext(ctx, db, migrationsDir); err != nil {
@@ -159,6 +166,38 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+}
+
+func authorityMigrationTarget(current int64) (int64, error) {
+	if current < 0 {
+		return 0, fmt.Errorf("authority migration version %d is invalid", current)
+	}
+	if current > authorityMigrationCeiling {
+		return 0, fmt.Errorf("authority migration version %d exceeds the supported production ceiling v%d; do not downgrade or apply retired shared-store migrations", current, authorityMigrationCeiling)
+	}
+	return authorityMigrationCeiling, nil
+}
+
+func migrateAuthorityUp(ctx context.Context, db *sql.DB, migrationsDir string) error {
+	current, err := goose.GetDBVersionContext(ctx, db)
+	if err != nil {
+		return fmt.Errorf("read current authority migration version: %w", err)
+	}
+	target, err := authorityMigrationTarget(current)
+	if err != nil {
+		return err
+	}
+	if err := goose.UpToContext(ctx, db, migrationsDir, target); err != nil {
+		return err
+	}
+	applied, err := goose.GetDBVersionContext(ctx, db)
+	if err != nil {
+		return fmt.Errorf("verify authority migration version: %w", err)
+	}
+	if applied != target {
+		return fmt.Errorf("authority migration stopped at v%d, want v%d", applied, target)
+	}
+	return nil
 }
 
 // openDB opens a *sql.DB using pgx's stdlib adapter so goose can use it.

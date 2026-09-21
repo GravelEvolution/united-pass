@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
@@ -31,6 +32,7 @@ type fakeSessionService struct {
 	getFn    func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error)
 	listFn   func(*sessionv2.ListSessionsRequest) (*sessionv2.ListSessionsResponse, error)
 	delFn    func(*sessionv2.DeleteSessionRequest) (*sessionv2.DeleteSessionResponse, error)
+	delCtxFn func(context.Context, *sessionv2.DeleteSessionRequest) (*sessionv2.DeleteSessionResponse, error)
 }
 
 func (f *fakeSessionService) CreateSession(_ context.Context, in *sessionv2.CreateSessionRequest, _ ...grpc.CallOption) (*sessionv2.CreateSessionResponse, error) {
@@ -45,7 +47,11 @@ func (f *fakeSessionService) GetSession(_ context.Context, in *sessionv2.GetSess
 func (f *fakeSessionService) ListSessions(_ context.Context, in *sessionv2.ListSessionsRequest, _ ...grpc.CallOption) (*sessionv2.ListSessionsResponse, error) {
 	return f.listFn(in)
 }
-func (f *fakeSessionService) DeleteSession(_ context.Context, in *sessionv2.DeleteSessionRequest, _ ...grpc.CallOption) (*sessionv2.DeleteSessionResponse, error) {
+
+func (f *fakeSessionService) DeleteSession(ctx context.Context, in *sessionv2.DeleteSessionRequest, _ ...grpc.CallOption) (*sessionv2.DeleteSessionResponse, error) {
+	if f.delCtxFn != nil {
+		return f.delCtxFn(ctx, in)
+	}
 	return f.delFn(in)
 }
 
@@ -62,10 +68,6 @@ type fakeUserService struct {
 	removePasskeyFn   func(*userv2.RemovePasskeyRequest) (*userv2.RemovePasskeyResponse, error)
 	setPasswordFn     func(*userv2.SetPasswordRequest) (*userv2.SetPasswordResponse, error)
 	passwordResetFn   func(*userv2.PasswordResetRequest) (*userv2.PasswordResetResponse, error)
-	setEmailFn        func(*userv2.SetEmailRequest) (*userv2.SetEmailResponse, error)
-	verifyEmailFn     func(*userv2.VerifyEmailRequest) (*userv2.VerifyEmailResponse, error)
-	setPhoneFn        func(*userv2.SetPhoneRequest) (*userv2.SetPhoneResponse, error)
-	verifyPhoneFn     func(*userv2.VerifyPhoneRequest) (*userv2.VerifyPhoneResponse, error)
 }
 
 func (f *fakeUserService) GetUserByID(_ context.Context, in *userv2.GetUserByIDRequest, _ ...grpc.CallOption) (*userv2.GetUserByIDResponse, error) {
@@ -112,30 +114,6 @@ func (f *fakeUserService) PasswordReset(_ context.Context, in *userv2.PasswordRe
 		return &userv2.PasswordResetResponse{}, nil
 	}
 	return f.passwordResetFn(in)
-}
-func (f *fakeUserService) SetEmail(_ context.Context, in *userv2.SetEmailRequest, _ ...grpc.CallOption) (*userv2.SetEmailResponse, error) {
-	if f.setEmailFn == nil {
-		return &userv2.SetEmailResponse{}, nil
-	}
-	return f.setEmailFn(in)
-}
-func (f *fakeUserService) VerifyEmail(_ context.Context, in *userv2.VerifyEmailRequest, _ ...grpc.CallOption) (*userv2.VerifyEmailResponse, error) {
-	if f.verifyEmailFn == nil {
-		return &userv2.VerifyEmailResponse{}, nil
-	}
-	return f.verifyEmailFn(in)
-}
-func (f *fakeUserService) SetPhone(_ context.Context, in *userv2.SetPhoneRequest, _ ...grpc.CallOption) (*userv2.SetPhoneResponse, error) {
-	if f.setPhoneFn == nil {
-		return &userv2.SetPhoneResponse{}, nil
-	}
-	return f.setPhoneFn(in)
-}
-func (f *fakeUserService) VerifyPhone(_ context.Context, in *userv2.VerifyPhoneRequest, _ ...grpc.CallOption) (*userv2.VerifyPhoneResponse, error) {
-	if f.verifyPhoneFn == nil {
-		return &userv2.VerifyPhoneResponse{}, nil
-	}
-	return f.verifyPhoneFn(in)
 }
 
 type fakeLinker struct {
@@ -203,418 +181,281 @@ func humanProfileResponse(userID string) *userv2.GetUserByIDResponse {
 	}
 }
 
-func TestBeginPasswordAuthenticationSuccess(t *testing.T) {
-	s := &fakeSessionService{
-		createFn: func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
-			return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
-		},
+func passwordOnlyCreate(t *testing.T, calls *int) func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
+	t.Helper()
+	return func(in *sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
+		(*calls)++
+		if in.Challenges != nil {
+			t.Fatal("CreateSession must not request challenges")
+		}
+		if in.Checks == nil || in.Checks.User == nil || in.Checks.Password == nil || in.Checks.Password.Password != "secret" {
+			t.Fatalf("CreateSession must contain exactly the user and expected password checks: %+v", in.Checks)
+		}
+		return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
+	}
+}
+
+func passwordSessionService(t *testing.T, createCalls *int) *fakeSessionService {
+	t.Helper()
+	return &fakeSessionService{
+		createFn: passwordOnlyCreate(t, createCalls),
 		getFn: func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error) {
 			return sessionWithUser("user-zitadel-1"), nil
 		},
+	}
+}
+
+func TestBeginPasswordAuthenticationSuccess(t *testing.T) {
+	createCalls := 0
+	s := passwordSessionService(t, &createCalls)
+	s.setFn = func(*sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+		t.Fatal("password-only account must not request a WebAuthN challenge")
+		return nil, nil
 	}
 	u := &fakeUserService{
 		getFn: func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error) {
 			return humanProfileResponse("user-zitadel-1"), nil
 		},
 		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
-			return &userv2.ListAuthenticationMethodTypesResponse{
-				AuthMethodTypes: []userv2.AuthenticationMethodType{
-					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSWORD,
-				},
-			}, nil
+			return &userv2.ListAuthenticationMethodTypesResponse{AuthMethodTypes: []userv2.AuthenticationMethodType{
+				userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSWORD,
+			}}, nil
 		},
 	}
 	l := &fakeLinker{user: identity.User{ID: "user_local_1", Status: identity.UserStatusActive}}
 
-	a := newTestAuth(t, s, u, l)
-	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+	res, err := newTestAuth(t, s, u, l).BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
 		Identifier: "zhixing.lin@example.com",
 		Password:   "secret",
 	})
 	if err != nil {
 		t.Fatalf("BeginPasswordAuthentication: %v", err)
 	}
-	if res.Status != auth.StatusAuthenticated {
-		t.Fatalf("status = %q, want %q", res.Status, auth.StatusAuthenticated)
+	if createCalls != 1 {
+		t.Fatalf("CreateSession calls = %d, want exactly 1 password check", createCalls)
 	}
-	if res.UserID != "user_local_1" {
-		t.Errorf("user id = %q, want user_local_1", res.UserID)
+	if res.Status != auth.StatusAuthenticated || res.UserID != "user_local_1" {
+		t.Fatalf("result = %+v, want authenticated local user", res)
 	}
-	if res.Provider != ProviderName {
-		t.Errorf("provider = %q, want %q", res.Provider, ProviderName)
-	}
-	// Provider session reference must be the session ID only — the token is
-	// discarded and must never be persisted or returned.
 	if res.ProviderSessionReference != "s1" {
-		t.Errorf("session reference = %q, want s1 (session ID only)", res.ProviderSessionReference)
+		t.Errorf("session reference = %q, want s1", res.ProviderSessionReference)
 	}
 	if len(res.AuthenticationMethods) != 1 || res.AuthenticationMethods[0] != auth.MethodPassword {
 		t.Errorf("methods = %v, want [password]", res.AuthenticationMethods)
 	}
-
-	// The profile must be synchronized into the identity linker.
-	if l.calls != 1 {
-		t.Fatalf("linker calls = %d, want 1", l.calls)
-	}
-	if l.lastInfo.Subject != "user-zitadel-1" {
-		t.Errorf("linked subject = %q, want user-zitadel-1", l.lastInfo.Subject)
-	}
-	if l.lastInfo.DisplayName != "Zhixing Lin" {
-		t.Errorf("linked display name = %q, want Zhixing Lin", l.lastInfo.DisplayName)
-	}
-	if l.lastInfo.Email != "zhixing@example.com" || !l.lastInfo.EmailVerified {
-		t.Errorf("linked email = %q verified=%v, want zhixing@example.com verified=true", l.lastInfo.Email, l.lastInfo.EmailVerified)
-	}
-	if l.lastInfo.Phone != "+8613800000000" {
-		t.Errorf("linked phone = %q, want +8613800000000", l.lastInfo.Phone)
+	if l.calls != 1 || l.lastInfo.Subject != "user-zitadel-1" || l.lastInfo.Email != "zhixing@example.com" || !l.lastInfo.EmailVerified {
+		t.Errorf("linked profile = %+v calls=%d", l.lastInfo, l.calls)
 	}
 }
 
 func TestBeginPasswordAuthenticationRequiresTOTP(t *testing.T) {
-	s := &fakeSessionService{
-		createFn: func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
-			return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
-		},
-		getFn: func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error) {
-			return sessionWithUser("user-zitadel-1"), nil
-		},
+	createCalls := 0
+	s := passwordSessionService(t, &createCalls)
+	s.setFn = func(*sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+		t.Fatal("TOTP account must not request a WebAuthN challenge")
+		return nil, nil
 	}
-	u := &fakeUserService{
-		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
-			return &userv2.ListAuthenticationMethodTypesResponse{
-				AuthMethodTypes: []userv2.AuthenticationMethodType{
-					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSWORD,
-					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_TOTP,
-				},
-			}, nil
-		},
-	}
+	u := &fakeUserService{methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+		return &userv2.ListAuthenticationMethodTypesResponse{AuthMethodTypes: []userv2.AuthenticationMethodType{
+			userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSWORD,
+			userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_TOTP,
+		}}, nil
+	}}
 	l := &fakeLinker{}
 
-	a := newTestAuth(t, s, u, l)
-	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
-		Identifier: "zhixing.lin@example.com",
-		Password:   "secret",
+	res, err := newTestAuth(t, s, u, l).BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+		Identifier: "zhixing.lin@example.com", Password: "secret",
 	})
 	if err != nil {
 		t.Fatalf("BeginPasswordAuthentication: %v", err)
 	}
-	if res.Status != auth.StatusMFARequired {
-		t.Fatalf("status = %q, want %q", res.Status, auth.StatusMFARequired)
+	if createCalls != 1 {
+		t.Fatalf("CreateSession calls = %d, want 1", createCalls)
 	}
-	if len(res.AvailableMethods) != 1 || res.AvailableMethods[0] != auth.MFAMethodTOTP {
-		t.Errorf("available methods = %v, want [totp]", res.AvailableMethods)
+	if res.Status != auth.StatusMFARequired || len(res.AvailableMethods) != 1 || res.AvailableMethods[0] != auth.MFAMethodTOTP {
+		t.Fatalf("result = %+v, want TOTP challenge", res)
 	}
-	// The provider session ID is server-side only; it must NOT be returned as
-	// an MFA token. There is no MFAToken field on the result at all.
-	if res.ProviderSessionID != "s1" {
-		t.Errorf("provider session id = %q, want s1", res.ProviderSessionID)
-	}
-	// The linker must not have been called before MFA completes.
-	if l.calls != 0 {
-		t.Errorf("linker calls before MFA = %d, want 0", l.calls)
+	if res.ProviderSessionID != "s1" || l.calls != 0 {
+		t.Errorf("provider session = %q linker calls=%d, want s1 and 0", res.ProviderSessionID, l.calls)
 	}
 }
 
-func TestBeginPasswordAuthenticationPasskeyChallenge(t *testing.T) {
-	options := &structpb.Struct{
-		Fields: map[string]*structpb.Value{
-			"challenge": structpb.NewStringValue("abc123"),
-			"rpId":      structpb.NewStringValue("login.example.com"),
-		},
+func TestBeginPasswordAuthenticationTOTPPreferredOverPasskey(t *testing.T) {
+	createCalls := 0
+	s := passwordSessionService(t, &createCalls)
+	s.setFn = func(*sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+		t.Fatal("TOTP must take precedence without requesting WebAuthN")
+		return nil, nil
 	}
-	s := &fakeSessionService{
-		createFn: func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
-			return &sessionv2.CreateSessionResponse{
-				SessionId:    "s1",
-				SessionToken: "tok1",
-				Challenges: &sessionv2.Challenges{
-					WebAuthN: &sessionv2.Challenges_WebAuthN{
-						PublicKeyCredentialRequestOptions: options,
-					},
-				},
-			}, nil
-		},
-	}
-	a := newTestAuth(t, s, &fakeUserService{}, &fakeLinker{})
-	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
-		Identifier: "u@example.com",
-		Password:   "secret",
+	u := &fakeUserService{methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+		return &userv2.ListAuthenticationMethodTypesResponse{AuthMethodTypes: []userv2.AuthenticationMethodType{
+			userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSKEY,
+			userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_TOTP,
+		}}, nil
+	}}
+
+	res, err := newTestAuth(t, s, u, &fakeLinker{}).BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+		Identifier: "u@example.com", Password: "secret",
 	})
 	if err != nil {
 		t.Fatalf("BeginPasswordAuthentication: %v", err)
 	}
-	if res.Status != auth.StatusMFARequired {
-		t.Fatalf("status = %q, want %q", res.Status, auth.StatusMFARequired)
+	if createCalls != 1 || res.Status != auth.StatusMFARequired || len(res.AvailableMethods) != 1 || res.AvailableMethods[0] != auth.MFAMethodTOTP {
+		t.Fatalf("CreateSession calls=%d result=%+v, want one password check and TOTP", createCalls, res)
 	}
-	if len(res.AvailableMethods) != 1 || res.AvailableMethods[0] != auth.MFAMethodPasskey {
-		t.Errorf("available methods = %v, want [passkey]", res.AvailableMethods)
+}
+
+func TestBeginPasswordAuthenticationPasskeyChallengeUsesExistingSession(t *testing.T) {
+	createCalls, setCalls := 0, 0
+	options := &structpb.Struct{Fields: map[string]*structpb.Value{
+		"challenge": structpb.NewStringValue("abc123"),
+		"rpId":      structpb.NewStringValue("login.example.com"),
+	}}
+	s := passwordSessionService(t, &createCalls)
+	s.setFn = func(in *sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+		setCalls++
+		if in.SessionId != "s1" || in.SessionToken != "" {
+			t.Fatalf("SetSession identity = (%q, token=%q), want (s1, empty)", in.SessionId, in.SessionToken)
+		}
+		if in.Checks != nil {
+			t.Fatalf("SetSession must never repeat password or other checks: %+v", in.Checks)
+		}
+		if in.Challenges == nil || in.Challenges.WebAuthN == nil || in.Challenges.WebAuthN.Domain != "login.example.com" {
+			t.Fatalf("SetSession WebAuthN challenge = %+v", in.Challenges)
+		}
+		return &sessionv2.SetSessionResponse{Challenges: &sessionv2.Challenges{
+			WebAuthN: &sessionv2.Challenges_WebAuthN{PublicKeyCredentialRequestOptions: options},
+		}}, nil
 	}
-	// The WebAuthn request options must reach the HTTP layer as a JSON object.
-	if len(res.PasskeyRequestOptions) == 0 {
-		t.Fatal("passkey request options must be set for the browser ceremony")
+	u := &fakeUserService{methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+		return &userv2.ListAuthenticationMethodTypesResponse{AuthMethodTypes: []userv2.AuthenticationMethodType{
+			userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSKEY,
+		}}, nil
+	}}
+
+	res, err := newTestAuth(t, s, u, &fakeLinker{}).BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+		Identifier: "u@example.com", Password: "secret",
+	})
+	if err != nil {
+		t.Fatalf("BeginPasswordAuthentication: %v", err)
+	}
+	if createCalls != 1 || setCalls != 1 {
+		t.Fatalf("CreateSession calls=%d SetSession calls=%d, want 1 and 1", createCalls, setCalls)
+	}
+	if res.Status != auth.StatusMFARequired || len(res.AvailableMethods) != 1 || res.AvailableMethods[0] != auth.MFAMethodPasskey {
+		t.Fatalf("result = %+v, want passkey challenge", res)
 	}
 	var decoded structpb.Struct
-	if err := json.Unmarshal(res.PasskeyRequestOptions, &decoded); err != nil {
-		t.Fatalf("passkey request options must be valid JSON: %v", err)
-	}
-	if decoded.Fields["challenge"].GetStringValue() != "abc123" {
-		t.Errorf("passkey request options challenge = %q, want abc123", decoded.Fields["challenge"].GetStringValue())
-	}
-	if res.ProviderSessionID != "s1" {
-		t.Errorf("provider session id = %q, want s1", res.ProviderSessionID)
+	if err := json.Unmarshal(res.PasskeyRequestOptions, &decoded); err != nil || decoded.Fields["challenge"].GetStringValue() != "abc123" {
+		t.Fatalf("passkey request options = %s, err=%v", res.PasskeyRequestOptions, err)
 	}
 }
 
-// TestBeginPasswordAuthenticationPasskeyChallengeFallback verifies that a
-// WebAuthN challenge issuance failure (ZITADEL internal error, e.g. no
-// passkeys registered or RP not configured) does not block password login:
-// the adapter retries without challenges and the user can continue with TOTP.
-func TestBeginPasswordAuthenticationPasskeyChallengeFallback(t *testing.T) {
-	var calls int
-	var retriedWithoutChallenge bool
-	s := &fakeSessionService{
-		createFn: func(in *sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
-			calls++
-			if in.Challenges != nil {
-				// First call requests a WebAuthN challenge and ZITADEL fails.
-				return nil, status.Error(codes.Internal, "WebAuthN begin login failed (WEBAU-4G8sw)")
+func TestBeginPasswordAuthenticationPasskeyChallengeFailureFailsClosed(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(*sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error)
+	}{
+		{name: "provider challenge error", set: func(*sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+			return nil, status.Error(codes.Internal, "WebAuthN begin login failed (WEBAU-4G8sw)")
+		}},
+		{name: "unrelated provider error", set: func(*sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+			return nil, status.Error(codes.Unavailable, "provider unavailable")
+		}},
+		{name: "nil response", set: func(*sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+			return nil, nil
+		}},
+		{name: "empty challenges", set: func(*sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+			return &sessionv2.SetSessionResponse{}, nil
+		}},
+		{name: "missing webauthn", set: func(*sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+			return &sessionv2.SetSessionResponse{Challenges: &sessionv2.Challenges{}}, nil
+		}},
+		{name: "missing request options", set: func(*sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+			return &sessionv2.SetSessionResponse{Challenges: &sessionv2.Challenges{WebAuthN: &sessionv2.Challenges_WebAuthN{}}}, nil
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			createCalls, deleted := 0, ""
+			s := passwordSessionService(t, &createCalls)
+			s.setFn = func(in *sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+				if in.Checks != nil || in.SessionToken != "" {
+					t.Fatalf("challenge SetSession repeated credentials: %+v", in)
+				}
+				return test.set(in)
 			}
-			retriedWithoutChallenge = true
-			return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
-		},
-		getFn: func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error) {
-			return sessionWithUser("user-1"), nil
-		},
-	}
-	u := &fakeUserService{
-		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
-			return &userv2.ListAuthenticationMethodTypesResponse{
-				AuthMethodTypes: []userv2.AuthenticationMethodType{
-					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_TOTP,
-				},
-			}, nil
-		},
-	}
-	a := newTestAuth(t, s, u, &fakeLinker{})
-	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
-		Identifier: "u@example.com",
-		Password:   "secret",
-	})
-	if err != nil {
-		t.Fatalf("BeginPasswordAuthentication: %v", err)
-	}
-	if calls != 2 {
-		t.Errorf("CreateSession calls = %d, want 2 (challenge + fallback)", calls)
-	}
-	if !retriedWithoutChallenge {
-		t.Error("expected a retry without WebAuthN challenges")
-	}
-	if res.Status != auth.StatusMFARequired {
-		t.Fatalf("status = %q, want %q (TOTP fallback)", res.Status, auth.StatusMFARequired)
-	}
-	if len(res.AvailableMethods) != 1 || res.AvailableMethods[0] != auth.MFAMethodTOTP {
-		t.Errorf("available methods = %v, want [totp]", res.AvailableMethods)
+			s.delFn = func(in *sessionv2.DeleteSessionRequest) (*sessionv2.DeleteSessionResponse, error) {
+				deleted = in.SessionId
+				return &sessionv2.DeleteSessionResponse{}, nil
+			}
+			u := &fakeUserService{methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+				return &userv2.ListAuthenticationMethodTypesResponse{AuthMethodTypes: []userv2.AuthenticationMethodType{
+					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSKEY,
+				}}, nil
+			}}
+			l := &fakeLinker{}
+			res, err := newTestAuth(t, s, u, l).BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+				Identifier: "u@example.com", Password: "secret",
+			})
+			if err != nil {
+				t.Fatalf("BeginPasswordAuthentication: %v", err)
+			}
+			if createCalls != 1 || res.Status != auth.StatusProviderUnavailable || deleted != "s1" || l.calls != 0 {
+				t.Fatalf("calls=%d status=%q deleted=%q linker=%d; want 1, unavailable, s1, 0", createCalls, res.Status, deleted, l.calls)
+			}
+		})
 	}
 }
 
-// TestBeginPasswordAuthenticationNoFallbackOnOtherErrors verifies the retry
-// only happens for WebAuthN challenge failures, not for arbitrary internal
-// errors (which must not mask provider problems).
+func TestBeginPasswordAuthenticationWebAuthnDomainEmptyFailsClosed(t *testing.T) {
+	for _, method := range []userv2.AuthenticationMethodType{
+		userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSKEY,
+		userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_U2F,
+	} {
+		t.Run(method.String(), func(t *testing.T) {
+			createCalls, deleted := 0, ""
+			s := passwordSessionService(t, &createCalls)
+			s.setFn = func(*sessionv2.SetSessionRequest) (*sessionv2.SetSessionResponse, error) {
+				t.Fatal("domain-empty flow must not call SetSession")
+				return nil, nil
+			}
+			s.delFn = func(in *sessionv2.DeleteSessionRequest) (*sessionv2.DeleteSessionResponse, error) {
+				deleted = in.SessionId
+				return &sessionv2.DeleteSessionResponse{}, nil
+			}
+			u := &fakeUserService{methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+				return &userv2.ListAuthenticationMethodTypesResponse{AuthMethodTypes: []userv2.AuthenticationMethodType{method}}, nil
+			}}
+			a := NewAuthenticator(s, u, &fakeLinker{}, "tenant-test", "", nil)
+			res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{Identifier: "u@example.com", Password: "secret"})
+			if err != nil {
+				t.Fatalf("BeginPasswordAuthentication: %v", err)
+			}
+			if createCalls != 1 || res.Status != auth.StatusProviderUnavailable || deleted != "s1" {
+				t.Fatalf("calls=%d status=%q deleted=%q; want 1, unavailable, s1", createCalls, res.Status, deleted)
+			}
+		})
+	}
+}
+
 func TestBeginPasswordAuthenticationNoFallbackOnOtherErrors(t *testing.T) {
-	s := &fakeSessionService{
-		createFn: func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
-			return nil, status.Error(codes.Internal, "some other internal failure")
-		},
-	}
-	a := newTestAuth(t, s, &fakeUserService{}, &fakeLinker{})
-	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
-		Identifier: "u@example.com",
-		Password:   "secret",
+	createCalls := 0
+	s := &fakeSessionService{createFn: func(in *sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
+		createCalls++
+		if in.Challenges != nil || in.Checks == nil || in.Checks.Password == nil {
+			t.Fatalf("unexpected CreateSession request: %+v", in)
+		}
+		return nil, status.Error(codes.Internal, "some other internal failure")
+	}}
+	res, err := newTestAuth(t, s, &fakeUserService{}, &fakeLinker{}).BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
+		Identifier: "u@example.com", Password: "secret",
 	})
 	if err != nil {
 		t.Fatalf("BeginPasswordAuthentication: %v", err)
 	}
-	if res.Status != auth.StatusProviderUnavailable {
-		t.Fatalf("status = %q, want %q", res.Status, auth.StatusProviderUnavailable)
-	}
-}
-
-// challengeFailureSessionService returns a fake whose CreateSession fails
-// with the real ZITADEL WebAuthN challenge error on the first call and
-// succeeds without challenges on the retry.
-func challengeFailureSessionService(deleted *string, getFn func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error)) *fakeSessionService {
-	return &fakeSessionService{
-		createFn: func(in *sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
-			if in.Challenges != nil {
-				return nil, status.Error(codes.Internal, "WebAuthN begin login failed (WEBAU-4G8sw)")
-			}
-			return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
-		},
-		getFn: func(in *sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error) {
-			if getFn != nil {
-				return getFn(in)
-			}
-			return sessionWithUser("user-1"), nil
-		},
-		delFn: func(in *sessionv2.DeleteSessionRequest) (*sessionv2.DeleteSessionResponse, error) {
-			if deleted != nil {
-				*deleted = in.SessionId
-			}
-			return &sessionv2.DeleteSessionResponse{}, nil
-		},
-	}
-}
-
-// TestBeginPasswordAuthenticationPasskeyChallengeFallbackFailClosed verifies
-// that a passkey-only user (no TOTP) is NEVER downgraded to password-only
-// login when the WebAuthN challenge cannot be issued: the adapter deletes the
-// just-created provider session, returns provider_unavailable and must not
-// create a local user/session.
-func TestBeginPasswordAuthenticationPasskeyChallengeFallbackFailClosed(t *testing.T) {
-	var deleted string
-	s := challengeFailureSessionService(&deleted, nil)
-	u := &fakeUserService{
-		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
-			return &userv2.ListAuthenticationMethodTypesResponse{
-				AuthMethodTypes: []userv2.AuthenticationMethodType{
-					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSKEY,
-				},
-			}, nil
-		},
-		getFn: func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error) {
-			return humanProfileResponse("user-1"), nil
-		},
-	}
-	l := &fakeLinker{user: identity.User{ID: "user_local_1", Status: identity.UserStatusActive}}
-	a := newTestAuth(t, s, u, l)
-	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
-		Identifier: "u@example.com",
-		Password:   "secret",
-	})
-	if err != nil {
-		t.Fatalf("BeginPasswordAuthentication: %v", err)
-	}
-	if res.Status != auth.StatusProviderUnavailable {
-		t.Fatalf("status = %q, want %q (fail closed)", res.Status, auth.StatusProviderUnavailable)
-	}
-	if deleted != "s1" {
-		t.Errorf("provider session deleted = %q, want s1 (fail closed must revoke the session)", deleted)
-	}
-	if l.calls != 0 {
-		t.Errorf("linker calls = %d, want 0 (no local user/session may be created)", l.calls)
-	}
-	if res.UserID != "" {
-		t.Errorf("user id = %q, want empty", res.UserID)
-	}
-}
-
-// TestBeginPasswordAuthenticationPasskeyChallengeFallbackU2F verifies U2F
-// security keys are treated like passkeys for the fail-closed decision.
-func TestBeginPasswordAuthenticationPasskeyChallengeFallbackU2F(t *testing.T) {
-	var deleted string
-	s := challengeFailureSessionService(&deleted, nil)
-	u := &fakeUserService{
-		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
-			return &userv2.ListAuthenticationMethodTypesResponse{
-				AuthMethodTypes: []userv2.AuthenticationMethodType{
-					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_U2F,
-				},
-			}, nil
-		},
-		getFn: func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error) {
-			return humanProfileResponse("user-1"), nil
-		},
-	}
-	l := &fakeLinker{user: identity.User{ID: "user_local_1", Status: identity.UserStatusActive}}
-	a := newTestAuth(t, s, u, l)
-	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
-		Identifier: "u@example.com",
-		Password:   "secret",
-	})
-	if err != nil {
-		t.Fatalf("BeginPasswordAuthentication: %v", err)
-	}
-	if res.Status != auth.StatusProviderUnavailable {
-		t.Fatalf("status = %q, want %q (fail closed)", res.Status, auth.StatusProviderUnavailable)
-	}
-	if deleted != "s1" {
-		t.Errorf("provider session deleted = %q, want s1", deleted)
-	}
-	if l.calls != 0 {
-		t.Errorf("linker calls = %d, want 0", l.calls)
-	}
-}
-
-// TestBeginPasswordAuthenticationPasskeyChallengeFallbackPasskeyAndTOTP
-// verifies a user with both passkey and TOTP can fall back to TOTP when the
-// passkey challenge cannot be issued.
-func TestBeginPasswordAuthenticationPasskeyChallengeFallbackPasskeyAndTOTP(t *testing.T) {
-	var deleted string
-	s := challengeFailureSessionService(&deleted, nil)
-	u := &fakeUserService{
-		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
-			return &userv2.ListAuthenticationMethodTypesResponse{
-				AuthMethodTypes: []userv2.AuthenticationMethodType{
-					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSKEY,
-					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_TOTP,
-				},
-			}, nil
-		},
-	}
-	a := newTestAuth(t, s, u, &fakeLinker{})
-	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
-		Identifier: "u@example.com",
-		Password:   "secret",
-	})
-	if err != nil {
-		t.Fatalf("BeginPasswordAuthentication: %v", err)
-	}
-	if res.Status != auth.StatusMFARequired {
-		t.Fatalf("status = %q, want %q (TOTP fallback)", res.Status, auth.StatusMFARequired)
-	}
-	if len(res.AvailableMethods) != 1 || res.AvailableMethods[0] != auth.MFAMethodTOTP {
-		t.Errorf("available methods = %v, want [totp]", res.AvailableMethods)
-	}
-	if deleted != "" {
-		t.Errorf("provider session deleted = %q, want none (TOTP fallback keeps the session)", deleted)
-	}
-}
-
-// TestBeginPasswordAuthenticationPasskeyChallengeFallbackNoMFA verifies a
-// user with no second factor at all (password only) can authenticate with
-// just the password after the challenge fallback.
-func TestBeginPasswordAuthenticationPasskeyChallengeFallbackNoMFA(t *testing.T) {
-	s := challengeFailureSessionService(nil, nil)
-	u := &fakeUserService{
-		methodsFn: func(*userv2.ListAuthenticationMethodTypesRequest) (*userv2.ListAuthenticationMethodTypesResponse, error) {
-			return &userv2.ListAuthenticationMethodTypesResponse{
-				AuthMethodTypes: []userv2.AuthenticationMethodType{
-					userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSWORD,
-				},
-			}, nil
-		},
-		getFn: func(*userv2.GetUserByIDRequest) (*userv2.GetUserByIDResponse, error) {
-			return humanProfileResponse("user-1"), nil
-		},
-	}
-	l := &fakeLinker{user: identity.User{ID: "user_local_1", Status: identity.UserStatusActive}}
-	a := newTestAuth(t, s, u, l)
-	res, err := a.BeginPasswordAuthentication(context.Background(), auth.PasswordAuthenticationInput{
-		Identifier: "u@example.com",
-		Password:   "secret",
-	})
-	if err != nil {
-		t.Fatalf("BeginPasswordAuthentication: %v", err)
-	}
-	if res.Status != auth.StatusAuthenticated {
-		t.Fatalf("status = %q, want %q", res.Status, auth.StatusAuthenticated)
-	}
-	if l.calls != 1 {
-		t.Errorf("linker calls = %d, want 1", l.calls)
-	}
-	if res.UserID != "user_local_1" {
-		t.Errorf("user id = %q, want user_local_1", res.UserID)
+	if createCalls != 1 || res.Status != auth.StatusProviderUnavailable {
+		t.Fatalf("CreateSession calls=%d status=%q, want 1 and unavailable", createCalls, res.Status)
 	}
 }
 
@@ -624,12 +465,17 @@ func TestBeginPasswordAuthenticationPasskeyChallengeFallbackNoMFA(t *testing.T) 
 // provider_unavailable, not as invalid_credentials: a server-side
 // configuration fault must never masquerade as a wrong password.
 func TestBeginPasswordAuthenticationAuthZFailure(t *testing.T) {
+	var deleted string
 	s := &fakeSessionService{
 		createFn: func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
 			return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
 		},
 		getFn: func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error) {
 			return sessionWithUser("user-1"), nil
+		},
+		delFn: func(in *sessionv2.DeleteSessionRequest) (*sessionv2.DeleteSessionResponse, error) {
+			deleted = in.SessionId
+			return &sessionv2.DeleteSessionResponse{}, nil
 		},
 	}
 	u := &fakeUserService{
@@ -648,17 +494,25 @@ func TestBeginPasswordAuthenticationAuthZFailure(t *testing.T) {
 	if res.Status != auth.StatusProviderUnavailable {
 		t.Fatalf("status = %q, want %q (SA permission fault)", res.Status, auth.StatusProviderUnavailable)
 	}
+	if deleted != "s1" {
+		t.Fatalf("deleted session = %q, want s1", deleted)
+	}
 }
 
 // TestBeginPasswordAuthenticationSessionAuthZFailure verifies the same
 // AUTHZ-* classification at the GetSession boundary.
 func TestBeginPasswordAuthenticationSessionAuthZFailure(t *testing.T) {
+	var deleted string
 	s := &fakeSessionService{
 		createFn: func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
 			return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
 		},
 		getFn: func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error) {
 			return nil, status.Error(codes.NotFound, "membership not found (AUTHZ-cdgFk)")
+		},
+		delFn: func(in *sessionv2.DeleteSessionRequest) (*sessionv2.DeleteSessionResponse, error) {
+			deleted = in.SessionId
+			return &sessionv2.DeleteSessionResponse{}, nil
 		},
 	}
 	a := newTestAuth(t, s, &fakeUserService{}, &fakeLinker{})
@@ -671,6 +525,52 @@ func TestBeginPasswordAuthenticationSessionAuthZFailure(t *testing.T) {
 	}
 	if res.Status != auth.StatusProviderUnavailable {
 		t.Fatalf("status = %q, want %q (SA permission fault)", res.Status, auth.StatusProviderUnavailable)
+	}
+	if deleted != "s1" {
+		t.Fatalf("deleted session = %q, want s1", deleted)
+	}
+}
+
+func TestBeginPasswordAuthenticationCleanupSurvivesCanceledRequest(t *testing.T) {
+	deleteCalled := false
+	s := &fakeSessionService{
+		createFn: func(*sessionv2.CreateSessionRequest) (*sessionv2.CreateSessionResponse, error) {
+			return &sessionv2.CreateSessionResponse{SessionId: "s1", SessionToken: "tok1"}, nil
+		},
+		getFn: func(*sessionv2.GetSessionRequest) (*sessionv2.GetSessionResponse, error) {
+			return nil, status.Error(codes.Unavailable, "provider unavailable")
+		},
+		delCtxFn: func(ctx context.Context, in *sessionv2.DeleteSessionRequest) (*sessionv2.DeleteSessionResponse, error) {
+			deleteCalled = true
+			if in.SessionId != "s1" {
+				t.Fatalf("deleted session = %q, want s1", in.SessionId)
+			}
+			if err := ctx.Err(); err != nil {
+				t.Fatalf("cleanup inherited canceled request context: %v", err)
+			}
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("cleanup context must have an independent deadline")
+			}
+			remaining := time.Until(deadline)
+			if remaining <= 0 || remaining > providerSessionCleanupTimeout {
+				t.Fatalf("cleanup deadline remaining = %s, want (0, %s]", remaining, providerSessionCleanupTimeout)
+			}
+			return &sessionv2.DeleteSessionResponse{}, nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := newTestAuth(t, s, &fakeUserService{}, &fakeLinker{}).BeginPasswordAuthentication(ctx, auth.PasswordAuthenticationInput{
+		Identifier: "u@example.com",
+		Password:   "secret",
+	})
+	if err == nil {
+		t.Fatal("BeginPasswordAuthentication error = nil, want provider failure")
+	}
+	if !deleteCalled {
+		t.Fatal("provider session cleanup was not attempted")
 	}
 }
 
@@ -706,6 +606,9 @@ func TestCompleteMFAPasskeySuccess(t *testing.T) {
 	}
 	if res.Status != auth.StatusAuthenticated {
 		t.Fatalf("status = %q, want %q", res.Status, auth.StatusAuthenticated)
+	}
+	if res.ProviderSessionToken.Token() != "tok2" {
+		t.Fatalf("provider session token = %q, want the final SetSession token", res.ProviderSessionToken)
 	}
 	// The assertion must have been parsed into the WebAuthn check struct.
 	if received == nil || received.CredentialAssertionData == nil {

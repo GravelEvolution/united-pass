@@ -133,15 +133,41 @@ SELECT status,display_name,nickname,avatar_url,email,email_verified,phone,phone_
 
 	identityOnlyID := identity.UserID("user_wechat_identity_only")
 	create(identityOnlyID, identity.UserStatusActive, "identity-only@example.com", "", false, 3)
-	identityOnly, err := repo.BindExistingWithWeChat(ctx, wechatonboarding.BindExistingInput{
-		UserID: identityOnlyID, TenantID: "wx-app", Subject: "openid-identity-only",
-		NormalizedEmail: "identity-only@example.com", ExpectedVersion: 3, ExpectedSecurityEpoch: 1,
-	})
-	if err != nil || !identityOnly.Linked || identityOnly.PhoneAdded || identityOnly.Version != 4 || identityOnly.SecurityEpoch != 2 {
-		t.Fatalf("identity-only result=%#v err=%v", identityOnly, err)
+	if err := users.CreateIdentityLink(ctx, identity.IdentityLink{
+		ID: generateLinkID(), UserID: identityOnlyID, Provider: wechat.ProviderName,
+		ProviderTenantID: "wx-app", ProviderSubject: "openid-identity-only",
+		CreatedAt: time.Now().UTC(), LastSeenAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if err := pool.PgxPool().QueryRow(ctx, `SELECT phone,phone_verified FROM users WHERE id=$1`, string(identityOnlyID)).Scan(&phone, &phoneVerified); err != nil || phone != "" || phoneVerified {
-		t.Fatalf("identity-only phone=%q verified=%v err=%v", phone, phoneVerified, err)
+	if err := repo.CompleteLinkedWithVerifiedPhone(ctx, identityOnlyID, "wx-app", "openid-identity-only", "+8613800000077"); err != nil {
+		t.Fatalf("complete historical identity-only phone: %v", err)
+	}
+	if err := pool.PgxPool().QueryRow(ctx, `SELECT display_name,nickname,avatar_url,email,phone,phone_verified,version,security_epoch FROM users WHERE id=$1`, string(identityOnlyID)).Scan(&displayName, &nickname, &avatarURL, &email, &phone, &phoneVerified, &version, &epoch); err != nil {
+		t.Fatal(err)
+	}
+	if displayName != "Authoritative Name" || nickname != "Authority" || avatarURL != "https://media.example.test/avatar.png" || email != "identity-only@example.com" || phone != "+8613800000077" || !phoneVerified || version != 4 || epoch != 2 {
+		t.Fatalf("historical completion changed authority data: display=%q nickname=%q avatar=%q email=%q phone=%q verified=%v version=%d epoch=%d", displayName, nickname, avatarURL, email, phone, phoneVerified, version, epoch)
+	}
+	if err := repo.CompleteLinkedWithVerifiedPhone(ctx, identityOnlyID, "wx-app", "openid-identity-only", "+8613800000077"); err != nil {
+		t.Fatalf("idempotent historical phone completion: %v", err)
+	}
+	if err := pool.PgxPool().QueryRow(ctx, `SELECT version,security_epoch FROM users WHERE id=$1`, string(identityOnlyID)).Scan(&version, &epoch); err != nil || version != 4 || epoch != 2 {
+		t.Fatalf("idempotent completion revision version=%d epoch=%d err=%v", version, epoch, err)
+	}
+
+	if err := users.CreateIdentityLink(ctx, identity.IdentityLink{
+		ID: generateLinkID(), UserID: phoneTargetID, Provider: wechat.ProviderName,
+		ProviderTenantID: "wx-app", ProviderSubject: "openid-historical-phone-target",
+		CreatedAt: time.Now().UTC(), LastSeenAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CompleteLinkedWithVerifiedPhone(ctx, phoneTargetID, "wx-app", "openid-historical-phone-target", "+8613800000099"); !errors.Is(err, wechatonboarding.ErrPhoneConflict) {
+		t.Fatalf("historical cross-account phone error=%v", err)
+	}
+	if err := pool.PgxPool().QueryRow(ctx, `SELECT phone,phone_verified FROM users WHERE id=$1`, string(phoneTargetID)).Scan(&phone, &phoneVerified); err != nil || phone != "" || phoneVerified {
+		t.Fatalf("historical phone conflict mutated target phone=%q verified=%v err=%v", phone, phoneVerified, err)
 	}
 
 	disabledID := identity.UserID("user_wechat_disabled")
@@ -238,9 +264,10 @@ func (optionalPhoneIntentStore) VerifyExisting(context.Context, string, string, 
 
 func (optionalPhoneIntentStore) Clear(context.Context, string) error { return nil }
 
-func TestIntegration_WeChatRegistrationCanActivateWithoutPhone(t *testing.T) {
+func TestIntegration_WeChatRegistrationRejectsNewPhoneEmptyAccountAndReconcilesHistoricalReservation(t *testing.T) {
 	pool := setupTestPool(t, 5)
 	ctx := context.Background()
+	users := NewUserRepository(pool.PgxPool())
 	repo := &RegistrationRepository{
 		pool: pool.PgxPool(), provider: "zitadel", tenantID: "project-test", intentStore: optionalPhoneIntentStore{},
 	}
@@ -255,9 +282,32 @@ func TestIntegration_WeChatRegistrationCanActivateWithoutPhone(t *testing.T) {
 			Email: "identity-only-registration@example.com", Password: "Correct-Horse-Battery-Staple9!",
 		},
 	}
-	reserved, err := repo.ReservePendingWithWeChat(ctx, input)
-	if err != nil || reserved != input.User.UserID {
-		t.Fatalf("reserve identity-only user=%q err=%v", reserved, err)
+	if reserved, err := repo.ReservePendingWithWeChat(ctx, input); !errors.Is(err, registration.ErrInvalidInput) || reserved != "" {
+		t.Fatalf("phone-empty reservation user=%q err=%v, want invalid input", reserved, err)
+	}
+	var forbiddenRows int
+	if err := pool.PgxPool().QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE id=$1`, input.User.UserID).Scan(&forbiddenRows); err != nil || forbiddenRows != 0 {
+		t.Fatalf("phone-empty reservation wrote users=%d err=%v", forbiddenRows, err)
+	}
+
+	// Seed the exact shape that an older release could have left behind. New
+	// code may reconcile it only after a verified phone arrives; it may not
+	// create another account or choose an owner by phone.
+	reserved := input.User.UserID
+	now := time.Now().UTC()
+	if err := users.Create(ctx, identity.User{
+		ID: identity.UserID(reserved), Status: identity.UserStatusPending,
+		DisplayName: input.User.DisplayName, Email: input.User.Email,
+		CreatedAt: now, UpdatedAt: now, Version: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := users.CreateIdentityLink(ctx, identity.IdentityLink{
+		ID: generateLinkID(), UserID: identity.UserID(reserved), Provider: wechat.ProviderName,
+		ProviderTenantID: input.TenantID, ProviderSubject: input.Subject,
+		CreatedAt: now, LastSeenAt: now,
+	}); err != nil {
+		t.Fatal(err)
 	}
 	var phone string
 	var phoneVerified bool

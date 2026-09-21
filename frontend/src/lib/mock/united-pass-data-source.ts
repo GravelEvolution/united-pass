@@ -22,10 +22,9 @@ import type {
   OAuthClient,
   OAuthClientCreateInput,
   OAuthClientCreationResult,
-  OAuthClientUpdateInput,
   SecretRotationResult,
 } from "@/features/applications/types";
-import { getClientProfileConfig, inferClientProfile } from "@/features/applications/types";
+import { getClientProfileConfig } from "@/features/applications/types";
 import type { ConsentDecision, ConsentResolution, ConsentRequest } from "@/features/authorization/types";
 import type {
   AuditExportResult,
@@ -119,7 +118,6 @@ const initialAuthorizedApplications: AuthorizedApplication[] = [
   {
     grantId: "grant_001",
     applicationId: "app_workspace",
-    logoUrl: null,
     applicationName: "United Workspace",
     applicationOwner: "协作产品团队",
     clientType: "confidential",
@@ -132,7 +130,6 @@ const initialAuthorizedApplications: AuthorizedApplication[] = [
   {
     grantId: "grant_002",
     applicationId: "app_mobile",
-    logoUrl: null,
     applicationName: "United Mobile",
     applicationOwner: "移动端团队",
     clientType: "public",
@@ -145,7 +142,6 @@ const initialAuthorizedApplications: AuthorizedApplication[] = [
   {
     grantId: "grant_003",
     applicationId: "app_legacy",
-    logoUrl: null,
     applicationName: "Legacy Reports",
     applicationOwner: "数据团队",
     clientType: "confidential",
@@ -977,84 +973,6 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       }
       return Promise.resolve(result);
     },
-    updateOAuthClient: (
-      applicationId: string,
-      clientId: string,
-      input: OAuthClientUpdateInput,
-    ): Promise<OAuthClient> => {
-      const detail = applicationDetails[applicationId];
-      const client = detail?.clients.find((item) => item.clientId === clientId);
-      if (!detail || !client) {
-        return Promise.reject(new Error(`Client ${clientId} not found under application ${applicationId}.`));
-      }
-
-      const profile = inferClientProfile(client);
-      const merged: OAuthClientCreateInput = {
-        applicationId,
-        name: input.name ?? client.name,
-        profile,
-        redirectUris: input.redirectUris ?? client.redirectUris.map((entry) => entry.uri),
-        logoutUri: input.logoutUri ?? client.logoutUri ?? "",
-        allowedScopes: input.allowedScopes ?? client.allowedScopes.map((scope) => scope.scope),
-        consentMode: input.consentMode ?? client.consentMode,
-      };
-      try {
-        validateOAuthClientCreateInput(merged);
-        validateConsentModeWithAudience(
-          merged.consentMode,
-          detail.audience,
-          getClientProfileConfig(profile),
-        );
-      } catch (error) {
-        return Promise.reject(error);
-      }
-
-      const now = new Date().toISOString();
-      client.name = merged.name;
-      client.redirectUris = buildRedirectUris(merged.redirectUris, now);
-      client.logoutUri = merged.logoutUri || null;
-      client.allowedScopes = resolveScopes(merged.allowedScopes);
-      client.consentMode = merged.consentMode;
-      client.updatedAt = now;
-      detail.updatedAt = now;
-      return Promise.resolve(client);
-    },
-    updateOAuthClientStatus: (
-      applicationId: string,
-      clientId: string,
-      status: ApplicationStatus,
-    ): Promise<OAuthClient> => {
-      const detail = applicationDetails[applicationId];
-      const client = detail?.clients.find((item) => item.clientId === clientId);
-      if (!detail || !client) {
-        return Promise.reject(new Error(`Client ${clientId} not found under application ${applicationId}.`));
-      }
-      if (status === "active" && detail.status !== "active") {
-        return Promise.reject(new Error("A client cannot be enabled while its application is disabled."));
-      }
-      client.status = status;
-      client.updatedAt = new Date().toISOString();
-      detail.updatedAt = client.updatedAt;
-      return Promise.resolve(client);
-    },
-    deleteOAuthClient: (applicationId: string, clientId: string): Promise<void> => {
-      const detail = applicationDetails[applicationId];
-      if (!detail) {
-        return Promise.reject(new Error(`Application ${applicationId} not found.`));
-      }
-      const index = detail.clients.findIndex((item) => item.clientId === clientId);
-      if (index === -1) {
-        return Promise.reject(new Error(`Client ${clientId} not found under application ${applicationId}.`));
-      }
-      detail.clients.splice(index, 1);
-      detail.updatedAt = new Date().toISOString();
-      const application = applications.find((item) => item.applicationId === applicationId);
-      if (application) {
-        application.clientCount = detail.clients.length;
-        application.updatedAt = detail.updatedAt;
-      }
-      return Promise.resolve();
-    },
     createApplicationWithInitialClient: (input: ApplicationWithInitialClientInput): Promise<ApplicationWithInitialClientResult> => {
       const profileConfig = getClientProfileConfig(input.initialClient.profile);
       try {
@@ -1200,7 +1118,7 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
         previousSecretExpiresAt,
       });
     },
-    updateApplicationStatus: (applicationId: string, status: ApplicationStatus): Promise<OAuthApplicationDetail> => {
+    updateApplicationStatus: (applicationId: string, status: ApplicationStatus): Promise<void> => {
       const now = new Date().toISOString();
       const detail = applicationDetails[applicationId];
       if (!detail) {
@@ -1221,7 +1139,7 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
         app.status = status;
         app.updatedAt = now;
       }
-      return Promise.resolve(detail);
+      return Promise.resolve();
     },
     deleteApplication: (applicationId: string): Promise<void> => {
       delete applicationDetails[applicationId];
@@ -1231,7 +1149,7 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
       }
       return Promise.resolve();
     },
-    updateApplication: (applicationId: string, input: ApplicationUpdateInput): Promise<OAuthApplicationDetail> => {
+    updateApplication: (applicationId: string, input: ApplicationUpdateInput): Promise<void> => {
       const now = new Date().toISOString();
       const detail = applicationDetails[applicationId];
       if (!detail) {
@@ -1256,7 +1174,7 @@ export function createMockUnitedPassDataSource(): UnitedPassDataSource {
         }
         app.updatedAt = now;
       }
-      return Promise.resolve(detail);
+      return Promise.resolve();
     },
     getPolicies: (query?: PageQuery) => Promise.resolve(toCursorPage(policies, query)),
     getPolicyDetail: (policyId: string): Promise<PolicyDetail | null> => {

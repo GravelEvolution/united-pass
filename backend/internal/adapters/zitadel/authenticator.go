@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
@@ -51,6 +52,11 @@ import (
 
 // ProviderName is the value of UP_AUTH_PROVIDER that selects this adapter.
 const ProviderName = "zitadel"
+
+// providerSessionCleanupTimeout keeps fail-closed cleanup independent from a
+// canceled login request without allowing a provider outage to retain a
+// background goroutine indefinitely.
+const providerSessionCleanupTimeout = 3 * time.Second
 
 // sessionService is the subset of the ZITADEL session service the adapter
 // uses. It is an interface so tests can substitute a fake.
@@ -78,10 +84,6 @@ type userService interface {
 	ListPasskeys(ctx context.Context, in *userv2.ListPasskeysRequest, opts ...grpc.CallOption) (*userv2.ListPasskeysResponse, error)
 	RemovePasskey(ctx context.Context, in *userv2.RemovePasskeyRequest, opts ...grpc.CallOption) (*userv2.RemovePasskeyResponse, error)
 	SetPassword(ctx context.Context, in *userv2.SetPasswordRequest, opts ...grpc.CallOption) (*userv2.SetPasswordResponse, error)
-	SetEmail(ctx context.Context, in *userv2.SetEmailRequest, opts ...grpc.CallOption) (*userv2.SetEmailResponse, error)
-	VerifyEmail(ctx context.Context, in *userv2.VerifyEmailRequest, opts ...grpc.CallOption) (*userv2.VerifyEmailResponse, error)
-	SetPhone(ctx context.Context, in *userv2.SetPhoneRequest, opts ...grpc.CallOption) (*userv2.SetPhoneResponse, error)
-	VerifyPhone(ctx context.Context, in *userv2.VerifyPhoneRequest, opts ...grpc.CallOption) (*userv2.VerifyPhoneResponse, error)
 }
 
 // Authenticator implements auth.Authenticator against ZITADEL's LoginV2 API.
@@ -121,22 +123,27 @@ func NewAuthenticator(
 }
 
 // BeginPasswordAuthentication creates a ZITADEL session with user + password
-// checks and determines whether a second factor is required.
+// checks and determines whether a second factor is required. The password is
+// checked exactly once: optional WebAuthN challenges are requested afterwards
+// against that same, password-verified session with SetSession.
 //
 // Status mapping:
 //   - password/user check failed   -> StatusInvalidCredentials (generic)
 //   - provider unreachable         -> StatusProviderUnavailable
-//   - response carries challenges  -> StatusMFARequired (passkey)
 //   - user has TOTP registered     -> StatusMFARequired (totp)
-//   - user has passkey/U2F but no  -> StatusProviderUnavailable (fail closed;
-//     WebAuthN challenge issued      the password-only session is revoked)
+//   - user has only passkey/U2F     -> request a WebAuthN challenge with
+//     SetSession, then StatusMFARequired
+//   - passkey challenge unavailable -> StatusProviderUnavailable (fail closed;
+//     the password-only session is revoked)
 //   - SA permission fault          -> StatusProviderUnavailable
 //   - otherwise                    -> StatusAuthenticated
 //
 // Fail closed: a user whose second factor is a passkey or U2F security key is
 // NEVER downgraded to password-only login when ZITADEL cannot issue a
-// WebAuthN challenge (e.g. RP/origin misconfiguration, WEBAU-* error). The
-// just-created provider session is revoked and no local session is created.
+// WebAuthN challenge (e.g. missing RP domain, malformed provider response, or
+// provider error). The just-created provider session is revoked and no local
+// session is created. TOTP takes precedence when both methods are registered,
+// because it is the MFA method currently supported end-to-end by every client.
 //
 // The returned ProviderSessionID is the ZITADEL session ID; it is stored
 // server-side in the MFA challenge and never exposed to the browser. The
@@ -245,60 +252,36 @@ func (a *Authenticator) VerifyUserPassword(
 
 // beginSession creates a ZITADEL session with user + password checks and
 // determines whether a second factor is required. It is shared by login
-// (identifier search) and reauthentication (stable user ID search).
+// (identifier search) and reauthentication (stable user ID search). The
+// password must appear in exactly one provider request; challenges are added
+// later with SetSession and never repeat the password check.
 func (a *Authenticator) beginSession(
 	ctx context.Context,
 	checkUser *sessionv2.CheckUser,
 	password string,
 ) (auth.AuthenticationResult, error) {
-	req := &sessionv2.CreateSessionRequest{
+	create, err := a.sessions.CreateSession(ctx, &sessionv2.CreateSessionRequest{
 		Checks: &sessionv2.Checks{
 			User:     checkUser,
 			Password: &sessionv2.CheckPassword{Password: password},
 		},
-		Challenges: a.requestChallenges(),
-	}
-	create, err := a.sessions.CreateSession(ctx, req)
+	})
 	if err != nil {
-		// Passkey challenges are best-effort: when ZITADEL cannot issue one
-		// (no passkeys registered, RP not configured, etc.) it returns an
-		// internal error. Retry without challenges so TOTP-only users can
-		// still authenticate instead of failing the whole login.
-		if a.domain != "" && isPasskeyChallengeFailure(err) {
-			noChallenge := &sessionv2.CreateSessionRequest{
-				Checks: req.Checks,
-			}
-			create, err = a.sessions.CreateSession(ctx, noChallenge)
+		if status := mapAuthError(err); status != auth.StatusInvalidCredentials {
+			return auth.AuthenticationResult{Status: status}, nil
 		}
-		if err != nil {
-			if status := mapAuthError(err); status != auth.StatusInvalidCredentials {
-				return auth.AuthenticationResult{Status: status}, nil
-			}
-			return auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}, nil
-		}
+		return auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}, nil
+	}
+	if create == nil || create.SessionId == "" {
+		return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
 	}
 
-	// Passkey challenge requested and granted by ZITADEL. The WebAuthn
-	// PublicKeyCredentialRequestOptions must reach the browser (as a JSON
-	// object) so it can run navigator.credentials.get.
-	if create.Challenges != nil && create.Challenges.WebAuthN != nil {
-		options, err := create.Challenges.WebAuthN.PublicKeyCredentialRequestOptions.MarshalJSON()
-		if err != nil {
-			return auth.AuthenticationResult{}, fmt.Errorf("zitadel: encode passkey request options: %w", err)
-		}
-		return auth.AuthenticationResult{
-			Status:                auth.StatusMFARequired,
-			ProviderSessionID:     create.SessionId,
-			AvailableMethods:      []auth.MFAMethod{auth.MFAMethodPasskey},
-			PasskeyRequestOptions: options,
-		}, nil
-	}
-
-	// No challenge was issued: either ZITADEL has no passkey registered for
-	// the user or the passkey challenge could not be issued (fallback above).
-	// Decide the second factor from the full registered method set.
+	// Determine the registered factors only after the single password check has
+	// succeeded. This avoids both account-state work for an invalid password and
+	// a second expensive password hash when WebAuthN is unavailable.
 	userID, err := a.sessionUserID(ctx, create.SessionId)
 	if err != nil {
+		a.deleteProviderSessionBestEffort(ctx, create.SessionId)
 		if errors.Is(err, errProviderPermission) {
 			return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
 		}
@@ -306,6 +289,7 @@ func (a *Authenticator) beginSession(
 	}
 	methods, err := a.userAuthMethods(ctx, userID)
 	if err != nil {
+		a.deleteProviderSessionBestEffort(ctx, create.SessionId)
 		if errors.Is(err, errProviderPermission) {
 			return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
 		}
@@ -319,16 +303,49 @@ func (a *Authenticator) beginSession(
 		}, nil
 	}
 	if hasWebAuthnMethod(methods) {
-		// The user's second factor is a passkey (or U2F security key) and no
-		// WebAuthN challenge could be issued. Fail closed: revoke the
-		// password-verified provider session and never create a local session
-		// with only one factor.
-		_, _ = a.sessions.DeleteSession(ctx, &sessionv2.DeleteSessionRequest{SessionId: create.SessionId})
-		return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
+		// A passkey-only account must never be downgraded to password-only.
+		// Request the challenge on the already verified session, without checks
+		// or the previous token, so the password is not evaluated again.
+		if a.domain == "" {
+			a.deleteProviderSessionBestEffort(ctx, create.SessionId)
+			return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
+		}
+		set, err := a.sessions.SetSession(ctx, &sessionv2.SetSessionRequest{
+			SessionId:  create.SessionId,
+			Challenges: a.requestChallenges(),
+		})
+		if err != nil || set == nil || set.Challenges == nil || set.Challenges.WebAuthN == nil ||
+			set.Challenges.WebAuthN.PublicKeyCredentialRequestOptions == nil {
+			a.deleteProviderSessionBestEffort(ctx, create.SessionId)
+			return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
+		}
+		options, err := set.Challenges.WebAuthN.PublicKeyCredentialRequestOptions.MarshalJSON()
+		if err != nil {
+			a.deleteProviderSessionBestEffort(ctx, create.SessionId)
+			return auth.AuthenticationResult{Status: auth.StatusProviderUnavailable}, nil
+		}
+		return auth.AuthenticationResult{
+			Status:                auth.StatusMFARequired,
+			ProviderSessionID:     create.SessionId,
+			AvailableMethods:      []auth.MFAMethod{auth.MFAMethodPasskey},
+			PasskeyRequestOptions: options,
+		}, nil
 	}
 
 	return a.resolveAuthenticated(ctx, create.SessionId, create.SessionToken, userID,
 		[]auth.AuthenticationMethod{auth.MethodPassword})
+}
+
+// deleteProviderSessionBestEffort revokes an incomplete provider session. Its
+// token is never exposed, and cleanup failure must not turn a failed-closed
+// authentication into a successful local session.
+func (a *Authenticator) deleteProviderSessionBestEffort(ctx context.Context, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), providerSessionCleanupTimeout)
+	defer cancel()
+	_, _ = a.sessions.DeleteSession(cleanupCtx, &sessionv2.DeleteSessionRequest{SessionId: sessionID})
 }
 
 // CompleteMFA completes a second-factor check against the ZITADEL session

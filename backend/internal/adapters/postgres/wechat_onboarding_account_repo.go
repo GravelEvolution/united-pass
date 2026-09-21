@@ -4,12 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
@@ -145,6 +143,144 @@ func scanWeChatOnboardingAccountSnapshot(row pgx.Row) (wechatonboarding.AccountS
 	return snapshot, nil
 }
 
+// CompleteLinkedWithVerifiedPhone completes a historical identity-only WeChat
+// account without using the phone as an account selector. The exact provider
+// subject must already link to the supplied active user. Only an empty phone,
+// or the identical legacy unverified phone, may be advanced to verified.
+func (r *WeChatOnboardingAccountRepository) CompleteLinkedWithVerifiedPhone(ctx context.Context, userID identity.UserID, tenantID, subject, phone string) error {
+	if r == nil || r.db == nil || userID == "" || tenantID == "" || subject == "" || phone == "" ||
+		tenantID != strings.TrimSpace(tenantID) || subject != strings.TrimSpace(subject) || phone != strings.TrimSpace(phone) {
+		return wechatonboarding.ErrInvalidInput
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < wechatOnboardingSerializableAttempts; attempt++ {
+		err := r.completeLinkedWithVerifiedPhoneOnce(ctx, userID, tenantID, subject, phone)
+		if err == nil {
+			return nil
+		}
+		if !isWeChatOnboardingSerializationFailure(err) {
+			return err
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	return fmt.Errorf("%w: serializable linked-phone settlement exhausted: %v", identity.ErrIdentityLinkConflict, lastErr)
+}
+
+func (r *WeChatOnboardingAccountRepository) completeLinkedWithVerifiedPhoneOnce(ctx context.Context, userID identity.UserID, tenantID, subject, phone string) error {
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return fmt.Errorf("postgres: begin linked WeChat phone transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	lockKeys := sortedAuthorityLockKeys(
+		authorityUserLockKey(userID),
+		authorityWeChatLockKey(tenantID, subject),
+		authorityPhoneLockKey(phone),
+	)
+	for _, key := range lockKeys {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key); err != nil {
+			return fmt.Errorf("postgres: lock linked WeChat phone authority key: %w", err)
+		}
+	}
+
+	var status, normalizedEmail, existingPhone string
+	var phoneVerified bool
+	var version int
+	var epoch int64
+	err = tx.QueryRow(ctx, wechatOnboardingLockUserSQL, string(userID)).Scan(
+		&status, &normalizedEmail, &existingPhone, &phoneVerified, &version, &epoch,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return identity.ErrUserNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("postgres: lock linked WeChat phone target: %w", err)
+	}
+	if status != string(identity.UserStatusActive) {
+		return identity.ErrUserNotFound
+	}
+
+	rows, err := tx.Query(ctx, wechatOnboardingLockLinksSQL, wechat.ProviderName, tenantID, subject, string(userID))
+	if err != nil {
+		return fmt.Errorf("postgres: lock linked WeChat phone links: %w", err)
+	}
+	links := make([]wechatOnboardingLink, 0, 2)
+	for rows.Next() {
+		var link wechatOnboardingLink
+		if scanErr := rows.Scan(&link.userID, &link.subject); scanErr != nil {
+			rows.Close()
+			return fmt.Errorf("postgres: scan linked WeChat phone link: %w", scanErr)
+		}
+		links = append(links, link)
+	}
+	rowsErr := rows.Err()
+	rows.Close()
+	if rowsErr != nil {
+		return fmt.Errorf("postgres: iterate linked WeChat phone links: %w", rowsErr)
+	}
+	alreadyLinked, linkErr := evaluateWeChatOnboardingLinks(links, string(userID), subject)
+	if linkErr != nil || !alreadyLinked {
+		return identity.ErrIdentityLinkConflict
+	}
+
+	phoneAdded, err := decideWeChatOnboardingPhone(existingPhone, phoneVerified, phone)
+	if err != nil {
+		return wechat.ErrPhoneConflict
+	}
+	var conflictingUserID string
+	phoneErr := tx.QueryRow(ctx, wechatOnboardingLockPhoneOwnerSQL, phone, string(userID)).Scan(&conflictingUserID)
+	if phoneErr == nil {
+		return wechat.ErrPhoneConflict
+	}
+	if !errors.Is(phoneErr, pgx.ErrNoRows) {
+		return fmt.Errorf("postgres: lock linked WeChat phone owner: %w", phoneErr)
+	}
+
+	if phoneAdded {
+		previousVersion, previousEpoch := version, epoch
+		err = tx.QueryRow(ctx, wechatOnboardingAdvanceUserSQL, string(userID), true, phone, previousVersion, previousEpoch).Scan(&version, &epoch)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return identity.ErrUserNotFound
+		}
+		if err != nil {
+			if isUniqueViolation(err) {
+				return wechat.ErrPhoneConflict
+			}
+			return fmt.Errorf("postgres: advance linked WeChat phone security state: %w", err)
+		}
+
+		digest, deriveErr := DeriveWeChatAuthorityReplayDigest(WeChatAuthorityReplayMaterial{
+			Flow:             WeChatAuthorityFlowExisting,
+			TenantID:         tenantID,
+			Subject:          subject,
+			TargetUserID:     userID,
+			AuthorityVersion: int64(previousVersion),
+			SecurityEpoch:    previousEpoch,
+		})
+		if deriveErr != nil {
+			return fmt.Errorf("postgres: derive linked WeChat phone authority effect: %w", deriveErr)
+		}
+		if _, recordErr := NewWeChatAuthorityEffectStore().RecordTx(ctx, tx, WeChatAuthorityEffect{
+			ReplayDigest: digest,
+			Kind:         WeChatAuthorityEffectExistingPhone,
+			TargetUserID: userID,
+			OccurredAt:   time.Now().UTC(),
+		}); recordErr != nil {
+			return fmt.Errorf("postgres: append linked WeChat phone authority effect: %w", recordErr)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit linked WeChat phone transaction: %w", err)
+	}
+	return nil
+}
+
 // BindExistingWithWeChat attaches a verified WeChat subject and, optionally,
 // a verified phone to one already-authenticated active account. Serializable
 // retries are internal so callers receive stable domain conflicts rather than
@@ -182,13 +318,13 @@ func (r *WeChatOnboardingAccountRepository) bindExistingWithWeChatOnce(ctx conte
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	lockKeys := []string{
-		"user:" + string(input.UserID),
-		"wechat:" + input.TenantID + ":" + input.Subject,
+		authorityUserLockKey(input.UserID),
+		authorityWeChatLockKey(input.TenantID, input.Subject),
 	}
 	if input.Phone != "" {
-		lockKeys = append(lockKeys, "phone:"+input.Phone)
+		lockKeys = append(lockKeys, authorityPhoneLockKey(input.Phone))
 	}
-	sort.Strings(lockKeys)
+	lockKeys = sortedAuthorityLockKeys(lockKeys...)
 	for _, key := range lockKeys {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key); err != nil {
 			return wechatonboarding.BindExistingResult{}, fmt.Errorf("postgres: lock WeChat onboarding authority key: %w", err)
@@ -265,6 +401,9 @@ func (r *WeChatOnboardingAccountRepository) bindExistingWithWeChatOnce(ctx conte
 			return wechatonboarding.BindExistingResult{}, wechatonboarding.ErrAccountChanged
 		}
 		if err != nil {
+			if phoneAdded && isUniqueViolation(err) {
+				return wechatonboarding.BindExistingResult{}, wechatonboarding.ErrPhoneConflict
+			}
 			return wechatonboarding.BindExistingResult{}, fmt.Errorf("postgres: advance WeChat onboarding account security state: %w", err)
 		}
 
@@ -351,6 +490,5 @@ func decideWeChatOnboardingPhone(existing string, verified bool, proof string) (
 }
 
 func isWeChatOnboardingSerializationFailure(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && (pgErr.Code == "40001" || pgErr.Code == "40P01")
+	return isAuthoritySerializationFailure(err)
 }

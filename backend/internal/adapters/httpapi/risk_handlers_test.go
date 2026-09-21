@@ -13,15 +13,45 @@ import (
 )
 
 type riskServiceStub struct {
-	decision riskdefense.Decision
-	complete riskdefense.CompleteResult
-	assessed riskdefense.Signal
-	finished riskdefense.Completion
+	decision  riskdefense.Decision
+	complete  riskdefense.CompleteResult
+	assessErr error
+	assessed  riskdefense.Signal
+	finished  riskdefense.Completion
+}
+
+func (s *riskServiceStub) EnsureDevice(_ context.Context, current string) (string, error) {
+	if current != "" {
+		return current, nil
+	}
+	if s.decision.DeviceIDToken != "" {
+		return s.decision.DeviceIDToken, nil
+	}
+	return "server-device", nil
 }
 
 func (s *riskServiceStub) Assess(_ context.Context, signal riskdefense.Signal) (riskdefense.Decision, error) {
 	s.assessed = signal
-	return s.decision, nil
+	return s.decision, s.assessErr
+}
+
+func TestRiskGuardRegistrationPassesTrustedNetworkAndMapsActiveChallengeTo429(t *testing.T) {
+	stub := &riskServiceStub{assessErr: &riskdefense.RateLimitError{RetryAfter: 2500 * time.Millisecond}}
+	guard := NewRiskGuard(stub, nil, SessionCookieAttributes{Secure: true, SameSite: http.SameSiteLaxMode}, time.Hour, 10*time.Minute)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/registrations", nil)
+	req.Header.Set("User-Agent", "test-browser")
+	recorder := httptest.NewRecorder()
+	networkHash := hashRiskValue("203.0.113.0/24")
+
+	if guard.RequireRegistration(recorder, req, hashRiskValue("intent@example.com"), networkHash) {
+		t.Fatal("active registration challenge unexpectedly allowed request")
+	}
+	if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Retry-After") != "3" {
+		t.Fatalf("status=%d retry-after=%q body=%s", recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
+	}
+	if stub.assessed.Operation != riskdefense.OperationRegistration || stub.assessed.ClientNetworkHash != networkHash {
+		t.Fatalf("assessed signal=%#v", stub.assessed)
+	}
 }
 func (s *riskServiceStub) Complete(_ context.Context, completion riskdefense.Completion) (riskdefense.CompleteResult, error) {
 	s.finished = completion

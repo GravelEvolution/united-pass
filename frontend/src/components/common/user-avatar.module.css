@@ -1,0 +1,10 @@
+.avatar {
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  overflow: hidden;
+}
+
+.avatarWithImage {
+  background-color: var(--up-brand-soft);
+}

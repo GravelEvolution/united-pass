@@ -38,6 +38,7 @@ async function solve(request) {
 
   throw new Error("nonce space exhausted");
 }
+
 function hasLeadingZeroBits(bytes, difficulty) {
   const completeBytes = Math.floor(difficulty / 8);
   for (let index = 0; index < completeBytes; index += 1) {
@@ -48,3 +49,4 @@ function hasLeadingZeroBits(bytes, difficulty) {
   const highBitsMask = (0xff << (8 - remainingBits)) & 0xff;
   return (bytes[completeBytes] & highBitsMask) === 0;
 }
+

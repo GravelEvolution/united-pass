@@ -23,3 +23,4 @@ describe("automation cost", () => {
     await expect(solveAutomationCost("challenge", 31)).rejects.toThrow("difficulty");
   });
 });
+

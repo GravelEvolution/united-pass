@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/qrauth"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
@@ -90,6 +91,12 @@ func TestQRAuthConsumeNeedsBrowserReceiverAndNeverExposesSessionToken(t *testing
 	}
 	if sessionCookie == nil || sessionCookie.Value != fakeWeChatSessionBearer {
 		t.Fatal("session cookie was not set")
+	}
+	if sessions.input.Provider != currentQRAuthSessionProvider {
+		t.Fatalf("QR session provider=%q, want cutover provider %q", sessions.input.Provider, currentQRAuthSessionProvider)
+	}
+	if hasAuthenticationMethod(sessions.input.AuthenticationMethods, auth.MethodWeChatPhoneVerified) {
+		t.Fatalf("generic QR handoff falsely inherited phone assurance: %#v", sessions.input.AuthenticationMethods)
 	}
 	if len(auditor.events) != 1 || auditor.events[0].EventType != qrAuthEventReceiverVerified || auditor.events[0].ChallengeReference == challengeID {
 		t.Fatalf("unexpected receiver-verification audit events: %#v", auditor.events)

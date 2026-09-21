@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,9 +23,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/GravelEvolution/united-pass/backend/internal/adminstepup"
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
 	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
@@ -253,6 +256,31 @@ type fakeReauthAuditor struct {
 	err       error
 }
 
+type fakeDreamUPStepUpWriter struct {
+	mu     sync.Mutex
+	states []adminstepup.StepUpState
+	err    error
+}
+
+func (f *fakeDreamUPStepUpWriter) PutStepUp(_ context.Context, state adminstepup.StepUpState) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.states = append(f.states, state)
+	return nil
+}
+
+func (f *fakeDreamUPStepUpWriter) latest() (adminstepup.StepUpState, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.states) == 0 {
+		return adminstepup.StepUpState{}, false
+	}
+	return f.states[len(f.states)-1], true
+}
+
 func (f *fakeReauthAuditor) RecordEvent(_ context.Context, eventType string, _ identity.UserID, _ applications.ApplicationID, _ applications.OAuthClientID, _, operation string, result applications.SecurityEventResult, failureClass string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -297,6 +325,7 @@ type reauthEnv struct {
 	grants     *memReauthGrants
 	rate       *fakeReauthRate
 	auditor    *fakeReauthAuditor
+	stepups    *fakeDreamUPStepUpWriter
 }
 
 func newReauthEnv() *reauthEnv {
@@ -305,9 +334,10 @@ func newReauthEnv() *reauthEnv {
 	grants := newMemReauthGrants()
 	rate := &fakeReauthRate{allow: true}
 	auditor := &fakeReauthAuditor{}
-	handlers := NewReauthHandlers(authz, challenges, grants, rate, auditor,
+	stepups := &fakeDreamUPStepUpWriter{}
+	handlers := NewReauthHandlers(authz, challenges, grants, rate, auditor, stepups,
 		5*time.Minute, 5*time.Minute, 5, 10, 15*time.Minute, slog.Default())
-	return &reauthEnv{handlers: handlers, authz: authz, challenges: challenges, grants: grants, rate: rate, auditor: auditor}
+	return &reauthEnv{handlers: handlers, authz: authz, challenges: challenges, grants: grants, rate: rate, auditor: auditor, stepups: stepups}
 }
 
 var reauthPrincipal = session.Principal{
@@ -391,6 +421,53 @@ func TestReauthRequest_GrantedImmediately(t *testing.T) {
 	if !env.auditor.has(applications.EventReauthenticationRequested, applications.SecurityEventSuccess) ||
 		!env.auditor.has(applications.EventReauthenticationSucceeded, applications.SecurityEventSuccess) {
 		t.Error("expected requested + succeeded audit events")
+	}
+	if state, ok := env.stepups.latest(); ok {
+		t.Fatalf("non-DreamUP reauthentication must not create administrator freshness state: %+v", state)
+	}
+}
+
+func TestReauthRequestGrantsExactDreamUPActionTargetAfterPassword(t *testing.T) {
+	env := newReauthEnv()
+	env.authz.verifyResult = auth.AuthenticationResult{Status: auth.StatusAuthenticated}
+	target := `["dreamup-admin-target/v1","evt_shanghai","application","app_1"]`
+	body := `{"action":"event.application.review","eventId":"evt_shanghai","target":` + strconv.Quote(target) + `,"password":"pw"}`
+	w := doReauthJSON(t, reauthRouterWithEpoch(env.handlers, reauthPrincipal, 9), "/auth/reauthentication", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	token := decodeReauthToken(t, w)
+	grant, err := NewReauthGrants(env.grants, nil).VerifyAndConsumeData(context.Background(), token, string(permissions.ActionApplicationReview), "sess-1", target, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(grant.GrantID, "rgr_") || grant.SecurityEpoch != 9 || grant.ChallengeVersion != 0 {
+		t.Fatalf("grant=%+v", grant)
+	}
+	state, ok := env.stepups.latest()
+	if !ok || !strings.HasPrefix(state.ID, "asu_") || state.SessionID != "sess-1" || state.UserID != reauthPrincipal.UserID || state.SecurityEpoch != 9 || state.ChallengeVersion != 9 || state.VerifiedAt.IsZero() || state.ExpiresAt.Sub(state.VerifiedAt) != 5*time.Minute {
+		t.Fatalf("DreamUP browser freshness state=%+v present=%v", state, ok)
+	}
+}
+
+func TestReauthRequestDreamUPFreshnessPersistenceFailsClosedBeforeTokenDisclosure(t *testing.T) {
+	env := newReauthEnv()
+	env.authz.verifyResult = auth.AuthenticationResult{Status: auth.StatusAuthenticated}
+	env.stepups.err = errors.New("authority database unavailable")
+	target := `["dreamup-admin-target/v1","evt_shanghai","application","app_1"]`
+	body := `{"action":"event.application.review","eventId":"evt_shanghai","target":` + strconv.Quote(target) + `,"password":"pw"}`
+	w := doReauthJSON(t, reauthRouterWithEpoch(env.handlers, reauthPrincipal, 9), "/auth/reauthentication", body)
+	if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), "reauthToken") || len(env.grants.data) != 0 {
+		t.Fatalf("status=%d grants=%d body=%s", w.Code, len(env.grants.data), w.Body.String())
+	}
+}
+
+func TestReauthRequestRejectsNonCanonicalDreamUPTargetBeforePassword(t *testing.T) {
+	env := newReauthEnv()
+	body := `{"action":"event.application.review","eventId":"evt_shanghai","target":"app_1","password":"pw"}`
+	w := doReauthJSON(t, reauthRouter(env.handlers, reauthPrincipal), "/auth/reauthentication", body)
+	if w.Code != http.StatusBadRequest || env.authz.verifyCalls != 0 || len(env.grants.data) != 0 {
+		t.Fatalf("status=%d verifyCalls=%d grants=%d body=%s", w.Code, env.authz.verifyCalls, len(env.grants.data), w.Body.String())
 	}
 }
 

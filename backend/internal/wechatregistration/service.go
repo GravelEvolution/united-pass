@@ -1,7 +1,6 @@
 // Package wechatregistration creates a pending United Pass account only after
 // the server verifies a Mini Program identity proof. The legacy registration
-// entry point still requires a WeChat phone proof; onboarding may pass an
-// already-verified identity proof whose phone is optional. Both paths reuse
+// entry point and onboarding both require a WeChat phone proof. Both paths reuse
 // the existing provider/email verification lifecycle and never create an
 // active account at login time.
 package wechatregistration
@@ -103,28 +102,53 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (registration.C
 	if err := registration.ValidateCreate(input.Registration); err != nil {
 		return registration.CreateResult{}, err
 	}
-	proof, err := s.verifier.VerifyRegistration(ctx, input.LoginCode, input.PhoneCode)
+	proof, err := s.VerifyRegistration(ctx, input.LoginCode, input.PhoneCode)
+	if err != nil {
+		return registration.CreateResult{}, err
+	}
+	return s.CreateVerified(ctx, CreateVerifiedInput{Registration: input.Registration, Proof: proof})
+}
+
+// VerifyRegistration exchanges both fresh Mini Program codes and returns only
+// the server-derived identity proof. HTTP callers use this split operation so
+// attacker-selected email buckets are charged only after WeChat has accepted
+// both one-time proofs. It never creates or reserves a United Pass account.
+func (s *Service) VerifyRegistration(ctx context.Context, loginCode, phoneCode string) (wechat.IdentityProof, error) {
+	if s == nil || s.verifier == nil {
+		return wechat.IdentityProof{}, registration.ErrUnavailable
+	}
+	if wechat.ValidateCode(loginCode) != nil || wechat.ValidateCode(phoneCode) != nil {
+		return wechat.IdentityProof{}, registration.ErrInvalidInput
+	}
+	proof, err := s.verifier.VerifyRegistration(ctx, loginCode, phoneCode)
 	if err != nil {
 		if errors.Is(err, wechat.ErrInvalidCode) || errors.Is(err, wechat.ErrRejected) {
-			return registration.CreateResult{}, registration.ErrInvalidInput
+			return wechat.IdentityProof{}, registration.ErrInvalidInput
 		}
-		return registration.CreateResult{}, registration.ErrUnavailable
+		return wechat.IdentityProof{}, registration.ErrUnavailable
 	}
-	if proof.TenantID == "" || proof.Subject == "" || proof.Phone == "" {
-		return registration.CreateResult{}, registration.ErrUnavailable
+	if proof.TenantID == "" || proof.Subject == "" || proof.Phone == "" ||
+		strings.TrimSpace(proof.TenantID) != proof.TenantID ||
+		strings.TrimSpace(proof.Subject) != proof.Subject ||
+		strings.TrimSpace(proof.Phone) != proof.Phone {
+		return wechat.IdentityProof{}, registration.ErrInvalidInput
 	}
-	return s.createVerified(ctx, CreateVerifiedInput{Registration: input.Registration, Proof: proof})
+	return proof, nil
 }
 
 // CreateVerified creates a pending account from a proof already verified by
-// the onboarding service. A phone proof is optional, but the stable WeChat
-// tenant and subject remain mandatory. This method performs no provider-code
-// exchange and therefore cannot replay a wx.login or getPhoneNumber code.
+// an upstream onboarding use case or the legacy HTTP adapter. The stable
+// WeChat tenant, subject and verified phone are all mandatory. This method
+// performs no provider-code exchange and therefore cannot replay a wx.login or
+// getPhoneNumber code.
 func (s *Service) CreateVerified(ctx context.Context, input CreateVerifiedInput) (registration.CreateResult, error) {
 	if err := registration.ValidateCreate(input.Registration); err != nil {
 		return registration.CreateResult{}, err
 	}
-	if input.Proof.TenantID == "" || input.Proof.Subject == "" {
+	if input.Proof.TenantID == "" || input.Proof.Subject == "" || input.Proof.Phone == "" ||
+		strings.TrimSpace(input.Proof.TenantID) != input.Proof.TenantID ||
+		strings.TrimSpace(input.Proof.Subject) != input.Proof.Subject ||
+		strings.TrimSpace(input.Proof.Phone) != input.Proof.Phone {
 		return registration.CreateResult{}, registration.ErrInvalidInput
 	}
 	if input.ExpectedUserID != "" && !validUserID(input.ExpectedUserID) {

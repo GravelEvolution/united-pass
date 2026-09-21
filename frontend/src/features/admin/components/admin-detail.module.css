@@ -30,6 +30,7 @@
 
 .headerInfo {
   display: grid;
+  min-width: 0;
   gap: 6px;
 }
 
@@ -37,6 +38,7 @@
   margin: 0;
   font-size: 22px;
   letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
 }
 
 .headerInfo p {
@@ -202,5 +204,33 @@
 
   .descriptionList {
     grid-template-columns: 1fr;
+  }
+
+  .tabContent {
+    padding: 18px 16px;
+  }
+
+  .dangerItem {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dangerItem > div {
+    min-width: 0;
+  }
+
+  .dangerItem :global(.semi-button) {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .formActions {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .formActions :global(.semi-button) {
+    width: 100%;
+    min-height: 44px;
   }
 }

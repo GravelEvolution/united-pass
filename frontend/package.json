@@ -16,12 +16,15 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
+    "test:e2e:csp": "pnpm build && playwright test --config playwright.csp.config.ts",
     "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
     "@douyinfe/semi-icons": "^2.102.0",
     "@douyinfe/semi-ui": "^2.102.0",
+    "@types/qrcode": "^1.5.6",
     "next": "16.3.0",
+    "qrcode": "^1.5.4",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },

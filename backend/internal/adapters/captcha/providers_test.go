@@ -2,10 +2,12 @@ package captcha
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"io"
 	"math"
 	"net/http"
@@ -17,6 +19,107 @@ import (
 )
 
 var providerTestNow = time.Date(2026, 8, 26, 1, 2, 3, 0, time.UTC)
+
+type memoryFirstPartyImageStore struct {
+	answers map[string]string
+}
+
+func (s *memoryFirstPartyImageStore) Create(_ context.Context, challengeID, answer string, _ time.Duration) error {
+	if s.answers == nil {
+		s.answers = make(map[string]string)
+	}
+	if _, exists := s.answers[challengeID]; exists {
+		return errors.New("duplicate")
+	}
+	s.answers[challengeID] = answer
+	return nil
+}
+
+func (s *memoryFirstPartyImageStore) ConsumeIfMatches(_ context.Context, challengeID, answer string) (bool, error) {
+	want, exists := s.answers[challengeID]
+	if !exists || want != answer {
+		return false, nil
+	}
+	delete(s.answers, challengeID)
+	return true, nil
+}
+
+func TestFirstPartyImageCaptchaPayloadCannotExposeFixedSVGGridAndConsumesOnce(t *testing.T) {
+	store := &memoryFirstPartyImageStore{}
+	provider, err := NewFirstPartyImage(FirstPartyImageConfig{
+		Store:  store,
+		TTL:    5 * time.Minute,
+		Random: bytes.NewReader(bytes.Repeat([]byte{7}, 128)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !provider.Available(t.Context(), riskdefense.ProviderRegionMainlandChina) {
+		t.Fatal("first-party image CAPTCHA must be available in mainland China")
+	}
+	challenge, err := provider.Begin(t.Context(), riskdefense.OperationLogin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if challenge.Provider != FirstPartyImageProviderName || store.answers[challenge.ID] != "77777" {
+		t.Fatalf("challenge=%#v stored=%q", challenge, store.answers[challenge.ID])
+	}
+	var payload firstPartyImagePublicPayload
+	if err := json.Unmarshal(challenge.PublicPayload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Digits != firstPartyDigitCount || !strings.HasPrefix(payload.ImageDataURL, "data:image/png;base64,") {
+		t.Fatalf("public payload=%#v", payload)
+	}
+	encodedPNG := strings.TrimPrefix(payload.ImageDataURL, "data:image/png;base64,")
+	pixels, err := base64.StdEncoding.DecodeString(encodedPNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := png.Decode(bytes.NewReader(pixels))
+	if err != nil {
+		t.Fatalf("decode CAPTCHA PNG: %v", err)
+	}
+	if decoded.Bounds().Dx() != firstPartyImageWidth || decoded.Bounds().Dy() != firstPartyImageHeight {
+		t.Fatalf("image bounds=%v", decoded.Bounds())
+	}
+	if bytes.Contains(pixels, []byte("<svg")) || bytes.Contains(pixels, []byte("M22 ")) || bytes.Contains(pixels, []byte("77777")) || bytes.Contains(challenge.PublicPayload, []byte(`"answer"`)) {
+		t.Fatal("public payload exposed plaintext or the previous deterministic SVG path grid")
+	}
+	if err := provider.Verify(t.Context(), challenge.ID, "11111"); !errors.Is(err, riskdefense.ErrInvalidProof) {
+		t.Fatalf("wrong proof error=%v", err)
+	}
+	if err := provider.Verify(t.Context(), challenge.ID, "７ ７ ７ ７ ７"); err != nil {
+		t.Fatalf("normalized proof error=%v", err)
+	}
+	if err := provider.Verify(t.Context(), challenge.ID, "77777"); !errors.Is(err, riskdefense.ErrInvalidProof) {
+		t.Fatalf("replayed proof error=%v", err)
+	}
+}
+
+func TestFirstPartyImageCaptchaRasterChangesForSameAnswer(t *testing.T) {
+	challengePayload := func(imageByte byte) []byte {
+		randomness := append([]byte{}, bytes.Repeat([]byte{7}, firstPartyDigitCount)...)
+		randomness = append(randomness, bytes.Repeat([]byte{1}, 32)...)
+		randomness = append(randomness, bytes.Repeat([]byte{imageByte}, 96)...)
+		provider, err := NewFirstPartyImage(FirstPartyImageConfig{
+			Store: &memoryFirstPartyImageStore{}, TTL: time.Minute, Random: bytes.NewReader(randomness),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		challenge, err := provider.Begin(t.Context(), riskdefense.OperationRegistration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return challenge.PublicPayload
+	}
+	first := challengePayload(2)
+	second := challengePayload(3)
+	if bytes.Equal(first, second) {
+		t.Fatal("same answer produced identical raster geometry")
+	}
+}
 
 func TestRecaptchaRejectsNonFiniteMinimumScore(t *testing.T) {
 	for _, score := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {

@@ -12,6 +12,10 @@ var (
 	// disabled account or malformed provider identity to an HTTP caller.
 	ErrNotRegistered   = errors.New("wechat: account is not available")
 	ErrBindingMismatch = errors.New("wechat: binding does not belong to current user")
+	// ErrPhoneConflict is returned when the verified phone is already owned by
+	// another account or would replace a different phone on the linked account.
+	// Callers must never use the phone to select or merge an account.
+	ErrPhoneConflict = errors.New("wechat: verified phone conflicts with account authority")
 )
 
 // BindingReader is satisfied by the PostgreSQL user repository. The service
@@ -22,11 +26,13 @@ type BindingReader interface {
 	GetByID(context.Context, identity.UserID) (identity.User, error)
 }
 
-// PhoneWriter is the minimal self-service mutation needed after a verified
-// WeChat getPhoneNumber flow. Its implementation must mark the number as
-// verified in the same durable identity store.
+// PhoneWriter is the narrow self-service mutation needed after a verified
+// WeChat getPhoneNumber flow. Its implementation must atomically re-check the
+// exact provider subject and active target account, and may only add an empty
+// phone or verify the identical legacy phone. It must fail closed rather than
+// overwrite or use the phone to select/merge an account.
 type PhoneWriter interface {
-	UpdatePhone(context.Context, identity.UserID, string) error
+	CompleteLinkedWithVerifiedPhone(context.Context, identity.UserID, string, string, string) error
 }
 
 type Service struct {
@@ -86,11 +92,17 @@ func (s *Service) BindVerifiedPhone(ctx context.Context, userID identity.UserID,
 	if link.UserID != userID {
 		return ErrBindingMismatch
 	}
-	if err := s.phones.UpdatePhone(ctx, userID, proof.Phone); err != nil {
-		if errors.Is(err, identity.ErrUserNotFound) {
+	if err := s.phones.CompleteLinkedWithVerifiedPhone(ctx, userID, proof.TenantID, proof.Subject, proof.Phone); err != nil {
+		switch {
+		case errors.Is(err, ErrPhoneConflict):
+			return ErrPhoneConflict
+		case errors.Is(err, identity.ErrIdentityLinkConflict):
+			return ErrBindingMismatch
+		case errors.Is(err, identity.ErrUserNotFound):
 			return ErrNotRegistered
+		default:
+			return ErrUnavailable
 		}
-		return ErrUnavailable
 	}
 	return nil
 }

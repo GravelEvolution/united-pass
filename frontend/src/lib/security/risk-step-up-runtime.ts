@@ -18,6 +18,7 @@ export class RiskStepUpUnavailableError extends Error {
     this.name = "RiskStepUpUnavailableError";
   }
 }
+
 export class RiskStepUpCancelledError extends Error {
   constructor(message = "额外验证已取消。") {
     super(message);
@@ -50,3 +51,4 @@ export async function requestRiskStepUp(
   if (!activeHandler) throw new RiskStepUpUnavailableError();
   return activeHandler(challenge, signal);
 }
+

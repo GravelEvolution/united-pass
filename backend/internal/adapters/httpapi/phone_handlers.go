@@ -192,6 +192,8 @@ func (h *PhoneVerifyHandlers) writeError(w http.ResponseWriter, r *http.Request,
 		WriteValidation(w, r, "请输入有效的手机号码。", nil)
 	case errors.Is(err, phoneverify.ErrVerificationFailed):
 		writeError(w, r, http.StatusUnprocessableEntity, "account.phone_verification_failed", "验证码无效、已失效或已使用。", nil)
+	case errors.Is(err, phoneverify.ErrPhoneConflict):
+		writeError(w, r, http.StatusConflict, "account.phone_conflict", "该手机号已绑定其他统一账户，系统未自动合并或覆盖账户。", nil)
 	default:
 		h.logger.Error("phone change failed", "requestId", requestID(r), "operation", operation, "errorClass", observability.ClassifyError(err))
 		WriteProviderUnavailable(w, r)

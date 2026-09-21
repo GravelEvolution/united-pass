@@ -239,4 +239,10 @@
   .headerCard {
     flex-direction: column;
   }
+
+  .editorCard,
+  .simulateCard { padding: 20px 16px; }
+
+  .formActions { align-items: stretch; flex-direction: column-reverse; }
+  .formActions :global(.semi-button) { width: 100%; min-height: 44px; }
 }

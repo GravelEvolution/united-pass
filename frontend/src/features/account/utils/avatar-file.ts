@@ -23,6 +23,7 @@ type ImageDimensions = {
 export type SanitizedAvatar = {
   fileName: string;
   previewDataUrl: string;
+  uploadFile: File;
   width: number;
   height: number;
 };
@@ -189,14 +190,22 @@ export async function sanitizeAvatarFile(file: File): Promise<SanitizedAvatar> {
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = "high";
     context.drawImage(decodedImage, 0, 0, outputWidth, outputHeight);
-    const previewDataUrl = canvas.toDataURL("image/webp", 0.88);
-    if (!previewDataUrl.startsWith("data:image/webp;base64,")) {
+    const previewDataUrl = canvas.toDataURL("image/jpeg", 0.88);
+    if (!previewDataUrl.startsWith("data:image/jpeg;base64,")) {
       throw new AvatarValidationError("浏览器无法重新编码安全的头像预览。");
     }
 
+    const uploadBlob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, "image/jpeg", 0.88);
+    });
+    if (!uploadBlob || uploadBlob.size <= 0 || uploadBlob.size > MAX_AVATAR_BYTES) {
+      throw new AvatarValidationError("头像重新编码失败或编码后文件过大，请选择其他图片。");
+    }
+
     return {
-      fileName: "avatar.webp",
+      fileName: "avatar.jpg",
       previewDataUrl,
+      uploadFile: new File([uploadBlob], "avatar.jpg", { type: "image/jpeg" }),
       width: headerDimensions.width,
       height: headerDimensions.height,
     };

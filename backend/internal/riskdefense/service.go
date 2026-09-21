@@ -59,6 +59,20 @@ type RateLimitError struct{ RetryAfter time.Duration }
 func (e *RateLimitError) Error() string { return ErrRateLimited.Error() }
 func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
 
+// RateLimit is kept local to the risk boundary so CAPTCHA issuance cannot
+// depend on the account-registration package.
+type RateLimit struct {
+	Max    int
+	Window time.Duration
+}
+
+type RegistrationIssueRatePolicy struct {
+	Device          RateLimit
+	Network         RateLimit
+	GlobalBurst     RateLimit
+	GlobalSustained RateLimit
+}
+
 type Activity struct {
 	Attempts int
 }
@@ -72,6 +86,8 @@ type ChallengeRecord struct {
 	DeviceIDHash        string    `json:"deviceIdHash"`
 	UserAgentHash       string    `json:"userAgentHash"`
 	IdentifierHash      string    `json:"identifierHash"`
+	ClientNetworkHash   string    `json:"clientNetworkHash,omitempty"`
+	RegistrationScope   string    `json:"registrationScope,omitempty"`
 	Difficulty          uint8     `json:"difficulty,omitempty"`
 	ProviderChallengeID string    `json:"providerChallengeId,omitempty"`
 	CreatedAt           time.Time `json:"createdAt"`
@@ -90,12 +106,18 @@ type Store interface {
 	DeviceExists(context.Context, string) (bool, error)
 	Observe(context.Context, Operation, string, string, time.Duration) (Activity, error)
 	CreateChallenge(context.Context, string, ChallengeRecord, time.Duration) error
+	ReserveRegistrationChallenge(context.Context, string, string, time.Duration) (bool, time.Duration, error)
+	FinalizeRegistrationChallenge(context.Context, string, string, ChallengeRecord, time.Duration) error
+	ReleaseRegistrationChallenge(context.Context, string, string) error
 	ClaimChallenge(context.Context, string, string) (ChallengeRecord, error)
 	ReleaseChallenge(context.Context, string, string) error
 	ConsumeChallenge(context.Context, string, string) error
+	ConsumeRegistrationChallenge(context.Context, string, string, string) error
 	PutTrust(context.Context, string, TrustRecord, time.Duration) error
 	GetTrust(context.Context, string) (TrustRecord, error)
 	CheckCompletionRate(context.Context, string, int, time.Duration) (bool, time.Duration, error)
+	CheckRegistrationIssueRate(context.Context, string, string, RegistrationIssueRatePolicy) (bool, time.Duration, error)
+	CheckRegistrationCompletionRate(context.Context, string, string, int, int, time.Duration) (bool, time.Duration, error)
 }
 
 type ProviderChallenge struct {
@@ -112,21 +134,34 @@ type InteractiveVerifier interface {
 }
 
 type Config struct {
-	Enabled                  bool
-	ObservationWindow        time.Duration
-	LoginMediumAfter         int
-	LoginHighAfter           int
-	RegistrationMediumAfter  int
-	RegistrationHighAfter    int
-	ChallengeTTL             time.Duration
-	DeviceIDTTL              time.Duration
-	TrustTTL                 time.Duration
-	AutomationCostDifficulty uint8
-	CompletionLimit          int
-	CompletionWindow         time.Duration
-	AllowlistedHashes        []string
-	Now                      func() time.Time
-	GenerateToken            func() (string, error)
+	Enabled                            bool
+	ObservationWindow                  time.Duration
+	LoginMediumAfter                   int
+	LoginHighAfter                     int
+	RegistrationMediumAfter            int
+	RegistrationHighAfter              int
+	ChallengeTTL                       time.Duration
+	DeviceIDTTL                        time.Duration
+	TrustTTL                           time.Duration
+	AutomationCostDifficulty           uint8
+	CompletionLimit                    int
+	CompletionWindow                   time.Duration
+	RegistrationIssueDeviceLimit       int
+	RegistrationIssueNetworkLimit      int
+	RegistrationIssueWindow            time.Duration
+	RegistrationIssueGlobalBurstLimit  int
+	RegistrationIssueGlobalBurstWindow time.Duration
+	RegistrationIssueGlobalLimit       int
+	RegistrationIssueGlobalWindow      time.Duration
+	RegistrationIssueMaxInFlight       int
+	RegistrationIssueMaxQueued         int
+	RegistrationIssueWaitTimeout       time.Duration
+	RegistrationCompletionDeviceLimit  int
+	RegistrationCompletionNetworkLimit int
+	RegistrationCompletionWindow       time.Duration
+	AllowlistedHashes                  []string
+	Now                                func() time.Time
+	GenerateToken                      func() (string, error)
 }
 
 type Signal struct {
@@ -135,7 +170,11 @@ type Signal struct {
 	DeviceIDToken    string
 	DeviceTrustToken string
 	UserAgentHash    string
-	SessionTrusted   bool
+	// ClientNetworkHash is supplied only by the trusted HTTP boundary after
+	// canonical proxy parsing. Registration requires it; login deliberately
+	// keeps its existing provider flow and leaves it empty.
+	ClientNetworkHash string
+	SessionTrusted    bool
 	// ProtocolAnomaly is set only for a server-verifiable protocol problem,
 	// never for ordinary first use or elapsed time.
 	ProtocolAnomaly bool
@@ -175,13 +214,16 @@ type CompleteResult struct {
 }
 
 type Service struct {
-	store     Store
-	provider  InteractiveVerifier
-	cfg       Config
-	allowlist map[string]struct{}
+	store                      Store
+	provider                   InteractiveVerifier
+	cfg                        Config
+	allowlist                  map[string]struct{}
+	registrationIssueAdmission *issueAdmission
 }
 
 const highRiskAutomationCostExtraBits uint8 = 4
+
+const registrationChallengeReservationTTL = 15 * time.Second
 
 func NewService(store Store, provider InteractiveVerifier, cfg Config) (*Service, error) {
 	if cfg.Now == nil {
@@ -189,6 +231,45 @@ func NewService(store Store, provider InteractiveVerifier, cfg Config) (*Service
 	}
 	if cfg.GenerateToken == nil {
 		cfg.GenerateToken = generateToken
+	}
+	if cfg.RegistrationIssueDeviceLimit <= 0 {
+		cfg.RegistrationIssueDeviceLimit = 4
+	}
+	if cfg.RegistrationIssueNetworkLimit <= 0 {
+		cfg.RegistrationIssueNetworkLimit = 128
+	}
+	if cfg.RegistrationIssueWindow <= 0 {
+		cfg.RegistrationIssueWindow = cfg.ObservationWindow
+	}
+	if cfg.RegistrationIssueGlobalBurstLimit <= 0 {
+		cfg.RegistrationIssueGlobalBurstLimit = 20
+	}
+	if cfg.RegistrationIssueGlobalBurstWindow <= 0 {
+		cfg.RegistrationIssueGlobalBurstWindow = 10 * time.Second
+	}
+	if cfg.RegistrationIssueGlobalLimit <= 0 {
+		cfg.RegistrationIssueGlobalLimit = 100
+	}
+	if cfg.RegistrationIssueGlobalWindow <= 0 {
+		cfg.RegistrationIssueGlobalWindow = 5 * time.Minute
+	}
+	if cfg.RegistrationIssueMaxInFlight <= 0 {
+		cfg.RegistrationIssueMaxInFlight = 4
+	}
+	if cfg.RegistrationIssueMaxQueued < 0 {
+		return nil, ErrUnavailable
+	}
+	if cfg.RegistrationIssueWaitTimeout <= 0 {
+		cfg.RegistrationIssueWaitTimeout = 500 * time.Millisecond
+	}
+	if cfg.RegistrationCompletionDeviceLimit <= 0 {
+		cfg.RegistrationCompletionDeviceLimit = cfg.CompletionLimit
+	}
+	if cfg.RegistrationCompletionNetworkLimit <= 0 {
+		cfg.RegistrationCompletionNetworkLimit = cfg.CompletionLimit * 32
+	}
+	if cfg.RegistrationCompletionWindow <= 0 {
+		cfg.RegistrationCompletionWindow = cfg.CompletionWindow
 	}
 	if cfg.Enabled && (store == nil || cfg.ObservationWindow <= 0 || cfg.ChallengeTTL <= 0 || cfg.DeviceIDTTL <= 0 || cfg.TrustTTL <= 0 || cfg.CompletionLimit <= 0 || cfg.CompletionWindow <= 0 || cfg.AutomationCostDifficulty == 0 || cfg.AutomationCostDifficulty > 30) {
 		return nil, ErrUnavailable
@@ -205,7 +286,11 @@ func NewService(store Store, provider InteractiveVerifier, cfg Config) (*Service
 		}
 		allowlist[digest] = struct{}{}
 	}
-	return &Service{store: store, provider: provider, cfg: cfg, allowlist: allowlist}, nil
+	issueGate, err := newIssueAdmission(cfg.RegistrationIssueMaxInFlight, cfg.RegistrationIssueMaxQueued, cfg.RegistrationIssueWaitTimeout)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	return &Service{store: store, provider: provider, cfg: cfg, allowlist: allowlist, registrationIssueAdmission: issueGate}, nil
 }
 
 func (s *Service) Assess(ctx context.Context, signal Signal) (Decision, error) {
@@ -221,8 +306,13 @@ func (s *Service) Assess(ctx context.Context, signal Signal) (Decision, error) {
 		return Decision{}, err
 	}
 	decision := Decision{DeviceIDToken: deviceToken}
-	if signal.Operation != OperationPhoneChange {
-		if _, ok := s.allowlist[strings.ToLower(signal.IdentifierHash)]; ok || signal.SessionTrusted {
+	// Registration must always prove one freshly bound interactive challenge.
+	// Login allowlists and an existing authenticated session therefore never
+	// bypass the registration gate; only the one-use trust produced for the
+	// exact registration intent may admit its automatic retry.
+	if signal.Operation != OperationRegistration && signal.Operation != OperationPhoneChange {
+		_, allowlisted := s.allowlist[strings.ToLower(signal.IdentifierHash)]
+		if allowlisted || signal.SessionTrusted {
 			decision.Allow = true
 			return decision, nil
 		}
@@ -271,18 +361,25 @@ func (s *Service) Assess(ctx context.Context, signal Signal) (Decision, error) {
 	return decision, nil
 }
 
+// EnsureDevice returns a server-registered device token without granting any
+// request or trust. Registration form intents use it before issuance so their
+// binding never has an empty-device wildcard.
+func (s *Service) EnsureDevice(ctx context.Context, raw string) (string, error) {
+	if s == nil || !s.cfg.Enabled {
+		return "", ErrUnavailable
+	}
+	token, _, _, err := s.ensureDevice(ctx, raw)
+	if err != nil || token == "" {
+		return "", ErrUnavailable
+	}
+	return token, nil
+}
+
 func (s *Service) Complete(ctx context.Context, input Completion) (CompleteResult, error) {
 	if s == nil || !s.cfg.Enabled || input.ChallengeToken == "" || input.DeviceIDToken == "" || input.UserAgentHash == "" {
 		return CompleteResult{}, ErrInvalidProof
 	}
 	challengeHash := hash(input.ChallengeToken)
-	allowed, retryAfter, err := s.store.CheckCompletionRate(ctx, challengeHash, s.cfg.CompletionLimit, s.cfg.CompletionWindow)
-	if err != nil {
-		return CompleteResult{}, ErrUnavailable
-	}
-	if !allowed {
-		return CompleteResult{}, &RateLimitError{RetryAfter: retryAfter}
-	}
 	claimID, err := s.cfg.GenerateToken()
 	if err != nil || claimID == "" {
 		return CompleteResult{}, ErrUnavailable
@@ -295,6 +392,34 @@ func (s *Service) Complete(ctx context.Context, input Completion) (CompleteResul
 	if !constantEqual(record.DeviceIDHash, hash(input.DeviceIDToken)) || !constantEqual(record.UserAgentHash, input.UserAgentHash) {
 		release()
 		return CompleteResult{}, ErrInvalidProof
+	}
+	allowed, retryAfter, err := s.store.CheckCompletionRate(ctx, challengeHash, s.cfg.CompletionLimit, s.cfg.CompletionWindow)
+	if err != nil {
+		release()
+		return CompleteResult{}, ErrUnavailable
+	}
+	if !allowed {
+		release()
+		return CompleteResult{}, &RateLimitError{RetryAfter: retryAfter}
+	}
+	if record.Operation == OperationRegistration {
+		if !validDigest(record.ClientNetworkHash) || !validDigest(record.RegistrationScope) {
+			release()
+			return CompleteResult{}, ErrUnavailable
+		}
+		allowed, retryAfter, err = s.store.CheckRegistrationCompletionRate(
+			ctx, record.DeviceIDHash, record.ClientNetworkHash,
+			s.cfg.RegistrationCompletionDeviceLimit, s.cfg.RegistrationCompletionNetworkLimit,
+			s.cfg.RegistrationCompletionWindow,
+		)
+		if err != nil {
+			release()
+			return CompleteResult{}, ErrUnavailable
+		}
+		if !allowed {
+			release()
+			return CompleteResult{}, &RateLimitError{RetryAfter: retryAfter}
+		}
 	}
 
 	switch record.Method {
@@ -317,7 +442,12 @@ func (s *Service) Complete(ctx context.Context, input Completion) (CompleteResul
 		return CompleteResult{}, ErrInvalidProof
 	}
 
-	if err := s.store.ConsumeChallenge(ctx, challengeHash, claimID); err != nil {
+	if record.Operation == OperationRegistration {
+		err = s.store.ConsumeRegistrationChallenge(ctx, challengeHash, claimID, record.RegistrationScope)
+	} else {
+		err = s.store.ConsumeChallenge(ctx, challengeHash, claimID)
+	}
+	if err != nil {
 		return CompleteResult{}, err
 	}
 	trustToken, err := s.cfg.GenerateToken()
@@ -371,30 +501,20 @@ func (s *Service) validTrust(ctx context.Context, raw, deviceHash string, signal
 	if !valid {
 		return false, nil
 	}
-	if signal.Operation == OperationRegistration || signal.Operation == OperationPhoneChange {
-		// Registration trust exists to let the browser retry the exact submission
-		// that earned it. Do not turn one solved challenge into a temporary pass
-		// for creating unrelated accounts from the same device.
-		return record.Operation == signal.Operation && constantEqual(record.IdentifierHash, strings.ToLower(signal.IdentifierHash)), nil
-	}
-	return true, nil
+	// Trust is always operation- and identifier-bound. In particular, a solved
+	// registration CAPTCHA must not suppress login defenses, and a login trust
+	// for one identifier must not carry to another account.
+	return record.Operation == signal.Operation && constantEqual(record.IdentifierHash, strings.ToLower(signal.IdentifierHash)), nil
 }
 
 func (s *Service) level(operation Operation, attempts, anomalies int) Level {
 	medium, high := s.cfg.LoginMediumAfter, s.cfg.LoginHighAfter
 	if operation == OperationRegistration {
-		medium, high = s.cfg.RegistrationMediumAfter, s.cfg.RegistrationHighAfter
-		// Registration is a public account-creation surface. Repeated attempts
-		// from the same server-issued device are therefore sufficient to add a
-		// progressive automation cost even when the request obeys the protocol.
-		// This remains objective: no name, prose, or submitted content is scored.
-		if attempts >= high {
-			return LevelHigh
-		}
-		if attempts >= medium {
-			return LevelMedium
-		}
-		return LevelLow
+		// A bot can rotate email, IP and cookies so every public registration
+		// appears to be a first low-risk attempt. Registration therefore starts
+		// at the interactive tier; its one-use trust is bound to the exact form
+		// intent tuple by IdentifierHash at the HTTP boundary.
+		return LevelHigh
 	}
 	if operation == OperationPhoneChange {
 		return LevelHigh
@@ -422,6 +542,40 @@ func (s *Service) issue(ctx context.Context, signal Signal, deviceHash string, l
 		UserAgentHash: signal.UserAgentHash, IdentifierHash: strings.ToLower(signal.IdentifierHash), CreatedAt: now,
 	}
 	challenge := Challenge{Token: token, Level: level, ExpiresAt: now.Add(s.cfg.ChallengeTTL)}
+	registrationReserved := false
+	if signal.Operation == OperationRegistration {
+		record.ClientNetworkHash = strings.ToLower(signal.ClientNetworkHash)
+		record.RegistrationScope = registrationScope(signal, deviceHash)
+		reserved, retryAfter, reserveErr := s.store.ReserveRegistrationChallenge(
+			ctx, record.RegistrationScope, hash(token), registrationChallengeReservationTTL,
+		)
+		if reserveErr != nil {
+			return Challenge{}, ErrUnavailable
+		}
+		if !reserved {
+			return Challenge{}, &RateLimitError{RetryAfter: retryAfter}
+		}
+		registrationReserved = true
+		allowed, retryAfter, rateErr := s.store.CheckRegistrationIssueRate(ctx, deviceHash, record.ClientNetworkHash, RegistrationIssueRatePolicy{
+			Device:          RateLimit{Max: s.cfg.RegistrationIssueDeviceLimit, Window: s.cfg.RegistrationIssueWindow},
+			Network:         RateLimit{Max: s.cfg.RegistrationIssueNetworkLimit, Window: s.cfg.RegistrationIssueWindow},
+			GlobalBurst:     RateLimit{Max: s.cfg.RegistrationIssueGlobalBurstLimit, Window: s.cfg.RegistrationIssueGlobalBurstWindow},
+			GlobalSustained: RateLimit{Max: s.cfg.RegistrationIssueGlobalLimit, Window: s.cfg.RegistrationIssueGlobalWindow},
+		})
+		if rateErr != nil {
+			_ = s.store.ReleaseRegistrationChallenge(context.WithoutCancel(ctx), record.RegistrationScope, hash(token))
+			return Challenge{}, ErrUnavailable
+		}
+		if !allowed {
+			_ = s.store.ReleaseRegistrationChallenge(context.WithoutCancel(ctx), record.RegistrationScope, hash(token))
+			return Challenge{}, &RateLimitError{RetryAfter: retryAfter}
+		}
+	}
+	releaseRegistrationReservation := func() {
+		if registrationReserved {
+			_ = s.store.ReleaseRegistrationChallenge(context.WithoutCancel(ctx), record.RegistrationScope, hash(token))
+		}
+	}
 	if level == LevelMedium {
 		record.Method = MethodAutomationCost
 		record.Difficulty = s.cfg.AutomationCostDifficulty
@@ -435,7 +589,17 @@ func (s *Service) issue(ctx context.Context, signal Signal, deviceHash string, l
 		// challenge. Fall back to a stronger computational cost that the existing
 		// completion endpoint can actually satisfy. This is not human verification.
 		if s.provider != nil {
+			releaseIssue := func() {}
+			if signal.Operation == OperationRegistration {
+				var acquired bool
+				releaseIssue, acquired = s.registrationIssueAdmission.acquire(ctx)
+				if !acquired {
+					releaseRegistrationReservation()
+					return Challenge{}, &RateLimitError{RetryAfter: s.cfg.RegistrationIssueWaitTimeout}
+				}
+			}
 			providerChallenge, beginErr := s.provider.Begin(ctx, signal.Operation)
+			releaseIssue()
 			if beginErr == nil && providerChallenge.ID != "" && strings.TrimSpace(providerChallenge.Provider) != "" {
 				record.Method = MethodInteractiveCAPTCHA
 				record.ProviderChallengeID = providerChallenge.ID
@@ -445,7 +609,11 @@ func (s *Service) issue(ctx context.Context, signal Signal, deviceHash string, l
 				challenge.ProviderReady = true
 			}
 		}
-		if record.Method == "" && signal.Operation == OperationPhoneChange {
+		if record.Method == "" && (signal.Operation == OperationRegistration || signal.Operation == OperationPhoneChange) {
+			// Registration has no computational fallback: proof-of-work is not
+			// human verification and would reopen the first-attempt bypass when an
+			// interactive provider is absent or unhealthy.
+			releaseRegistrationReservation()
 			return Challenge{}, ErrUnavailable
 		}
 		if record.Method == "" {
@@ -456,7 +624,16 @@ func (s *Service) issue(ctx context.Context, signal Signal, deviceHash string, l
 			challenge.ProviderReady = true
 		}
 	}
-	if err := s.store.CreateChallenge(ctx, hash(token), record, s.cfg.ChallengeTTL); err != nil {
+	if signal.Operation == OperationRegistration {
+		err = s.store.FinalizeRegistrationChallenge(ctx, record.RegistrationScope, hash(token), record, s.cfg.ChallengeTTL)
+		if err == nil {
+			registrationReserved = false
+		}
+	} else {
+		err = s.store.CreateChallenge(ctx, hash(token), record, s.cfg.ChallengeTTL)
+	}
+	if err != nil {
+		releaseRegistrationReservation()
 		return Challenge{}, ErrUnavailable
 	}
 	return challenge, nil
@@ -470,7 +647,20 @@ func strongerAutomationCostDifficulty(base uint8) uint8 {
 }
 
 func validSignal(signal Signal) bool {
-	return (signal.Operation == OperationLogin || signal.Operation == OperationRegistration || signal.Operation == OperationPhoneChange) && len(signal.IdentifierHash) == sha256.Size*2 && signal.UserAgentHash != ""
+	valid := (signal.Operation == OperationLogin || signal.Operation == OperationRegistration || signal.Operation == OperationPhoneChange) && validDigest(signal.IdentifierHash) && validDigest(signal.UserAgentHash)
+	return valid && (signal.Operation != OperationRegistration || validDigest(signal.ClientNetworkHash))
+}
+
+func registrationScope(signal Signal, deviceHash string) string {
+	return hash(string(OperationRegistration) + "\x00" + strings.ToLower(signal.IdentifierHash) + "\x00" + deviceHash + "\x00" + strings.ToLower(signal.ClientNetworkHash))
+}
+
+func validDigest(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func validAutomationCost(token, nonce string, difficulty uint8) bool {

@@ -347,6 +347,33 @@ func TestAdminOutboxDeterministicFailureRequiresConfirmedSentPhase(t *testing.T)
 	}
 }
 
+func TestAdminOutboxPreflightAbortRequiresOwnedIndeterminateClaimAndRecordsNotSent(t *testing.T) {
+	tx := &recordingAdminTx{}
+	repo := &adminOutboxRepository{tx: tx}
+	result := adminstore.AllowlistedResult{Code: "operation.failed", Payload: map[string]string{"event_id": "evt_shanghai", "operation_request_id": "req_operation_1", "actor_id": "user_1", "response_status": "503"}}
+	if err := repo.AbortBeforeSend(context.Background(), "aop_1", 4, "claim", result, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"delivery_state='failed'", "delivery_phase='not_sent'", "delivery_phase='indeterminate'", "claim_token_hash=$3", "terminal_at=$7"} {
+		if !strings.Contains(tx.lastQuery, fragment) {
+			t.Fatalf("preflight abort missing %q: %s", fragment, tx.lastQuery)
+		}
+	}
+}
+
+func TestAdminOutboxClaimRenewalUsesDatabaseClockAndExactFence(t *testing.T) {
+	tx := &recordingAdminTx{}
+	repo := &adminOutboxRepository{tx: tx}
+	if err := repo.RenewClaim(context.Background(), "aop_1", 4, "claim", 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"clock_timestamp()", "make_interval(secs => $4)", "version=version+1", "delivery_state='claimed'", "delivery_phase='indeterminate'", "claim_token_hash=$3", "claim_lease_until>clock_timestamp()"} {
+		if !strings.Contains(tx.lastQuery, fragment) {
+			t.Fatalf("claim renewal missing %q: %s", fragment, tx.lastQuery)
+		}
+	}
+}
+
 type noWriteAdminTx struct{ recordingAdminTx }
 
 func (t *noWriteAdminTx) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
@@ -372,6 +399,25 @@ func TestPutStepUpAtomicallyReplacesAnyActivePriorSessionProofBeforeInsert(t *te
 		t.Fatal(err)
 	}
 	if len(tx.queries) != 2 || !strings.Contains(tx.queries[0], "revoked_at=$3") || !strings.Contains(tx.queries[0], "session_id=$1 AND user_id=$2") || strings.Contains(tx.queries[0], "expires_at") || !strings.Contains(tx.queries[1], "INSERT INTO admin_step_up_state") {
+		t.Fatalf("queries=%v", tx.queries)
+	}
+}
+
+func TestStandalonePutStepUpCreatesAndCommitsItsOwnSerializableTransaction(t *testing.T) {
+	tx := &recordingAdminTx{}
+	repo := &AdminStepUpRepository{beginner: recordingAdminBeginner{tx: tx}}
+	now := time.Date(2026, 9, 1, 20, 30, 0, 0, time.UTC)
+	err := repo.PutStepUp(context.Background(), adminstepup.StepUpState{
+		ID: "asu_browser_reauth", SessionID: "session_browser", UserID: "user_admin",
+		ChallengeVersion: 3, SecurityEpoch: 3, VerifiedAt: now, ExpiresAt: now.Add(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tx.commits != 1 || tx.rollbacks != 0 {
+		t.Fatalf("commits=%d rollbacks=%d", tx.commits, tx.rollbacks)
+	}
+	if len(tx.queries) != 2 || !strings.Contains(tx.queries[0], "UPDATE admin_step_up_state") || !strings.Contains(tx.queries[1], "INSERT INTO admin_step_up_state") {
 		t.Fatalf("queries=%v", tx.queries)
 	}
 }

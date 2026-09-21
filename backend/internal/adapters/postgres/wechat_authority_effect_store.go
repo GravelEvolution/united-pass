@@ -27,6 +27,10 @@ const (
 	WeChatAuthorityFlowExisting             WeChatAuthorityFlow = "existing"
 	WeChatAuthorityFlowPending              WeChatAuthorityFlow = "pending"
 	WeChatAuthorityFlowPendingPhoneVerified WeChatAuthorityFlow = "pending_phone_verified"
+	// WeChatAuthorityFlowSMSPhoneVerified reuses the existing append-only
+	// security notification outbox for an SMS-verified account phone change.
+	// Unlike the WeChat flows it has no provider tenant or subject material.
+	WeChatAuthorityFlowSMSPhoneVerified WeChatAuthorityFlow = "sms_phone_verified"
 )
 
 // WeChatAuthorityEffectKind is a fixed, non-PII description of the authority
@@ -39,6 +43,7 @@ const (
 	WeChatAuthorityEffectExistingLinkPhone    WeChatAuthorityEffectKind = "wechat.existing_linked_phone_verified"
 	WeChatAuthorityEffectPendingReserved      WeChatAuthorityEffectKind = "wechat.pending_reserved"
 	WeChatAuthorityEffectPendingPhoneVerified WeChatAuthorityEffectKind = "wechat.pending_phone_verified"
+	WeChatAuthorityEffectSMSPhoneVerified     WeChatAuthorityEffectKind = "account.phone_verified"
 )
 
 const (
@@ -86,16 +91,30 @@ type WeChatAuthorityReplayMaterial struct {
 // email, password, provider session and native session material are
 // deliberately absent from the input contract.
 func DeriveWeChatAuthorityReplayDigest(material WeChatAuthorityReplayMaterial) (WeChatAuthorityReplayDigest, error) {
-	if !validWeChatAuthorityFlow(material.Flow) || material.TenantID == "" || material.Subject == "" || material.TargetUserID == "" || material.AuthorityVersion < 0 || material.SecurityEpoch < 0 {
+	if !validWeChatAuthorityFlow(material.Flow) || material.TargetUserID == "" || material.AuthorityVersion < 0 || material.SecurityEpoch < 0 {
 		return WeChatAuthorityReplayDigest{}, ErrWeChatAuthorityEffectInvalid
 	}
 	switch material.Flow {
+	case WeChatAuthorityFlowSMSPhoneVerified:
+		if material.TenantID != "" || material.Subject != "" || material.AuthorityVersion == 0 || material.SecurityEpoch == 0 {
+			return WeChatAuthorityReplayDigest{}, ErrWeChatAuthorityEffectInvalid
+		}
 	case WeChatAuthorityFlowPending:
+		if material.TenantID == "" || material.Subject == "" {
+			return WeChatAuthorityReplayDigest{}, ErrWeChatAuthorityEffectInvalid
+		}
 		if material.AuthorityVersion != 0 || material.SecurityEpoch != 0 {
 			return WeChatAuthorityReplayDigest{}, ErrWeChatAuthorityEffectInvalid
 		}
 	case WeChatAuthorityFlowPendingPhoneVerified:
+		if material.TenantID == "" || material.Subject == "" {
+			return WeChatAuthorityReplayDigest{}, ErrWeChatAuthorityEffectInvalid
+		}
 		if material.AuthorityVersion == 0 || material.SecurityEpoch == 0 {
+			return WeChatAuthorityReplayDigest{}, ErrWeChatAuthorityEffectInvalid
+		}
+	default:
+		if material.TenantID == "" || material.Subject == "" {
 			return WeChatAuthorityReplayDigest{}, ErrWeChatAuthorityEffectInvalid
 		}
 	}
@@ -198,7 +217,7 @@ func (s *WeChatAuthorityEffectStore) RecordTx(ctx context.Context, tx weChatAuth
 }
 
 func validWeChatAuthorityFlow(flow WeChatAuthorityFlow) bool {
-	return flow == WeChatAuthorityFlowExisting || flow == WeChatAuthorityFlowPending || flow == WeChatAuthorityFlowPendingPhoneVerified
+	return flow == WeChatAuthorityFlowExisting || flow == WeChatAuthorityFlowPending || flow == WeChatAuthorityFlowPendingPhoneVerified || flow == WeChatAuthorityFlowSMSPhoneVerified
 }
 
 func validWeChatAuthorityEffect(effect WeChatAuthorityEffect) bool {
@@ -215,6 +234,8 @@ func validWeChatAuthorityEffect(effect WeChatAuthorityEffect) bool {
 		return effect.ReplayDigest.flow == WeChatAuthorityFlowPending
 	case WeChatAuthorityEffectPendingPhoneVerified:
 		return effect.ReplayDigest.flow == WeChatAuthorityFlowPendingPhoneVerified
+	case WeChatAuthorityEffectSMSPhoneVerified:
+		return effect.ReplayDigest.flow == WeChatAuthorityFlowSMSPhoneVerified
 	default:
 		return false
 	}

@@ -80,7 +80,7 @@ export function UserDetail({ detail, canManage = false }: UserDetailProps) {
       </div>
 
       <div className={styles.tabContent}>
-        <Tabs type="line" activeKey={activeTab} onChange={handleTabChange}>
+        <Tabs type="line" collapsible="auto" activeKey={activeTab} onChange={handleTabChange}>
           <Tabs.TabPane tab="账户资料" itemKey="profile">
             <ProfileTab detail={detail} />
           </Tabs.TabPane>

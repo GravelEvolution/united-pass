@@ -8,10 +8,12 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
+	"github.com/GravelEvolution/united-pass/backend/internal/wechat"
 	"github.com/GravelEvolution/united-pass/backend/internal/wechatonboarding"
 )
 
 var _ wechatonboarding.AccountRepository = (*WeChatOnboardingAccountRepository)(nil)
+var _ wechat.PhoneWriter = (*WeChatOnboardingAccountRepository)(nil)
 
 func TestEvaluateWeChatOnboardingLinksFailsClosedOnEveryCompetingBinding(t *testing.T) {
 	tests := []struct {

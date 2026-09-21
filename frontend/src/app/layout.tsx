@@ -8,6 +8,7 @@
 
 import type { Metadata } from "next";
 import type { PropsWithChildren } from "react";
+import { headers } from "next/headers";
 import Script from "next/script";
 import "@douyinfe/semi-ui/lib/es/_base/base.css";
 import { SemiDesignProvider } from "@/components/providers/semi-design-provider";
@@ -24,7 +25,11 @@ export const metadata: Metadata = {
   description: `${SYSTEM_NAME}提供统一、安全、清晰的身份与访问管理能力。`,
 };
 
-export default function RootLayout({ children }: PropsWithChildren) {
+export default async function RootLayout({ children }: PropsWithChildren) {
+  // Reading the per-request nonce intentionally makes the application dynamic.
+  // Strict nonce CSP is incompatible with a statically cached document shell.
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
+
   return (
     <html lang="zh-CN" data-theme="light" suppressHydrationWarning>
       <body theme-mode="light" suppressHydrationWarning>
@@ -32,7 +37,7 @@ export default function RootLayout({ children }: PropsWithChildren) {
           <RiskStepUpProvider>{children}</RiskStepUpProvider>
         </SemiDesignProvider>
         {/* Static script: no user-controlled interpolation. Runs before hydration to prevent a theme flash. */}
-        <Script id="united-pass-theme" strategy="beforeInteractive">
+        <Script id="united-pass-theme" strategy="beforeInteractive" nonce={nonce}>
           {THEME_INITIALIZATION_SCRIPT}
         </Script>
       </body>

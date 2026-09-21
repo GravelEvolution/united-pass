@@ -76,21 +76,13 @@ export type AdminReauthenticationAction =
   | "policy.publish"
   | "audit.export";
 
-export type ApplicationReauthenticationAction =
-  | "application.delete"
-  | "client.delete"
-  | "client.secret.rotate";
-
 export type ReauthenticationAction =
   | AccountReauthenticationAction
-  | AdminReauthenticationAction
-  | ApplicationReauthenticationAction;
+  | AdminReauthenticationAction;
 
 export type ReauthenticationInput = {
   action: ReauthenticationAction;
   target: string;
-  applicationId?: string;
-  clientId?: string;
   password: string;
 };
 
@@ -173,7 +165,6 @@ export type AuthorizedApplication = {
   applicationId: string;
   applicationName: string;
   applicationOwner: string;
-  logoUrl: string | null;
   clientType: "public" | "confidential";
   grantedAt: string;
   lastUsedAt: string | null;

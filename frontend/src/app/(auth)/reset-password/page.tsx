@@ -17,20 +17,20 @@ export const dynamic = "force-dynamic";
 export default async function ResetPasswordPage({
   searchParams,
 }: {
-  searchParams: Promise<{ userId?: string; code?: string }>;
+  searchParams: Promise<{ token?: string }>;
 }) {
-  const { userId, code } = await searchParams;
+  const { token } = await searchParams;
 
-  if (!userId || !code || userId.trim().length === 0 || code.trim().length === 0) {
+  if (!token || token.trim().length === 0) {
     return (
       <InvalidLinkNotice
         title="链接无效"
-        description="密码重置链接缺少必要的参数。请确认你打开的是邮件中完整的重置链接。"
+        description="密码重置链接缺少必要的令牌参数。请确认你打开的是邮件中完整的重置链接。"
         actionHref="/forgot-password"
         actionLabel="重新申请重置密码"
       />
     );
   }
 
-  return <ResetPasswordPanel userId={userId} code={code} />;
+  return <ResetPasswordPanel token={token} />;
 }

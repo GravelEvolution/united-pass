@@ -32,10 +32,19 @@ A second challenge is surfaced as an error and never starts another loop.
 `RiskStepUpProvider` supplies one application-level, keyboard-operable Semi
 Design modal. Interactive CAPTCHA SDKs register through
 `registerInteractiveCaptchaAdapter`; only the adapter's opaque proof is sent to
-the backend. When `providerReady` is false or no client adapter is installed,
-the modal says verification is unavailable and fails closed. It never creates
-a fake success. Existing login MFA and authenticated reauthentication retain
-their account-aware contracts and UI.
+the backend. The built-in dispatcher accepts only the server-selected
+`cloudflare_turnstile` and `google_recaptcha` contracts. It loads Turnstile
+from the fixed `challenges.cloudflare.com` explicit-render URL and reCAPTCHA
+from the fixed `recaptcha.net` v3 URL. Payload-supplied script URLs, extra
+fields, invalid actions, and unknown providers fail closed.
+
+Turnstile receives the server-issued action and cdata; reCAPTCHA receives the
+unique server-issued action. Site keys are public challenge data. Provider
+secrets and verification remain exclusively in the API. When `providerReady`
+is false or no matching client adapter is installed, the modal says
+verification is unavailable and fails closed. It never creates a fake success.
+Existing login MFA and authenticated reauthentication retain their
+account-aware contracts and UI.
 
 ## Alternatives Considered
 
@@ -66,12 +75,16 @@ their account-aware contracts and UI.
 - Worker host: `src/lib/security/automation-cost.ts`; standalone worker asset:
   `public/up-automation-cost-worker.js`
 - Provider seam: `src/lib/security/interactive-captcha-adapter.ts`
+- Provider contract/router: `src/lib/security/interactive-captcha-contract.ts`,
+  `src/lib/security/official-interactive-captcha-adapter.ts`
 - Modal bridge: `src/features/auth/components/risk-step-up-provider.tsx`
 - Root registration: `src/app/layout.tsx`
 
 ## Follow-up
 
-- Register the reviewed Alibaba Cloud CAPTCHA 2.0 browser adapter only after
-  its backend verifier and public configuration are available.
-- Re-run keyboard, dark-mode, and provider-specific acceptance tests when that
-  adapter is introduced.
+- Alibaba Cloud CAPTCHA 2.0 remains intentionally unsupported until its
+  backend ACS3 verifier, scene/CertifyID contract, and V3 browser adapter are
+  reviewed together. The Google `recaptcha.net` fallback is not a mainland
+  availability guarantee.
+- Re-run keyboard, dark-mode, CSP allowlist, and provider-specific acceptance
+  tests when production provider credentials are introduced.

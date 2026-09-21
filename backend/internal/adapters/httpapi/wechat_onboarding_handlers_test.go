@@ -15,6 +15,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
+	"github.com/GravelEvolution/united-pass/backend/internal/wechat"
 	"github.com/GravelEvolution/united-pass/backend/internal/wechatonboarding"
 )
 
@@ -131,6 +132,56 @@ func TestWeChatOnboardingBeginReturnsOpaqueChallenge(t *testing.T) {
 	}
 }
 
+func TestWeChatOnboardingLinkedAccountSessionCarriesPhoneAssurance(t *testing.T) {
+	service := &onboardingServiceStub{beginResult: wechatonboarding.BeginResult{
+		Status: wechatonboarding.StatusAuthenticated, UserID: "user_existing",
+	}}
+	sessions := &fakeWeChatSessions{}
+	router := onboardingRouter(service, sessions, &fakeWeChatRateChecker{allow: true})
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, onboardingRequest(http.MethodPost, "/auth/wechat/onboarding", `{"loginCode":"login-code","phoneCode":"phone-code"}`))
+	if rr.Code != http.StatusOK || sessions.input.Provider != wechat.ProviderName || !hasAuthenticationMethod(sessions.input.AuthenticationMethods, auth.MethodFederated) || !hasAuthenticationMethod(sessions.input.AuthenticationMethods, auth.MethodWeChatPhoneVerified) {
+		t.Fatalf("status=%d session=%+v body=%s", rr.Code, sessions.input, rr.Body.String())
+	}
+}
+
+func TestWeChatOnboardingBeginRequiresPhoneCodeBeforeService(t *testing.T) {
+	service := &onboardingServiceStub{}
+	router := onboardingRouter(service, &fakeWeChatSessions{}, &fakeWeChatRateChecker{allow: true})
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, onboardingRequest(http.MethodPost, "/auth/wechat/onboarding", `{"loginCode":"login-code"}`))
+	if rr.Code != http.StatusUnprocessableEntity || service.beginInput.LoginCode != "" {
+		t.Fatalf("status=%d input=%#v body=%s", rr.Code, service.beginInput, rr.Body.String())
+	}
+	var response ErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil || response.Error.Code != codeWeChatPhoneRequired {
+		t.Fatalf("error=%#v decode=%v", response.Error, err)
+	}
+}
+
+func TestWeChatOnboardingPhoneProofFailureAndConflictHaveStableErrors(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		service  *onboardingServiceStub
+		wantHTTP int
+		wantCode string
+	}{
+		{name: "provider proof missing", service: &onboardingServiceStub{beginErr: wechatonboarding.ErrPhoneRequired}, wantHTTP: http.StatusUnprocessableEntity, wantCode: codeWeChatPhoneRequired},
+		{name: "provider infrastructure unavailable", service: &onboardingServiceStub{beginErr: wechatonboarding.ErrUnavailable}, wantHTTP: http.StatusBadGateway, wantCode: CodeProviderUnavailable},
+		{name: "authority conflict", service: &onboardingServiceStub{beginErr: wechatonboarding.ErrPhoneConflict}, wantHTTP: http.StatusConflict, wantCode: codeWeChatPhoneConflict},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			router := onboardingRouter(test.service, &fakeWeChatSessions{}, &fakeWeChatRateChecker{allow: true})
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, onboardingRequest(http.MethodPost, "/auth/wechat/onboarding", `{"loginCode":"login-code","phoneCode":"phone-code"}`))
+			var response ErrorResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil || rr.Code != test.wantHTTP || response.Error.Code != test.wantCode {
+				t.Fatalf("status=%d error=%#v decode=%v body=%s", rr.Code, response.Error, err, rr.Body.String())
+			}
+		})
+	}
+}
+
 func TestWeChatOnboardingCompletePasswordMismatchUsesStableRequestedCode(t *testing.T) {
 	service := &onboardingServiceStub{completeErr: wechatonboarding.ErrPasswordMismatch}
 	router := onboardingRouter(service, &fakeWeChatSessions{}, &fakeWeChatRateChecker{allow: true})
@@ -171,7 +222,7 @@ func TestWeChatOnboardingAuthenticatedCreatesNativeSessionWithBothMethods(t *tes
 	if sessions.input.UserID != userID || sessions.input.ClientKind != session.ClientKindMiniProgram || sessions.input.ProviderSessionReference != "provider-session" || sessions.input.ProviderSessionToken.Token() != "provider-secret" {
 		t.Fatalf("session input=%+v", sessions.input)
 	}
-	if !hasAuthenticationMethod(sessions.input.AuthenticationMethods, auth.MethodPassword) || !hasAuthenticationMethod(sessions.input.AuthenticationMethods, auth.MethodFederated) {
+	if !hasAuthenticationMethod(sessions.input.AuthenticationMethods, auth.MethodPassword) || !hasAuthenticationMethod(sessions.input.AuthenticationMethods, auth.MethodFederated) || !hasAuthenticationMethod(sessions.input.AuthenticationMethods, auth.MethodWeChatPhoneVerified) {
 		t.Fatalf("methods=%#v", sessions.input.AuthenticationMethods)
 	}
 	if len(rr.Result().Cookies()) != 0 {
@@ -306,7 +357,7 @@ func TestWeChatOnboardingBeginRateFailureStopsProviderFlow(t *testing.T) {
 	service := &onboardingServiceStub{}
 	router := onboardingRouter(service, &fakeWeChatSessions{}, failingWeChatRateChecker{})
 	rr := httptest.NewRecorder()
-	router.ServeHTTP(rr, onboardingRequest(http.MethodPost, "/auth/wechat/onboarding", `{"loginCode":"login-code"}`))
+	router.ServeHTTP(rr, onboardingRequest(http.MethodPost, "/auth/wechat/onboarding", `{"loginCode":"login-code","phoneCode":"phone-code"}`))
 	if rr.Code != http.StatusTooManyRequests || service.beginInput.LoginCode != "" {
 		t.Fatalf("status=%d input=%#v", rr.Code, service.beginInput)
 	}

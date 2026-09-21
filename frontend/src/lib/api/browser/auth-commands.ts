@@ -15,8 +15,8 @@ import { parseMfaRequiredResponse } from "@/lib/api/response-validators";
 /**
  * Login seam (P3.9 prerequisite, frontend-freeze-v1.md §5, ADR-0004).
  *
- * `/login` always submits credentials to the P1 Session API; the product-data
- * fixture switch never fabricates an authenticated browser session:
+ * Real-mode `/login` submits credentials to the P1 Session API instead of
+ * `authenticateMockAccount()`:
  *
  *   POST /api/v1/auth/sessions
  *     204 → session cookies set, login complete
@@ -35,18 +35,11 @@ export type LoginInput = {
   password: string;
   remember: boolean;
   resumeRequestId?: string;
-  captchaVerifyParam?: string;
 };
 
 export type LoginOutcome =
   | { status: "authenticated" }
-  | {
-      status: "mfa_required";
-      mfaToken: string;
-      availableMethods: MfaMethod[];
-      passkeyRequestOptions?: unknown;
-      expiresAt: string;
-    };
+  | { status: "mfa_required"; mfaToken: string; availableMethods: MfaMethod[] };
 
 /**
  * Submits the password login. Resolves `{ status: "authenticated" }` on 204
@@ -62,7 +55,6 @@ export async function submitLogin(input: LoginInput): Promise<LoginOutcome> {
       remember: input.remember,
       resumeRequestId: input.resumeRequestId ?? "",
     },
-    captchaVerifyParam: input.captchaVerifyParam,
   });
 
   // 204 carries no body: the transport layer resolves undefined, which is

@@ -8,9 +8,9 @@ export type InteractiveCaptchaInput = {
 };
 
 export type InteractiveCaptchaAdapter = {
-  /** Stable provider identifier, for example `aliyun-captcha-v2`. */
+  /** Stable local adapter identifier; provider choice remains server-owned. */
   id: string;
-  /** Resolves only with the provider's opaque server-verifiable proof. */
+  /** Resolves only with the provider's server-verifiable proof. */
   execute(input: InteractiveCaptchaInput): Promise<string>;
 };
 
@@ -18,7 +18,7 @@ let activeAdapter: InteractiveCaptchaAdapter | undefined;
 
 /**
  * Provider SDK integration lives behind this seam. Registering an adapter is
- * not itself proof; only its opaque result is sent to the backend verifier.
+ * not itself proof; only its result is sent to the backend verifier.
  */
 export function registerInteractiveCaptchaAdapter(
   adapter: InteractiveCaptchaAdapter,
@@ -28,6 +28,7 @@ export function registerInteractiveCaptchaAdapter(
     if (activeAdapter === adapter) activeAdapter = undefined;
   };
 }
+
 export function getInteractiveCaptchaAdapter(): InteractiveCaptchaAdapter | undefined {
   return activeAdapter;
 }

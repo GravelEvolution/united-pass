@@ -16,10 +16,12 @@ import (
 	"strings"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
+	"github.com/GravelEvolution/united-pass/backend/internal/auth"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/platform/observability"
 	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
+	"github.com/GravelEvolution/united-pass/backend/internal/wechat"
 )
 
 // UserStatusChecker checks whether a user is still permitted to hold an active
@@ -195,8 +197,32 @@ func RequireSession(svc *session.Service, checker UserStatusChecker, gate Securi
 				WriteUnauthorized(w, r)
 				return
 			}
+			// QR browser sessions created before the mandatory-phone cutover may
+			// have been approved by an identity-only WeChat bearer. Version the
+			// provider stamp instead of scanning Redis: old records are terminal,
+			// deleted on first use and their browser cookies are cleared.
+			if record.Provider == legacyQRAuthSessionProvider {
+				_ = svc.DeleteSession(r.Context(), token)
+				if !nativeBearer {
+					clearAuthCookies(w, attrs)
+				}
+				WriteUnauthorized(w, r)
+				return
+			}
 			if nativeBearer {
 				if record.ClientKind != session.ClientKindMiniProgram {
+					WriteUnauthorized(w, r)
+					return
+				}
+				// Cut over existing WeChat native sessions without scanning Redis.
+				// Identity-only sessions used provider=wechat, while the historical
+				// existing-account password/MFA branch retained provider=zitadel and
+				// appended MethodFederated. Neither could stamp this server-only phone
+				// assurance. Delete and reject both shapes; pure password Mini Program
+				// sessions remain governed by their own authentication contract.
+				isWeChatFlow := record.Provider == wechat.ProviderName || sessionHasAuthenticationMethod(record.AuthenticationMethods, auth.MethodFederated)
+				if isWeChatFlow && !sessionHasAuthenticationMethod(record.AuthenticationMethods, auth.MethodWeChatPhoneVerified) {
+					_ = svc.DeleteSession(r.Context(), token)
 					WriteUnauthorized(w, r)
 					return
 				}
@@ -214,6 +240,15 @@ func RequireSession(svc *session.Service, checker UserStatusChecker, gate Securi
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+func sessionHasAuthenticationMethod(methods []auth.AuthenticationMethod, target auth.AuthenticationMethod) bool {
+	for _, method := range methods {
+		if method == target {
+			return true
+		}
+	}
+	return false
 }
 
 type nativeMiniProgramBearerRoute struct {
@@ -242,15 +277,13 @@ var nativeMiniProgramBearerRoutes = []nativeMiniProgramBearerRoute{
 	{http.MethodGet, "/api/v1/admin/dreamup/eligibility"},
 	{http.MethodGet, "/api/v1/admin/dreamup/events"},
 	{http.MethodGet, "/api/v1/admin/dreamup/session"},
-	// Retained for one compatibility window so the already-published Mini
-	// Program does not break before the no-question client reaches users. The
-	// new client never calls these routes; browser administrator behavior is
-	// unchanged. Remove these three native entries after adoption is confirmed.
-	{http.MethodGet, "/api/v1/admin/dreamup/step-up/challenge"},
-	{http.MethodPost, "/api/v1/admin/dreamup/step-up/enroll"},
-	{http.MethodPost, "/api/v1/admin/dreamup/step-up/verify"},
+	{http.MethodPost, "/api/v1/admin/dreamup/reauthentication"},
 	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/applications"},
 	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/content"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/splash-ad"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/splash-poster-image-upload-intents"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/announcement-background-image-upload-intents"},
+	{http.MethodPut, "/api/v1/admin/dreamup/events/{eventId}/splash-ad"},
 	{http.MethodPut, "/api/v1/admin/dreamup/events/{eventId}/content/intro"},
 	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/announcements"},
 	{http.MethodPatch, "/api/v1/admin/dreamup/events/{eventId}/announcements/{contentId}"},
@@ -260,11 +293,43 @@ var nativeMiniProgramBearerRoutes = []nativeMiniProgramBearerRoute{
 	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/checkins/scan"},
 	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/contact-submissions/{submissionId}/resolution"},
 	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/review-identity"},
 	{http.MethodPut, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/reviews/me"},
 	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus"},
 	{http.MethodPut, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus/approval"},
 	{http.MethodDelete, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/admission-consensus/approval"},
 	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/applications/{applicationId}/decision"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/inspection-point-image-upload-intents"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/inspection-points"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/inspection-points"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/inspection-points/{pointId}"},
+	{http.MethodPatch, "/api/v1/admin/dreamup/events/{eventId}/inspection-points/{pointId}"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/inspection-points/{pointId}/code-rotations"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/inspection-points/{pointId}/inspections"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/inspections"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/inspections/{inspectionId}"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/inspection-photo-uploads/{uploadId}/finalize"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/asset-image-upload-intents"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/assets"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/assets"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/assets/{assetId}"},
+	{http.MethodPatch, "/api/v1/admin/dreamup/events/{eventId}/assets/{assetId}"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/code-rotations"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/inventory-adjustments"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/asset-reservations"},
+	{http.MethodPatch, "/api/v1/admin/dreamup/events/{eventId}/asset-reservations/{reservationId}"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/checkout"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/checkin"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/asset-units/{unitId}/transfers"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/personal-asset-image-upload-intents"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/personal-asset-assignments"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/personal-asset-assignments"},
+	{http.MethodPatch, "/api/v1/admin/dreamup/events/{eventId}/personal-asset-assignments/{assignmentId}"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/personal-asset-assignments/{assignmentId}/code-rotations"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/entity-codes/{codeId}/print-jobs"},
+	{http.MethodPost, "/api/v1/admin/dreamup/events/{eventId}/qr-print-jobs/bulk"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/qr-print-jobs/{printJobId}"},
+	{http.MethodGet, "/api/v1/admin/dreamup/events/{eventId}/qr-print-jobs/{printJobId}/bulk"},
 }
 
 func nativeMiniProgramBearerRouteAllowed(r *http.Request) bool {
@@ -324,6 +389,15 @@ func OptionalSession(svc *session.Service, checker UserStatusChecker, gate Secur
 				return
 			}
 			if outcome != promoted {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if record.Provider == legacyQRAuthSessionProvider {
+				_ = svc.DeleteSession(r.Context(), token)
+				clearAuthCookies(w, attrs)
+				// Optional authentication degrades the terminal legacy record to
+				// anonymous after cleanup; it must never expose a half-logged-in
+				// principal on authorization/login interaction pages.
 				next.ServeHTTP(w, r)
 				return
 			}

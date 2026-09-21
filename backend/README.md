@@ -77,10 +77,12 @@ Operational endpoints:
 
 ## Database Migrations
 
-Migrations are NOT executed automatically at API server startup. Use the explicit migration command:
+Migrations are NOT executed automatically at API server startup. The production
+authority database is intentionally capped at migration version 13; the ordinary
+authority command cannot apply later files:
 
 ```bash
-# Apply all pending migrations
+# Apply pending authority migrations, stopping at version 13
 go run ./cmd/migrate up
 
 # Show migration status
@@ -89,24 +91,19 @@ go run ./cmd/migrate status
 # Show current migration version
 go run ./cmd/migrate version
 
-# Attempt destructive rollback; forward-only migrations (currently v16) refuse
+# Attempt destructive rollback (requires explicit confirmation)
 go run ./cmd/migrate reset --confirm
 ```
 
-Migrations live in `migrations/` and are managed by [goose](https://github.com/pressly/goose).
-The published repository and the original production rollout assigned different
-schemas to versions 12 and 13. Migration 00013 is the public/fresh lineage
-bridge; production databases that already record v13 skip it because they
-already contain the DreamUP and identity-access objects. Migration 00016 then
-creates the missing account self-service tables on that production lineage and
-validates the already-present public lineage without rewriting its data.
-
-Migrations 00013, 00015, and 00016 are intentionally forward-only. Their Down
-sections abort, so `reset` exits before Goose can record a lower version while
-leaving the irreversible schema in place. Rollback across any barrier requires
-a separately reviewed forward migration. Because Goose records version numbers
-rather than migration-file checksums, do not use the displayed v12/v13 filename
-alone as lineage evidence; version 16 is the converged schema boundary.
+Authority migrations 00001–00013 live in `migrations/` and are managed by
+[goose](https://github.com/pressly/goose). Files 00014 and 00015 are retained as
+historical compatibility material for retired deployments that once kept Mini
+Program retry verifiers and DreamUP cross-system receipts in the shared authority
+schema. They are not part of the current production authority topology and must
+not be applied there. `cmd/migrate up` uses a bounded `UpTo` and fails closed if
+the selected authority schema is already above v13; it never downgrades such a
+schema. Migration 00015 remains forward-only for a separately reviewed legacy
+repair.
 
 WeChat Mini Program retry verifiers and DreamUP cross-system mutation receipts
 use a separate operational store. Its command reads only
@@ -126,7 +123,8 @@ contains exactly `goose_db_version`, `wechat_registration_provider_intents`
 and `admin_operation_outbox`. Authority, role and permission tables are
 rejected from the isolated schema. The isolated migration has no rollback
 command; recovery requires a separately reviewed backup restore or forward
-migration.
+migration. DreamUP administration therefore requires authority v13 plus this
+physically distinct isolated v1 store; it does not require authority v14 or v15.
 
 ## Environment Variables
 
@@ -173,7 +171,7 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_LOGIN_RATE_WINDOW` | `15m` | Login rate limit window. |
 | `UP_MFA_RATE_LIMIT` | `10` | Maximum MFA attempts per window. |
 | `UP_MFA_RATE_WINDOW` | `15m` | MFA rate limit window. |
-| `UP_RISK_DEFENSE_ENABLED` | `false` | Enables the objective login/registration risk gate and its configured interactive-provider pool. |
+| `UP_RISK_DEFENSE_ENABLED` | `false` | Enables the objective login/registration risk gate. Public browser registration requires it and fails closed when it is disabled. |
 | `UP_RISK_CAPTCHA_REGION` | `mainland_china` | Server-owned provider pool region: `mainland_china` or `global`. Turnstile is excluded from the mainland pool. |
 | `UP_RISK_TURNSTILE_SITE_KEY` | | Public Turnstile site key. Must be configured atomically with its secret and hostname. |
 | `UP_RISK_TURNSTILE_SECRET_KEY` | | Server-only Turnstile secret. Never expose it to the browser or logs. |
@@ -202,6 +200,29 @@ All configuration is loaded once at startup through `internal/config`. Variables
 | `UP_AUTH_PROVIDER_DOMAIN` | | WebAuthn relying-party domain for passkey challenges. Empty disables passkey challenges. |
 | `UP_OAUTH_PUBLIC_ORIGIN` | | Public OAuth origin the reverse proxy serves the protocol endpoints on (browser-visible issuer origin), e.g. `https://id.example.com`. Strict origin syntax: scheme + host (+ port) only — no path, userinfo, query or fragment. HTTPS required in production, where the variable is mandatory. The ZITADEL LoginV2 Interaction Base URI is derived as `<origin>/_interaction`. Do not reuse `UP_AUTH_PROVIDER_BASE_URL` for this value. |
 | `UP_PUBLIC_REGISTRATION_ENABLED` | `false` | Master gate for public registration and email verification. Enabling requires PostgreSQL, Redis, complete ZITADEL configuration, both project and organization IDs, and the public OAuth origin. |
+| `UP_REGISTRATION_FORM_INTENT_DEVICE_LIMIT` / `..._WINDOW` | `6` / `5m` | Per-device budget for issuing server-bound registration form intents. |
+| `UP_REGISTRATION_FORM_INTENT_NET_LIMIT` / `..._WINDOW` | `20` / `5m` | Network budget for form intents, evaluated before a new device record can be allocated. |
+| `UP_REGISTRATION_FORM_INTENT_GLOBAL_BURST_LIMIT` / `..._WINDOW` | `30` / `10s` | Distributed burst ceiling for form-intent issuance; rotating device, network and email does not reset it. |
+| `UP_REGISTRATION_FORM_INTENT_GLOBAL_LIMIT` / `..._WINDOW` | `300` / `5m` | Distributed sustained form-intent ceiling. |
+| `UP_RISK_REGISTRATION_ISSUE_GLOBAL_BURST_LIMIT` / `..._WINDOW` | `20` / `10s` | Distributed global burst ceiling for registration CAPTCHA allocation. |
+| `UP_RISK_REGISTRATION_ISSUE_GLOBAL_LIMIT` / `..._WINDOW` | `100` / `5m` | Distributed sustained CAPTCHA-allocation ceiling. |
+| `UP_RISK_REGISTRATION_ISSUE_MAX_IN_FLIGHT` / `..._MAX_QUEUED` / `..._WAIT_TIMEOUT` | `4` / `32` / `500ms` | Bounded process-local CAPTCHA provider admission. An explicit zero queue is honored. |
+| `UP_REGISTRATION_GLOBAL_BURST_LIMIT` / `UP_REGISTRATION_GLOBAL_BURST_WINDOW` | `20` / `10s` | Distributed global post-CAPTCHA creation burst ceiling; cannot be reset by changing IP, device or email. |
+| `UP_REGISTRATION_GLOBAL_LIMIT` / `UP_REGISTRATION_GLOBAL_WINDOW` | `200` / `1h` | Distributed global sustained creation ceiling. |
+| `UP_REGISTRATION_CREATE_MAILBOX_FAMILY_LIMIT` / `..._WINDOW` | `3` / `24h` | Provider-reviewed same-inbox budget. Gmail/Googlemail dots and plus aliases are unified; Outlook-family plus aliases are unified without generic provider assumptions. |
+| `UP_REGISTRATION_UNFAMILIAR_DOMAIN_BURST_LIMIT` / `..._WINDOW` | `3` / `10m` | Short-window registrable-domain budget for mailbox domains outside the reviewed established set. |
+| `UP_REGISTRATION_UNFAMILIAR_DOMAIN_LIMIT` / `..._WINDOW` | `10` / `24h` | Sustained registrable-domain budget for unfamiliar mailbox domains. |
+| `UP_REGISTRATION_UNFAMILIAR_MX_BURST_LIMIT` / `..._WINDOW` | `20` / `10m` | Short-window budget independently charged for every unfamiliar registrable MX operator (maximum 16 per domain). |
+| `UP_REGISTRATION_UNFAMILIAR_MX_LIMIT` / `..._WINDOW` | `100` / `24h` | Sustained per-operator unfamiliar-MX budget. A/AAAA fallback groups by registrable recipient domain. |
+| `UP_REGISTRATION_ADMISSION_MAX_IN_FLIGHT` / `..._MAX_QUEUED` / `..._WAIT_TIMEOUT` | `8` / `32` / `3s` | Bounded local queue around CAPTCHA, DNS, repository and identity-provider registration work. Startup rejects more than 4,096 active or 65,536 total slots. |
+| `UP_REGISTRATION_UNFAMILIAR_MAX_IN_FLIGHT` / `..._MAX_QUEUED` / `..._PER_DOMAIN` | `2` / `8` / `2` | Capacity reserved against unfamiliar-domain floods; one exact unfamiliar domain is limited to two concurrent requests by default. |
+| `UP_REGISTRATION_BLOCKED_EMAIL_DOMAINS_EXTRA` | | Additional evidence-backed exact/parent recipient domains. Built-in blocks remain active; ICANN and private public suffixes are rejected. |
+| `UP_REGISTRATION_BLOCKED_MX_DOMAINS_EXTRA` | | Additional evidence-backed MX host/operator suffixes. |
+| `UP_REGISTRATION_ESTABLISHED_EMAIL_DOMAINS_EXTRA` | | Reviewed high-volume domains exempt only from unfamiliar-domain buckets. |
+| `UP_REGISTRATION_ESTABLISHED_MX_DOMAINS_EXTRA` | | Reviewed high-volume MX operators exempt only from unfamiliar-MX buckets. |
+| `UP_REGISTRATION_VERIFY_GLOBAL_BURST_LIMIT` / `..._WINDOW` | `20` / `10s` | Distributed global burst ceiling for verification attempts with fully rotated user IDs and networks. |
+| `UP_REGISTRATION_VERIFY_GLOBAL_LIMIT` / `..._WINDOW` | `100` / `5m` | Distributed sustained verification ceiling. Unknown or already-active IDs are rejected from the local pending-registration store before a provider RPC. |
+| `UP_REGISTRATION_HONEYPOT_IP_BLOCKS_ENABLED` | `false` | Enables honeypot IP strikes only after the authenticated CDN-to-origin client-IP boundary is verified. Device blocking and audit remain active when false. |
 | `UP_FEISHU_BASE_URL` | `https://open.feishu.cn` | Feishu OpenAPI origin. HTTPS is required in production. |
 | `UP_FEISHU_AUTHORIZE_URL` | `https://accounts.feishu.cn/open-apis/authen/v1/authorize` | Feishu browser authorization endpoint. |
 | `UP_FEISHU_APP_ID` | | Feishu application ID. Must be configured atomically with App Secret, tenant ID and redirect URL. |
@@ -251,13 +272,24 @@ They never fall back to development, shared, tunneled or production services.
 - Redis data loss only invalidates sessions — it does not delete users.
 - Never connect to public network services with plaintext. Development uses the SSH tunnel; production requires TLS.
 - CI does not connect to remote shared databases.
-- Interactive CAPTCHA providers are disabled unless their complete site-key,
-  server secret, and exact-hostname tuple is present. The server chooses the
-  provider; the browser cannot select one or supply a verification URL.
+- Risk defense always supplies the built-in `moonstone_image_digits` provider
+  when Redis is available. Its answer stays in short-lived server-side Redis;
+  the browser receives only a freshly randomized raster PNG and digit count. A
+  correct proof is consumed atomically and cannot be replayed.
+- Registration challenge allocation is single-active per exact intent/device/
+  trusted-network tuple. Device/network issuance and aggregate completion
+  budgets prevent concurrent requests or challenge rotation from resetting the
+  CAPTCHA attempt budget. Duplicate active requests receive HTTP 429.
+- External interactive CAPTCHA providers remain disabled unless their complete
+  site-key, server secret, and exact-hostname tuple is present. The server
+  chooses the provider; the browser cannot select one or supply a verification
+  URL. Public browser registration is pinned to the built-in image provider;
+  external providers remain available to the login risk pool.
 - `recaptcha.net` is only a fixed-host fallback for the mainland pool and has
-  no mainland availability SLA. Alibaba Cloud CAPTCHA 2.0 is not implemented
-  in this revision, so operators must not treat this pool as a reliable
-  mainland CAPTCHA service.
+  no mainland availability SLA. The built-in digit image removes external-key
+  availability as a registration dependency, but it remains one layer in the
+  device, intent, origin and rate-limit controls rather than a guarantee that
+  all automation is impossible.
 
 ## Test Commands
 

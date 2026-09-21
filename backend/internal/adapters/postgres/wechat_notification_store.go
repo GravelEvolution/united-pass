@@ -263,7 +263,7 @@ func validWeChatNotificationIntent(intent WeChatNotificationIntent) bool {
 		return false
 	}
 	switch intent.EffectKind {
-	case WeChatAuthorityEffectExistingLink, WeChatAuthorityEffectExistingPhone, WeChatAuthorityEffectExistingLinkPhone, WeChatAuthorityEffectPendingReserved, WeChatAuthorityEffectPendingPhoneVerified:
+	case WeChatAuthorityEffectExistingLink, WeChatAuthorityEffectExistingPhone, WeChatAuthorityEffectExistingLinkPhone, WeChatAuthorityEffectPendingReserved, WeChatAuthorityEffectPendingPhoneVerified, WeChatAuthorityEffectSMSPhoneVerified:
 		return true
 	default:
 		return false

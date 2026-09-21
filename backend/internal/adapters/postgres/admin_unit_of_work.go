@@ -397,10 +397,36 @@ func (r *protectedReasonRepository) Create(ctx context.Context, id, owner, keyID
 	return nil
 }
 
-func (r *protectedReasonRepository) MarkTerminal(ctx context.Context, id string, terminal, expires time.Time) error {
-	tag, err := r.tx.Exec(ctx, `UPDATE protected_operation_reasons SET consumed_at=COALESCE(consumed_at,$2),terminal_at=$2,expires_at=$3 WHERE reason_id=$1 AND terminal_at IS NULL`, id, terminal, expires)
+func (r *protectedReasonRepository) CreateOrReplay(ctx context.Context, reason adminstore.ProtectedReason) (adminstore.ProtectedReason, bool, error) {
+	if reason.ID == "" || reason.OwnerUserID == "" || reason.OperationKind != "direct_read" || reason.KeyID == "" || len(reason.Nonce) == 0 || len(reason.Ciphertext) == 0 || reason.CreatedAt.IsZero() {
+		return adminstore.ProtectedReason{}, false, adminstore.ErrIdempotencyConflict
+	}
+	tag, err := r.tx.Exec(ctx, `INSERT INTO protected_operation_reasons(reason_id,owner_user_id,operation_kind,key_id,nonce,ciphertext,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(reason_id) DO NOTHING`, reason.ID, reason.OwnerUserID, reason.OperationKind, reason.KeyID, reason.Nonce, reason.Ciphertext, reason.CreatedAt)
 	if err != nil {
-		return err
+		return adminstore.ProtectedReason{}, false, fmt.Errorf("postgres: create protected reason idempotently: %w", err)
+	}
+	created := tag.RowsAffected() == 1
+	var stored adminstore.ProtectedReason
+	err = r.tx.QueryRow(ctx, `SELECT reason_id,owner_user_id,operation_kind,COALESCE(key_id,''),nonce,ciphertext,consumed_at,terminal_at,expires_at,purged_at,created_at FROM protected_operation_reasons WHERE reason_id=$1 FOR UPDATE`, reason.ID).Scan(
+		&stored.ID, &stored.OwnerUserID, &stored.OperationKind, &stored.KeyID, &stored.Nonce, &stored.Ciphertext,
+		&stored.ConsumedAt, &stored.TerminalAt, &stored.ExpiresAt, &stored.PurgedAt, &stored.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return adminstore.ProtectedReason{}, false, adminstore.ErrIdempotencyConflict
+	}
+	if err != nil {
+		return adminstore.ProtectedReason{}, false, fmt.Errorf("postgres: read protected reason replay: %w", err)
+	}
+	return stored, !created, nil
+}
+
+func (r *protectedReasonRepository) MarkTerminal(ctx context.Context, id string, terminal, expires time.Time) error {
+	if id == "" || terminal.IsZero() || !expires.After(terminal) {
+		return adminstore.ErrIdempotencyConflict
+	}
+	tag, err := r.tx.Exec(ctx, `UPDATE protected_operation_reasons SET consumed_at=$2,terminal_at=$2,expires_at=$3 WHERE reason_id=$1 AND purged_at IS NULL AND ((consumed_at IS NULL AND terminal_at IS NULL AND expires_at IS NULL) OR (consumed_at=$2 AND terminal_at=$2 AND expires_at=$3))`, id, terminal, expires)
+	if err != nil {
+		return fmt.Errorf("postgres: terminalize protected reason: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
 		return adminstore.ErrIdempotencyConflict
@@ -438,6 +464,10 @@ func (r *protectedReasonRepository) PurgeExpired(ctx context.Context, now time.T
 			return 0, err
 		}
 		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("postgres: iterate expired protected reasons: %w", err)
 	}
 	rows.Close()
 	for _, id := range ids {
@@ -672,6 +702,28 @@ func (r *adminOutboxRepository) MarkDeliveryPhase(ctx context.Context, id string
 	return nil
 }
 
+// RenewClaim re-fences a still-owned indeterminate operation immediately
+// before its upstream call. clock_timestamp() is intentional: unlike a caller
+// supplied timestamp or transaction timestamp, it cannot become stale while
+// this statement waits for a concurrent row lock.
+func (r *adminOutboxRepository) RenewClaim(ctx context.Context, id string, expected int64, claimToken string, lease time.Duration) error {
+	if id == "" || expected <= 0 || claimToken == "" || lease <= 0 || lease > 10*time.Minute {
+		return adminstore.ErrIdempotencyConflict
+	}
+	leaseSeconds := lease.Seconds()
+	if leaseSeconds <= 0 {
+		return adminstore.ErrIdempotencyConflict
+	}
+	tag, err := r.tx.Exec(ctx, `UPDATE admin_operation_outbox SET claim_lease_until=clock_timestamp()+make_interval(secs => $4),version=version+1,updated_at=clock_timestamp() WHERE operation_id=$1 AND version=$2 AND delivery_state='claimed' AND delivery_phase='indeterminate' AND claim_token_hash=$3 AND claim_lease_until>clock_timestamp()`, id, expected, hashAdminOutboxClaimToken(claimToken), leaseSeconds)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return adminstore.ErrIdempotencyConflict
+	}
+	return nil
+}
+
 func (r *adminOutboxRepository) DeferReceipt(ctx context.Context, id string, expected int64, claimToken string, nextAttempt, at time.Time) error {
 	if claimToken == "" || !nextAttempt.After(at) {
 		return adminstore.ErrIdempotencyConflict
@@ -733,6 +785,30 @@ func (r *adminOutboxRepository) Fail(ctx context.Context, id string, expected in
 		return err
 	}
 	tag, err := r.tx.Exec(ctx, `UPDATE admin_operation_outbox SET delivery_state='failed',claim_token_hash=NULL,claim_lease_until=NULL,result_code=$4,result_digest=$5,result_payload=$6,terminal_at=$7,version=version+1,updated_at=$7 WHERE operation_id=$1 AND version=$2 AND delivery_state='claimed' AND delivery_phase='sent' AND claim_token_hash=$3 AND claim_lease_until>$7`, id, expected, hashAdminOutboxClaimToken(claimToken), result.Code, result.Digest, payload, at)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return adminstore.ErrIdempotencyConflict
+	}
+	return nil
+}
+
+// AbortBeforeSend terminalizes a claimed operation that the caller proves did
+// not reach the upstream service. It deliberately records not_sent rather than
+// reusing Fail, whose sent precondition is reserved for upstream responses.
+func (r *adminOutboxRepository) AbortBeforeSend(ctx context.Context, id string, expected int64, claimToken string, result adminstore.AllowlistedResult, at time.Time) error {
+	if claimToken == "" || expected <= 0 || result.Code != "operation.failed" || at.IsZero() {
+		return adminstore.ErrIdempotencyConflict
+	}
+	if err := result.Validate(); err != nil {
+		return err
+	}
+	payload, err := adminstore.EncodeAllowlistedPayload(result.Payload)
+	if err != nil {
+		return err
+	}
+	tag, err := r.tx.Exec(ctx, `UPDATE admin_operation_outbox SET delivery_state='failed',delivery_phase='not_sent',claim_token_hash=NULL,claim_lease_until=NULL,result_code=$4,result_digest=$5,result_payload=$6,terminal_at=$7,version=version+1,updated_at=$7 WHERE operation_id=$1 AND version=$2 AND delivery_state='claimed' AND delivery_phase='indeterminate' AND claim_token_hash=$3 AND claim_lease_until>$7`, id, expected, hashAdminOutboxClaimToken(claimToken), result.Code, result.Digest, payload, at)
 	if err != nil {
 		return err
 	}

@@ -12,7 +12,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"math"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -29,9 +28,24 @@ func TestLoadDefaults(t *testing.T) {
 		"UP_TRUSTED_PROXY_CIDRS", "UP_REGISTRATION_CREATE_IP_LIMIT",
 		"UP_REGISTRATION_CREATE_IP_WINDOW", "UP_REGISTRATION_CREATE_NET_LIMIT",
 		"UP_REGISTRATION_CREATE_NET_WINDOW", "UP_REGISTRATION_CREATE_EMAIL_LIMIT",
-		"UP_REGISTRATION_CREATE_EMAIL_WINDOW", "UP_REGISTRATION_CREATE_PAIR_LIMIT",
-		"UP_REGISTRATION_CREATE_PAIR_WINDOW", "UP_REGISTRATION_VERIFY_LIMIT",
-		"UP_REGISTRATION_VERIFY_WINDOW", "UP_REGISTRATION_RESEND_LIMIT",
+		"UP_REGISTRATION_CREATE_EMAIL_WINDOW", "UP_REGISTRATION_CREATE_MAILBOX_FAMILY_LIMIT", "UP_REGISTRATION_CREATE_MAILBOX_FAMILY_WINDOW", "UP_REGISTRATION_CREATE_PAIR_LIMIT",
+		"UP_REGISTRATION_CREATE_PAIR_WINDOW", "UP_REGISTRATION_GLOBAL_BURST_LIMIT",
+		"UP_REGISTRATION_FORM_INTENT_DEVICE_LIMIT", "UP_REGISTRATION_FORM_INTENT_DEVICE_WINDOW",
+		"UP_REGISTRATION_FORM_INTENT_NET_LIMIT", "UP_REGISTRATION_FORM_INTENT_NET_WINDOW",
+		"UP_REGISTRATION_FORM_INTENT_GLOBAL_BURST_LIMIT", "UP_REGISTRATION_FORM_INTENT_GLOBAL_BURST_WINDOW",
+		"UP_REGISTRATION_FORM_INTENT_GLOBAL_LIMIT", "UP_REGISTRATION_FORM_INTENT_GLOBAL_WINDOW",
+		"UP_REGISTRATION_GLOBAL_BURST_WINDOW", "UP_REGISTRATION_GLOBAL_LIMIT", "UP_REGISTRATION_GLOBAL_WINDOW",
+		"UP_REGISTRATION_UNFAMILIAR_DOMAIN_BURST_LIMIT", "UP_REGISTRATION_UNFAMILIAR_DOMAIN_BURST_WINDOW",
+		"UP_REGISTRATION_UNFAMILIAR_DOMAIN_LIMIT", "UP_REGISTRATION_UNFAMILIAR_DOMAIN_WINDOW",
+		"UP_REGISTRATION_UNFAMILIAR_MX_BURST_LIMIT", "UP_REGISTRATION_UNFAMILIAR_MX_BURST_WINDOW",
+		"UP_REGISTRATION_UNFAMILIAR_MX_LIMIT", "UP_REGISTRATION_UNFAMILIAR_MX_WINDOW",
+		"UP_REGISTRATION_ADMISSION_MAX_IN_FLIGHT", "UP_REGISTRATION_ADMISSION_MAX_QUEUED", "UP_REGISTRATION_ADMISSION_WAIT_TIMEOUT",
+		"UP_REGISTRATION_UNFAMILIAR_MAX_IN_FLIGHT", "UP_REGISTRATION_UNFAMILIAR_MAX_QUEUED", "UP_REGISTRATION_UNFAMILIAR_PER_DOMAIN",
+		"UP_REGISTRATION_BLOCKED_EMAIL_DOMAINS_EXTRA", "UP_REGISTRATION_BLOCKED_MX_DOMAINS_EXTRA",
+		"UP_REGISTRATION_ESTABLISHED_EMAIL_DOMAINS_EXTRA", "UP_REGISTRATION_ESTABLISHED_MX_DOMAINS_EXTRA",
+		"UP_REGISTRATION_HONEYPOT_IP_BLOCKS_ENABLED", "UP_REGISTRATION_VERIFY_LIMIT",
+		"UP_REGISTRATION_VERIFY_WINDOW", "UP_REGISTRATION_VERIFY_GLOBAL_BURST_LIMIT", "UP_REGISTRATION_VERIFY_GLOBAL_BURST_WINDOW",
+		"UP_REGISTRATION_VERIFY_GLOBAL_LIMIT", "UP_REGISTRATION_VERIFY_GLOBAL_WINDOW", "UP_REGISTRATION_RESEND_LIMIT",
 		"UP_REGISTRATION_RESEND_WINDOW", "UP_REGISTRATION_IPV4_NET_BITS",
 		"UP_REGISTRATION_IPV6_NET_BITS", "UP_RISK_DEFENSE_ENABLED",
 		"UP_RISK_OBSERVATION_WINDOW", "UP_RISK_LOGIN_MEDIUM_AFTER", "UP_RISK_LOGIN_HIGH_AFTER",
@@ -39,6 +53,10 @@ func TestLoadDefaults(t *testing.T) {
 		"UP_RISK_CHALLENGE_TTL", "UP_RISK_DEVICE_ID_TTL", "UP_RISK_TRUST_TTL",
 		"UP_RISK_AUTOMATION_COST_DIFFICULTY", "UP_RISK_COMPLETION_LIMIT",
 		"UP_RISK_COMPLETION_WINDOW", "UP_RISK_ALLOWLIST_SHA256",
+		"UP_RISK_REGISTRATION_ISSUE_DEVICE_LIMIT", "UP_RISK_REGISTRATION_ISSUE_NETWORK_LIMIT", "UP_RISK_REGISTRATION_ISSUE_WINDOW",
+		"UP_RISK_REGISTRATION_ISSUE_GLOBAL_BURST_LIMIT", "UP_RISK_REGISTRATION_ISSUE_GLOBAL_BURST_WINDOW",
+		"UP_RISK_REGISTRATION_ISSUE_GLOBAL_LIMIT", "UP_RISK_REGISTRATION_ISSUE_GLOBAL_WINDOW",
+		"UP_RISK_REGISTRATION_ISSUE_MAX_IN_FLIGHT", "UP_RISK_REGISTRATION_ISSUE_MAX_QUEUED", "UP_RISK_REGISTRATION_ISSUE_WAIT_TIMEOUT",
 		"UP_DREAMUP_MOBILE_SCOPED_RATE_LIMIT", "UP_DREAMUP_MOBILE_GLOBAL_RATE_LIMIT",
 		"UP_DREAMUP_MOBILE_RATE_WINDOW",
 		"UP_ISOLATED_DATABASE_URL", "UP_ISOLATED_DATABASE_SCHEMA",
@@ -49,9 +67,6 @@ func TestLoadDefaults(t *testing.T) {
 		"UP_RISK_TURNSTILE_SECRET_KEY", "UP_RISK_TURNSTILE_HOSTNAME",
 		"UP_RISK_RECAPTCHA_SITE_KEY", "UP_RISK_RECAPTCHA_SECRET_KEY",
 		"UP_RISK_RECAPTCHA_HOSTNAME", "UP_RISK_RECAPTCHA_MIN_SCORE",
-		"UP_ALIYUN_SMS_ENABLED", "UP_ALIYUN_SMS_ACCESS_KEY_ID",
-		"UP_ALIYUN_SMS_ACCESS_KEY_SECRET", "UP_ALIYUN_SMS_SIGN_NAME",
-		"UP_ALIYUN_SMS_TEMPLATE_CODE", "UP_ALIYUN_SMS_ENDPOINT",
 	)
 
 	cfg, err := Load()
@@ -63,9 +78,6 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.ReadHeaderTimeout != 5*time.Second {
 		t.Errorf("ReadHeaderTimeout = %v, want 5s", cfg.ReadHeaderTimeout)
-	}
-	if cfg.AliyunSMS.Enabled || cfg.AliyunSMS.Endpoint != defaultAliyunSMSEndpoint {
-		t.Fatalf("Aliyun SMS defaults = enabled:%v endpoint:%q", cfg.AliyunSMS.Enabled, cfg.AliyunSMS.Endpoint)
 	}
 	if cfg.MaxRequestBodyBytes != 1<<20 {
 		t.Errorf("MaxRequestBodyBytes = %d, want %d", cfg.MaxRequestBodyBytes, 1<<20)
@@ -79,13 +91,18 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Registration.Enabled {
 		t.Fatal("public registration must default off")
 	}
-	if cfg.Registration.CreateIPLimit != 3 || cfg.Registration.CreateIPWindow != time.Hour || cfg.RateLimit.LoginLimit != 10 {
+	if cfg.Registration.CreateIPLimit != 3 || cfg.Registration.CreateIPWindow != time.Hour || cfg.Registration.CreateMailboxFamilyLimit != 3 || cfg.Registration.CreateMailboxFamilyWindow != 24*time.Hour || cfg.RateLimit.LoginLimit != 10 {
 		t.Fatalf("registration/login limits drifted: registration=%#v login=%#v", cfg.Registration, cfg.RateLimit)
+	}
+	if cfg.Registration.FormIntentDeviceLimit != 6 || cfg.Registration.FormIntentNetLimit != 20 || cfg.Registration.FormIntentBurstLimit != 30 || cfg.Registration.FormIntentGlobalLimit != 300 ||
+		cfg.Registration.GlobalBurstLimit != 20 || cfg.Registration.GlobalLimit != 200 || cfg.Registration.GlobalWindow != time.Hour || cfg.Registration.DomainBurstLimit != 3 || cfg.Registration.DomainLimit != 10 ||
+		cfg.Registration.AdmissionInFlight != 8 || cfg.Registration.AdmissionWait != 3*time.Second || cfg.Registration.UnfamiliarInFlight != 2 || cfg.Registration.UnfamiliarPerDomain != 2 || cfg.Registration.HoneypotIPBlocksEnabled {
+		t.Fatalf("registration cohort/admission defaults drifted: %#v", cfg.Registration)
 	}
 	if len(cfg.ClientIP.TrustedProxyCIDRs) != 2 {
 		t.Fatalf("trusted proxy defaults = %#v", cfg.ClientIP.TrustedProxyCIDRs)
 	}
-	if cfg.DreamUPAdmin.AdminOrigin != "https://auth.moonstone.org.cn" {
+	if cfg.DreamUPAdmin.AdminOrigin != "https://moonstone.org.cn" {
 		t.Fatalf("DreamUP administration browser origin = %q", cfg.DreamUPAdmin.AdminOrigin)
 	}
 	if cfg.DreamUPMobile.ScopedRateLimit != 60 || cfg.DreamUPMobile.GlobalRateLimit != 2000 || cfg.DreamUPMobile.RateWindow != time.Minute {
@@ -149,7 +166,7 @@ func TestLoadIsolatedOperationalDatabaseConfiguration(t *testing.T) {
 func TestDreamUPMobileEnabledRejectsUnsafeRateLimits(t *testing.T) {
 	cfg := validDevelopmentConfig()
 	cfg.DreamUPMobile = DreamUPMobileConfig{
-		Enabled: true, DelegationKeyringPath: filepath.Join(t.TempDir(), "dreamup-mobile.json"), DelegationCurrentKeyID: "mobile-1",
+		Enabled: true, DelegationKeyringPath: `C:\secrets\dreamup-mobile.json`, DelegationCurrentKeyID: "mobile-1",
 		DelegationIssuer: "https://auth.moonstone.org.cn", DelegationAudience: "dreamup-mobile-api", AssertionTTL: 15 * time.Second,
 		ScopedRateLimit: 60, GlobalRateLimit: 59, RateWindow: time.Minute,
 	}
@@ -164,7 +181,6 @@ func TestDreamUPMobileEnabledRejectsUnsafeRateLimits(t *testing.T) {
 
 func TestDreamUPMobileAndAdministratorDelegationKeysMustBeDistinct(t *testing.T) {
 	cfg := validDevelopmentConfig()
-	mobileKeyringPath := filepath.Join(t.TempDir(), "dreamup-mobile.json")
 	cfg.Database = DatabaseConfig{
 		URL: "postgres://user:pass@localhost:5432/united_pass?sslmode=disable", Schema: "united_pass",
 		MaxConns: 10, MinConns: 1, ConnectTimeout: 10 * time.Second,
@@ -176,18 +192,18 @@ func TestDreamUPMobileAndAdministratorDelegationKeysMustBeDistinct(t *testing.T)
 	cfg.Auth.Provider = "zitadel"
 	cfg.Auth.ProjectID = "project-id"
 	cfg.DreamUPMobile = DreamUPMobileConfig{
-		Enabled: true, DelegationKeyringPath: mobileKeyringPath, DelegationCurrentKeyID: "mobile-1",
+		Enabled: true, DelegationKeyringPath: `C:\secrets\dreamup-mobile.json`, DelegationCurrentKeyID: "mobile-1",
 		DelegationIssuer: "https://auth.moonstone.org.cn", DelegationAudience: "dreamup-mobile-api", AssertionTTL: 15 * time.Second,
 		ScopedRateLimit: 60, GlobalRateLimit: 2000, RateWindow: time.Minute,
 	}
-	cfg.DreamUPAdmin = validDreamUPAdminConfigForTest(t)
+	cfg.DreamUPAdmin = validDreamUPAdminConfigForTest()
 
 	cfg.DreamUPMobile.DelegationKeyringPath = cfg.DreamUPAdmin.DelegationKeyringPath
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must use distinct keyrings") {
 		t.Fatalf("shared delegation keyring path accepted: %v", err)
 	}
 
-	cfg.DreamUPMobile.DelegationKeyringPath = mobileKeyringPath
+	cfg.DreamUPMobile.DelegationKeyringPath = `C:\secrets\dreamup-mobile.json`
 	cfg.DreamUPMobile.DelegationCurrentKeyID = cfg.DreamUPAdmin.DelegationCurrentKeyID
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "current key IDs must be distinct") {
 		t.Fatalf("shared delegation current key ID accepted: %v", err)
@@ -232,6 +248,21 @@ func TestRegistrationLimitsAreIndependentFromLogin(t *testing.T) {
 	}
 	if cfg.RateLimit.LoginLimit != 19 || cfg.Registration.CreateIPLimit != 2 || cfg.Registration.CreateIPWindow != 45*time.Minute {
 		t.Fatalf("login/registration limits not independent: login=%#v registration=%#v", cfg.RateLimit, cfg.Registration)
+	}
+}
+
+func TestRegistrationCohortPolicyLoadsOperationalDomainLists(t *testing.T) {
+	t.Setenv("UP_REGISTRATION_GLOBAL_LIMIT", "77")
+	t.Setenv("UP_REGISTRATION_BLOCKED_EMAIL_DOMAINS_EXTRA", "one.example,two.example")
+	t.Setenv("UP_REGISTRATION_BLOCKED_MX_DOMAINS_EXTRA", "mx.bad.example")
+	t.Setenv("UP_REGISTRATION_ESTABLISHED_EMAIL_DOMAINS_EXTRA", "school.example")
+	t.Setenv("UP_REGISTRATION_HONEYPOT_IP_BLOCKS_ENABLED", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Registration.GlobalLimit != 77 || len(cfg.Registration.BlockedEmailDomains) != 2 || len(cfg.Registration.BlockedMXDomains) != 1 || len(cfg.Registration.EstablishedEmailDomains) != 1 || !cfg.Registration.HoneypotIPBlocksEnabled {
+		t.Fatalf("registration cohort config = %#v", cfg.Registration)
 	}
 }
 
@@ -328,6 +359,39 @@ func TestRegistrationRejectsUnsafeGatewayAndRateConfiguration(t *testing.T) {
 	cfg.Registration.CreateIPLimit = 0
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "registration create IP") {
 		t.Fatalf("invalid registration rate accepted: %v", err)
+	}
+
+	cfg = validDevelopmentConfig()
+	cfg.Registration.AdmissionInFlight = 1
+	cfg.Registration.UnfamiliarInFlight = 2
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "admission") {
+		t.Fatalf("invalid registration admission accepted: %v", err)
+	}
+}
+
+func TestRegistrationRejectsAdmissionCapacityOverflow(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	for _, test := range []struct {
+		name   string
+		mutate func(*RegistrationConfig)
+	}{
+		{name: "in flight", mutate: func(cfg *RegistrationConfig) { cfg.AdmissionInFlight = maxInt }},
+		{name: "queued", mutate: func(cfg *RegistrationConfig) { cfg.AdmissionQueued = maxInt }},
+		{name: "combined slots", mutate: func(cfg *RegistrationConfig) {
+			cfg.AdmissionInFlight = maxRegistrationAdmissionInFlight
+			cfg.AdmissionQueued = maxRegistrationAdmissionTotalSlots
+		}},
+		{name: "unfamiliar combined slots", mutate: func(cfg *RegistrationConfig) {
+			cfg.UnfamiliarQueued = maxRegistrationAdmissionTotalSlots
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validDevelopmentConfig()
+			test.mutate(&cfg.Registration)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "admission") {
+				t.Fatalf("oversized registration admission accepted: %v", err)
+			}
+		})
 	}
 }
 
@@ -574,7 +638,7 @@ func TestDreamUPAdminEnabledRequiresEveryPurposeSpecificKeyring(t *testing.T) {
 		HighRiskFreshness: 5 * time.Minute, RateLimit: 5, RateWindow: 15 * time.Minute,
 		LockDuration: 30 * time.Minute, Argon2MaxConcurrent: 2,
 		BaseURL: "http://127.0.0.1:18084", DelegationIssuer: "https://auth.moonstone.org.cn",
-		DelegationAudience: "dreamup-admin-api", DelegationKeyringPath: filepath.Join(t.TempDir(), "dreamup-delegation.json"),
+		DelegationAudience: "dreamup-admin-api", DelegationKeyringPath: `C:\secrets\dreamup-delegation.json`,
 		DelegationCurrentKeyID: "delegation-1", AdminOrigin: "https://auth.moonstone.org.cn",
 		ResponseLimitBytes: 8 << 20, ReconcileInterval: 15 * time.Second,
 		ReconcileBatchSize: 50, ReconcileLease: 30 * time.Second,
@@ -592,7 +656,7 @@ func TestDreamUPAdminEnabledRequiresEveryPurposeSpecificKeyring(t *testing.T) {
 
 func TestDreamUPAdminRequiresIsolatedOperationalDatabase(t *testing.T) {
 	cfg := validDevelopmentConfig()
-	cfg.DreamUPAdmin = validDreamUPAdminConfigForTest(t)
+	cfg.DreamUPAdmin = validDreamUPAdminConfigForTest()
 	cfg.IsolatedDatabase = DatabaseConfig{}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "UP_ISOLATED_DATABASE_URL") {
 		t.Fatalf("DreamUP admin accepted authority-database outbox: %v", err)
@@ -619,7 +683,7 @@ func TestDreamUPAdminBFFConfigurationFailsClosed(t *testing.T) {
 	cfg.DreamUPAdmin.BaseURL = "http://127.0.0.1:18084"
 	cfg.DreamUPAdmin.DelegationIssuer = "https://auth.moonstone.org.cn"
 	cfg.DreamUPAdmin.DelegationAudience = "dreamup-admin-api"
-	cfg.DreamUPAdmin.DelegationKeyringPath = filepath.Join(t.TempDir(), "dreamup-delegation.json")
+	cfg.DreamUPAdmin.DelegationKeyringPath = `C:\secrets\dreamup-delegation.json`
 	cfg.DreamUPAdmin.DelegationCurrentKeyID = "delegation-1"
 	cfg.DreamUPAdmin.AdminOrigin = "https://auth.moonstone.org.cn"
 	cfg.DreamUPAdmin.ResponseLimitBytes = 8 << 20
@@ -1086,81 +1150,6 @@ func TestInteractionBaseURIDerivation(t *testing.T) {
 	}
 }
 
-func TestValidateAliyunSMSRequiresCompleteConfiguration(t *testing.T) {
-	complete := AliyunSMSConfig{
-		Enabled:         true,
-		AccessKeyID:     "test-access-key-id",
-		AccessKeySecret: "test-access-key-secret",
-		SignName:        "test-sign",
-		TemplateCode:    "SMS_123456789",
-		Endpoint:        defaultAliyunSMSEndpoint,
-	}
-	tests := []struct {
-		name    string
-		missing string
-		mutate  func(*AliyunSMSConfig)
-	}{
-		{name: "access key id", missing: "UP_ALIYUN_SMS_ACCESS_KEY_ID", mutate: func(cfg *AliyunSMSConfig) { cfg.AccessKeyID = "" }},
-		{name: "access key secret", missing: "UP_ALIYUN_SMS_ACCESS_KEY_SECRET", mutate: func(cfg *AliyunSMSConfig) { cfg.AccessKeySecret = "" }},
-		{name: "sign name", missing: "UP_ALIYUN_SMS_SIGN_NAME", mutate: func(cfg *AliyunSMSConfig) { cfg.SignName = "" }},
-		{name: "template code", missing: "UP_ALIYUN_SMS_TEMPLATE_CODE", mutate: func(cfg *AliyunSMSConfig) { cfg.TemplateCode = "" }},
-		{name: "untrimmed value", missing: "UP_ALIYUN_SMS_SIGN_NAME", mutate: func(cfg *AliyunSMSConfig) { cfg.SignName = " test-sign" }},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			cfg := validDevelopmentConfig()
-			cfg.AliyunSMS = complete
-			test.mutate(&cfg.AliyunSMS)
-			err := cfg.Validate()
-			if err == nil || !strings.Contains(err.Error(), test.missing) {
-				t.Fatalf("Validate error = %v, want missing %s", err, test.missing)
-			}
-		})
-	}
-
-	cfg := validDevelopmentConfig()
-	cfg.AliyunSMS = complete
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate rejected complete Aliyun SMS configuration: %v", err)
-	}
-}
-
-func TestValidateAliyunSMSEndpointPinsOfficialHTTPSOrigin(t *testing.T) {
-	for _, endpoint := range []string{
-		"https://dysmsapi.aliyuncs.com",
-		"https://dysmsapi.aliyuncs.com/",
-		"https://DYSMSAPI.ALIYUNCS.COM:443/",
-	} {
-		if err := validateAliyunSMSEndpoint(endpoint); err != nil {
-			t.Errorf("validateAliyunSMSEndpoint(%q): %v", endpoint, err)
-		}
-	}
-
-	for _, endpoint := range []string{
-		"",
-		" https://dysmsapi.aliyuncs.com/",
-		"http://dysmsapi.aliyuncs.com/",
-		"https://dysmsapi.aliyuncs.com:80/",
-		"https://dysmsapi.aliyuncs.com:444/",
-		"https://dysmsapi.aliyuncs.com:/",
-		"https://dysmsapi.aliyuncs.com:0443/",
-		"https://dysmsapi.aliyuncs.com.attacker.example/",
-		"https://sms.example/",
-		"https://user:pass@dysmsapi.aliyuncs.com/",
-		"https://dysmsapi.aliyuncs.com/provider-prefix",
-		"https://dysmsapi.aliyuncs.com/%2e",
-		"https://dysmsapi.aliyuncs.com/?target=other",
-		"https://dysmsapi.aliyuncs.com/?",
-		"https://dysmsapi.aliyuncs.com/#",
-		"https://dysmsapi.aliyuncs.com/#fragment",
-		"https://dysmsapi.aliyuncs.com:bad/",
-	} {
-		if err := validateAliyunSMSEndpoint(endpoint); err == nil {
-			t.Errorf("validateAliyunSMSEndpoint accepted %q", endpoint)
-		}
-	}
-}
-
 func validDevelopmentConfig() Config {
 	return Config{
 		Environment:         EnvironmentDevelopment,
@@ -1201,11 +1190,26 @@ func validDevelopmentConfig() Config {
 			TrustedProxyCIDRs: []string{"127.0.0.1/32", "::1/128"},
 		},
 		Registration: RegistrationConfig{
+			FormIntentDeviceLimit: 6, FormIntentDeviceWindow: 5 * time.Minute,
+			FormIntentNetLimit: 20, FormIntentNetWindow: 5 * time.Minute,
+			FormIntentBurstLimit: 30, FormIntentBurstWindow: 10 * time.Second,
+			FormIntentGlobalLimit: 300, FormIntentGlobalWindow: 5 * time.Minute,
 			CreateIPLimit: 3, CreateIPWindow: time.Hour,
 			CreateNetLimit: 10, CreateNetWindow: time.Hour,
 			CreateEmailLimit: 3, CreateEmailWindow: 24 * time.Hour,
+			CreateMailboxFamilyLimit: 3, CreateMailboxFamilyWindow: 24 * time.Hour,
 			CreatePairLimit: 2, CreatePairWindow: time.Hour,
+			GlobalBurstLimit: 20, GlobalBurstWindow: 10 * time.Second,
+			GlobalLimit: 200, GlobalWindow: time.Hour,
+			DomainBurstLimit: 3, DomainBurstWindow: 10 * time.Minute,
+			DomainLimit: 10, DomainWindow: 24 * time.Hour,
+			MXBurstLimit: 20, MXBurstWindow: 10 * time.Minute,
+			MXLimit: 100, MXWindow: 24 * time.Hour,
+			AdmissionInFlight: 8, AdmissionQueued: 32, AdmissionWait: time.Second,
+			UnfamiliarInFlight: 2, UnfamiliarQueued: 8, UnfamiliarPerDomain: 1,
 			VerifyLimit: 8, VerifyWindow: 15 * time.Minute,
+			VerifyGlobalBurstLimit: 20, VerifyGlobalBurstWindow: 10 * time.Second,
+			VerifyGlobalLimit: 100, VerifyGlobalWindow: 5 * time.Minute,
 			ResendLimit: 3, ResendWindow: 30 * time.Minute,
 			IPv4NetBits: 24, IPv6NetBits: 56,
 		},
@@ -1234,8 +1238,7 @@ func validDevelopmentConfig() Config {
 	}
 }
 
-func validDreamUPAdminConfigForTest(t *testing.T) DreamUPAdminConfig {
-	t.Helper()
+func validDreamUPAdminConfigForTest() DreamUPAdminConfig {
 	return DreamUPAdminConfig{
 		Enabled:                        true,
 		ChallengeEncryptionKeyringPath: "challenge-encryption.json", ChallengeEncryptionCurrentKeyID: "ce-1",
@@ -1247,7 +1250,7 @@ func validDreamUPAdminConfigForTest(t *testing.T) DreamUPAdminConfig {
 		HighRiskFreshness: 5 * time.Minute, RateLimit: 5, RateWindow: 15 * time.Minute,
 		LockDuration: 30 * time.Minute, Argon2MaxConcurrent: 2,
 		BaseURL: "http://127.0.0.1:18084", DelegationIssuer: "https://auth.moonstone.org.cn",
-		DelegationAudience: "dreamup-admin-api", DelegationKeyringPath: filepath.Join(t.TempDir(), "dreamup-admin.json"),
+		DelegationAudience: "dreamup-admin-api", DelegationKeyringPath: `C:\secrets\dreamup-admin.json`,
 		DelegationCurrentKeyID: "administrator-1", AdminOrigin: "https://auth.moonstone.org.cn",
 		ResponseLimitBytes: 8 << 20, ReconcileInterval: 15 * time.Second,
 		ReconcileBatchSize: 50, ReconcileLease: 30 * time.Second,

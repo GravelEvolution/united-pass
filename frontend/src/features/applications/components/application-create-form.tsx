@@ -223,6 +223,7 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
         />
         <div className={styles.resultPanel}>
           <div className={styles.resultHeader}>
+            <span className={styles.mockBadge}>MOCK</span>
             <h2>创建结果</h2>
           </div>
 
@@ -552,7 +553,7 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
 
         <div className={styles.actions}>
           <Button htmlType="submit" type="primary" theme="solid" size="large" loading={isSubmitting}>
-            创建应用与客户端
+            创建客户端（Mock）
           </Button>
           <Button
             size="large"

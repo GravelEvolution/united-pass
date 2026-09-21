@@ -270,8 +270,8 @@ func TestFixedCatalogIsExplicitValidRoleMatrix(t *testing.T) {
 			}
 		}
 	}
-	if dreamUPCount != 21 {
-		t.Fatalf("DreamUP policy count = %d, want the 21 reviewed administrator actions", dreamUPCount)
+	if dreamUPCount != 34 {
+		t.Fatalf("DreamUP policy count = %d, want the 34 reviewed administrator actions", dreamUPCount)
 	}
 	if _, serviceOnly := seen[string(permissions.ActionOperationReceiptRead)]; serviceOnly {
 		t.Fatal("service-only operation receipt capability must never be granted to an administrator")

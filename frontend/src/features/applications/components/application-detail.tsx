@@ -8,31 +8,22 @@
 
 "use client";
 
-import type { FormEvent } from "react";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Button, Empty, Input, Modal, Select, Tabs, TextArea, Toast } from "@douyinfe/semi-ui";
+import { Button, Empty, Modal, Tabs, Toast } from "@douyinfe/semi-ui";
 import { StatusBadge } from "@/components/common/status-badge";
 import { PageHeader } from "@/components/common/page-header";
 import {
   AUDIENCE_LABELS,
-  type AllowedScope,
-  type ApplicationAudience,
   type OAuthApplicationDetail,
 } from "@/features/applications/types";
-import { validateApplicationCreateInput } from "@/features/applications/validation";
-import { OAuthClientEditor } from "@/features/applications/components/oauth-client-editor";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
-import { AccountReauthenticationForm } from "@/features/account/components/security-overview";
 import { formatSecurityDateTime } from "@/lib/utils/date-time";
 import styles from "./application-detail.module.css";
-import formStyles from "./application-create-form.module.css";
 
 type ApplicationDetailProps = {
   detail: OAuthApplicationDetail;
-  availableScopes: AllowedScope[];
-  canManage: boolean;
 };
 
 const VALID_TABS = ["basic", "clients", "grants", "audit", "danger"] as const;
@@ -42,7 +33,7 @@ function isTabKey(value: string | null): value is TabKey {
   return value !== null && (VALID_TABS as readonly string[]).includes(value);
 }
 
-export function ApplicationDetail({ detail, availableScopes, canManage }: ApplicationDetailProps) {
+export function ApplicationDetail({ detail }: ApplicationDetailProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const tabParam = searchParams.get("tab");
@@ -86,13 +77,13 @@ export function ApplicationDetail({ detail, availableScopes, canManage }: Applic
       </div>
 
       <div className={styles.tabContent}>
-        <Tabs type="line" activeKey={activeTab} onChange={handleTabChange}>
+        <Tabs type="line" collapsible="auto" activeKey={activeTab} onChange={handleTabChange}>
           <Tabs.TabPane tab="基本信息" itemKey="basic">
-            <BasicInfoTab detail={detail} canManage={canManage} />
+            <BasicInfoTab detail={detail} />
           </Tabs.TabPane>
 
           <Tabs.TabPane tab="OAuth Clients" itemKey="clients">
-            <ClientsTab detail={detail} availableScopes={availableScopes} canManage={canManage} />
+            <ClientsTab detail={detail} />
           </Tabs.TabPane>
 
           <Tabs.TabPane tab="授权记录" itemKey="grants">
@@ -104,7 +95,7 @@ export function ApplicationDetail({ detail, availableScopes, canManage }: Applic
           </Tabs.TabPane>
 
           <Tabs.TabPane tab="危险操作" itemKey="danger">
-            <DangerTab detail={detail} canManage={canManage} />
+            <DangerTab detail={detail} />
           </Tabs.TabPane>
         </Tabs>
       </div>
@@ -112,138 +103,50 @@ export function ApplicationDetail({ detail, availableScopes, canManage }: Applic
   );
 }
 
-function BasicInfoTab({ detail, canManage }: { detail: OAuthApplicationDetail; canManage: boolean }) {
-  const router = useRouter();
-  const [editing, setEditing] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [name, setName] = useState(detail.name);
-  const [description, setDescription] = useState(detail.description);
-  const [audience, setAudience] = useState<ApplicationAudience>(detail.audience);
-  const [ownerId, setOwnerId] = useState(detail.ownerId);
-  const [formError, setFormError] = useState<string>();
-
-  async function save(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    setFormError(undefined);
-    const input = {
-      name: name.trim(),
-      description: description.trim(),
-      audience,
-      ownerId: ownerId.trim(),
-    };
-    try {
-      validateApplicationCreateInput(input);
-      if (input.description.length > 500) throw new Error("应用说明不能超过 500 个字符。");
-      setSubmitting(true);
-      await browserCommands.updateApplication(detail.applicationId, input);
-      Toast.success({ content: "应用基本信息已更新。" });
-      setEditing(false);
-      router.refresh();
-    } catch (error) {
-      setFormError(error instanceof Error ? error.message : "更新应用失败，请重试。");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
+function BasicInfoTab({ detail }: ApplicationDetailProps) {
   return (
-    <div className={styles.section}>
-      {canManage && <Button theme="outline" onClick={() => setEditing(true)}>编辑基本信息</Button>}
-      <dl className={styles.descriptionList}>
-        <dt>应用名称</dt><dd>{detail.name}</dd>
-        <dt>应用说明</dt><dd>{detail.description || "—"}</dd>
-        <dt>受众</dt><dd>{AUDIENCE_LABELS[detail.audience]}</dd>
-        <dt>负责人</dt><dd>{detail.ownerName}</dd>
-        <dt>状态</dt>
-        <dd><StatusBadge label={detail.status === "active" ? "正常" : "已停用"} tone={detail.status === "active" ? "success" : "danger"} /></dd>
-        <dt>创建时间</dt><dd>{formatSecurityDateTime(detail.createdAt)}</dd>
-        <dt>更新时间</dt><dd>{formatSecurityDateTime(detail.updatedAt)}</dd>
-      </dl>
-      <Modal title="编辑应用基本信息" visible={editing} footer={null} maskClosable={false} onCancel={() => setEditing(false)}>
-        <form className={formStyles.form} onSubmit={(event) => void save(event)}>
-          <label className={formStyles.fieldGroup}>
-            <span className={formStyles.fieldLabel}>应用名称</span>
-            <Input value={name} onChange={setName} minLength={2} maxLength={80} required />
-          </label>
-          <label className={formStyles.fieldGroup}>
-            <span className={formStyles.fieldLabel}>应用说明</span>
-            <TextArea value={description} onChange={setDescription} maxCount={500} autosize />
-          </label>
-          <label className={formStyles.fieldGroup}>
-            <span className={formStyles.fieldLabel}>受众</span>
-            <Select value={audience} onChange={(value) => {
-              if (value === "internal" || value === "external" || value === "hybrid") setAudience(value);
-            }}>
-              {(Object.keys(AUDIENCE_LABELS) as ApplicationAudience[]).map((value) => (
-                <Select.Option key={value} value={value}>{AUDIENCE_LABELS[value]}</Select.Option>
-              ))}
-            </Select>
-          </label>
-          <label className={formStyles.fieldGroup}>
-            <span className={formStyles.fieldLabel}>负责人 User ID</span>
-            <Input value={ownerId} onChange={setOwnerId} required />
-          </label>
-          {formError && <div className={`${formStyles.notice} ${formStyles.noticeDanger}`} role="alert">{formError}</div>}
-          <div className={formStyles.actions}>
-            <Button htmlType="submit" type="primary" theme="solid" loading={submitting}>保存</Button>
-            <Button theme="outline" onClick={() => setEditing(false)} disabled={submitting}>取消</Button>
-          </div>
-        </form>
-      </Modal>
-    </div>
+    <dl className={styles.descriptionList}>
+      <dt>应用名称</dt>
+      <dd>{detail.name}</dd>
+
+      <dt>应用说明</dt>
+      <dd>{detail.description || "—"}</dd>
+
+      <dt>受众</dt>
+      <dd>{AUDIENCE_LABELS[detail.audience]}</dd>
+
+      <dt>负责人</dt>
+      <dd>{detail.ownerName}</dd>
+
+      <dt>状态</dt>
+      <dd>
+        <StatusBadge
+          label={detail.status === "active" ? "正常" : "已停用"}
+          tone={detail.status === "active" ? "success" : "danger"}
+        />
+      </dd>
+
+      <dt>创建时间</dt>
+      <dd>{formatSecurityDateTime(detail.createdAt)}</dd>
+
+      <dt>更新时间</dt>
+      <dd>{formatSecurityDateTime(detail.updatedAt)}</dd>
+    </dl>
   );
 }
 
-function ClientsTab({
-  detail,
-  availableScopes,
-  canManage,
-}: { detail: OAuthApplicationDetail; availableScopes: AllowedScope[]; canManage: boolean }) {
-  const router = useRouter();
-  const [creating, setCreating] = useState(false);
-
-  const createAction = canManage ? (
-    <Button
-      type="primary"
-      theme="solid"
-      disabled={detail.status !== "active"}
-      onClick={() => setCreating(true)}
-    >
-      新增 OAuth Client
-    </Button>
-  ) : null;
-
-  const editor = (
-    <Modal title="新增 OAuth Client" visible={creating} footer={null} width={680} maskClosable={false} onCancel={() => setCreating(false)}>
-      {creating && (
-        <OAuthClientEditor
-          applicationId={detail.applicationId}
-          applicationAudience={detail.audience}
-          availableScopes={availableScopes}
-          onCancel={() => setCreating(false)}
-          onDone={(clientId) => {
-            setCreating(false);
-            router.push(`/admin/applications/${detail.applicationId}/clients/${clientId}`);
-            router.refresh();
-          }}
-        />
-      )}
-    </Modal>
-  );
-
+function ClientsTab({ detail }: ApplicationDetailProps) {
   if (detail.clients.length === 0) {
     return (
-      <div className={styles.section}>
-        {createAction}
-        <Empty title="暂无 OAuth Client" description="此应用尚未配置任何 OAuth Client。" />
-        {editor}
-      </div>
+      <Empty
+        title="暂无 OAuth Client"
+        description="此应用尚未配置任何 OAuth Client。"
+      />
     );
   }
 
   return (
     <div className={styles.section}>
-      {createAction}
       {detail.clients.map((client) => (
         <Link
           key={client.clientId}
@@ -271,12 +174,11 @@ function ClientsTab({
           </div>
         </Link>
       ))}
-      {editor}
     </div>
   );
 }
 
-function GrantsTab({ detail }: { detail: OAuthApplicationDetail }) {
+function GrantsTab({ detail }: ApplicationDetailProps) {
   if (detail.grants.length === 0) {
     return <Empty title="暂无授权记录" description="用户授权此应用后将显示在此处。" />;
   }
@@ -310,7 +212,7 @@ function GrantsTab({ detail }: { detail: OAuthApplicationDetail }) {
   );
 }
 
-function AuditTab({ detail }: { detail: OAuthApplicationDetail }) {
+function AuditTab({ detail }: ApplicationDetailProps) {
   if (detail.auditEntries.length === 0) {
     return <Empty title="暂无审计记录" />;
   }
@@ -341,18 +243,12 @@ function AuditTab({ detail }: { detail: OAuthApplicationDetail }) {
   );
 }
 
-function DangerTab({ detail, canManage }: { detail: OAuthApplicationDetail; canManage: boolean }) {
+function DangerTab({ detail }: ApplicationDetailProps) {
   const router = useRouter();
   const isActive = detail.status === "active";
   const [toggling, setToggling] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [deleteReauthenticationVisible, setDeleteReauthenticationVisible] = useState(false);
   const [confirmDeleteName, setConfirmDeleteName] = useState("");
-  const browserOperation = useRef<AbortController | null>(null);
-
-  if (!canManage) {
-    return <div className={`${styles.notice} ${styles.noticeInfo}`}>你只有应用查看权限，无法执行管理操作。</div>;
-  }
 
   function handleToggleStatus() {
     const warningContent = (
@@ -366,6 +262,7 @@ function DangerTab({ detail, canManage }: { detail: OAuthApplicationDetail; canM
               <li>已签发的 Access Token 在过期前仍然有效</li>
               <li>Refresh Token 的续签将被阻止</li>
             </ul>
+            <p>此操作需要重认证。当前为 Mock 实现。</p>
           </>
         ) : (
           <p>恢复后用户可重新发起新的授权请求。已过期的授权不会自动恢复。</p>
@@ -410,29 +307,22 @@ function DangerTab({ detail, canManage }: { detail: OAuthApplicationDetail; canM
     }
   }
 
-  async function handleDeleteApplication(
-    reauthToken: string,
-    signal: AbortSignal,
-  ): Promise<void> {
+  async function handleDeleteApplication() {
+    if (confirmDeleteName !== detail.name) {
+      Toast.warning({ content: "输入的应用名称不匹配。" });
+      return;
+    }
+
     setDeleting(true);
     try {
-      await browserCommands.deleteApplication(
-        detail.applicationId,
-        reauthToken,
-        { signal },
-      );
+      await browserCommands.deleteApplication(detail.applicationId);
       Toast.success({ content: "应用已删除。" });
-      setDeleteReauthenticationVisible(false);
       router.push("/admin/applications");
+    } catch {
+      Toast.error({ content: "删除失败，请重试。" });
     } finally {
       setDeleting(false);
     }
-  }
-
-  function closeDeleteReauthentication(): void {
-    browserOperation.current?.abort();
-    browserOperation.current = null;
-    setDeleteReauthenticationVisible(false);
   }
 
   return (
@@ -495,44 +385,11 @@ function DangerTab({ detail, canManage }: { detail: OAuthApplicationDetail; canM
           type="danger"
           loading={deleting}
           disabled={confirmDeleteName !== detail.name}
-          onClick={() => {
-            if (confirmDeleteName !== detail.name) {
-              Toast.warning({ content: "输入的应用名称不匹配。" });
-              return;
-            }
-            setDeleteReauthenticationVisible(true);
-          }}
+          onClick={handleDeleteApplication}
         >
           永久删除应用
         </Button>
       </div>
-
-      <Modal
-        title="重新认证并删除应用"
-        visible={deleteReauthenticationVisible}
-        footer={null}
-        onCancel={closeDeleteReauthentication}
-        closeOnEsc={!deleting}
-        maskClosable={false}
-      >
-        <p>
-          本次授权仅绑定到应用 <strong>{detail.name}</strong>（{detail.applicationId}），
-          且只能使用一次。
-        </p>
-        {deleteReauthenticationVisible && (
-          <AccountReauthenticationForm
-            action="application.delete"
-            target=""
-            applicationId={detail.applicationId}
-            submitLabel="验证并永久删除"
-            browserOperationRef={browserOperation}
-            onGranted={handleDeleteApplication}
-            onCancel={closeDeleteReauthentication}
-            operationError="应用删除失败；此次单次授权不会被重复使用，请重新验证后再试。"
-            destructive
-          />
-        )}
-      </Modal>
     </div>
   );
 }

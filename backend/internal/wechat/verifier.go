@@ -19,6 +19,9 @@ var (
 	// ErrUnavailable covers provider transport and server failures. Raw
 	// provider messages must never escape this package.
 	ErrUnavailable = errors.New("wechat: provider unavailable")
+	// ErrPhoneRequired marks a missing or failed getPhoneNumber proof in a
+	// flow that must never downgrade to identity-only authentication.
+	ErrPhoneRequired = errors.New("wechat: verified phone proof is required")
 )
 
 const (
@@ -42,11 +45,9 @@ type Verifier interface {
 	VerifyRegistration(context.Context, string, string) (IdentityProof, error)
 }
 
-// OnboardingVerifier proves wx.login and optionally redeems a phone code. A
-// phone-code validation/provider failure is deliberately represented by an
-// otherwise valid IdentityProof with an empty Phone; login proof failures are
-// still returned. This keeps the phone authorization optional and prevents a
-// split client-side authorization state machine.
+// OnboardingVerifier proves both wx.login and getPhoneNumber. Phone-code
+// absence, rejection or provider failure returns ErrPhoneRequired and no
+// partial proof; onboarding cannot downgrade to identity-only authentication.
 type OnboardingVerifier interface {
 	VerifyOnboarding(context.Context, string, string) (IdentityProof, error)
 }

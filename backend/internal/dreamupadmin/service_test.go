@@ -43,6 +43,22 @@ func (s *serviceAuthorizerStub) Check(_ context.Context, _ identity.UserID, _ pe
 	return s.decision, nil
 }
 
+type capabilityAuthorizerStub struct {
+	decision  permissions.Decision
+	denied    map[permissions.Action]bool
+	actions   []permissions.Action
+	resources []permissions.Resource
+}
+
+func (s *capabilityAuthorizerStub) Check(_ context.Context, _ identity.UserID, action permissions.Action, resource permissions.Resource) (permissions.Decision, error) {
+	s.actions = append(s.actions, action)
+	s.resources = append(s.resources, resource)
+	if s.denied[action] {
+		return permissions.Decision{}, nil
+	}
+	return s.decision, nil
+}
+
 type serviceRegistryStub struct{ event adminroles.RegisteredEvent }
 
 func (s serviceRegistryStub) GetExact(_ context.Context, id string) (adminroles.RegisteredEvent, error) {
@@ -147,9 +163,15 @@ func TestServiceEligibilityTraversesRegistryPagesWithoutDisclosingThem(t *testin
 	}
 }
 
-type serviceStepUpStub struct{ state adminstepup.StepUpState }
+type serviceStepUpStub struct {
+	state adminstepup.StepUpState
+	err   error
+}
 
 func (s serviceStepUpStub) GetActiveForSession(_ context.Context, sessionID string, userID identity.UserID, now time.Time) (adminstepup.StepUpState, error) {
+	if s.err != nil {
+		return adminstepup.StepUpState{}, s.err
+	}
 	if s.state.SessionID != sessionID || s.state.UserID != userID || s.state.RevokedAt != nil || !now.Before(s.state.ExpiresAt) {
 		return adminstepup.StepUpState{}, adminstepup.ErrNotFound
 	}
@@ -201,9 +223,11 @@ type serviceClientStub struct {
 	input    UpstreamRequest
 	response UpstreamResponse
 	err      error
+	calls    int
 }
 
 func (s *serviceClientStub) Execute(_ context.Context, input UpstreamRequest) (UpstreamResponse, error) {
+	s.calls++
 	s.input = input
 	if s.err != nil {
 		return UpstreamResponse{}, s.err
@@ -256,27 +280,24 @@ func TestServiceBindsExactEventRoleStepUpAndRequest(t *testing.T) {
 	}
 }
 
-func TestServiceAllowsFreshDurableStepUpOnlyForLegacyCookieHighRiskRequest(t *testing.T) {
+func TestServiceUsesCurrentBrowserSessionForHighRiskRequestWithoutReauthentication(t *testing.T) {
 	now := time.Date(2026, 8, 29, 3, 0, 0, 0, time.UTC)
 	signer := &serviceSignerStub{}
 	client := &serviceClientStub{}
 	accountSecurity := &serviceAccountSecurityStub{epoch: 9}
 	service, err := NewService(ServiceDependencies{
-		Authorizer:      &serviceAuthorizerStub{decision: permissions.Decision{Allowed: true, Role: adminroles.RoleAdmin, BindingID: "binding_1", BindingVersion: 3, ChallengeVersion: 4}},
+		Authorizer:      &serviceAuthorizerStub{decision: permissions.Decision{Allowed: true, Role: adminroles.RoleAdmin, BindingID: "binding_1", BindingVersion: 3, ChallengeVersion: 9}},
 		Registry:        serviceRegistryStub{event: registeredEligibilityEvent("evt_shanghai")},
 		AccountSecurity: accountSecurity,
-		StepUps: serviceStepUpStub{state: adminstepup.StepUpState{
-			ID: "asu_cookie_fresh_1", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, SecurityEpoch: 9,
-			VerifiedAt: now.Add(-dreamupdelegation.MaxHighRiskStepUpAge), ExpiresAt: now.Add(20 * time.Minute),
-		}},
-		Signer: signer, Client: client,
+		StepUps:         eligibilityStepUpPanic{},
+		Signer:          signer, Client: client,
 	}, ServiceConfig{Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	_, err = service.Proxy(context.Background(), Actor{
-		UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-10 * time.Minute),
+		UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-10 * time.Minute), SecurityEpoch: 9,
 		AuthenticationTransport: AuthenticationTransportBrowserCookie,
 	}, ProxyRequest{
 		EventID: "evt_shanghai", Capability: permissions.ActionApplicationReview, ResourceKind: "application", ResourceID: "app_1",
@@ -286,8 +307,8 @@ func TestServiceAllowsFreshDurableStepUpOnlyForLegacyCookieHighRiskRequest(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if signer.input.ReauthGrantID != "asu_cookie_fresh_1" || signer.input.ChallengeVersion != 4 || !signer.input.StepUpAt.Equal(now.Add(-dreamupdelegation.MaxHighRiskStepUpAge)) {
-		t.Fatalf("legacy cookie assertion=%+v", signer.input)
+	if !strings.HasPrefix(signer.input.ReauthGrantID, "asa_") || len(signer.input.ReauthGrantID) != 28 || signer.input.ChallengeVersion != 9 || !signer.input.StepUpAt.Equal(now) {
+		t.Fatalf("browser session assertion=%+v", signer.input)
 	}
 	if client.input.Path != "/internal/v1/events/evt_shanghai/applications/app_1/reviews/me" {
 		t.Fatalf("upstream input=%+v", client.input)
@@ -297,57 +318,44 @@ func TestServiceAllowsFreshDurableStepUpOnlyForLegacyCookieHighRiskRequest(t *te
 	}
 }
 
-func TestServiceLegacyCookieFallbackFailsClosedOutsideExactBoundary(t *testing.T) {
+func TestServiceBrowserHighRiskSessionBoundaryFailsClosed(t *testing.T) {
 	now := time.Date(2026, 8, 29, 3, 15, 0, 0, time.UTC)
 	tests := []struct {
 		name                string
 		transport           AuthenticationTransport
 		authTime            time.Time
-		state               adminstepup.StepUpState
+		actorEpoch          securitystate.Epoch
 		currentEpoch        securitystate.Epoch
 		epochErr            error
 		omitAccountSecurity bool
 		wantEpochCalls      int
+		wantErr             error
 	}{
 		{
-			name: "unknown transport", authTime: now.Add(-10 * time.Minute),
-			state:        adminstepup.StepUpState{ID: "asu_unknown_1", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, SecurityEpoch: 1, VerifiedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)},
-			currentEpoch: 1,
+			name: "unknown transport", authTime: now.Add(-10 * time.Minute), actorEpoch: 1, currentEpoch: 1, wantErr: ErrAuthenticationRequired,
 		},
 		{
-			name: "stale cookie proof", transport: AuthenticationTransportBrowserCookie, authTime: now.Add(-10 * time.Minute),
-			state:        adminstepup.StepUpState{ID: "asu_stale_1", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, SecurityEpoch: 1, VerifiedAt: now.Add(-dreamupdelegation.MaxHighRiskStepUpAge - time.Second), ExpiresAt: now.Add(time.Minute)},
-			currentEpoch: 1, wantEpochCalls: 1,
+			name: "stale login", transport: AuthenticationTransportBrowserCookie, authTime: now.Add(-dreamupdelegation.MaxAdministratorLoginAge - time.Second), actorEpoch: 1,
+			currentEpoch: 1, wantErr: ErrAuthenticationRequired,
 		},
 		{
-			name: "future cookie proof", transport: AuthenticationTransportBrowserCookie, authTime: now.Add(-10 * time.Minute),
-			state:        adminstepup.StepUpState{ID: "asu_future_1", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, SecurityEpoch: 1, VerifiedAt: now.Add(dreamupdelegation.MaxClockSkew + time.Second), ExpiresAt: now.Add(time.Minute)},
-			currentEpoch: 1, wantEpochCalls: 1,
+			name: "future login", transport: AuthenticationTransportBrowserCookie, authTime: now.Add(dreamupdelegation.MaxClockSkew + time.Second), actorEpoch: 1,
+			currentEpoch: 1, wantErr: ErrAuthenticationRequired,
 		},
 		{
-			name: "proof predates current login", transport: AuthenticationTransportBrowserCookie, authTime: now.Add(-time.Minute),
-			state:        adminstepup.StepUpState{ID: "asu_old_login_1", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, SecurityEpoch: 1, VerifiedAt: now.Add(-2 * time.Minute), ExpiresAt: now.Add(time.Minute)},
-			currentEpoch: 1, wantEpochCalls: 1,
+			name: "missing actor epoch", transport: AuthenticationTransportBrowserCookie, authTime: now.Add(-time.Minute), currentEpoch: 1, wantErr: ErrAuthenticationRequired,
 		},
 		{
-			name: "missing security epoch", transport: AuthenticationTransportBrowserCookie, authTime: now.Add(-10 * time.Minute),
-			state:        adminstepup.StepUpState{ID: "asu_epoch_1", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, VerifiedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)},
-			currentEpoch: 1, wantEpochCalls: 1,
+			name: "account security epoch drift", transport: AuthenticationTransportBrowserCookie, authTime: now.Add(-10 * time.Minute), actorEpoch: 9,
+			currentEpoch: 10, wantEpochCalls: 1, wantErr: ErrAuthenticationRequired,
 		},
 		{
-			name: "account security epoch drift", transport: AuthenticationTransportBrowserCookie, authTime: now.Add(-10 * time.Minute),
-			state:        adminstepup.StepUpState{ID: "asu_epoch_drift_1", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, SecurityEpoch: 9, VerifiedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)},
-			currentEpoch: 10, wantEpochCalls: 1,
+			name: "account security epoch lookup failure", transport: AuthenticationTransportBrowserCookie, authTime: now.Add(-10 * time.Minute), actorEpoch: 9,
+			currentEpoch: 9, epochErr: errors.New("database unavailable"), wantEpochCalls: 1, wantErr: ErrUpstream,
 		},
 		{
-			name: "account security epoch lookup failure", transport: AuthenticationTransportBrowserCookie, authTime: now.Add(-10 * time.Minute),
-			state:        adminstepup.StepUpState{ID: "asu_epoch_error_1", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, SecurityEpoch: 9, VerifiedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)},
-			currentEpoch: 9, epochErr: errors.New("database unavailable"), wantEpochCalls: 1,
-		},
-		{
-			name: "account security reader unavailable", transport: AuthenticationTransportBrowserCookie, authTime: now.Add(-10 * time.Minute),
-			state:               adminstepup.StepUpState{ID: "asu_epoch_reader_1", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, SecurityEpoch: 9, VerifiedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)},
-			omitAccountSecurity: true,
+			name: "account security reader unavailable", transport: AuthenticationTransportBrowserCookie, authTime: now.Add(-10 * time.Minute), actorEpoch: 9,
+			omitAccountSecurity: true, wantErr: ErrAuthenticationRequired,
 		},
 	}
 	for _, test := range tests {
@@ -361,18 +369,18 @@ func TestServiceLegacyCookieFallbackFailsClosedOutsideExactBoundary(t *testing.T
 			service, err := NewService(ServiceDependencies{
 				Authorizer:      &serviceAuthorizerStub{decision: permissions.Decision{Allowed: true, Role: adminroles.RoleAdmin, BindingID: "binding_1", BindingVersion: 3, ChallengeVersion: 4}},
 				Registry:        serviceRegistryStub{event: registeredEligibilityEvent("evt_shanghai")},
-				StepUps:         serviceStepUpStub{state: test.state},
+				StepUps:         eligibilityStepUpPanic{},
 				AccountSecurity: accountSecurityReader,
 				Signer:          signer, Client: &serviceClientStub{},
 			}, ServiceConfig{Now: func() time.Time { return now }})
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = service.Proxy(context.Background(), Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: test.authTime, AuthenticationTransport: test.transport}, ProxyRequest{
+			_, err = service.Proxy(context.Background(), Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: test.authTime, SecurityEpoch: test.actorEpoch, AuthenticationTransport: test.transport}, ProxyRequest{
 				EventID: "evt_shanghai", Capability: permissions.ActionContentManage, ResourceKind: "event_content", ResourceID: "evt_shanghai",
 				Method: http.MethodGet, Path: "/internal/v1/events/evt_shanghai/content", RequestID: "req_cookie_boundary",
 			})
-			if !errors.Is(err, ErrStepUpRequired) || signer.input.EventID != "" {
+			if !errors.Is(err, test.wantErr) || signer.input.EventID != "" {
 				t.Fatalf("error=%v signed=%+v", err, signer.input)
 			}
 			if accountSecurity.calls != test.wantEpochCalls {
@@ -382,12 +390,12 @@ func TestServiceLegacyCookieFallbackFailsClosedOutsideExactBoundary(t *testing.T
 	}
 }
 
-func TestServiceNativeMiniProgramUsesEpochBoundSessionWithoutSecurityQuestion(t *testing.T) {
+func TestServiceNativeMiniProgramHighRiskUsesCurrentEpochBoundSession(t *testing.T) {
 	now := time.Date(2026, 8, 29, 4, 0, 0, 0, time.UTC)
 	accountSecurity := &serviceAccountSecurityStub{epoch: 7}
 	signer := &serviceSignerStub{}
 	client := &serviceClientStub{}
-	consumer := &serviceReauthStub{err: errors.New("must not consume a grant")}
+	consumer := &serviceReauthStub{}
 	service, err := NewService(ServiceDependencies{
 		Authorizer:      &serviceAuthorizerStub{decision: permissions.Decision{Allowed: true, Role: adminroles.RoleAdmin, BindingID: "binding_native_1", BindingVersion: 5}},
 		Registry:        serviceRegistryStub{event: registeredEligibilityEvent("evt_shanghai")},
@@ -412,14 +420,39 @@ func TestServiceNativeMiniProgramUsesEpochBoundSessionWithoutSecurityQuestion(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if accountSecurity.calls != 1 || accountSecurity.seen != "user_1" || consumer.calls != 0 {
+	if accountSecurity.calls != 1 || consumer.calls != 0 {
 		t.Fatalf("epoch calls=%d user=%q grant consumer calls=%d", accountSecurity.calls, accountSecurity.seen, consumer.calls)
 	}
-	if signer.input.ChallengeVersion != 7 || !signer.input.StepUpAt.Equal(now) || !strings.HasPrefix(signer.input.ReauthGrantID, "nma_") || len(signer.input.ReauthGrantID) != 28 {
-		t.Fatalf("native assertion=%+v", signer.input)
-	}
-	if signer.input.RoleBindingID != "binding_native_1" || signer.input.RoleVersion != 5 || client.input.Path == "" {
+	if signer.input.EventID != "evt_shanghai" || client.input.Path == "" || !strings.HasPrefix(signer.input.ReauthGrantID, "asa_") || signer.input.ChallengeVersion != 7 || !signer.input.StepUpAt.Equal(now) {
 		t.Fatalf("native signed=%+v upstream=%+v", signer.input, client.input)
+	}
+}
+
+func TestServiceAuthorizesNativeReauthenticationFromFreshEpochBoundSession(t *testing.T) {
+	now := time.Date(2026, 8, 29, 4, 2, 0, 0, time.UTC)
+	accountSecurity := &serviceAccountSecurityStub{epoch: 7}
+	authorizer := &serviceAuthorizerStub{decision: permissions.Decision{Allowed: true, Role: adminroles.RoleAdmin, BindingID: "binding_native_1", BindingVersion: 5}}
+	service, err := NewService(ServiceDependencies{
+		Authorizer: authorizer, Registry: serviceRegistryStub{event: registeredEligibilityEvent("evt_shanghai")},
+		StepUps: serviceStepUpStub{}, AccountSecurity: accountSecurity,
+		Signer: &serviceSignerStub{}, Client: &serviceClientStub{},
+	}, ServiceConfig{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := dreamUPGrantTarget("evt_shanghai", "application", "app_1")
+	result, err := service.AuthorizeNativeReauthentication(context.Background(), Actor{
+		UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-time.Minute), SecurityEpoch: 7,
+		AuthenticationTransport: AuthenticationTransportNativeMiniProgramBearer,
+	}, NativeReauthenticationRequest{EventID: "evt_shanghai", Action: permissions.ActionApplicationReview, Target: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != permissions.ActionApplicationReview || result.Target != target || result.ChallengeVersion != 7 || result.SecurityEpoch != 7 {
+		t.Fatalf("authorization=%+v", result)
+	}
+	if authorizer.seen.Kind != "application" || authorizer.seen.ID != "app_1" || authorizer.seen.EventID != "evt_shanghai" || accountSecurity.calls != 1 {
+		t.Fatalf("resource=%+v epochCalls=%d", authorizer.seen, accountSecurity.calls)
 	}
 }
 
@@ -444,7 +477,7 @@ func TestServiceNativeMiniProgramSessionProofFailsClosedOnEpochDrift(t *testing.
 		EventID: "evt_shanghai", Capability: permissions.ActionApplicationReadBasic, ResourceKind: "application", ResourceID: "app_1",
 		Method: http.MethodGet, Path: "/internal/v1/events/evt_shanghai/applications/app_1", RequestID: "req_epoch_drift",
 	})
-	if !errors.Is(err, ErrStepUpRequired) || signer.input.EventID != "" {
+	if !errors.Is(err, ErrAuthenticationRequired) || signer.input.EventID != "" {
 		t.Fatalf("error=%v signed=%+v", err, signer.input)
 	}
 }
@@ -512,6 +545,75 @@ func TestServiceNativeMiniProgramListEventsUsesEpochBoundSession(t *testing.T) {
 	}
 }
 
+func TestServiceBrowserCookieListEventsUsesEpochBoundSessionWithoutSecurityQuestion(t *testing.T) {
+	now := time.Date(2026, 8, 29, 4, 16, 0, 0, time.UTC)
+	accountSecurity := &serviceAccountSecurityStub{epoch: 6}
+	signer := &serviceSignerStub{}
+	client := &serviceClientStub{response: UpstreamResponse{StatusCode: http.StatusOK, Body: json.RawMessage(`{"applications":[]}`)}}
+	service, err := NewService(ServiceDependencies{
+		Authorizer:      &serviceAuthorizerStub{decision: permissions.Decision{Allowed: true, Role: adminroles.RoleSuperAdmin, BindingID: "binding_browser_list", BindingVersion: 2}},
+		Registry:        serviceRegistryStub{event: registeredEligibilityEvent("evt_shanghai")},
+		StepUps:         eligibilityStepUpPanic{},
+		AccountSecurity: accountSecurity,
+		Signer:          signer,
+		Client:          client,
+	}, ServiceConfig{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := service.ListEvents(context.Background(), Actor{
+		UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-3 * time.Minute), SecurityEpoch: 6,
+		AuthenticationTransport: AuthenticationTransportBrowserCookie,
+	})
+	if err != nil || len(events) != 1 || events[0].EventID != "evt_shanghai" || events[0].Role != adminroles.RoleSuperAdmin {
+		t.Fatalf("events=%+v error=%v", events, err)
+	}
+	if accountSecurity.calls != 2 || signer.input.ChallengeVersion != 6 || !signer.input.StepUpAt.Equal(now.Add(-3*time.Minute)) {
+		t.Fatalf("epoch calls=%d assertion=%+v", accountSecurity.calls, signer.input)
+	}
+}
+
+func TestServiceListEventsReturnsPolicyEvaluatedCapabilities(t *testing.T) {
+	now := time.Date(2026, 8, 29, 4, 17, 0, 0, time.UTC)
+	authorizer := &capabilityAuthorizerStub{
+		decision: permissions.Decision{Allowed: true, Role: adminroles.RoleSuperAdmin, BindingID: "binding_capabilities", BindingVersion: 7},
+		denied:   map[permissions.Action]bool{permissions.ActionContentManage: true},
+	}
+	service, err := NewService(ServiceDependencies{
+		Authorizer:      authorizer,
+		Registry:        serviceRegistryStub{event: registeredEligibilityEvent("evt_shanghai")},
+		StepUps:         eligibilityStepUpPanic{},
+		AccountSecurity: &serviceAccountSecurityStub{epoch: 9},
+		Signer:          &serviceSignerStub{},
+		Client:          &serviceClientStub{response: UpstreamResponse{StatusCode: http.StatusOK, Body: json.RawMessage(`{"applications":[]}`)}},
+	}, ServiceConfig{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := service.ListEvents(context.Background(), Actor{
+		UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-time.Minute), SecurityEpoch: 9,
+		AuthenticationTransport: AuthenticationTransportBrowserCookie,
+	})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events=%+v error=%v", events, err)
+	}
+	got := make(map[permissions.Action]bool, len(events[0].Capabilities))
+	for _, capability := range events[0].Capabilities {
+		got[capability] = true
+	}
+	if !got[permissions.ActionDashboardRead] || !got[permissions.ActionIdentityReadRestricted] || !got[permissions.ActionPersonalAssetAssignment] || got[permissions.ActionContentManage] {
+		t.Fatalf("capabilities=%v", events[0].Capabilities)
+	}
+	if len(authorizer.actions) != len(eventSummaryCapabilities)+1 {
+		t.Fatalf("authorization checks=%d actions=%v", len(authorizer.actions), authorizer.actions)
+	}
+	for _, resource := range authorizer.resources {
+		if resource.Kind != "event" || resource.ID != "evt_shanghai" || resource.EventID != "evt_shanghai" {
+			t.Fatalf("non-event capability probe=%+v", resource)
+		}
+	}
+}
+
 func TestServiceNativeMiniProgramOperationStatusFailsBeforeStorageOnEpochDrift(t *testing.T) {
 	now := time.Date(2026, 8, 29, 4, 18, 0, 0, time.UTC)
 	service, err := NewService(ServiceDependencies{
@@ -529,7 +631,7 @@ func TestServiceNativeMiniProgramOperationStatusFailsBeforeStorageOnEpochDrift(t
 		UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-time.Minute), SecurityEpoch: 1,
 		AuthenticationTransport: AuthenticationTransportNativeMiniProgramBearer,
 	}, "evt_shanghai", "0123456789abcdef0123456789abcdef")
-	if !errors.Is(err, ErrStepUpRequired) {
+	if !errors.Is(err, ErrAuthenticationRequired) {
 		t.Fatalf("error=%v", err)
 	}
 }
@@ -542,13 +644,14 @@ func TestServiceNativeMiniProgramSessionBoundaryFailsClosed(t *testing.T) {
 		authTime      time.Time
 		reader        AccountSecurityEpochReader
 		wantCalls     int
+		wantErr       error
 	}{
-		{name: "unstamped session", authTime: now.Add(-time.Minute), reader: &serviceAccountSecurityStub{epoch: 1}},
-		{name: "missing epoch reader", securityEpoch: 1, authTime: now.Add(-time.Minute)},
-		{name: "epoch lookup failure", securityEpoch: 1, authTime: now.Add(-time.Minute), reader: &serviceAccountSecurityStub{epoch: 1, err: errors.New("database unavailable")}, wantCalls: 1},
-		{name: "epoch drift", securityEpoch: 1, authTime: now.Add(-time.Minute), reader: &serviceAccountSecurityStub{epoch: 2}, wantCalls: 1},
-		{name: "future authentication", securityEpoch: 1, authTime: now.Add(dreamupdelegation.MaxClockSkew + time.Second), reader: &serviceAccountSecurityStub{epoch: 1}},
-		{name: "stale authentication", securityEpoch: 1, authTime: now.Add(-dreamupdelegation.MaxAdministratorLoginAge - time.Second), reader: &serviceAccountSecurityStub{epoch: 1}},
+		{name: "unstamped session", authTime: now.Add(-time.Minute), reader: &serviceAccountSecurityStub{epoch: 1}, wantErr: ErrAuthenticationRequired},
+		{name: "missing epoch reader", securityEpoch: 1, authTime: now.Add(-time.Minute), wantErr: ErrAuthenticationRequired},
+		{name: "epoch lookup failure", securityEpoch: 1, authTime: now.Add(-time.Minute), reader: &serviceAccountSecurityStub{epoch: 1, err: errors.New("database unavailable")}, wantCalls: 1, wantErr: ErrUpstream},
+		{name: "epoch drift", securityEpoch: 1, authTime: now.Add(-time.Minute), reader: &serviceAccountSecurityStub{epoch: 2}, wantCalls: 1, wantErr: ErrAuthenticationRequired},
+		{name: "future authentication", securityEpoch: 1, authTime: now.Add(dreamupdelegation.MaxClockSkew + time.Second), reader: &serviceAccountSecurityStub{epoch: 1}, wantErr: ErrAuthenticationRequired},
+		{name: "stale authentication", securityEpoch: 1, authTime: now.Add(-dreamupdelegation.MaxAdministratorLoginAge - time.Second), reader: &serviceAccountSecurityStub{epoch: 1}, wantErr: ErrAuthenticationRequired},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -572,7 +675,7 @@ func TestServiceNativeMiniProgramSessionBoundaryFailsClosed(t *testing.T) {
 				EventID: "evt_shanghai", Capability: permissions.ActionApplicationReadBasic, ResourceKind: "application", ResourceID: "app_1",
 				Method: http.MethodGet, Path: "/internal/v1/events/evt_shanghai/applications/app_1", RequestID: "req_native_boundary",
 			})
-			if !errors.Is(err, ErrStepUpRequired) || signer.input.EventID != "" || client.input.Path != "" {
+			if !errors.Is(err, test.wantErr) || signer.input.EventID != "" || client.input.Path != "" {
 				t.Fatalf("error=%v signed=%+v upstream=%+v", err, signer.input, client.input)
 			}
 			if stub, ok := test.reader.(*serviceAccountSecurityStub); ok && stub.calls != test.wantCalls {
@@ -679,7 +782,7 @@ func TestServiceHighRiskGrantValidationFailsClosedBeforeSigning(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = service.Proxy(context.Background(), Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-2 * time.Minute)}, ProxyRequest{
+			_, err = service.Proxy(context.Background(), Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-2 * time.Minute), AuthenticationTransport: AuthenticationTransportNativeMiniProgramBearer}, ProxyRequest{
 				EventID: "evt_shanghai", Capability: permissions.ActionApplicationReview, ResourceKind: "application", ResourceID: "app_1",
 				Method: http.MethodPut, Path: "/internal/v1/events/evt_shanghai/applications/app_1/reviews/me", Body: json.RawMessage(`{"recommendation":"accept"}`),
 				RequestID: "req_grant_matrix", IdempotencyKey: strings.Repeat("I", 32), IfMatch: `"1"`, ReauthenticationToken: strings.Repeat("T", 43),
@@ -691,14 +794,13 @@ func TestServiceHighRiskGrantValidationFailsClosedBeforeSigning(t *testing.T) {
 	}
 }
 
-func TestServiceMissingGrantAndVerifierFailureFailClosed(t *testing.T) {
+func TestServiceExplicitGrantVerifierFailureFailsClosed(t *testing.T) {
 	now := time.Date(2026, 8, 27, 6, 0, 0, 0, time.UTC)
 	for _, test := range []struct {
 		name  string
 		token string
 		stub  *serviceReauthStub
 	}{
-		{name: "missing token", stub: &serviceReauthStub{data: validServiceGrant(now, string(permissions.ActionContentManage), dreamUPGrantTarget("evt_shanghai", "event", "evt_shanghai"))}},
 		{name: "atomic consumer rejected or reused token", token: strings.Repeat("U", 43), stub: &serviceReauthStub{err: auth.ErrReauthGrantNotFound}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -711,15 +813,15 @@ func TestServiceMissingGrantAndVerifierFailureFailClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = service.Proxy(context.Background(), Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-2 * time.Minute)}, ProxyRequest{
+			_, err = service.Proxy(context.Background(), Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-2 * time.Minute), AuthenticationTransport: AuthenticationTransportNativeMiniProgramBearer}, ProxyRequest{
 				EventID: "evt_shanghai", Capability: permissions.ActionContentManage, ResourceKind: "event_content", ResourceID: "evt_shanghai", Method: http.MethodGet,
 				Path: "/internal/v1/events/evt_shanghai/content", RequestID: "req_missing_grant", ReauthenticationToken: test.token,
 			})
 			if !errors.Is(err, ErrStepUpRequired) || signer.input.EventID != "" {
 				t.Fatalf("error=%v signed=%+v", err, signer.input)
 			}
-			if test.token == "" && test.stub.calls != 0 {
-				t.Fatalf("missing token called consumer %d times", test.stub.calls)
+			if test.stub.calls != 1 {
+				t.Fatalf("explicit token called consumer %d times", test.stub.calls)
 			}
 		})
 	}
@@ -757,6 +859,8 @@ func TestHighRiskGrantTargetIsStableAndServerDerived(t *testing.T) {
 		{name: "contact detail and resolution", input: ProxyRequest{EventID: "evt_a", Capability: permissions.ActionContactSubmissionManage, ResourceKind: "contact_submission", ResourceID: "contact_1"}, want: dreamUPGrantTarget("evt_a", "contact_submission", "contact_1")},
 		{name: "application mutation", input: ProxyRequest{EventID: "evt_a", Capability: permissions.ActionApplicationDecide, ResourceKind: "application", ResourceID: "app_1"}, want: dreamUPGrantTarget("evt_a", "application", "app_1")},
 		{name: "check in", input: ProxyRequest{EventID: "evt_a", Capability: permissions.ActionCheckinScan, ResourceKind: "event", ResourceID: "evt_a"}, want: dreamUPGrantTarget("evt_a", "event", "evt_a")},
+		{name: "bulk QR creation", input: ProxyRequest{EventID: "evt_a", Capability: permissions.ActionQRPrintBulk, ResourceKind: "event", ResourceID: "evt_a", Method: http.MethodPost}, want: dreamUPGrantTarget("evt_a", "event", "evt_a")},
+		{name: "bulk QR job read", input: ProxyRequest{EventID: "evt_a", Capability: permissions.ActionQRPrintBulk, ResourceKind: "qr_print_job", ResourceID: "print_1", Method: http.MethodGet}, want: dreamUPGrantTarget("evt_a", "qr_print_job", "print_1")},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -765,6 +869,65 @@ func TestHighRiskGrantTargetIsStableAndServerDerived(t *testing.T) {
 				t.Fatalf("target=%q ok=%v want=%q", got, ok, test.want)
 			}
 		})
+	}
+}
+
+func TestHighRiskGrantTargetRejectsInvalidBulkQRResources(t *testing.T) {
+	for _, input := range []ProxyRequest{
+		{EventID: "evt_a", Capability: permissions.ActionQRPrintBulk, ResourceKind: "event", ResourceID: "evt_other"},
+		{EventID: "evt_a", Capability: permissions.ActionQRPrintBulk, ResourceKind: "entity_code", ResourceID: "code_1"},
+		{EventID: "evt_a", Capability: permissions.ActionQRPrintBulk, ResourceKind: "qr_print_job", ResourceID: ""},
+		{EventID: "evt_a", Capability: permissions.ActionQRPrintBulk, ResourceKind: "event_asset", ResourceID: "asset_1"},
+		{EventID: "evt_a", Capability: permissions.ActionQRPrintBulk, ResourceKind: "event", ResourceID: "evt_a", Method: http.MethodGet},
+		{EventID: "evt_a", Capability: permissions.ActionQRPrintBulk, ResourceKind: "qr_print_job", ResourceID: "print_1", Method: http.MethodPost},
+	} {
+		if target, ok := highRiskGrantTarget(input); ok || target != "" {
+			t.Fatalf("unexpected bulk QR target=%q ok=%v input=%+v", target, ok, input)
+		}
+	}
+}
+
+func TestServiceBulkQRJobReadConsumesExactObjectGrant(t *testing.T) {
+	now := time.Date(2026, 8, 30, 20, 30, 0, 0, time.UTC)
+	target := dreamUPGrantTarget("evt_shanghai", "qr_print_job", "print_1")
+	reauth := &serviceReauthStub{data: validServiceGrant(now, string(permissions.ActionQRPrintBulk), target)}
+	signer := &serviceSignerStub{}
+	client := &serviceClientStub{}
+	service, err := NewService(ServiceDependencies{
+		Authorizer: &serviceAuthorizerStub{decision: permissions.Decision{
+			Allowed: true, Role: adminroles.RoleSuperAdmin, BindingID: "binding_super", BindingVersion: 7, ChallengeVersion: 4,
+		}},
+		Registry:     serviceRegistryStub{event: registeredEligibilityEvent("evt_shanghai")},
+		StepUps:      serviceStepUpStub{},
+		ReauthGrants: reauth,
+		Signer:       signer,
+		Client:       client,
+	}, ServiceConfig{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.Proxy(context.Background(), Actor{
+		UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-2 * time.Minute),
+		AuthenticationTransport: AuthenticationTransportBrowserCookie,
+	}, ProxyRequest{
+		EventID: "evt_shanghai", Capability: permissions.ActionQRPrintBulk,
+		ResourceKind: "qr_print_job", ResourceID: "print_1", Method: http.MethodGet,
+		Path: "/internal/v1/events/evt_shanghai/qr-print-jobs/print_1/bulk", RequestID: "req_bulk_print_read",
+		ReauthenticationToken: strings.Repeat("Q", 43),
+	})
+	if err != nil {
+		t.Fatalf("bulk job read rejected: %v", err)
+	}
+	if result.StatusCode != http.StatusOK || reauth.calls != 1 || reauth.action != string(permissions.ActionQRPrintBulk) || reauth.target != target {
+		t.Fatalf("result=%+v reauth=%+v", result, reauth)
+	}
+	if signer.input.Capability != dreamupdelegation.AdministratorCapability(permissions.ActionQRPrintBulk) ||
+		signer.input.RoleBindingID != "binding_super" || signer.input.RoleVersion != 7 || signer.input.ReauthGrantID != "rgr_exact_1" {
+		t.Fatalf("signed input=%+v", signer.input)
+	}
+	if client.input.Method != http.MethodGet || client.input.Path != "/internal/v1/events/evt_shanghai/qr-print-jobs/print_1/bulk" {
+		t.Fatalf("upstream input=%+v", client.input)
 	}
 }
 
@@ -806,33 +969,35 @@ func TestServiceObjectGrantCannotCrossEventsWhenResourceIDCollides(t *testing.T)
 	}
 }
 
-func TestServiceRejectsCrossEventAndStaleChallengeBeforeSigning(t *testing.T) {
+func TestServiceRejectsCrossEventAndUsesCurrentBrowserSessionWithoutSecurityQuestion(t *testing.T) {
 	now := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
 	authorizer := &serviceAuthorizerStub{decision: permissions.Decision{Allowed: true, Role: adminroles.RoleAdmin, BindingID: "binding_1", BindingVersion: 3, ChallengeVersion: 5}}
 	signer := &serviceSignerStub{}
 	service, err := NewService(ServiceDependencies{
-		Authorizer: authorizer,
-		Registry:   serviceRegistryStub{event: adminroles.RegisteredEvent{EventID: "evt_shanghai", Series: "dreamup", Slug: "shanghai", DisplayName: "上海站", Enabled: true}},
-		StepUps:    serviceStepUpStub{state: adminstepup.StepUpState{ID: "asu_review_durable", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, VerifiedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)}},
-		Signer:     signer, Client: &serviceClientStub{},
+		Authorizer:      authorizer,
+		Registry:        serviceRegistryStub{event: adminroles.RegisteredEvent{EventID: "evt_shanghai", Series: "dreamup", Slug: "shanghai", DisplayName: "上海站", Enabled: true}},
+		StepUps:         serviceStepUpStub{},
+		AccountSecurity: &serviceAccountSecurityStub{epoch: 2},
+		Signer:          signer, Client: &serviceClientStub{},
 	}, ServiceConfig{Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.Proxy(context.Background(), Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-time.Minute)}, ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionApplicationReadBasic, ResourceKind: "application", ResourceID: "app_1", Method: http.MethodGet, Path: "/internal/v1/events/evt_other/applications/app_1", RequestID: "req_12345678"})
+	actor := Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-time.Minute), SecurityEpoch: 2, AuthenticationTransport: AuthenticationTransportBrowserCookie}
+	_, err = service.Proxy(context.Background(), actor, ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionApplicationReadBasic, ResourceKind: "application", ResourceID: "app_1", Method: http.MethodGet, Path: "/internal/v1/events/evt_other/applications/app_1", RequestID: "req_12345678"})
 	if !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("cross-event error=%v", err)
 	}
-	_, err = service.Proxy(context.Background(), Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-time.Minute)}, ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionApplicationReadBasic, ResourceKind: "application", ResourceID: "app_1", Method: http.MethodGet, Path: "/internal/v1/events/evt_shanghai/applications/app_1", RequestID: "req_12345678"})
-	if !errors.Is(err, ErrStepUpRequired) {
-		t.Fatalf("challenge drift error=%v", err)
+	_, err = service.Proxy(context.Background(), actor, ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionApplicationReadBasic, ResourceKind: "application", ResourceID: "app_1", Method: http.MethodGet, Path: "/internal/v1/events/evt_shanghai/applications/app_1", RequestID: "req_12345678"})
+	if err != nil {
+		t.Fatalf("current browser session rejected: %v", err)
 	}
-	if signer.input.EventID != "" {
-		t.Fatal("stale challenge was signed")
+	if signer.input.EventID != "evt_shanghai" || signer.input.ChallengeVersion != 5 || !signer.input.StepUpAt.Equal(actor.AuthenticatedAt) || signer.input.ReauthGrantID != "" {
+		t.Fatalf("browser session assertion=%+v", signer.input)
 	}
 }
 
-func TestServiceNeverBypassesSessionBoundStepUpForPrivilegedRoles(t *testing.T) {
+func TestServiceNeverBypassesEpochBoundSessionForPrivilegedRoles(t *testing.T) {
 	now := time.Date(2026, 8, 27, 5, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name             string
@@ -855,12 +1020,12 @@ func TestServiceNeverBypassesSessionBoundStepUpForPrivilegedRoles(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = service.Proxy(context.Background(), Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-time.Minute)}, ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionApplicationReview, ResourceKind: "application", ResourceID: "app_1", Method: http.MethodPut, Path: "/internal/v1/events/evt_shanghai/applications/app_1/reviews/me", Body: json.RawMessage(`{"recommendation":"accept"}`), RequestID: "req_12345678", IdempotencyKey: "0123456789abcdef0123456789abcdef", IfMatch: `"1"`})
-			if !errors.Is(err, ErrStepUpRequired) {
-				t.Fatalf("expected step-up required, got %v", err)
+			_, err = service.Proxy(context.Background(), Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-time.Minute), AuthenticationTransport: AuthenticationTransportNativeMiniProgramBearer}, ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionApplicationReview, ResourceKind: "application", ResourceID: "app_1", Method: http.MethodPut, Path: "/internal/v1/events/evt_shanghai/applications/app_1/reviews/me", Body: json.RawMessage(`{"recommendation":"accept"}`), RequestID: "req_12345678", IdempotencyKey: "0123456789abcdef0123456789abcdef", IfMatch: `"1"`})
+			if !errors.Is(err, ErrAuthenticationRequired) {
+				t.Fatalf("expected authentication required, got %v", err)
 			}
 			if signer.input.EventID != "" {
-				t.Fatal("request was signed without real session-bound step-up")
+				t.Fatal("request was signed without a current epoch-bound session")
 			}
 		})
 	}
@@ -988,6 +1153,9 @@ type serviceOutboxStub struct {
 	phases   []adminstore.DeliveryPhase
 	settled  bool
 	failed   bool
+	aborted  bool
+	renewed  bool
+	renewErr error
 	deferred bool
 	result   adminstore.AllowlistedResult
 	getErr   error
@@ -1012,6 +1180,10 @@ func (s *serviceOutboxStub) MarkDeliveryPhase(_ context.Context, _ string, _ int
 	s.phases = append(s.phases, phase)
 	return nil
 }
+func (s *serviceOutboxStub) RenewClaim(_ context.Context, _ string, _ int64, _ string, _ time.Duration) error {
+	s.renewed = true
+	return s.renewErr
+}
 func (s *serviceOutboxStub) Settle(_ context.Context, _ string, _ int64, _ string, result adminstore.AllowlistedResult, _ time.Time) error {
 	s.settled = true
 	s.result = result
@@ -1019,6 +1191,13 @@ func (s *serviceOutboxStub) Settle(_ context.Context, _ string, _ int64, _ strin
 }
 func (s *serviceOutboxStub) Fail(_ context.Context, _ string, _ int64, _ string, result adminstore.AllowlistedResult, _ time.Time) error {
 	s.failed = true
+	s.result = result
+	return nil
+}
+func (s *serviceOutboxStub) AbortBeforeSend(_ context.Context, _ string, _ int64, _ string, result adminstore.AllowlistedResult, _ time.Time) error {
+	s.aborted = true
+	s.item.State = "failed"
+	s.item.DeliveryPhase = adminstore.DeliveryPhaseNotSent
 	s.result = result
 	return nil
 }
@@ -1076,6 +1255,7 @@ func TestServicePersistsAndSettlesMutationIntentAroundOneUpstreamCall(t *testing
 		StepUps:      serviceStepUpStub{state: adminstepup.StepUpState{ID: "asu_review_outbox", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, VerifiedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)}},
 		ReauthGrants: &serviceReauthStub{data: validServiceGrant(now, string(permissions.ActionApplicationReview), dreamUPGrantTarget("evt_shanghai", "application", "app_1"))},
 		Signer:       &serviceSignerStub{}, Client: &serviceClientStub{}, UnitOfWork: serviceUOWStub{outbox}, Fingerprinter: fingerprinter,
+		ReasonUnitOfWork: reviewReasonUOWStub{&reviewReasonRepositoryStub{}}, ReasonCipher: &reviewReasonCipherStub{},
 	}, ServiceConfig{Now: func() time.Time { return now }, RequireDurableMutations: true, MutationLease: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -1101,6 +1281,131 @@ func TestServicePersistsAndSettlesMutationIntentAroundOneUpstreamCall(t *testing
 	}
 }
 
+func TestReviewIdentityReasonFailureTerminalizesKnownNotSentIntent(t *testing.T) {
+	now := time.Date(2026, 9, 4, 20, 0, 0, 0, time.UTC)
+	outbox := &serviceOutboxStub{}
+	client := &serviceClientStub{}
+	service, err := NewService(ServiceDependencies{
+		Authorizer: &serviceAuthorizerStub{decision: permissions.Decision{
+			Allowed: true, Role: adminroles.RoleSuperAdmin, BindingID: "binding_super", BindingVersion: 3, ChallengeVersion: 4,
+		}},
+		Registry: serviceRegistryStub{event: adminroles.RegisteredEvent{
+			EventID: "evt_shanghai", Series: "dreamup", Slug: "shanghai", DisplayName: "上海站", Enabled: true,
+		}},
+		StepUps: serviceStepUpStub{},
+		ReauthGrants: &serviceReauthStub{data: validServiceGrant(
+			now, string(permissions.ActionIdentityReadRestricted), dreamUPGrantTarget("evt_shanghai", "application", "app_1"),
+		)},
+		Signer: &serviceSignerStub{}, Client: client,
+		UnitOfWork: outboxUOW(outbox), Fingerprinter: &serviceFingerprinterStub{},
+		ReasonUnitOfWork: reviewReasonUOWStub{repository: nil}, ReasonCipher: &reviewReasonCipherStub{},
+	}, ServiceConfig{Now: func() time.Time { return now }, RequireDurableMutations: true, MutationLease: 30 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := "req_review_identity_reason_failure"
+	_, err = service.Proxy(context.Background(), Actor{
+		UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-time.Minute),
+		AuthenticationTransport: AuthenticationTransportNativeMiniProgramBearer,
+	}, ProxyRequest{
+		EventID: "evt_shanghai", Capability: permissions.ActionIdentityReadRestricted,
+		ResourceKind: "application", ResourceID: "app_1", Method: http.MethodPost,
+		Path:      "/internal/v1/events/evt_shanghai/applications/app_1/review-identity",
+		Body:      []byte(`{"protectedReasonId":"` + ReviewIdentityProtectedReasonID(requestID) + `"}`),
+		RequestID: requestID, IdempotencyKey: strings.Repeat("I", 32), IfMatch: `"1"`, ReauthenticationToken: strings.Repeat("R", 43),
+	})
+	if !errors.Is(err, ErrUpstream) {
+		t.Fatalf("error=%v, want upstream failure", err)
+	}
+	if client.calls != 0 || len(outbox.phases) != 1 || outbox.phases[0] != adminstore.DeliveryPhaseIndeterminate || outbox.settled || outbox.failed || !outbox.aborted || outbox.deferred || outbox.item.State != "failed" || outbox.item.DeliveryPhase != adminstore.DeliveryPhaseNotSent {
+		t.Fatalf("clientCalls=%d phases=%v settled=%v failed=%v aborted=%v deferred=%v item=%+v", client.calls, outbox.phases, outbox.settled, outbox.failed, outbox.aborted, outbox.deferred, outbox.item)
+	}
+}
+
+func TestReviewIdentityRenewsClaimAfterReasonBeforeUpstream(t *testing.T) {
+	now := time.Date(2026, 9, 4, 20, 0, 0, 0, time.UTC)
+	outbox := &serviceOutboxStub{}
+	client := &serviceClientStub{}
+	reasons := &reviewReasonRepositoryStub{}
+	service, err := NewService(ServiceDependencies{
+		Authorizer: &serviceAuthorizerStub{decision: permissions.Decision{
+			Allowed: true, Role: adminroles.RoleSuperAdmin, BindingID: "binding_super", BindingVersion: 3, ChallengeVersion: 4,
+		}},
+		Registry: serviceRegistryStub{event: adminroles.RegisteredEvent{
+			EventID: "evt_shanghai", Series: "dreamup", Slug: "shanghai", DisplayName: "上海站", Enabled: true,
+		}},
+		StepUps: serviceStepUpStub{},
+		ReauthGrants: &serviceReauthStub{data: validServiceGrant(
+			now, string(permissions.ActionIdentityReadRestricted), dreamUPGrantTarget("evt_shanghai", "application", "app_1"),
+		)},
+		Signer: &serviceSignerStub{}, Client: client,
+		UnitOfWork: outboxUOW(outbox), Fingerprinter: &serviceFingerprinterStub{},
+		ReasonUnitOfWork: reviewReasonUOWStub{repository: reasons}, ReasonCipher: &reviewReasonCipherStub{},
+	}, ServiceConfig{Now: func() time.Time { return now }, RequireDurableMutations: true, MutationLease: 30 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := "req_review_identity_success"
+	_, err = service.Proxy(context.Background(), Actor{
+		UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-time.Minute),
+		AuthenticationTransport: AuthenticationTransportNativeMiniProgramBearer,
+	}, ProxyRequest{
+		EventID: "evt_shanghai", Capability: permissions.ActionIdentityReadRestricted,
+		ResourceKind: "application", ResourceID: "app_1", Method: http.MethodPost,
+		Path:      "/internal/v1/events/evt_shanghai/applications/app_1/review-identity",
+		Body:      []byte(`{"protectedReasonId":"` + ReviewIdentityProtectedReasonID(requestID) + `"}`),
+		RequestID: requestID, IdempotencyKey: strings.Repeat("I", 32), IfMatch: `"1"`, ReauthenticationToken: strings.Repeat("R", 43),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reasons.record == nil || reasons.record.TerminalAt == nil || !outbox.renewed || client.calls != 1 || !outbox.settled || outbox.aborted || len(outbox.phases) != 2 || outbox.phases[0] != adminstore.DeliveryPhaseIndeterminate || outbox.phases[1] != adminstore.DeliveryPhaseSent {
+		t.Fatalf("reason=%+v renewed=%v clientCalls=%d phases=%v settled=%v aborted=%v", reasons.record, outbox.renewed, client.calls, outbox.phases, outbox.settled, outbox.aborted)
+	}
+}
+
+func TestReviewIdentityNeverCallsUpstreamWhenClaimRenewalFails(t *testing.T) {
+	now := time.Date(2026, 9, 4, 20, 0, 0, 0, time.UTC)
+	outbox := &serviceOutboxStub{renewErr: adminstore.ErrIdempotencyConflict}
+	client := &serviceClientStub{}
+	service, err := NewService(ServiceDependencies{
+		Authorizer: &serviceAuthorizerStub{decision: permissions.Decision{
+			Allowed: true, Role: adminroles.RoleSuperAdmin, BindingID: "binding_super", BindingVersion: 3, ChallengeVersion: 4,
+		}},
+		Registry: serviceRegistryStub{event: adminroles.RegisteredEvent{
+			EventID: "evt_shanghai", Series: "dreamup", Slug: "shanghai", DisplayName: "上海站", Enabled: true,
+		}},
+		StepUps: serviceStepUpStub{},
+		ReauthGrants: &serviceReauthStub{data: validServiceGrant(
+			now, string(permissions.ActionIdentityReadRestricted), dreamUPGrantTarget("evt_shanghai", "application", "app_1"),
+		)},
+		Signer: &serviceSignerStub{}, Client: client,
+		UnitOfWork: outboxUOW(outbox), Fingerprinter: &serviceFingerprinterStub{},
+		ReasonUnitOfWork: reviewReasonUOWStub{repository: &reviewReasonRepositoryStub{}}, ReasonCipher: &reviewReasonCipherStub{},
+	}, ServiceConfig{Now: func() time.Time { return now }, RequireDurableMutations: true, MutationLease: 30 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := "req_review_identity_renew_failure"
+	_, err = service.Proxy(context.Background(), Actor{
+		UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-time.Minute),
+		AuthenticationTransport: AuthenticationTransportNativeMiniProgramBearer,
+	}, ProxyRequest{
+		EventID: "evt_shanghai", Capability: permissions.ActionIdentityReadRestricted,
+		ResourceKind: "application", ResourceID: "app_1", Method: http.MethodPost,
+		Path:      "/internal/v1/events/evt_shanghai/applications/app_1/review-identity",
+		Body:      []byte(`{"protectedReasonId":"` + ReviewIdentityProtectedReasonID(requestID) + `"}`),
+		RequestID: requestID, IdempotencyKey: strings.Repeat("I", 32), IfMatch: `"1"`, ReauthenticationToken: strings.Repeat("R", 43),
+	})
+	if !errors.Is(err, ErrUpstream) || !outbox.renewed || client.calls != 0 || !outbox.aborted || outbox.settled {
+		t.Fatalf("error=%v renewed=%v clientCalls=%d aborted=%v settled=%v", err, outbox.renewed, client.calls, outbox.aborted, outbox.settled)
+	}
+}
+
+func outboxUOW(outbox *serviceOutboxStub) serviceUOWStub {
+	return serviceUOWStub{outbox: outbox}
+}
+
 func TestExpectedMutationReceiptBindsEveryExposedMutationFamily(t *testing.T) {
 	base := "/internal/v1/events/evt_shanghai"
 	tests := []struct {
@@ -1111,12 +1416,34 @@ func TestExpectedMutationReceiptBindsEveryExposedMutationFamily(t *testing.T) {
 		{name: "intro", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionContentManage, ResourceKind: "event_content", ResourceID: "evt_shanghai", Method: http.MethodPut, Path: base + "/content/intro", Body: json.RawMessage(`{"action":"publish"}`)}, want: mutationReceiptExpectation{Action: "event_content.intro.publish", TargetType: "event_content"}},
 		{name: "new announcement", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionContentManage, ResourceKind: "event_content", ResourceID: "evt_shanghai", Method: http.MethodPost, Path: base + "/announcements", Body: json.RawMessage(`{"action":"save_draft"}`)}, want: mutationReceiptExpectation{Action: "event_content.announcement.save_draft", TargetType: "event_content"}},
 		{name: "announcement", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionContentManage, ResourceKind: "event_content", ResourceID: "announcement_1", Method: http.MethodPatch, Path: base + "/announcements/announcement_1", Body: json.RawMessage(`{"action":"archive"}`)}, want: mutationReceiptExpectation{Action: "event_content.announcement.archive", TargetType: "event_content", TargetID: "announcement_1"}},
+		{name: "announcement background image upload intent", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionContentManage, ResourceKind: "event_content", ResourceID: "evt_shanghai", Method: http.MethodPost, Path: base + "/announcement-background-image-upload-intents"}, want: mutationReceiptExpectation{Action: "admin_image_upload_intent.created", TargetType: "admin_image_upload_intent"}},
+		{name: "splash image upload intent", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionContentManage, ResourceKind: "splash_poster", ResourceID: "evt_shanghai", Method: http.MethodPost, Path: base + "/splash-poster-image-upload-intents"}, want: mutationReceiptExpectation{Action: "admin_image_upload_intent.created", TargetType: "admin_image_upload_intent"}},
+		{name: "splash publish", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionContentManage, ResourceKind: "splash_poster", ResourceID: "evt_shanghai", Method: http.MethodPut, Path: base + "/splash-ad", Body: json.RawMessage(`{"action":"publish"}`)}, want: mutationReceiptExpectation{Action: "splash_poster.published", TargetType: "splash_poster"}},
+		{name: "splash disable", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionContentManage, ResourceKind: "splash_poster", ResourceID: "evt_shanghai", Method: http.MethodPut, Path: base + "/splash-ad", Body: json.RawMessage(`{"action":"disable"}`)}, want: mutationReceiptExpectation{Action: "splash_poster.disabled", TargetType: "splash_poster"}},
 		{name: "contact", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionContactSubmissionManage, ResourceKind: "contact_submission", ResourceID: "contact_1", Method: http.MethodPatch, Path: base + "/contact-submissions/contact_1/resolution"}, want: mutationReceiptExpectation{Action: "contact_submission.resolved", TargetType: "contact_submission", TargetID: "contact_1"}},
+		{name: "review identity", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionIdentityReadRestricted, ResourceKind: "application", ResourceID: "app_1", Method: http.MethodPost, Path: base + "/applications/app_1/review-identity"}, want: mutationReceiptExpectation{Action: "identity.read_restricted", TargetType: "application", TargetID: "app_1"}},
 		{name: "review", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionApplicationReview, ResourceKind: "application", ResourceID: "app_1", Method: http.MethodPut, Path: base + "/applications/app_1/reviews/me"}, want: mutationReceiptExpectation{Action: "application.review_saved", TargetType: "application", TargetID: "app_1"}},
 		{name: "approve", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionApplicationApproveAdmission, ResourceKind: "application", ResourceID: "app_1", Method: http.MethodPut, Path: base + "/applications/app_1/admission-consensus/approval"}, want: mutationReceiptExpectation{Action: "application.admission_approved", TargetType: "application", TargetID: "app_1"}},
 		{name: "withdraw", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionApplicationApproveAdmission, ResourceKind: "application", ResourceID: "app_1", Method: http.MethodDelete, Path: base + "/applications/app_1/admission-consensus/approval"}, want: mutationReceiptExpectation{Action: "application.admission_approval_withdrawn", TargetType: "application", TargetID: "app_1"}},
 		{name: "decision", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionApplicationDecide, ResourceKind: "application", ResourceID: "app_1", Method: http.MethodPatch, Path: base + "/applications/app_1/decision", Body: json.RawMessage(`{"status":"waitlisted"}`)}, want: mutationReceiptExpectation{Action: "application.waitlisted", TargetType: "application", TargetID: "app_1"}},
 		{name: "checkin", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionCheckinScan, ResourceKind: "event", ResourceID: "evt_shanghai", Method: http.MethodPost, Path: base + "/checkins/scan"}, want: mutationReceiptExpectation{Action: "checkin.completed", TargetType: "application"}},
+		{name: "point create", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionInspectionPointManage, ResourceKind: "event", ResourceID: "evt_shanghai", Method: http.MethodPost, Path: base + "/inspection-points"}, want: mutationReceiptExpectation{Action: "inspection_point.created", TargetType: "inspection_point"}},
+		{name: "point image upload intent", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionInspectionPointManage, ResourceKind: "event", ResourceID: "evt_shanghai", Method: http.MethodPost, Path: base + "/inspection-point-image-upload-intents"}, want: mutationReceiptExpectation{Action: "admin_image_upload_intent.created", TargetType: "admin_image_upload_intent"}},
+		{name: "point update", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionInspectionPointManage, ResourceKind: "inspection_point", ResourceID: "point_1", Method: http.MethodPatch, Path: base + "/inspection-points/point_1"}, want: mutationReceiptExpectation{Action: "inspection_point.updated", TargetType: "inspection_point", TargetID: "point_1"}},
+		{name: "point code", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionInspectionPointManage, ResourceKind: "inspection_point", ResourceID: "point_1", Method: http.MethodPost, Path: base + "/inspection-points/point_1/code-rotations"}, want: mutationReceiptExpectation{Action: "inspection_point.code_rotated", TargetType: "inspection_point", TargetID: "point_1"}},
+		{name: "inspection", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionInspectionPerform, ResourceKind: "inspection_point", ResourceID: "point_1", Method: http.MethodPost, Path: base + "/inspection-points/point_1/inspections"}, want: mutationReceiptExpectation{Action: "inspection_attempt.started", TargetType: "inspection_attempt"}},
+		{name: "inspection photo finalize", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionInspectionPerform, ResourceKind: "inspection_photo_upload", ResourceID: "upload_1", Method: http.MethodPost, Path: base + "/inspection-photo-uploads/upload_1/finalize"}, want: mutationReceiptExpectation{Action: "inspection.completed", TargetType: "inspection_photo_upload", TargetID: "upload_1"}},
+		{name: "asset create", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionAssetManage, ResourceKind: "event", ResourceID: "evt_shanghai", Method: http.MethodPost, Path: base + "/assets"}, want: mutationReceiptExpectation{Action: "event_asset.created", TargetType: "event_asset"}},
+		{name: "asset image upload intent", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionAssetManage, ResourceKind: "event", ResourceID: "evt_shanghai", Method: http.MethodPost, Path: base + "/asset-image-upload-intents"}, want: mutationReceiptExpectation{Action: "admin_image_upload_intent.created", TargetType: "admin_image_upload_intent"}},
+		{name: "asset update", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionAssetManage, ResourceKind: "event_asset", ResourceID: "asset_1", Method: http.MethodPatch, Path: base + "/assets/asset_1"}, want: mutationReceiptExpectation{Action: "event_asset.updated", TargetType: "event_asset", TargetID: "asset_1"}},
+		{name: "asset code", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionAssetCodeRotate, ResourceKind: "asset_unit", ResourceID: "unit_1", Method: http.MethodPost, Path: base + "/asset-units/unit_1/code-rotations"}, want: mutationReceiptExpectation{Action: "asset_unit.code_rotated", TargetType: "asset_unit", TargetID: "unit_1"}},
+		{name: "inventory", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionAssetInventoryAdjust, ResourceKind: "asset_unit", ResourceID: "unit_1", Method: http.MethodPost, Path: base + "/asset-units/unit_1/inventory-adjustments"}, want: mutationReceiptExpectation{Action: "asset_unit.inventory_adjusted", TargetType: "asset_unit", TargetID: "unit_1"}},
+		{name: "reservation", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionAssetReservationManage, ResourceKind: "asset_reservation", ResourceID: "reservation_1", Method: http.MethodPatch, Path: base + "/asset-reservations/reservation_1"}, want: mutationReceiptExpectation{Action: "asset_reservation.updated", TargetType: "asset_reservation", TargetID: "reservation_1"}},
+		{name: "checkout", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionAssetCustodyTransfer, ResourceKind: "asset_unit", ResourceID: "unit_1", Method: http.MethodPost, Path: base + "/asset-units/unit_1/checkout"}, want: mutationReceiptExpectation{Action: "asset_unit.checked_out", TargetType: "asset_unit", TargetID: "unit_1"}},
+		{name: "personal asset", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionPersonalAssetAssignment, ResourceKind: "personal_asset_assignment", ResourceID: "assignment_1", Method: http.MethodPatch, Path: base + "/personal-asset-assignments/assignment_1"}, want: mutationReceiptExpectation{Action: "personal_asset_assignment.updated", TargetType: "personal_asset_assignment", TargetID: "assignment_1"}},
+		{name: "personal image upload intent", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionPersonalAssetAssignment, ResourceKind: "event", ResourceID: "evt_shanghai", Method: http.MethodPost, Path: base + "/personal-asset-image-upload-intents"}, want: mutationReceiptExpectation{Action: "admin_image_upload_intent.created", TargetType: "admin_image_upload_intent"}},
+		{name: "single print", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionQRPrintSingle, ResourceKind: "entity_code", ResourceID: "code_1", Method: http.MethodPost, Path: base + "/entity-codes/code_1/print-jobs"}, want: mutationReceiptExpectation{Action: "qr_print_job.created", TargetType: "qr_print_job"}},
+		{name: "bulk print", input: ProxyRequest{EventID: "evt_shanghai", Capability: permissions.ActionQRPrintBulk, ResourceKind: "event", ResourceID: "evt_shanghai", Method: http.MethodPost, Path: base + "/qr-print-jobs/bulk"}, want: mutationReceiptExpectation{Action: "qr_print_job.created", TargetType: "qr_print_job"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1126,10 +1453,20 @@ func TestExpectedMutationReceiptBindsEveryExposedMutationFamily(t *testing.T) {
 			}
 		})
 	}
-	invalid := tests[4].input
+	invalid := tests[7].input
 	invalid.Path = base + "/applications/app_2/reviews/me"
 	if _, err := expectedMutationReceipt(invalid); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("mismatched route binding error=%v", err)
+	}
+	for _, invalidSplash := range []ProxyRequest{
+		{EventID: "evt_shanghai", Capability: permissions.ActionContentManage, ResourceKind: "splash_poster", ResourceID: "evt_other", Method: http.MethodPut, Path: base + "/splash-ad", Body: json.RawMessage(`{"action":"publish"}`)},
+		{EventID: "evt_shanghai", Capability: permissions.ActionContentManage, ResourceKind: "splash_poster", ResourceID: "evt_shanghai", Method: http.MethodPut, Path: base + "/splash-ad", Body: json.RawMessage(`{"action":"archive"}`)},
+		{EventID: "evt_shanghai", Capability: permissions.ActionContentManage, ResourceKind: "splash_poster", ResourceID: "evt_shanghai", Method: http.MethodPut, Path: base + "/splash-ad/extra", Body: json.RawMessage(`{"action":"disable"}`)},
+		{EventID: "evt_shanghai", Capability: permissions.ActionContentManage, ResourceKind: "event_content", ResourceID: "evt_shanghai", Method: http.MethodPut, Path: base + "/splash-ad", Body: json.RawMessage(`{"action":"publish"}`)},
+	} {
+		if _, err := expectedMutationReceipt(invalidSplash); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("invalid splash receipt binding accepted: input=%+v err=%v", invalidSplash, err)
+		}
 	}
 }
 
@@ -1159,6 +1496,7 @@ func TestServicePersistsDeterministicUpstreamFailureWithoutReissuingMutation(t *
 		StepUps:      serviceStepUpStub{state: adminstepup.StepUpState{ID: "asu_failure", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, VerifiedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)}},
 		ReauthGrants: &serviceReauthStub{data: validServiceGrant(now, string(permissions.ActionApplicationReview), dreamUPGrantTarget("evt_shanghai", "application", "app_1"))},
 		Signer:       &serviceSignerStub{}, Client: &serviceClientStub{err: ErrConflict}, UnitOfWork: serviceUOWStub{outbox}, Fingerprinter: &serviceFingerprinterStub{},
+		ReasonUnitOfWork: reviewReasonUOWStub{&reviewReasonRepositoryStub{}}, ReasonCipher: &reviewReasonCipherStub{},
 	}, ServiceConfig{Now: func() time.Time { return now }, RequireDurableMutations: true})
 	if err != nil {
 		t.Fatal(err)
@@ -1181,6 +1519,7 @@ func TestServiceDefersAmbiguousUpstreamFailureToAuthoritativeReceipt(t *testing.
 		StepUps:      serviceStepUpStub{state: adminstepup.StepUpState{ID: "asu_ambiguous", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, VerifiedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)}},
 		ReauthGrants: &serviceReauthStub{data: validServiceGrant(now, string(permissions.ActionApplicationReview), dreamUPGrantTarget("evt_shanghai", "application", "app_1"))},
 		Signer:       &serviceSignerStub{}, Client: &serviceClientStub{err: ErrUpstream}, UnitOfWork: serviceUOWStub{outbox}, Fingerprinter: &serviceFingerprinterStub{},
+		ReasonUnitOfWork: reviewReasonUOWStub{&reviewReasonRepositoryStub{}}, ReasonCipher: &reviewReasonCipherStub{},
 	}, ServiceConfig{Now: func() time.Time { return now }, RequireDurableMutations: true})
 	if err != nil {
 		t.Fatal(err)
@@ -1200,26 +1539,28 @@ func TestServiceOperationStatusIsAuthoritativeActorBoundAndNoBodyReplay(t *testi
 		TerminalAt: &terminal, UpdatedAt: terminal,
 	}}
 	service, err := NewService(ServiceDependencies{
-		Authorizer: &serviceAuthorizerStub{decision: permissions.Decision{Allowed: true, Role: adminroles.RoleAdmin, BindingID: "binding_1", BindingVersion: 3, ChallengeVersion: 4}},
-		Registry:   serviceRegistryStub{event: adminroles.RegisteredEvent{EventID: "evt_shanghai", Series: "dreamup", Slug: "shanghai", DisplayName: "上海站", Enabled: true}},
-		StepUps:    serviceStepUpStub{state: adminstepup.StepUpState{ID: "asu_status", SessionID: "session_1", UserID: "user_1", ChallengeVersion: 4, VerifiedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)}},
-		Signer:     &serviceSignerStub{}, Client: &serviceClientStub{}, UnitOfWork: serviceUOWStub{outbox},
+		Authorizer:      &serviceAuthorizerStub{decision: permissions.Decision{Allowed: true, Role: adminroles.RoleAdmin, BindingID: "binding_1", BindingVersion: 3, ChallengeVersion: 4}},
+		Registry:        serviceRegistryStub{event: adminroles.RegisteredEvent{EventID: "evt_shanghai", Series: "dreamup", Slug: "shanghai", DisplayName: "上海站", Enabled: true}},
+		StepUps:         serviceStepUpStub{},
+		AccountSecurity: &serviceAccountSecurityStub{epoch: 4},
+		Signer:          &serviceSignerStub{}, Client: &serviceClientStub{}, UnitOfWork: serviceUOWStub{outbox},
 	}, ServiceConfig{Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, err := service.OperationStatus(context.Background(), Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-2 * time.Minute)}, "evt_shanghai", "0123456789abcdef0123456789abcdef")
+	actor := Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-2 * time.Minute), SecurityEpoch: 4, AuthenticationTransport: AuthenticationTransportBrowserCookie}
+	status, err := service.OperationStatus(context.Background(), actor, "evt_shanghai", "0123456789abcdef0123456789abcdef")
 	if err != nil || status.Status != "succeeded" || status.RequestID != ":trace-admin_123" || status.ResponseStatus == nil || *status.ResponseStatus != 200 || status.ResultVersion == nil || *status.ResultVersion != 7 || !status.UpdatedAt.Equal(terminal) {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
 
 	outbox.item.Result.Payload["actor_id"] = "user_other"
-	if _, err := service.OperationStatus(context.Background(), Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-2 * time.Minute)}, "evt_shanghai", "0123456789abcdef0123456789abcdef"); !errors.Is(err, ErrNotFound) {
+	if _, err := service.OperationStatus(context.Background(), actor, "evt_shanghai", "0123456789abcdef0123456789abcdef"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-actor status error=%v", err)
 	}
 	outbox.item.Result.Payload["actor_id"] = "user_1"
 	outbox.getErr = adminstore.ErrOperationNotFound
-	if _, err := service.OperationStatus(context.Background(), Actor{UserID: "user_1", SessionID: "session_1", AuthenticatedAt: now.Add(-2 * time.Minute)}, "evt_shanghai", "0123456789abcdef0123456789abcdef"); !errors.Is(err, ErrNotFound) {
+	if _, err := service.OperationStatus(context.Background(), actor, "evt_shanghai", "0123456789abcdef0123456789abcdef"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing status error=%v", err)
 	}
 }

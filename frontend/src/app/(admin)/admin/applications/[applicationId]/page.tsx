@@ -32,11 +32,7 @@ export default async function ApplicationDetailPage({
   params: Promise<{ applicationId: string }>;
 }) {
   const { applicationId } = await params;
-  const [detail, availableScopes, permissions] = await Promise.all([
-    serverQueries.getApplicationDetail(applicationId),
-    serverQueries.getAvailableScopes(),
-    serverQueries.getCurrentPermissions(),
-  ]);
+  const detail = await serverQueries.getApplicationDetail(applicationId);
 
   if (!detail) {
     notFound();
@@ -44,11 +40,7 @@ export default async function ApplicationDetailPage({
 
   return (
     <Suspense>
-      <ApplicationDetail
-        detail={detail}
-        availableScopes={availableScopes}
-        canManage={permissions.applicationManage}
-      />
+      <ApplicationDetail detail={detail} />
     </Suspense>
   );
 }

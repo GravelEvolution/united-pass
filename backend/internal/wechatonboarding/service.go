@@ -69,10 +69,11 @@ func NewService(verifier ProofVerifier, bindings BindingReader, accounts Account
 	return &Service{verifier: verifier, bindings: bindings, accounts: accounts, password: password, creator: creator, store: store, rate: rate, completionRate: completionRate, cfg: cfg}
 }
 
-// Begin proves wx.login on the server. An optional phone code is best effort:
-// its failure produces a proof with no phone, never a client-visible second
-// authorization stage. Already-linked active users are restored directly;
-// every other identity receives a short-lived single-use onboarding token.
+// Begin proves wx.login and getPhoneNumber on the server. A verified phone is
+// required before any account can be created or any WeChat-authenticated
+// session can be issued. Already-linked active users first reconcile that
+// phone against the exact same linked account; every other identity receives
+// a short-lived single-use onboarding token.
 func (s *Service) Begin(ctx context.Context, input BeginInput) (BeginResult, error) {
 	if !s.ready() {
 		return BeginResult{}, ErrUnavailable
@@ -82,6 +83,9 @@ func (s *Service) Begin(ctx context.Context, input BeginInput) (BeginResult, err
 	}
 	proof, err := s.verifier.VerifyOnboarding(ctx, input.LoginCode, input.PhoneCode)
 	if err != nil {
+		if errors.Is(err, wechat.ErrPhoneRequired) {
+			return BeginResult{}, ErrPhoneRequired
+		}
 		if errors.Is(err, wechat.ErrInvalidCode) || errors.Is(err, wechat.ErrRejected) {
 			return BeginResult{}, ErrInvalidInput
 		}
@@ -89,6 +93,9 @@ func (s *Service) Begin(ctx context.Context, input BeginInput) (BeginResult, err
 	}
 	if !validProof(proof) {
 		return BeginResult{}, ErrUnavailable
+	}
+	if proof.Phone == "" {
+		return BeginResult{}, ErrPhoneRequired
 	}
 
 	var pendingUserID identity.UserID
@@ -106,6 +113,18 @@ func (s *Service) Begin(ctx context.Context, input BeginInput) (BeginResult, err
 		}
 		switch {
 		case user.Status.CanAuthenticate():
+			if err := s.accounts.CompleteLinkedWithVerifiedPhone(ctx, user.ID, proof.TenantID, proof.Subject, proof.Phone); err != nil {
+				switch {
+				case errors.Is(err, ErrPhoneConflict):
+					return BeginResult{}, ErrPhoneConflict
+				case errors.Is(err, ErrIdentityConflict), errors.Is(err, identity.ErrIdentityLinkConflict):
+					return BeginResult{}, ErrIdentityConflict
+				case errors.Is(err, ErrAccountInactive), errors.Is(err, identity.ErrUserNotFound):
+					return BeginResult{}, ErrAccountInactive
+				default:
+					return BeginResult{}, ErrUnavailable
+				}
+			}
 			return BeginResult{Status: StatusAuthenticated, UserID: user.ID}, nil
 		case user.Status == identity.UserStatusPending && !user.EmailVerified:
 			// A previous provider or Redis failure may have committed only the
@@ -138,9 +157,13 @@ func (s *Service) Begin(ctx context.Context, input BeginInput) (BeginResult, err
 }
 
 // Complete first claims and rate-limits a valid onboarding token, then looks
-// up the normalized email. Existing accounts use their stable user ID for
-// password verification; legacy passwords are intentionally not subjected to
-// the new-account strength policy. New emails alone pass ValidateCreate.
+// up the normalized email. Active existing-account binding is bounded by the
+// verified WeChat subject, client/token and stable target-account buckets plus
+// the challenge attempt ceiling; it must not consume public new-account
+// creation budgets. Exact pending-account recovery remains bound to the
+// encrypted target user, verified subject and client/subject limits. Only a
+// genuinely new email that first passes the current ValidateCreate policy
+// advances the public creation buckets.
 func (s *Service) Complete(ctx context.Context, input CompleteInput) (CompleteResult, error) {
 	if !s.ready() {
 		return CompleteResult{}, ErrUnavailable
@@ -159,10 +182,6 @@ func (s *Service) Complete(ctx context.Context, input CompleteInput) (CompleteRe
 			_ = s.store.Release(context.WithoutCancel(ctx), input.OnboardingToken, claimID)
 		}
 	}()
-	if err := s.checkCompletionRate(ctx, input.ClientIP, input.ClientNetwork, normalizedEmail); err != nil {
-		return CompleteResult{}, err
-	}
-
 	snapshot, lookupErr := s.accounts.FindByNormalizedEmail(ctx, normalizedEmail)
 	switch {
 	case lookupErr == nil:
@@ -173,7 +192,11 @@ func (s *Service) Complete(ctx context.Context, input CompleteInput) (CompleteRe
 				release = false
 				return CompleteResult{}, ErrIdentityConflict
 			}
-			result, createErr := s.completePendingRegistration(ctx, input.OnboardingToken, claimID, challenge, input, normalizedEmail)
+			registrationInput, validationErr := validatePendingRegistration(challenge, input, normalizedEmail)
+			if validationErr != nil {
+				return CompleteResult{}, validationErr
+			}
+			result, createErr := s.completePendingRegistration(ctx, input.OnboardingToken, claimID, challenge, registrationInput)
 			if createErr == nil {
 				release = false
 			}
@@ -190,7 +213,21 @@ func (s *Service) Complete(ctx context.Context, input CompleteInput) (CompleteRe
 			release = false
 			return CompleteResult{}, ErrIdentityConflict
 		}
-		result, createErr := s.completePendingRegistration(ctx, input.OnboardingToken, claimID, challenge, input, normalizedEmail)
+		// Validate the new-account profile and credential before charging any
+		// public budget. Otherwise malformed profiles and weak passwords could
+		// exhaust the normalized-email bucket without being creatable.
+		registrationInput, validationErr := validatePendingRegistration(challenge, input, normalizedEmail)
+		if validationErr != nil {
+			return CompleteResult{}, validationErr
+		}
+		// The email lookup has established that this is a valid new-account
+		// path. Charge the ordinary creation buckets here, rather than before
+		// lookup, so an existing user's password or MFA retries cannot exhaust
+		// the public registration allowance.
+		if err := s.checkNewAccountCreationRate(ctx, input.ClientIP, input.ClientNetwork, normalizedEmail); err != nil {
+			return CompleteResult{}, err
+		}
+		result, createErr := s.completePendingRegistration(ctx, input.OnboardingToken, claimID, challenge, registrationInput)
 		if createErr == nil {
 			release = false
 		}
@@ -202,7 +239,12 @@ func (s *Service) Complete(ctx context.Context, input CompleteInput) (CompleteRe
 	}
 }
 
-func (s *Service) completePendingRegistration(ctx context.Context, rawToken, claimID string, challenge ChallengeData, input CompleteInput, normalizedEmail string) (CompleteResult, error) {
+func validatePendingRegistration(challenge ChallengeData, input CompleteInput, normalizedEmail string) (registration.CreateInput, error) {
+	// Defense in depth for challenges minted before phone-required onboarding
+	// was enabled: an identity-only proof can never reserve a new account.
+	if challenge.Phone == "" {
+		return registration.CreateInput{}, ErrPhoneRequired
+	}
 	// New-account validation happens only after the unique-email lookup so
 	// historic passwords remain valid on the active-account merge branch.
 	registrationInput := registration.CreateInput{
@@ -210,14 +252,21 @@ func (s *Service) completePendingRegistration(ctx context.Context, rawToken, cla
 		Password: input.Password, AcceptedTerms: input.AcceptedTerms, RequestID: input.RequestID,
 	}
 	if err := registration.ValidateCreate(registrationInput); err != nil {
-		return CompleteResult{}, ErrInvalidInput
+		return registration.CreateInput{}, ErrInvalidInput
 	}
+	return registrationInput, nil
+}
+
+func (s *Service) completePendingRegistration(ctx context.Context, rawToken, claimID string, challenge ChallengeData, registrationInput registration.CreateInput) (CompleteResult, error) {
 	created, err := s.creator.CreateVerified(ctx, wechatregistration.CreateVerifiedInput{
 		Registration:   registrationInput,
 		Proof:          wechat.IdentityProof{TenantID: challenge.TenantID, Subject: challenge.Subject, Phone: challenge.Phone},
 		ExpectedUserID: string(challenge.TargetUserID),
 	})
 	if err != nil {
+		if errors.Is(err, registration.ErrPhoneConflict) {
+			return CompleteResult{}, ErrPhoneConflict
+		}
 		if errors.Is(err, registration.ErrInvalidInput) {
 			return CompleteResult{}, ErrInvalidInput
 		}
@@ -450,8 +499,30 @@ func (s *Service) claimAndRate(ctx context.Context, rawToken, clientIP string, e
 		wantPurpose = MFAChallengePurpose
 	}
 	if challenge.Kind != expected || challenge.Purpose != wantPurpose {
-		_ = s.store.Consume(context.WithoutCancel(ctx), rawToken, claimID)
+		consumeErr := s.store.Consume(context.WithoutCancel(ctx), rawToken, claimID)
+		// A claimed MFA challenge carries a live provider session. A terminal
+		// route/purpose mismatch must revoke it even when Redis cleanup fails;
+		// otherwise a corrupt cleanup obligation could strand that session.
+		if challenge.Kind == ChallengeKindMFA {
+			s.revoke(ctx, challenge.ProviderSessionID)
+		}
+		if consumeErr != nil {
+			return "", ChallengeData{}, ErrUnavailable
+		}
 		return "", ChallengeData{}, ErrChallengeNotFound
+	}
+	// Deployment may leave pre-policy challenges in Redis. Consume every
+	// phone-empty onboarding or MFA challenge before it can reach any account
+	// branch; otherwise an old token could still mint a session or reservation.
+	if challenge.Phone == "" {
+		consumeErr := s.store.Consume(context.WithoutCancel(ctx), rawToken, claimID)
+		if challenge.Kind == ChallengeKindMFA {
+			s.revoke(ctx, challenge.ProviderSessionID)
+		}
+		if consumeErr != nil {
+			return "", ChallengeData{}, ErrUnavailable
+		}
+		return "", ChallengeData{}, ErrPhoneRequired
 	}
 	tokenHash := session.HashToken(rawToken)
 	allowed, retryAfter, rateErr := s.rate.CheckMFA(ctx, clientIP, tokenHash, s.cfg.RateLimit, s.cfg.RateWindow)
@@ -477,7 +548,7 @@ func (s *Service) claimAndRate(ctx context.Context, rawToken, clientIP string, e
 	return claimID, challenge, nil
 }
 
-func (s *Service) checkCompletionRate(ctx context.Context, clientIP, clientNetwork, normalizedEmail string) error {
+func (s *Service) checkNewAccountCreationRate(ctx context.Context, clientIP, clientNetwork, normalizedEmail string) error {
 	if strings.TrimSpace(clientIP) == "" || normalizedEmail == "" {
 		return ErrInvalidInput
 	}

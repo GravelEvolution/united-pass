@@ -19,9 +19,12 @@ import (
 	"time"
 
 	"github.com/GravelEvolution/united-pass/backend/internal/adapters/httpapi/request"
+	"github.com/GravelEvolution/united-pass/backend/internal/adminstepup"
 	"github.com/GravelEvolution/united-pass/backend/internal/applications"
 	"github.com/GravelEvolution/united-pass/backend/internal/auth"
+	"github.com/GravelEvolution/united-pass/backend/internal/dreamupdelegation"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
+	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
 	"github.com/GravelEvolution/united-pass/backend/internal/platform/observability"
 	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
@@ -84,6 +87,14 @@ type ReauthEventRecorder interface {
 	RecordEvent(ctx context.Context, eventType string, actor identity.UserID, appID applications.ApplicationID, clientID applications.OAuthClientID, requestID, operation string, result applications.SecurityEventResult, failureClass string) error
 }
 
+// DreamUPBrowserStepUpWriter stores the short-lived browser freshness proof
+// created by generic password/MFA reauthentication. It reuses the existing
+// session-bound admin_step_up_state table but never reads or writes a retired
+// security-question credential.
+type DreamUPBrowserStepUpWriter interface {
+	PutStepUp(context.Context, adminstepup.StepUpState) error
+}
+
 // SensitiveConsumptionGate validates the consumption of a sensitive
 // capability (reauth grant, enrollment token) against the user's
 // authoritative security state (ADR-0007 Decision 5): a stamp behind the
@@ -98,19 +109,20 @@ type SensitiveConsumptionGate interface {
 // POST /api/v1/auth/reauthentication/mfa. Both routes require a valid
 // session and CSRF token (middleware-enforced).
 type ReauthHandlers struct {
-	authenticator ReauthAuthenticator
-	challenges    ReauthChallengeStore
-	grants        ReauthGrantStore
-	rateChecker   ReauthRateChecker
-	auditor       ReauthEventRecorder
-	challengeTTL  time.Duration
-	grantTTL      time.Duration
-	maxAttempts   int
-	rateLimit     int
-	rateWindow    time.Duration
-	revokeTimeout time.Duration
-	auditTimeout  time.Duration
-	logger        *slog.Logger
+	authenticator  ReauthAuthenticator
+	challenges     ReauthChallengeStore
+	grants         ReauthGrantStore
+	rateChecker    ReauthRateChecker
+	auditor        ReauthEventRecorder
+	dreamUPStepUps DreamUPBrowserStepUpWriter
+	challengeTTL   time.Duration
+	grantTTL       time.Duration
+	maxAttempts    int
+	rateLimit      int
+	rateWindow     time.Duration
+	revokeTimeout  time.Duration
+	auditTimeout   time.Duration
+	logger         *slog.Logger
 }
 
 // NewReauthHandlers builds the reauthentication handlers from configuration.
@@ -120,31 +132,34 @@ func NewReauthHandlers(
 	grants ReauthGrantStore,
 	rateChecker ReauthRateChecker,
 	auditor ReauthEventRecorder,
+	dreamUPStepUps DreamUPBrowserStepUpWriter,
 	challengeTTL, grantTTL time.Duration,
 	maxAttempts, rateLimit int,
 	rateWindow time.Duration,
 	logger *slog.Logger,
 ) *ReauthHandlers {
 	return &ReauthHandlers{
-		authenticator: authenticator,
-		challenges:    challenges,
-		grants:        grants,
-		rateChecker:   rateChecker,
-		auditor:       auditor,
-		challengeTTL:  challengeTTL,
-		grantTTL:      grantTTL,
-		maxAttempts:   maxAttempts,
-		rateLimit:     rateLimit,
-		rateWindow:    rateWindow,
-		revokeTimeout: reauthRevokeTimeout,
-		auditTimeout:  reauthAuditTimeout,
-		logger:        logger,
+		authenticator:  authenticator,
+		challenges:     challenges,
+		grants:         grants,
+		rateChecker:    rateChecker,
+		auditor:        auditor,
+		dreamUPStepUps: dreamUPStepUps,
+		challengeTTL:   challengeTTL,
+		grantTTL:       grantTTL,
+		maxAttempts:    maxAttempts,
+		rateLimit:      rateLimit,
+		rateWindow:     rateWindow,
+		revokeTimeout:  reauthRevokeTimeout,
+		auditTimeout:   reauthAuditTimeout,
+		logger:         logger,
 	}
 }
 
 // reauthRequest is the JSON body for POST /api/v1/auth/reauthentication.
 type reauthRequest struct {
 	Action        string `json:"action"`
+	EventID       string `json:"eventId,omitempty"`
 	ApplicationID string `json:"applicationId"`
 	ClientID      string `json:"clientId"`
 	// Target is the generic action-specific binding (ADR-0006 §4): required
@@ -181,6 +196,9 @@ type reauthChallengeResponse struct {
 // account.sessions.revoke_others is intentionally absent: it is reserved but
 // never accepted, so no grant can ever be minted for it (ADR-0006 §4).
 func isValidReauthAction(action string) bool {
+	if permissions.IsDreamUPHighRiskDelegatedAdministratorAction(permissions.Action(action)) {
+		return true
+	}
 	switch action {
 	case auth.ReauthActionApplicationDelete,
 		auth.ReauthActionClientDelete,
@@ -249,7 +267,19 @@ func (h *ReauthHandlers) Request(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "密码不能为空。", nil)
 		return
 	}
-	if auth.IsAccountReauthAction(req.Action) {
+	if permissions.IsDreamUPHighRiskDelegatedAdministratorAction(permissions.Action(req.Action)) {
+		if req.EventID == "" || req.ApplicationID != "" || req.ClientID != "" {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "活动管理操作需要精确的活动与目标绑定。", nil)
+			return
+		}
+		if _, ok := permissions.ParseDreamUPReauthenticationTarget(req.EventID, permissions.Action(req.Action), req.Target); !ok {
+			writeError(w, r, http.StatusBadRequest, CodeBadRequest, "活动管理操作目标格式不正确。", nil)
+			return
+		}
+	} else if req.EventID != "" {
+		writeError(w, r, http.StatusBadRequest, CodeBadRequest, "该操作不支持活动绑定。", nil)
+		return
+	} else if auth.IsAccountReauthAction(req.Action) {
 		// Account actions bind user + session + action only: application and
 		// client bindings are forbidden (a fake applicationId must never be
 		// accepted), and Target carries the passkeyId exclusively for
@@ -593,6 +623,12 @@ func (h *ReauthHandlers) issueGrant(w http.ResponseWriter, r *http.Request, prin
 		WriteInternalError(w, r)
 		return
 	}
+	dreamUPAction := permissions.IsDreamUPHighRiskDelegatedAdministratorAction(permissions.Action(action))
+	if dreamUPAction && (h.dreamUPStepUps == nil || record.SecurityEpoch < 1) {
+		h.logger.Error("DreamUP reauthentication freshness store unavailable", "requestId", requestID(r))
+		WriteInternalError(w, r)
+		return
+	}
 	token, err := session.GenerateToken()
 	if err != nil {
 		h.logger.Error("reauth grant token generation failed",
@@ -603,8 +639,19 @@ func (h *ReauthHandlers) issueGrant(w http.ResponseWriter, r *http.Request, prin
 		WriteInternalError(w, r)
 		return
 	}
+	grantIDToken, err := session.GenerateToken()
+	if err != nil {
+		h.logger.Error("reauth grant id generation failed",
+			"requestId", requestID(r),
+			"errorClass", observability.ClassifyError(err),
+			"errorDetail", observability.RedactedError(err, 256),
+		)
+		WriteInternalError(w, r)
+		return
+	}
 	now := time.Now().UTC()
 	data := auth.ReauthGrantData{
+		GrantID:       "rgr_" + grantIDToken[:24],
 		UserID:        principal.UserID,
 		SessionID:     string(principal.SessionID),
 		Action:        action,
@@ -638,6 +685,27 @@ func (h *ReauthHandlers) issueGrant(w http.ResponseWriter, r *http.Request, prin
 		h.logger.Error("reauthentication success audit failed", "requestId", requestID(r), "errorClass", observability.ClassifyError(err), "grantCleanupErrorClass", observability.ClassifyError(cleanupErr))
 		WriteInternalError(w, r)
 		return
+	}
+	if dreamUPAction {
+		freshnessTTL := h.grantTTL
+		if freshnessTTL > dreamupdelegation.MaxHighRiskStepUpAge {
+			freshnessTTL = dreamupdelegation.MaxHighRiskStepUpAge
+		}
+		state := adminstepup.StepUpState{
+			ID:               "asu_" + grantIDToken[:24],
+			SessionID:        string(principal.SessionID),
+			UserID:           principal.UserID,
+			ChallengeVersion: int64(record.SecurityEpoch),
+			SecurityEpoch:    int64(record.SecurityEpoch),
+			VerifiedAt:       now,
+			ExpiresAt:        now.Add(freshnessTTL),
+		}
+		if err := h.dreamUPStepUps.PutStepUp(r.Context(), state); err != nil {
+			_, cleanupErr := h.grants.ConsumeGrant(r.Context(), session.HashToken(token))
+			h.logger.Error("DreamUP reauthentication freshness persistence failed", "requestId", requestID(r), "errorClass", observability.ClassifyError(err), "grantCleanupErrorClass", observability.ClassifyError(cleanupErr))
+			WriteInternalError(w, r)
+			return
+		}
 	}
 	writeJSONNoStore(w, r, http.StatusOK, reauthGrantResponse{
 		Status:      "granted",

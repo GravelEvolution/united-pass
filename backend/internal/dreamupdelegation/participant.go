@@ -54,7 +54,7 @@ type participantClaims struct {
 	ResumeByteSize    int64  `json:"resume_byte_size,omitempty"`
 }
 
-var participantPathPattern = regexp.MustCompile(`^/api/v1/events/[a-z0-9][a-z0-9-]{0,79}/me/(application(?:/(?:submit|withdraw|reopen|resume))?|review-progress|admission(?:/(?:entry-code|group-qr))?|checkin|seat-confirm|team(?:/(?:join|leave|dissolve|captain-transfer|requests|plaza-applications|invite-by-email)|/invite-code/rotate|/requests/[A-Za-z0-9._:-]{1,255}/decision)?|feedback|sponsorship-enquiries)$`)
+var participantPathPattern = regexp.MustCompile(`^/api/v1/events/[a-z0-9][a-z0-9-]{0,79}/me/(application(?:/(?:submit|withdraw|reopen|resume))?|review-progress|admission(?:/(?:entry-code|group-qr))?|checkin|seat-confirm|team(?:/(?:join|leave|dissolve|captain-transfer|requests|plaza-applications|invite-by-email)|/invite-code/rotate|/requests/[A-Za-z0-9._:-]{1,255}/decision)?|feedback|sponsorship-enquiries|emergency-reports|code-resolutions|available-assets|asset-reservations(?:/[A-Za-z0-9._:-]{1,255})?|personal-assets)$`)
 
 func NewParticipantSigner(keyring *Keyring, config SignerConfig) (*ParticipantSigner, error) {
 	if err := validateSignerConfig(keyring, config); err != nil || config.TTL > MaxParticipantTTL {
@@ -99,13 +99,13 @@ func validParticipantRequest(input ParticipantAssertion) bool {
 	// Participant routes deliberately have a small fixed surface. GETs are
 	// read-only; mutations are only the existing applicant-owned operations.
 	switch {
-	case input.Method == "GET" && (pathAndQueryHasSuffix(input.PathAndQuery, "/application") || pathAndQueryHasSuffix(input.PathAndQuery, "/review-progress") || pathAndQueryHasSuffix(input.PathAndQuery, "/admission") || pathAndQueryHasSuffix(input.PathAndQuery, "/admission/group-qr") || pathAndQueryHasSuffix(input.PathAndQuery, "/checkin") || pathAndQueryHasSuffix(input.PathAndQuery, "/seat-confirm") || isParticipantTeamRoot(input.PathAndQuery)):
+	case input.Method == "GET" && (pathAndQueryHasSuffix(input.PathAndQuery, "/application") || pathAndQueryHasSuffix(input.PathAndQuery, "/review-progress") || pathAndQueryHasSuffix(input.PathAndQuery, "/admission") || pathAndQueryHasSuffix(input.PathAndQuery, "/admission/group-qr") || pathAndQueryHasSuffix(input.PathAndQuery, "/checkin") || pathAndQueryHasSuffix(input.PathAndQuery, "/seat-confirm") || pathAndQueryHasSuffix(input.PathAndQuery, "/available-assets") || pathAndQueryHasSuffix(input.PathAndQuery, "/asset-reservations") || pathAndQueryHasSuffix(input.PathAndQuery, "/personal-assets") || isParticipantTeamRoot(input.PathAndQuery)):
 		return input.BodySHA256 == SHA256Digest(nil)
 	case input.Method == "PUT" && pathAndQueryHasSuffix(input.PathAndQuery, "/application"):
 		return true
-	case input.Method == "POST" && (pathAndQueryHasSuffix(input.PathAndQuery, "/submit") || pathAndQueryHasSuffix(input.PathAndQuery, "/withdraw") || pathAndQueryHasSuffix(input.PathAndQuery, "/reopen") || pathAndQueryHasSuffix(input.PathAndQuery, "/admission/entry-code") || pathAndQueryHasSuffix(input.PathAndQuery, "/seat-confirm") || isParticipantTeamPostRoute(input.PathAndQuery) || containsParticipantContactSubmission(input.PathAndQuery)):
+	case input.Method == "POST" && (pathAndQueryHasSuffix(input.PathAndQuery, "/submit") || pathAndQueryHasSuffix(input.PathAndQuery, "/withdraw") || pathAndQueryHasSuffix(input.PathAndQuery, "/reopen") || pathAndQueryHasSuffix(input.PathAndQuery, "/admission/entry-code") || pathAndQueryHasSuffix(input.PathAndQuery, "/seat-confirm") || pathAndQueryHasSuffix(input.PathAndQuery, "/code-resolutions") || pathAndQueryHasSuffix(input.PathAndQuery, "/asset-reservations") || pathAndQueryHasSuffix(input.PathAndQuery, "/emergency-reports") || isParticipantTeamPostRoute(input.PathAndQuery) || containsParticipantContactSubmission(input.PathAndQuery)):
 		return true
-	case input.Method == "DELETE" && pathAndQueryHasSuffix(input.PathAndQuery, "/admission/entry-code"):
+	case input.Method == "DELETE" && (pathAndQueryHasSuffix(input.PathAndQuery, "/admission/entry-code") || participantAssetReservationItemPattern.MatchString(input.PathAndQuery)):
 		return true
 	case input.Method == "PATCH" && isParticipantTeamRoot(input.PathAndQuery):
 		return true
@@ -164,3 +164,4 @@ func containsParticipantContactSubmission(path string) bool {
 var participantTeamRootPattern = regexp.MustCompile(`/me/team$`)
 var participantTeamPostPattern = regexp.MustCompile(`/me/team(?:/(?:join|leave|dissolve|captain-transfer|requests|plaza-applications|invite-by-email)|/invite-code/rotate|/requests/[A-Za-z0-9._:-]{1,255}/decision)?$`)
 var participantContactSubmissionPattern = regexp.MustCompile(`/me/(?:feedback|sponsorship-enquiries)$`)
+var participantAssetReservationItemPattern = regexp.MustCompile(`/me/asset-reservations/[A-Za-z0-9._:-]{1,255}$`)

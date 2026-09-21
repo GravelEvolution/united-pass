@@ -9,11 +9,15 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Button, Input, Modal, Toast } from "@douyinfe/semi-ui";
 import { validateContactValue, type ContactKind } from "../utils/contact-validation";
+import {
+  getContactVerificationCodeError,
+  normalizeContactVerificationCode,
+} from "../utils/contact-verification-code";
 import { browserCommands } from "@/lib/api/browser/browser-commands";
-import { preloadAliyunCaptcha, verifyAliyunCaptcha } from "@/lib/security/aliyun-captcha";
+import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import styles from "./account-panels.module.css";
 
 type ContactVerificationModalProps = {
@@ -29,10 +33,6 @@ export function ContactVerificationModal({
   onCancel,
   onVerified,
 }: ContactVerificationModalProps) {
-  useEffect(() => {
-    void preloadAliyunCaptcha();
-  }, []);
-
   const [step, setStep] = useState<"request" | "verify">("request");
   const [contactValue, setContactValue] = useState("");
   const [verificationCode, setVerificationCode] = useState("");
@@ -40,6 +40,7 @@ export function ContactVerificationModal({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [requestId, setRequestId] = useState<string>();
   const isEmail = kind === "email";
+  const mockVerificationCode = isEmail ? "A1B2C3" : "246810";
   const contactLabel = isEmail ? "邮箱地址" : "手机号码";
   const normalizedContactValue = contactValue.trim();
 
@@ -59,20 +60,10 @@ export function ContactVerificationModal({
 
     setFieldError(undefined);
     setIsSubmitting(true);
-
-    let captchaVerifyParam: string;
-    try {
-      captchaVerifyParam = await verifyAliyunCaptcha();
-    } catch {
-      setIsSubmitting(false);
-      Toast.error({ content: "人机验证未通过，请重试。" });
-      return;
-    }
-
     try {
       const result = isEmail
-        ? await browserCommands.requestEmailChange(normalizedContactValue, captchaVerifyParam)
-        : await browserCommands.requestPhoneChange(normalizedContactValue, captchaVerifyParam);
+        ? await browserCommands.requestEmailChange(normalizedContactValue)
+        : await browserCommands.requestPhoneChange(normalizedContactValue);
       setRequestId(result.requestId);
       setStep("verify");
     } catch {
@@ -85,6 +76,17 @@ export function ContactVerificationModal({
   async function handleVerifyCode(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
+    const validationError = getContactVerificationCodeError(kind, verificationCode);
+    if (validationError) {
+      setFieldError(validationError);
+      return;
+    }
+
+    if (USE_MOCK_DATA_SOURCE && verificationCode !== mockVerificationCode) {
+      setFieldError("验证码错误，请输入页面显示的 Mock 验证码。");
+      return;
+    }
+
     if (!requestId) {
       setFieldError("验证请求已失效，请重新发起。");
       return;
@@ -94,9 +96,9 @@ export function ContactVerificationModal({
     setIsSubmitting(true);
     try {
       if (isEmail) {
-        await browserCommands.verifyEmailChange(requestId, verificationCode.trim());
+        await browserCommands.verifyEmailChange(requestId, verificationCode);
       } else {
-        await browserCommands.verifyPhoneChange(requestId, verificationCode.trim());
+        await browserCommands.verifyPhoneChange(requestId, verificationCode);
       }
       onVerified(normalizedContactValue);
     } catch {
@@ -128,7 +130,7 @@ export function ContactVerificationModal({
                 setContactValue(nextValue);
                 setFieldError(undefined);
               }}
-              placeholder={isEmail ? "new-address@example.com" : "13800138000"}
+              placeholder={isEmail ? "new-address@example.com" : "+8613800138000"}
               autoComplete={isEmail ? "email" : "tel"}
               validateStatus={fieldError ? "error" : "default"}
               aria-invalid={Boolean(fieldError)}
@@ -143,7 +145,11 @@ export function ContactVerificationModal({
             )}
           </label>
           <p className={styles.profileNotice}>
-            验证码将通过安全渠道发送到新的{contactLabel}。
+            {USE_MOCK_DATA_SOURCE
+              ? "这是 Mock 验证流程，不会真的发送邮件或短信。"
+              : isEmail
+                ? "验证码将发送到新邮箱；它由 6 位大写字母或数字组成，请按邮件原样输入。"
+                : "验证码将通过短信发送到新手机；请输入短信中的 6 位数字验证码。"}
           </p>
           <div className={styles.profileActions}>
             <Button theme="outline" onClick={onCancel} disabled={isSubmitting}>取消</Button>
@@ -155,17 +161,24 @@ export function ContactVerificationModal({
       ) : (
         <form className={styles.contactForm} method="post" onSubmit={handleVerifyCode}>
           <p className={styles.contactCurrent}>正在验证：<strong>{normalizedContactValue}</strong></p>
+          {USE_MOCK_DATA_SOURCE && (
+            <div className={styles.mockCode} aria-live="polite">
+              <span>本次 Mock 验证码</span>
+              <code>{mockVerificationCode}</code>
+            </div>
+          )}
           <label className={styles.profileField} htmlFor={`${kind}-verification-code`}>
-            <span>输入验证码</span>
+            <span>{isEmail ? "6 位大写字母或数字验证码" : "6 位数字验证码"}</span>
             <Input
               id={`${kind}-verification-code`}
               value={verificationCode}
               onChange={(nextCode) => {
-                setVerificationCode(nextCode.replace(/\D/g, "").slice(0, 6));
+                setVerificationCode(normalizeContactVerificationCode(kind, nextCode));
                 setFieldError(undefined);
               }}
-              placeholder="6 位验证码"
-              inputMode="numeric"
+              placeholder={isEmail ? "例如 A1B2C3" : "例如 246810"}
+              inputMode={isEmail ? "text" : "numeric"}
+              autoCapitalize={isEmail ? "characters" : "none"}
               autoComplete="one-time-code"
               maxLength={6}
               validateStatus={fieldError ? "error" : "default"}

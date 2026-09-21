@@ -66,14 +66,18 @@ func (r *WorkforceRepository) ChangeUserStatus(ctx context.Context, mutation wor
 		eventType = workforce.EventUserDisabled
 		operation = "user.disable"
 	}
+	details := map[string]string{
+		"from_status":               current,
+		"to_status":                 string(mutation.Status),
+		"cleared_department_owners": strconv.Itoa(clearedOwners),
+		"cleared_supervisors":       strconv.Itoa(clearedSupervisors),
+	}
+	if mutation.ActorLabel != "" {
+		details["actor_label"] = mutation.ActorLabel
+	}
 	if err := insertSecurityEvent(ctx, tx, workforceSecurityEvent(eventType,
 		mutation.ActorUserID, "user_id", string(mutation.TargetUserID),
-		mutation.RequestID, operation, applications.SecurityEventSuccess, "", map[string]string{
-			"from_status":               current,
-			"to_status":                 string(mutation.Status),
-			"cleared_department_owners": strconv.Itoa(clearedOwners),
-			"cleared_supervisors":       strconv.Itoa(clearedSupervisors),
-		})); err != nil {
+		mutation.RequestID, operation, applications.SecurityEventSuccess, "", details)); err != nil {
 		return nil, err
 	}
 

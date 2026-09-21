@@ -32,6 +32,7 @@ export default async function LoginPage({
       resumeRequestId={requestId}
       providerError={providerError}
       registrationEnabled={process.env.UP_PUBLIC_REGISTRATION_ENABLED === "true"}
+      qrLoginEnabled={process.env.UP_QR_AUTH_ENABLED === "true"}
       feishuLoginEnabled={loginProviders.some(
         (provider) => provider.providerId === "provider_feishu" && provider.loginEnabled,
       )}

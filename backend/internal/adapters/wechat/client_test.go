@@ -57,17 +57,22 @@ func TestVerifyRegistrationUsesServerSideExchangesAndReturnsOnlyProof(t *testing
 	}
 }
 
-func TestVerifyOnboardingPhoneIsOptionalAndBestEffort(t *testing.T) {
+func TestVerifyOnboardingRequiresVerifiedPhoneAndFailsClosed(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		phoneCode string
-		phoneBody string
-		wantPhone string
-		wantCalls int32
+		name        string
+		phoneCode   string
+		tokenBody   string
+		phoneBody   string
+		phoneStatus int
+		wantPhone   string
+		wantCalls   int32
+		wantErr     error
 	}{
-		{name: "absent", wantCalls: 0},
-		{name: "malformed", phoneCode: " bad", wantCalls: 0},
-		{name: "rejected", phoneCode: "phone-code", phoneBody: `{"errcode":40029}`, wantCalls: 1},
+		{name: "absent", wantCalls: 0, wantErr: wechatdomain.ErrPhoneRequired},
+		{name: "malformed", phoneCode: " bad", wantCalls: 0, wantErr: wechatdomain.ErrPhoneRequired},
+		{name: "access token rejected", phoneCode: "phone-code", tokenBody: `{"errcode":40013}`, wantCalls: 0, wantErr: wechatdomain.ErrUnavailable},
+		{name: "phone rejected", phoneCode: "phone-code", phoneBody: `{"errcode":40029}`, wantCalls: 1, wantErr: wechatdomain.ErrPhoneRequired},
+		{name: "phone unavailable", phoneCode: "phone-code", phoneStatus: http.StatusBadGateway, wantCalls: 1, wantErr: wechatdomain.ErrUnavailable},
 		{name: "verified", phoneCode: "phone-code", phoneBody: `{"phone_info":{"phoneNumber":"+8613800138000"}}`, wantPhone: "+8613800138000", wantCalls: 1},
 		{name: "mainland local normalized", phoneCode: "phone-code", phoneBody: `{"phone_info":{"phoneNumber":"13800138000"}}`, wantPhone: "+8613800138000", wantCalls: 1},
 	} {
@@ -79,9 +84,16 @@ func TestVerifyOnboardingPhoneIsOptionalAndBestEffort(t *testing.T) {
 				case "/sns/jscode2session":
 					_, _ = w.Write([]byte(`{"openid":"open-id","session_key":"secret-session-key"}`))
 				case "/cgi-bin/token":
-					_, _ = w.Write([]byte(`{"access_token":"provider-access-token"}`))
+					body := test.tokenBody
+					if body == "" {
+						body = `{"access_token":"provider-access-token"}`
+					}
+					_, _ = w.Write([]byte(body))
 				case "/wxa/business/getuserphonenumber":
 					phoneCalls.Add(1)
+					if test.phoneStatus != 0 {
+						w.WriteHeader(test.phoneStatus)
+					}
 					_, _ = w.Write([]byte(test.phoneBody))
 				default:
 					t.Fatalf("unexpected path %s", r.URL.Path)
@@ -93,11 +105,17 @@ func TestVerifyOnboardingPhoneIsOptionalAndBestEffort(t *testing.T) {
 				t.Fatal(err)
 			}
 			proof, err := client.VerifyOnboarding(context.Background(), "login-code", test.phoneCode)
-			if err != nil {
-				t.Fatalf("VerifyOnboarding: %v", err)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("VerifyOnboarding error = %v, want %v", err, test.wantErr)
 			}
-			if proof.TenantID != "test-app" || proof.Subject != "open-id" || proof.Phone != test.wantPhone {
+			if errors.Is(test.wantErr, wechatdomain.ErrUnavailable) && errors.Is(err, wechatdomain.ErrPhoneRequired) {
+				t.Fatalf("provider outage was misclassified as phone denial: %v", err)
+			}
+			if test.wantErr == nil && (proof.TenantID != "test-app" || proof.Subject != "open-id" || proof.Phone != test.wantPhone) {
 				t.Fatalf("proof = %#v", proof)
+			}
+			if test.wantErr != nil && proof != (wechatdomain.IdentityProof{}) {
+				t.Fatalf("failed onboarding returned partial proof = %#v", proof)
 			}
 			if phoneCalls.Load() != test.wantCalls {
 				t.Fatalf("phone calls = %d, want %d", phoneCalls.Load(), test.wantCalls)

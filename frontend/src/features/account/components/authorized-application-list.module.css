@@ -70,23 +70,35 @@
   background: linear-gradient(145deg, var(--up-brand-gradient-start), var(--up-brand-gradient-end));
   font-size: 16px;
   font-weight: 700;
+  overflow: hidden;
+}
+
+.appIcon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .grantTitle {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .grantTitle h3 {
   margin: 0;
   font-size: 15px;
+  overflow-wrap: anywhere;
 }
 
 .grantIdentity p {
   margin: 4px 0 0;
   color: var(--up-muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .detailList {
@@ -173,4 +185,5 @@
   .detailList > div:first-child,
   .detailList > div:last-child { padding: 10px 0; }
   .scopeRow { grid-template-columns: 1fr; gap: 6px; }
+  .grantHeader > :global(.semi-button) { width: 100%; min-height: 44px; }
 }

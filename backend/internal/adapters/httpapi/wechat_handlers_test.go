@@ -150,6 +150,20 @@ func TestWeChatBindPhoneRejectsMismatchedBinding(t *testing.T) {
 	}
 }
 
+func TestWeChatBindPhoneReturnsExplicitConflictWithoutAutomaticMerge(t *testing.T) {
+	service := &fakeWeChatService{bindErr: wechat.ErrPhoneConflict}
+	h := NewWeChatHandlers(service, nil, &fakeWeChatRateChecker{allow: true}, 5, time.Minute, testLogger())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/me/wechat/phone", strings.NewReader(`{"loginCode":"login-code","phoneCode":"phone-code"}`))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := WithPrincipal(req.Context(), session.Principal{UserID: identity.UserID("user_01TEST001")})
+	rr := httptest.NewRecorder()
+	h.BindPhone(rr, req.WithContext(ctx))
+	var response ErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil || rr.Code != http.StatusConflict || response.Error.Code != codeWeChatPhoneConflict {
+		t.Fatalf("status=%d error=%#v decode=%v body=%s", rr.Code, response.Error, err, rr.Body.String())
+	}
+}
+
 func TestWeChatLoginFailsClosedOnRateLimitFailure(t *testing.T) {
 	service := &fakeWeChatService{user: testUser()}
 	rate := &failingWeChatRateChecker{}

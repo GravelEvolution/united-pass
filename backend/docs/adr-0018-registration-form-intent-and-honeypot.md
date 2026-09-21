@@ -18,15 +18,21 @@ also failed when a new domain continued to use the same provider-operated MX.
 
 Before submitting a registration, the browser obtains a short-lived, opaque,
 single-use form-intent token. Redis stores only the token digest and binds it to
-digests of the user agent, the trusted client network, and the optional
-server-issued `up_risk_device` cookie. A token has a small minimum age and a
-bounded lifetime. Consumption is atomic, so it cannot be replayed.
+digests of the user agent, trusted client network, exact Origin, and mandatory
+server-issued `up_risk_device` cookie. The first clean submission atomically
+validates those values and pins the normalized email digest before any email
+rate budget or CAPTCHA is allocated. Email and pair creation budgets are spent
+only after the exact tuple completes its interactive challenge. That post-proof
+charge is atomic across every ordinary create bucket and permits one
+same-network, same-email replay if final intent consumption fails transiently;
+it cannot allocate another challenge or change the bound address. A token has a
+small minimum age and a bounded lifetime. Final consumption is atomic, so it
+cannot be replayed.
 
-Device binding is conditional on what existed when the intent was issued. If
-the intent already contains a device digest, any replacement is rejected. If
-it was issued before the browser had a device cookie, the one automatic retry
-after risk step-up may carry the first server-issued device cookie; user-agent
-and trusted-network binding remain strict throughout that transition.
+Intent issuance first establishes the server risk device. Device, Origin,
+user-agent, trusted-network and pinned-email binding are then exact; replacing
+any dimension is rejected before account-creation budgets or risk-provider
+resources are spent.
 
 Intent issuance has its own atomic Redis budget keyed by the trusted client
 network digest: 20 issues per five minutes. This budget is intentionally
@@ -108,19 +114,31 @@ Phone changes do not use this policy.
 
 The interactive CAPTCHA boundary additionally supports a server-selected
 provider pool. Provider identity is stored inside the server challenge; the
-client submits only the challenge ID and opaque proof and cannot select or
-switch providers. An empty or temporarily unavailable pool safely falls back
-to a stronger, satisfiable automation-cost challenge; it never emits an
-interactive challenge that the client cannot complete.
+client submits only the challenge token and provider proof and cannot select or
+switch providers. Public browser registration is pinned to the built-in digit
+image provider and fails closed if it is unavailable; login may still fall back
+to a stronger, satisfiable automation-cost challenge.
 
-This revision supplies two opt-in adapters. Cloudflare Turnstile is eligible
+Before the provider is called, Redis atomically reserves one active challenge
+for the exact form-intent identifier, server-issued device and trusted network.
+Concurrent and repeated submissions receive 429 instead of allocating another
+answer. The winner alone may finalize the challenge, and only that owner may
+release or consume the active slot. Device/network issuance budgets and
+aggregate completion budgets prevent rotating form intents or waiting for a
+challenge expiry from resetting CAPTCHA attempts.
+
+This revision supplies one built-in and two opt-in adapters. The built-in
+`moonstone_image_digits` provider stores its short-lived answer only in Redis
+behind a hashed opaque ID and emits a freshly rasterized base64 PNG with
+per-challenge jitter, rotation, scale, shear and noise; it exposes no source
+glyph paths, fonts, scripts or plaintext answer. Cloudflare Turnstile is eligible
 only in the `global` pool. Its verifier uses the fixed Siteverify endpoint and
 requires HTTP 200, `success`, exact hostname, server-issued action and cdata,
 fresh timestamp, and no error codes. Google reCAPTCHA v3 uses only the fixed
 `recaptcha.net` endpoint and requires HTTP 200, `success`, exact hostname,
 the unique server-issued action, fresh timestamp, configured minimum score,
 and no error codes. A success response carrying a quota warning is rejected.
-Both adapters use bounded timeouts and response bodies, reject redirects, and
+Both external adapters use bounded timeouts and response bodies, reject redirects, and
 open a short circuit after transport or provider-configuration failures.
 
 Provider configuration is atomic: incomplete site-key, server-secret, or
@@ -155,6 +173,8 @@ pool still requires its official signed verifier and browser integration.
   with 422 rather than being classified as attackers.
 - Redis receives short-lived intent, strike, and block keys; no raw email,
   address, user agent, device ID, or token is used as a key.
+- Redis permits only one active provider challenge per exact registration tuple
+  and enforces device/network budgets across challenge tokens.
 - Repeated intent rendering cannot create unbounded 20-minute Redis keys from
   one network; the separate five-minute issuance counter fails closed.
 - Vendor-specific interactive verification is enabled only for a reviewed

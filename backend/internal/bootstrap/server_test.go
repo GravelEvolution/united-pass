@@ -64,32 +64,6 @@ func testConfig() config.Config {
 	}
 }
 
-func TestNewAliyunSMSClientFailsClosedBeforeWiring(t *testing.T) {
-	valid := config.AliyunSMSConfig{
-		Enabled:         true,
-		AccessKeyID:     "test-access-key-id",
-		AccessKeySecret: "test-access-key-secret",
-		SignName:        "test-sign",
-		TemplateCode:    "SMS_123456789",
-		Endpoint:        "https://dysmsapi.aliyuncs.com/",
-	}
-	if _, err := newAliyunSMSClient(valid); err != nil {
-		t.Fatalf("newAliyunSMSClient rejected valid config: %v", err)
-	}
-
-	invalidEndpoint := valid
-	invalidEndpoint.Endpoint = "https://attacker.example/"
-	if _, err := newAliyunSMSClient(invalidEndpoint); err == nil || !strings.Contains(err.Error(), "official Aliyun HTTPS origin") {
-		t.Fatalf("newAliyunSMSClient endpoint error = %v", err)
-	}
-
-	missingSecret := valid
-	missingSecret.AccessKeySecret = ""
-	if _, err := newAliyunSMSClient(missingSecret); err == nil || !strings.Contains(err.Error(), "access key secret") {
-		t.Fatalf("newAliyunSMSClient credential error = %v", err)
-	}
-}
-
 // prepareBootstrapTestDatabase makes the database-backed bootstrap regression
 // test hermetic. The API server deliberately never runs migrations at startup,
 // so a test that opts into a real database must prepare its dedicated test
@@ -526,6 +500,32 @@ func TestNewServerRejectsUnknownProviderInDevelopment(t *testing.T) {
 	}
 }
 
+func TestWeChatAuthenticationRoutesExcludeIdentityOnlySessionBypass(t *testing.T) {
+	router := chi.NewRouter()
+	onboarding := httpapi.NewWeChatOnboardingHandlers(nil, nil, nil, nil, nil, registration.CreateRatePolicy{}, 0, 0, nil)
+	mountWeChatAuthenticationRoutes(router, onboarding)
+
+	routes := map[string]bool{}
+	if err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		routes[method+" "+route] = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range []string{
+		"POST /auth/wechat/onboarding",
+		"POST /auth/wechat/onboarding/complete",
+		"POST /auth/wechat/onboarding/mfa",
+	} {
+		if !routes[route] {
+			t.Fatalf("phone-required route %q was not mounted: %#v", route, routes)
+		}
+	}
+	if routes["POST /auth/wechat/sessions"] {
+		t.Fatalf("identity-only WeChat session bypass was mounted: %#v", routes)
+	}
+}
+
 // TestNewServerRejectsInvalidEncryptionKey verifies that a malformed session
 // encryption key prevents startup (fail closed) instead of degrading to
 // plaintext.
@@ -710,25 +710,19 @@ func bootstrapTestAESKey(fill byte) string {
 // database-backed userChecker and userReader rejected fake users whose IDs
 // do not exist in PostgreSQL.
 //
-// It requires the disposable local integration matrix. The run token is the
-// explicit opt-in: database and Redis variables alone may be inherited from a
-// broader CI job and must not turn this integration-backed check into a unit
-// test dependency. Run with:
+// It requires a real PostgreSQL and Redis instance; the test is skipped when
+// UP_TEST_DATABASE_URL or UP_TEST_REDIS_URL is not set. Run with:
 //
-//	UP_TEST_DISPOSABLE_RUN_TOKEN=... UP_TEST_DATABASE_URL=postgres://... \
-//	UP_TEST_REDIS_URL=redis://... \
+//	UP_TEST_DATABASE_URL=postgres://... UP_TEST_REDIS_URL=redis://... \
 //	go test ./internal/bootstrap/ -run TestFakeProviderWithDatabaseServesCurrentUser
 func TestFakeProviderWithDatabaseServesCurrentUser(t *testing.T) {
-	runToken := os.Getenv(integrationboundary.RunTokenEnvironment)
-	if runToken == "" {
-		t.Skip("UP_TEST_DISPOSABLE_RUN_TOKEN required to opt in to this integration-backed test")
-	}
 	dbURL := os.Getenv("UP_TEST_DATABASE_URL")
 	redisURL := os.Getenv("UP_TEST_REDIS_URL")
 	if dbURL == "" || redisURL == "" {
-		t.Fatal("UP_TEST_DATABASE_URL and UP_TEST_REDIS_URL required after integration opt-in")
+		t.Skip("UP_TEST_DATABASE_URL and UP_TEST_REDIS_URL required for this test")
 	}
 	dbSchema := os.Getenv("UP_TEST_DATABASE_SCHEMA")
+	runToken := os.Getenv(integrationboundary.RunTokenEnvironment)
 	redisPrefix := os.Getenv("UP_TEST_REDIS_KEY_PREFIX")
 	if err := integrationboundary.ValidatePostgres(dbURL, dbSchema, runToken); err != nil {
 		t.Fatalf("PostgreSQL integration boundary rejected: %v", err)

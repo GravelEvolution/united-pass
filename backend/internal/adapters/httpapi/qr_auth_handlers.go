@@ -16,7 +16,11 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
-const qrReceiverCookieName = "up_qr_receiver"
+const (
+	qrReceiverCookieName         = "up_qr_receiver"
+	legacyQRAuthSessionProvider  = "wechat_miniprogram_qr"
+	currentQRAuthSessionProvider = "wechat_miniprogram_qr_v2"
+)
 
 var qrChallengeIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{20,255}$`)
 
@@ -191,7 +195,7 @@ func (h *QRAuthHandlers) Consume(w http.ResponseWriter, r *http.Request) {
 		WriteProviderUnavailable(w, r)
 		return
 	}
-	created, err := h.sessions.CreateSession(r.Context(), session.CreateSessionInput{UserID: userID, Provider: "wechat_miniprogram_qr", AuthenticationMethods: []auth.AuthenticationMethod{auth.MethodFederated}, UserAgent: r.UserAgent(), ClientIP: clientIP(r)})
+	created, err := h.sessions.CreateSession(r.Context(), session.CreateSessionInput{UserID: userID, Provider: currentQRAuthSessionProvider, AuthenticationMethods: []auth.AuthenticationMethod{auth.MethodFederated}, UserAgent: r.UserAgent(), ClientIP: clientIP(r)})
 	if err != nil {
 		h.logger.Error("QR session creation failed", "requestId", requestID(r))
 		h.setReceiver(w, "", -1)

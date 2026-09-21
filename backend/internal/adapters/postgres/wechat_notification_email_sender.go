@@ -65,6 +65,8 @@ func weChatNotificationTemplate(kind WeChatAuthorityEffectKind) (string, string,
 		return "欢迎使用 United Pass 微信快捷登录", `<p>你的 United Pass 账户已完成微信小程序注册与绑定。</p>` + footer, true
 	case WeChatAuthorityEffectPendingPhoneVerified:
 		return "United Pass 安全提醒：微信手机号已验证", `<p>你的 United Pass 账户已通过微信小程序补充并验证手机号。</p>` + footer, true
+	case WeChatAuthorityEffectSMSPhoneVerified:
+		return "United Pass 安全提醒：手机号已更新", `<p>你的 United Pass 账户已通过短信验证更新手机号。</p>` + footer, true
 	default:
 		return "", "", false
 	}

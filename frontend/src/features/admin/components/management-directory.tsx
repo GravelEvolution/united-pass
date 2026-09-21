@@ -115,7 +115,7 @@ export function ManagementDirectory<RecordType extends Data>({
 
       <section className={styles.directoryCard} aria-label={`${copy.title}目录`}>
         <div className={styles.toolbar}>
-          <form onSubmit={handleSearch} style={{ display: "flex", gap: 8, flex: 1 }}>
+          <form className={styles.searchForm} onSubmit={handleSearch}>
             <Input
               value={searchQuery}
               onChange={setSearchQuery}

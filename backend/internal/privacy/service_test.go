@@ -7,7 +7,6 @@
 package privacy
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -125,10 +124,6 @@ func TestSupportedLegalManifestMatchesExactFrontendSourceBytes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", file, err)
 		}
-		// The manifest signs the LF bytes stored in Git. An existing Windows
-		// checkout may still contain CRLF because of core.autocrlf, so apply the
-		// same text normalization Git uses before calculating the digest.
-		content = bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
 		digest := sha256.Sum256(content)
 		supported, ok := SupportedDocument(kind)
 		if !ok || hex.EncodeToString(digest[:]) != supported.ContentSHA256 {

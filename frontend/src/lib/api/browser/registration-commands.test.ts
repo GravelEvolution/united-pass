@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createRegistration,
+  issueRegistrationFormIntent,
   resendRegistrationEmail,
   verifyRegistrationEmail,
 } from "./registration-commands";
@@ -26,6 +27,18 @@ function requestBody(call: FetchCall): Record<string, unknown> {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("registration commands", () => {
+  it("issues a server-timed registration form intent", async () => {
+    const calls = stubFetch({
+      formIntentToken: "form-intent",
+      expiresAt: "2026-08-18T13:00:00Z",
+    }, 201);
+    const result = await issueRegistrationFormIntent();
+    expect(calls[0].url).toBe("/api/v1/registrations/form-intents");
+    expect(calls[0].init.method).toBe("POST");
+    expect(requestBody(calls[0])).toEqual({});
+    expect(result.formIntentToken).toBe("form-intent");
+  });
+
   it("creates a registration without sending password confirmation", async () => {
     const calls = stubFetch({
       status: "verification_required",
@@ -40,6 +53,8 @@ describe("registration commands", () => {
       password: "correct horse battery staple",
       acceptedTerms: true,
       requestId: "request-1",
+      formIntentToken: "form-intent",
+      automationBrief: "",
     });
 
     expect(calls[0].url).toBe("/api/v1/registrations");
@@ -51,6 +66,8 @@ describe("registration commands", () => {
       password: "correct horse battery staple",
       acceptedTerms: true,
       requestId: "request-1",
+      formIntentToken: "form-intent",
+      automationBrief: "",
     });
     expect(result.registrationToken).toBe("opaque-token");
   });

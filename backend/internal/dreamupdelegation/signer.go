@@ -64,6 +64,19 @@ const (
 	AdministratorCapabilityAuditRead               AdministratorCapability = "event.audit.read"
 	AdministratorCapabilityContactSubmissionManage AdministratorCapability = "event.contact_submission.manage"
 	AdministratorCapabilityContentManage           AdministratorCapability = "event.content.manage"
+	AdministratorCapabilityInspectionPointRead     AdministratorCapability = "event.inspection.point.read"
+	AdministratorCapabilityInspectionPointManage   AdministratorCapability = "event.inspection.point.manage"
+	AdministratorCapabilityInspectionPerform       AdministratorCapability = "event.inspection.perform"
+	AdministratorCapabilityInspectionReview        AdministratorCapability = "event.inspection.review"
+	AdministratorCapabilityAssetRead               AdministratorCapability = "event.asset.read"
+	AdministratorCapabilityAssetManage             AdministratorCapability = "event.asset.manage"
+	AdministratorCapabilityAssetReservationManage  AdministratorCapability = "event.asset.reservation.manage"
+	AdministratorCapabilityAssetCustodyTransfer    AdministratorCapability = "event.asset.custody.transfer"
+	AdministratorCapabilityAssetInventoryAdjust    AdministratorCapability = "event.asset.inventory.adjust"
+	AdministratorCapabilityPersonalAssetAssignment AdministratorCapability = "event.personal_asset.assignment.manage"
+	AdministratorCapabilityAssetCodeRotate         AdministratorCapability = "event.asset.code.rotate"
+	AdministratorCapabilityQRPrintSingle           AdministratorCapability = "event.qr.print.single"
+	AdministratorCapabilityQRPrintBulk             AdministratorCapability = "event.qr.print.bulk"
 	AdministratorCapabilityRoleMigrationRead       AdministratorCapability = "system.role_migration.read"
 )
 
@@ -90,6 +103,19 @@ var administratorCapabilities = map[AdministratorCapability]permissions.Action{
 	AdministratorCapabilityAuditRead:               permissions.ActionAuditRead,
 	AdministratorCapabilityContactSubmissionManage: permissions.ActionContactSubmissionManage,
 	AdministratorCapabilityContentManage:           permissions.ActionContentManage,
+	AdministratorCapabilityInspectionPointRead:     permissions.ActionInspectionPointRead,
+	AdministratorCapabilityInspectionPointManage:   permissions.ActionInspectionPointManage,
+	AdministratorCapabilityInspectionPerform:       permissions.ActionInspectionPerform,
+	AdministratorCapabilityInspectionReview:        permissions.ActionInspectionReview,
+	AdministratorCapabilityAssetRead:               permissions.ActionAssetRead,
+	AdministratorCapabilityAssetManage:             permissions.ActionAssetManage,
+	AdministratorCapabilityAssetReservationManage:  permissions.ActionAssetReservationManage,
+	AdministratorCapabilityAssetCustodyTransfer:    permissions.ActionAssetCustodyTransfer,
+	AdministratorCapabilityAssetInventoryAdjust:    permissions.ActionAssetInventoryAdjust,
+	AdministratorCapabilityPersonalAssetAssignment: permissions.ActionPersonalAssetAssignment,
+	AdministratorCapabilityAssetCodeRotate:         permissions.ActionAssetCodeRotate,
+	AdministratorCapabilityQRPrintSingle:           permissions.ActionQRPrintSingle,
+	AdministratorCapabilityQRPrintBulk:             permissions.ActionQRPrintBulk,
 	AdministratorCapabilityRoleMigrationRead:       permissions.ActionRoleMigrationRead,
 }
 

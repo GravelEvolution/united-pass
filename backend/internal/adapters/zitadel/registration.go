@@ -25,6 +25,12 @@ type registrationUserService interface {
 	GetUserByID(context.Context, *userv2.GetUserByIDRequest, ...grpc.CallOption) (*userv2.GetUserByIDResponse, error)
 }
 
+// registrationProviderRPCTimeout bounds every registration RPC independently.
+// Registration requests may hold a scarce admission slot while ZITADEL is
+// unavailable, so no provider call may inherit an otherwise unbounded request
+// context.
+const registrationProviderRPCTimeout = 8 * time.Second
+
 // RegistrationProvider uses UserService v2 and an organization ID. A project
 // ID is intentionally not accepted here: ZITADEL user creation is scoped to
 // an organization, while the project remains only the local identity-link
@@ -32,10 +38,22 @@ type registrationUserService interface {
 type RegistrationProvider struct {
 	users          registrationUserService
 	organizationID string
+	rpcTimeout     time.Duration
 }
 
 func NewRegistrationProvider(users registrationUserService, organizationID string) *RegistrationProvider {
-	return &RegistrationProvider{users: users, organizationID: organizationID}
+	return newRegistrationProvider(users, organizationID, registrationProviderRPCTimeout)
+}
+
+func newRegistrationProvider(users registrationUserService, organizationID string, rpcTimeout time.Duration) *RegistrationProvider {
+	if rpcTimeout <= 0 {
+		rpcTimeout = registrationProviderRPCTimeout
+	}
+	return &RegistrationProvider{users: users, organizationID: organizationID, rpcTimeout: rpcTimeout}
+}
+
+func (p *RegistrationProvider) rpcContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, p.rpcTimeout)
 }
 
 func (p *RegistrationProvider) CreateUser(ctx context.Context, input registration.ProviderUser) error {
@@ -47,7 +65,8 @@ func (p *RegistrationProvider) CreateUser(ctx context.Context, input registratio
 	userID := input.UserID
 	username := input.Username
 	preferredLanguage := "zh"
-	response, err := p.users.AddHumanUser(ctx, &userv2.AddHumanUserRequest{
+	rpcCtx, cancel := p.rpcContext(ctx)
+	response, err := p.users.AddHumanUser(rpcCtx, &userv2.AddHumanUserRequest{
 		Organization: &objectv2.Organization{Org: &objectv2.Organization_OrgId{OrgId: p.organizationID}},
 		UserId:       &userID,
 		Username:     &username,
@@ -67,6 +86,7 @@ func (p *RegistrationProvider) CreateUser(ctx context.Context, input registratio
 			Password: input.Password, ChangeRequired: false,
 		}},
 	})
+	cancel()
 	if err != nil {
 		if status.Code(err) == codes.AlreadyExists {
 			return p.reconcileExistingUser(ctx, input)
@@ -75,7 +95,7 @@ func (p *RegistrationProvider) CreateUser(ctx context.Context, input registratio
 	}
 	if response.GetUserId() != input.UserID {
 		if response.GetUserId() != "" {
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			cleanupCtx, cancel := p.rpcContext(context.WithoutCancel(ctx))
 			_, _ = p.users.DeleteUser(cleanupCtx, &userv2.DeleteUserRequest{UserId: response.GetUserId()})
 			cancel()
 		}
@@ -90,7 +110,9 @@ func (p *RegistrationProvider) CreateUser(ctx context.Context, input registratio
 // reservation independently binds the non-readable password through a
 // memory-hard request verifier. An unrelated collision remains generic.
 func (p *RegistrationProvider) reconcileExistingUser(ctx context.Context, input registration.ProviderUser) error {
-	response, err := p.users.GetUserByID(ctx, &userv2.GetUserByIDRequest{UserId: input.UserID})
+	rpcCtx, cancel := p.rpcContext(ctx)
+	response, err := p.users.GetUserByID(rpcCtx, &userv2.GetUserByIDRequest{UserId: input.UserID})
+	cancel()
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return registration.ErrConflict
@@ -115,7 +137,9 @@ func (p *RegistrationProvider) DeleteUser(ctx context.Context, userID string) er
 	if p == nil || p.users == nil || userID == "" {
 		return registration.ErrUnavailable
 	}
-	_, err := p.users.DeleteUser(ctx, &userv2.DeleteUserRequest{UserId: userID})
+	rpcCtx, cancel := p.rpcContext(ctx)
+	_, err := p.users.DeleteUser(rpcCtx, &userv2.DeleteUserRequest{UserId: userID})
+	cancel()
 	if err == nil || status.Code(err) == codes.NotFound {
 		return nil
 	}
@@ -126,16 +150,23 @@ func (p *RegistrationProvider) VerifyEmail(ctx context.Context, input registrati
 	if p == nil || p.users == nil || input.UserID == "" || input.Code == "" {
 		return registration.ErrVerificationFailed
 	}
-	_, err := p.users.VerifyEmail(ctx, &userv2.VerifyEmailRequest{
+	rpcCtx, cancel := p.rpcContext(ctx)
+	_, err := p.users.VerifyEmail(rpcCtx, &userv2.VerifyEmailRequest{
 		UserId: input.UserID, VerificationCode: input.Code,
 	})
+	cancel()
 	if err == nil {
 		return nil
+	}
+	if isRegistrationContextError(err) {
+		return registration.ErrUnavailable
 	}
 	// Verification codes are one-time. A retry after the provider succeeded
 	// but the local activation failed must still be able to finish, so read
 	// back the provider email state before classifying the consumed code.
-	response, readErr := p.users.GetUserByID(ctx, &userv2.GetUserByIDRequest{UserId: input.UserID})
+	readCtx, readCancel := p.rpcContext(ctx)
+	response, readErr := p.users.GetUserByID(readCtx, &userv2.GetUserByIDRequest{UserId: input.UserID})
+	readCancel()
 	if readErr == nil && response.GetUser().GetHuman().GetEmail().GetIsVerified() {
 		return nil
 	}
@@ -150,12 +181,14 @@ func (p *RegistrationProvider) ResendEmail(ctx context.Context, input registrati
 		return registration.ErrVerificationFailed
 	}
 	urlTemplate := input.VerificationURLTemplate
-	_, err := p.users.ResendEmailCode(ctx, &userv2.ResendEmailCodeRequest{
+	rpcCtx, cancel := p.rpcContext(ctx)
+	_, err := p.users.ResendEmailCode(rpcCtx, &userv2.ResendEmailCodeRequest{
 		UserId: input.UserID,
 		Verification: &userv2.ResendEmailCodeRequest_SendCode{SendCode: &userv2.SendEmailVerificationCode{
 			UrlTemplate: &urlTemplate,
 		}},
 	})
+	cancel()
 	if err == nil {
 		return nil
 	}
@@ -179,11 +212,23 @@ func mapRegistrationCreateError(err error) error {
 }
 
 func isRegistrationUserError(err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if isRegistrationContextError(err) {
 		return false
 	}
 	switch status.Code(err) {
 	case codes.InvalidArgument, codes.NotFound, codes.FailedPrecondition, codes.Aborted, codes.OutOfRange:
+		return true
+	default:
+		return false
+	}
+}
+
+func isRegistrationContextError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	switch status.Code(err) {
+	case codes.Canceled, codes.DeadlineExceeded:
 		return true
 	default:
 		return false

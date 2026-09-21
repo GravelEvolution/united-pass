@@ -1,5 +1,11 @@
 # DreamUP administrator mutation recovery runbook
 
+This runbook covers the current production topology: United Pass authority
+PostgreSQL remains at migration v13, while DreamUP cross-system mutation
+receipts live in a physically distinct operational PostgreSQL database at
+isolated migration v1. Do not run authority migration 00014 or 00015 for this
+topology.
+
 ## Client behavior
 
 Generate one cryptographically random 32–160 character idempotency key for each
@@ -55,34 +61,45 @@ recovered exclusively from the authoritative receipt.
 
 Before enabling traffic:
 
-1. In an approved maintenance window, stop every United Pass API and worker
-   instance, plus any other process that reads or writes
-   `admin_operation_outbox`. Confirm there are no live outbox claims or
-   database sessions using that table, then apply migration
-   `00015_dreamup_operation_recovery.sql` with the explicit migration command;
-   API startup never runs migrations. The migration fails after five seconds
-   of lock contention and gives each SQL statement a two-minute timeout. The
-   ACCESS EXCLUSIVE table lock is held until the whole Goose transaction
-   commits, so the timeout does not bound total migration duration and all
-   shared outbox traffic must remain stopped until migration completion.
-2. Verify the migration reaches version 15, the receipt-due partial index exists,
-   and existing `needs_operator` rows have non-null `terminal_at`.
-   Inventory any pre-v15 nonterminal cross-system row that lacks the persisted
-   receipt action/target binding; do not synthesize metadata for it. It must be
-   investigated through the operator workflow before traffic resumes.
-3. Run the PostgreSQL integration suite against a dedicated test schema twice in
-   succession to prove cleanup and fresh migration recreation.
-4. Exercise direct success, deterministic 4xx, timeout followed by receipt
+1. Verify the authority database reports Goose version 13. Do not run
+   `cmd/migrate up` as a routine release step when it already reports v13. The
+   command is capped at v13 and must fail if pointed at a legacy schema above
+   that ceiling; never use migration 00014/00015 to prepare current production.
+2. Verify `UP_ISOLATED_DATABASE_URL` identifies a different physical database
+   from `UP_DATABASE_URL`, take and checksum a fresh isolated-database backup,
+   and record its restore procedure. A second schema in the authority database
+   is not an acceptable substitute.
+3. If the dedicated operational database is new, run
+   `go run ./cmd/migrate-isolated up` against that target only. If it already
+   reports isolated migration version 1, do not rerun or rebuild it. The API
+   startup contract must confirm that its selected schema contains exactly the
+   Goose metadata plus `wechat_registration_provider_intents` and
+   `admin_operation_outbox`, with no authority or unrelated business table.
+4. Before replacing an API process that may own a cross-system claim, stop new
+   DreamUP administrator mutations and allow in-flight requests to drain. Keep
+   the existing operational database in place across the binary switch; do not
+   drop, recreate or copy its outbox into authority PostgreSQL.
+5. Run the PostgreSQL integration suite against disposable authority-v13 and
+   isolated-v1 targets twice in succession to prove cleanup, fresh isolated
+   migration recreation, local authority receipts and cross-system outbox
+   recovery.
+6. Exercise direct success, deterministic 4xx, timeout followed by receipt
    success, expired-claim reclamation, same-actor status, cross-actor not-found,
    and needs-operator paths in the isolated candidate environment. Include a
    check-in scan whose response is discarded, then prove the original operation
    request ID and idempotency key recover the `checkin.completed` receipt; exact
    replay must return the original result and changed input with that key must
    conflict without a second check-in or audit event.
-5. Confirm no response or structured log echoes the idempotency key or receipt
-   hash, restart the stopped API/worker processes only after version and schema
-   verification succeeds, then complete the normal human release review.
+7. Confirm no response or structured log echoes the idempotency key or receipt
+   hash. Enable traffic only after authority v13, isolated v1, both readiness
+   checks, backup integrity and the normal human release review all succeed.
 
-Do not invoke Goose Down for migration 00015. It deliberately raises an error
-so `goose_db_version` cannot claim v14 while the v15 constraints remain. Any
-rollback must be a separately reviewed forward migration.
+### Retired shared-store compatibility note
+
+`migrations/00015_dreamup_operation_recovery.sql` remains in source history for
+an installation that had already placed the DreamUP outbox in its shared
+authority schema. It is forward-only and its Down deliberately raises an error.
+It is not a current production migration and must not be invoked to launch this
+management panel. Any repair of such a legacy installation requires a separate
+authorization, fresh verified backup, exclusive maintenance window and reviewed
+forward migration plan.

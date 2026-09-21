@@ -14,6 +14,20 @@ test.describe("账户中心流程", () => {
 
     // 验证账户页面存在
     await expect(page.locator("h1, h2, h3").first()).toBeVisible();
+    await expect(page.getByRole("link", { name: "退出登录" })).toBeVisible();
+  });
+
+  test("邮箱换绑输入支持六位字母数字验证码", async ({ page }) => {
+    await page.goto("/account");
+    await page.getByRole("button", { name: "修改邮箱" }).click();
+    await page.getByLabel("新邮箱地址").fill("new-address@example.com");
+    await page.getByRole("button", { name: "发送验证码" }).click();
+
+    const codeInput = page.getByLabel("6 位大写字母或数字验证码");
+    await codeInput.fill("A1B2C3");
+    await expect(codeInput).toHaveValue("A1B2C3");
+    await page.getByRole("button", { name: "验证并更新" }).click();
+    await expect(page.getByText("new-address@example.com", { exact: true })).toBeVisible();
   });
 
   test("安全设置页面可以正常加载", async ({ page }) => {

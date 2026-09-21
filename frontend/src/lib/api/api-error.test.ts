@@ -133,6 +133,14 @@ describe("isStepUpChallenge", () => {
       difficulty: 18,
       completionPath: "/api/v1/auth/step-up",
     })).toBe(true);
+    expect(isStepUpChallenge({
+      ...base,
+      method: "automation_cost",
+      algorithm: "sha256_leading_zero_bits",
+      difficulty: 18,
+      provider: "client-selected-provider",
+      completionPath: "/api/v1/auth/step-up",
+    })).toBe(false);
   });
 
   it("accepts an unavailable interactive provider without treating it as success", () => {
@@ -156,7 +164,40 @@ describe("isStepUpChallenge", () => {
     expect(isStepUpChallenge({
       ...base,
       method: "interactive_captcha",
+      provider: "google_recaptcha",
+      providerPayload: { siteKey: "public", action: "united_pass_login_A1-b2" },
       completionPath: "https://evil.example/collect",
+    })).toBe(false);
+  });
+
+  it("accepts only implemented provider payloads when providerReady is true", () => {
+    expect(isStepUpChallenge({
+      ...base,
+      method: "interactive_captcha",
+      provider: "cloudflare_turnstile",
+      providerPayload: {
+        siteKey: "public",
+        action: "united_pass_register_A1-b2",
+        cdata: "server_nonce-1",
+      },
+      completionPath: "/api/v1/auth/step-up",
+    })).toBe(true);
+    expect(isStepUpChallenge({
+      ...base,
+      method: "interactive_captcha",
+      provider: "moonstone_image_digits",
+      providerPayload: {
+        imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+        digits: 5,
+      },
+      completionPath: "/api/v1/auth/step-up",
+    })).toBe(true);
+    expect(isStepUpChallenge({
+      ...base,
+      method: "interactive_captcha",
+      provider: "arbitrary-provider",
+      providerPayload: { scriptUrl: "https://evil.example/sdk.js" },
+      completionPath: "/api/v1/auth/step-up",
     })).toBe(false);
   });
 });

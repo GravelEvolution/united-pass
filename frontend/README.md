@@ -28,37 +28,40 @@
 
 | 值 | 行为 |
 | --- | --- |
-| `true` | 产品数据 seam 使用固定 fixture；认证凭据流程仍调用真实 API |
-| 未设置或非 `true` | 所有 query/command seam 调用真实后端；不会静默回落 Mock |
+| `true` | 所有 seam 使用固定 Mock，适合组件开发、单元测试和 fixture 演示 |
+| 未设置或非 `true` | 已迁移 seam 调用真实后端；未迁移 seam 继续显式使用 Mock |
 
 这个开关会进入浏览器 bundle，只能保存布尔配置，绝不能放入秘密。Next.js 服务端
 使用 `API_BASE_URL` 直连 Go API，默认值为 `http://localhost:8080/api/v1`；浏览器
 始终使用同源 `/api/v1`。
 
-`UP_PUBLIC_REGISTRATION_ENABLED=true` 同时打开服务端渲染的注册表单；它必须与
-Go API 进程的同名开关保持一致。未设置时注册页保持关闭，且该变量不会进入浏览器
-bundle。
+`UP_PUBLIC_REGISTRATION_ENABLED=true` 同时打开服务端渲染的注册表单；必须与 Go API
+进程的同名开关保持一致。未设置时注册页保持关闭，变量不会进入浏览器 bundle。
 
 ## 当前真实 API 范围
 
 非 Mock 模式已经接入：
 
 - 密码登录、TOTP MFA、飞书登录入口、退出；
-- 公开注册、邮箱验证和抗账户枚举的密码找回/重置；
 - 当前用户、权限、OAuth 授权/Consent、已授权应用和撤销；
-- 个人资料、服务端净化头像、Provider 验证的邮箱/手机号变更；
 - 密码修改、TOTP、Passkey、重认证、当前用户会话及撤销；
-- OAuth Application / Client 查询、创建、编辑、状态、删除与 Secret 轮换；
-- 按后端 capability 独立裁剪的管理仪表盘；
 - 用户、员工、部门的查询和管理操作；
 - Provider 列表/详情、目录同步、冲突处理与显式身份关联；
 - 策略草稿/模拟/发布、审计筛选与异步导出；
 - 个人数据导出、账户删除/取消，以及受控发布的隐私政策和服务条款。
+- 默认关闭、可配置开启的公开注册、验证邮件重发与 fragment 邮箱验证。
 
-Recovery Codes 是唯一保留的产品能力缺口：当前 ZITADEL baseline 没有满足一次性
-展示、轮换、撤销和审计要求的接口，因此真实模式明确显示 Provider 不支持，不生成
-伪代码或成功态；只有显式 fixture 模式可展示不可用于认证的界面原型。
-`src/lib/mock/` 不是认证、授权或生产持久化实现。
+以下前端 seam 仍是 Mock 或产品原型，刷新后不代表真实持久化：
+
+- 密码找回/重置；
+- 个人资料、头像、邮箱和手机号变更；
+- 管理端仪表盘摘要；
+- OAuth Application / Client 的前端查询与增删改、Secret 轮换；
+- Recovery Codes（后端架构性 Deferred）。
+
+后端已经具有部分对应管理 API，并不意味着前端 seam 已迁移。以
+`src/lib/api/server/server-queries.ts` 和
+`src/lib/api/browser/browser-commands.ts` 的实际分支为准。
 
 ## 登录态行为
 
@@ -120,17 +123,22 @@ pnpm dev
 打开 [http://localhost:3000](http://localhost:3000)，根路径会跳转 `/login`。
 已有 `.env.local` 时不要用示例文件覆盖它。
 
-真实 API 配置：
+Mock 配置：
 
 ```dotenv
-NEXT_PUBLIC_USE_MOCK=false
+NEXT_PUBLIC_USE_MOCK=true
 API_BASE_URL=http://localhost:8080/api/v1
-# 可选；必须与 Go API 同步开启
-UP_PUBLIC_REGISTRATION_ENABLED=true
 ```
 
-如需非认证页面 fixture，可显式设置 `NEXT_PUBLIC_USE_MOCK=true`。登录、注册、邮箱
-验证和密码恢复仍会调用真实后端；不存在可绕过同源 Session/权限门禁的 Mock 登录凭据。
+Mock 登录 fixture（只用于开发，不是秘密，也不得复用为真实密码）：
+
+| Persona | 账户 | 密码 | 目标页 |
+| --- | --- | --- | --- |
+| 外部用户 | `app.user` | `MockUser123!` | `/account` |
+| 管理员 | `zhixing.lin` | `MockAdmin123!` | `/admin` |
+
+受保护页面仍执行服务端 Cookie/权限门禁；Mock fixture 不能替代真实同源 Session 和
+权限验收。
 
 ## 完整联调与部署拓扑
 
@@ -157,6 +165,7 @@ pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
+pnpm test:e2e:csp
 ```
 
 可选的 Mock 浏览器套件：
@@ -164,6 +173,11 @@ pnpm build
 ```bash
 pnpm test:e2e
 ```
+
+`test:e2e:csp` 会先重新执行 `pnpm build`，再启动本地 standalone production
+构建；不会复用陈旧构建产物。它在 Chromium 中真实打开阿里云验证码挑战，验证
+资源加载、严格 CSP、受控的 React/Next 样式属性兼容例外及文档/静态路由边界；
+测试凭据只用于打开验证码，不会提交登录请求或连接 United Pass 生产 API。
 
 Vitest 使用 Node 环境，测试覆盖 API 错误归一化、响应运行时收窄、CSRF、登录/MFA、
 OAuth 决策、安全因子、WebAuthn 序列化、组织管理、Provider、策略、审计、隐私、
@@ -176,7 +190,7 @@ OAuth 决策、安全因子、WebAuthn 序列化、组织管理、Provider、策
 - `src/lib/api/server/`：服务端查询、Session Cookie 转发和运行时校验
 - `src/lib/api/browser/`：同源浏览器命令、CSRF 和错误归一化
 - `src/lib/mock/`：显式 fixture 数据源，不得被真实 seam 静默 fallback
-- `src/proxy.ts`：管理路由 pre-render 权限门禁
+- `src/proxy.ts`：逐请求 CSP/安全响应头与管理路由 pre-render 权限门禁
 - `docs/`：前端 ADR、冻结合同和 Mock 说明
 
 任何用户专属 Server fetch 必须 `cache: no-store`；任何写请求必须经共享浏览器客户端
@@ -192,4 +206,5 @@ OAuth 决策、安全因子、WebAuthn 序列化、组织管理、Provider、策
 - [ADR-0007：Phase 5 身份与员工管理真实 seam](docs/adr-0007.md)
 - [ADR-0008：Phase 6 Feishu Provider](docs/adr-0008.md)
 - [ADR-0009：Phase 7 策略与审计](docs/adr-0009.md)
+- [ADR-0011：严格逐请求 CSP](docs/adr-0011-strict-content-security-policy.md)
 - [Backend README](../backend/README.md)

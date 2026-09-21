@@ -27,7 +27,9 @@ const (
 type FormIntentRecord struct {
 	UserAgentHash     string    `json:"userAgentHash"`
 	ClientNetworkHash string    `json:"clientNetworkHash"`
-	DeviceIDHash      string    `json:"deviceIdHash,omitempty"`
+	DeviceIDHash      string    `json:"deviceIdHash"`
+	OriginHash        string    `json:"originHash"`
+	EmailHash         string    `json:"emailHash,omitempty"`
 	NotBefore         time.Time `json:"notBefore"`
 	ExpiresAt         time.Time `json:"expiresAt"`
 }
@@ -36,6 +38,8 @@ type FormIntentBinding struct {
 	UserAgentHash     string
 	ClientNetworkHash string
 	DeviceIDHash      string
+	OriginHash        string
+	EmailHash         string
 }
 
 type FormIntentResult struct {
@@ -78,6 +82,8 @@ type AbuseAuditEvent struct {
 
 type FormDefenseStore interface {
 	CreateFormIntent(context.Context, string, FormIntentRecord, time.Duration) error
+	ValidateFormIntent(context.Context, string, FormIntentBinding, time.Time) error
+	BindFormIntentEmail(context.Context, string, FormIntentBinding, time.Time) error
 	ConsumeFormIntent(context.Context, string, FormIntentBinding, time.Time) error
 	IsRegistrationBlocked(context.Context, AbuseFingerprint) (bool, error)
 	RecordRegistrationHoneypot(context.Context, AbuseFingerprint, AbusePolicy) (AbuseDisposition, error)
@@ -116,7 +122,7 @@ func NewFormDefense(store FormDefenseStore, auditor AbuseAuditor, cfg FormDefens
 }
 
 func (d *FormDefense) Issue(ctx context.Context, binding FormIntentBinding) (FormIntentResult, error) {
-	if d == nil || !validFormIntentBinding(binding) {
+	if d == nil || !validFormIntentBaseBinding(binding) || binding.EmailHash != "" {
 		return FormIntentResult{}, ErrUnavailable
 	}
 	token, err := d.cfg.GenerateToken()
@@ -125,7 +131,8 @@ func (d *FormDefense) Issue(ctx context.Context, binding FormIntentBinding) (For
 	}
 	now := d.cfg.Now().UTC()
 	record := FormIntentRecord{
-		UserAgentHash: binding.UserAgentHash, ClientNetworkHash: binding.ClientNetworkHash, DeviceIDHash: binding.DeviceIDHash,
+		UserAgentHash: binding.UserAgentHash, ClientNetworkHash: binding.ClientNetworkHash,
+		DeviceIDHash: binding.DeviceIDHash, OriginHash: binding.OriginHash,
 		NotBefore: now.Add(d.cfg.MinimumFormAge), ExpiresAt: now.Add(d.cfg.IntentTTL),
 	}
 	if err := d.store.CreateFormIntent(ctx, token, record, d.cfg.IntentTTL); err != nil {
@@ -134,8 +141,46 @@ func (d *FormDefense) Issue(ctx context.Context, binding FormIntentBinding) (For
 	return FormIntentResult{Token: token, ExpiresAt: record.ExpiresAt}, nil
 }
 
-func (d *FormDefense) Consume(ctx context.Context, rawToken string, binding FormIntentBinding) error {
+// BindEmail performs a non-consuming, atomic preflight before any email rate
+// budget or CAPTCHA allocation. The first clean submission pins its normalized
+// email digest to the server-issued intent; later calls must present the exact
+// same digest and browser binding.
+func (d *FormDefense) BindEmail(ctx context.Context, rawToken string, binding FormIntentBinding) error {
 	if d == nil || rawToken == "" || len(rawToken) > 512 || !validFormIntentBinding(binding) {
+		return ErrFormIntentInvalid
+	}
+	err := d.store.BindFormIntentEmail(ctx, rawToken, binding, d.cfg.Now().UTC())
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrFormIntentInvalid), errors.Is(err, ErrFormIntentTooYoung):
+		return err
+	default:
+		return ErrUnavailable
+	}
+}
+
+// Validate confirms the current browser tuple without binding an email or
+// consuming a live intent. BindEmail remains the stronger create-path preflight
+// because it atomically pins the normalized email before any rate or CAPTCHA
+// allocation.
+func (d *FormDefense) Validate(ctx context.Context, rawToken string, binding FormIntentBinding) error {
+	if d == nil || rawToken == "" || len(rawToken) > 512 || !validFormIntentBaseBinding(binding) || (binding.EmailHash != "" && !validDigest(binding.EmailHash)) {
+		return ErrFormIntentInvalid
+	}
+	err := d.store.ValidateFormIntent(ctx, rawToken, binding, d.cfg.Now().UTC())
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrFormIntentInvalid), errors.Is(err, ErrFormIntentTooYoung):
+		return err
+	default:
+		return ErrUnavailable
+	}
+}
+
+func (d *FormDefense) Consume(ctx context.Context, rawToken string, binding FormIntentBinding) error {
+	if d == nil || rawToken == "" || len(rawToken) > 512 || !validFormIntentBaseBinding(binding) || (binding.EmailHash != "" && !validDigest(binding.EmailHash)) {
 		return ErrFormIntentInvalid
 	}
 	err := d.store.ConsumeFormIntent(ctx, rawToken, binding, d.cfg.Now().UTC())
@@ -221,8 +266,12 @@ func validFingerprint(value AbuseFingerprint) bool {
 	return validDigest(value.ClientIPHash) && validDigest(value.UserAgentHash) && (value.DeviceIDHash == "" || validDigest(value.DeviceIDHash))
 }
 
+func validFormIntentBaseBinding(value FormIntentBinding) bool {
+	return validDigest(value.UserAgentHash) && validDigest(value.ClientNetworkHash) && validDigest(value.DeviceIDHash) && validDigest(value.OriginHash)
+}
+
 func validFormIntentBinding(value FormIntentBinding) bool {
-	return validDigest(value.UserAgentHash) && validDigest(value.ClientNetworkHash) && (value.DeviceIDHash == "" || validDigest(value.DeviceIDHash))
+	return validFormIntentBaseBinding(value) && validDigest(value.EmailHash)
 }
 
 func validDigest(value string) bool {

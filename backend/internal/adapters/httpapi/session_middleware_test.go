@@ -10,6 +10,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/securitystate"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
+	"github.com/GravelEvolution/united-pass/backend/internal/wechat"
 )
 
 // fakeSecurityGate is a configurable SecurityStateGate recording every
@@ -232,6 +234,131 @@ func TestRequireSession_PromotionMatrix(t *testing.T) {
 	})
 }
 
+func TestRequireSessionRejectsPreCutoverIdentityOnlyWeChatBearer(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		provider   string
+		methods    []auth.AuthenticationMethod
+		wantStatus int
+		wantDelete bool
+	}{
+		{
+			name: "legacy WeChat bearer has no mandatory phone assurance", provider: wechat.ProviderName,
+			methods: []auth.AuthenticationMethod{auth.MethodFederated}, wantStatus: http.StatusUnauthorized, wantDelete: true,
+		},
+		{
+			name: "strict WeChat bearer carries server-only assurance", provider: wechat.ProviderName,
+			methods: []auth.AuthenticationMethod{auth.MethodFederated, auth.MethodWeChatPhoneVerified}, wantStatus: http.StatusOK,
+		},
+		{
+			name: "legacy existing-account password and federated session is rejected", provider: "zitadel",
+			methods: []auth.AuthenticationMethod{auth.MethodPassword, auth.MethodFederated}, wantStatus: http.StatusUnauthorized, wantDelete: true,
+		},
+		{
+			name: "strict existing-account session carries mandatory phone assurance", provider: "zitadel",
+			methods: []auth.AuthenticationMethod{auth.MethodPassword, auth.MethodFederated, auth.MethodWeChatPhoneVerified}, wantStatus: http.StatusOK,
+		},
+		{
+			name: "pure password native session keeps its own contract", provider: "zitadel",
+			methods: []auth.AuthenticationMethod{auth.MethodPassword}, wantStatus: http.StatusOK,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			svc, _, attrs := middlewareEnv(t)
+			created, err := svc.CreateSession(t.Context(), session.CreateSessionInput{
+				UserID: middlewareUser, ClientKind: session.ClientKindMiniProgram,
+				Provider: test.provider, AuthenticationMethods: test.methods,
+				UserAgent: "middleware-test-agent", ClientIP: "203.0.113.99",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			router := chi.NewRouter()
+			router.Use(RequireSession(svc, &fakeStatusChecker{}, &fakeSecurityGate{verdict: securitystate.PromotionAllowed}, attrs, discardLogger()))
+			router.Get("/api/v1/me", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+			req.Header.Set("X-UnitedPass-Client", session.ClientKindMiniProgram)
+			req.Header.Set(AuthorizationHeaderName, "Bearer "+created.SessionToken)
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+			if rr.Code != test.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", rr.Code, test.wantStatus, rr.Body.String())
+			}
+			_, _, validateErr := svc.ValidateSession(t.Context(), created.SessionToken)
+			if test.wantDelete {
+				if !errors.Is(validateErr, session.ErrSessionNotFound) {
+					t.Fatalf("legacy session was not deleted: %v", validateErr)
+				}
+			} else if validateErr != nil {
+				t.Fatalf("valid native session was deleted or rejected: %v", validateErr)
+			}
+		})
+	}
+}
+
+func TestRequireSessionDeletesPreCutoverQRBrowserSession(t *testing.T) {
+	svc, _, attrs := middlewareEnv(t)
+	created, err := svc.CreateSession(t.Context(), session.CreateSessionInput{
+		UserID: middlewareUser, Provider: legacyQRAuthSessionProvider,
+		AuthenticationMethods: []auth.AuthenticationMethod{auth.MethodFederated},
+		UserAgent:             "middleware-test-agent", ClientIP: "203.0.113.99",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	router.Use(RequireSession(svc, &fakeStatusChecker{}, &fakeSecurityGate{verdict: securitystate.PromotionAllowed}, attrs, discardLogger()))
+	router.Get("/me", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: created.SessionToken})
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, _, err := svc.ValidateSession(t.Context(), created.SessionToken); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("legacy QR session was not deleted: %v", err)
+	}
+	cleared := clearedCookies(rr.Result())
+	if !cleared[SessionCookieName] || !cleared[CSRFCookieName] {
+		t.Fatalf("legacy QR cookies were not cleared: %#v", cleared)
+	}
+}
+
+func TestOptionalSessionDeletesPreCutoverQRAndDegradesToAnonymous(t *testing.T) {
+	svc, _, attrs := middlewareEnv(t)
+	created, err := svc.CreateSession(t.Context(), session.CreateSessionInput{
+		UserID: middlewareUser, Provider: legacyQRAuthSessionProvider,
+		AuthenticationMethods: []auth.AuthenticationMethod{auth.MethodFederated},
+		UserAgent:             "middleware-test-agent", ClientIP: "203.0.113.99",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	router.Use(OptionalSession(svc, &fakeStatusChecker{}, &fakeSecurityGate{verdict: securitystate.PromotionAllowed}, attrs, discardLogger()))
+	router.Get("/interaction", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := PrincipalFromContext(r.Context()); ok {
+			t.Error("legacy QR session was promoted on optional-auth path")
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/interaction", nil)
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: created.SessionToken})
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, _, err := svc.ValidateSession(t.Context(), created.SessionToken); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("legacy QR session was not deleted: %v", err)
+	}
+	cleared := clearedCookies(rr.Result())
+	if !cleared[SessionCookieName] || !cleared[CSRFCookieName] {
+		t.Fatalf("legacy QR cookies were not cleared: %#v", cleared)
+	}
+}
+
 // TestOptionalSession_SharesTheSameValidator covers the F1 requirement on the
 // anonymous-tolerant path: identical verdicts, identical cookie policy —
 // epoch stale clears cookies even here, transient denial degrades to
@@ -345,14 +472,30 @@ func TestNativeMiniProgramBearerScopeIncludesExactDreamUPContentContracts(t *tes
 		path   string
 	}{
 		{http.MethodGet, "/api/v1/admin/dreamup/eligibility"},
-		{http.MethodGet, "/api/v1/admin/dreamup/step-up/challenge"},
-		{http.MethodPost, "/api/v1/admin/dreamup/step-up/enroll"},
-		{http.MethodPost, "/api/v1/admin/dreamup/step-up/verify"},
+		{http.MethodPost, "/api/v1/admin/dreamup/reauthentication"},
 		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/content"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/splash-ad"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/splash-poster-image-upload-intents"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/announcement-background-image-upload-intents"},
+		{http.MethodPut, "/api/v1/admin/dreamup/events/evt_shanghai/splash-ad"},
 		{http.MethodPut, "/api/v1/admin/dreamup/events/evt_shanghai/content/intro"},
 		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/announcements"},
 		{http.MethodPatch, "/api/v1/admin/dreamup/events/evt_shanghai/announcements/content_1"},
 		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/contact-submissions/contact_1"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/applications/application_1/review-identity"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/inspection-point-image-upload-intents"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/inspection-points"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/inspection-points/point_1/inspections"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/inspection-photo-uploads/upload_1/finalize"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/asset-image-upload-intents"},
+		{http.MethodPatch, "/api/v1/admin/dreamup/events/evt_shanghai/assets/asset_1"},
+		{http.MethodPatch, "/api/v1/admin/dreamup/events/evt_shanghai/asset-reservations/reservation_1"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/asset-units/unit_1/checkout"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/personal-asset-image-upload-intents"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/personal-asset-assignments/assignment_1/code-rotations"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/entity-codes/code_1/print-jobs"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/qr-print-jobs/print_1"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/qr-print-jobs/print_1/bulk"},
 	}
 	for _, test := range allowed {
 		req := httptest.NewRequest(test.method, test.path, nil)
@@ -365,14 +508,108 @@ func TestNativeMiniProgramBearerScopeIncludesExactDreamUPContentContracts(t *tes
 		path   string
 	}{
 		{http.MethodPost, "/api/v1/admin/dreamup/eligibility"},
+		{http.MethodGet, "/api/v1/admin/dreamup/reauthentication"},
+		{http.MethodPost, "/api/v1/admin/dreamup/reauthentication/extra"},
+		{http.MethodGet, "/api/v1/admin/dreamup/step-up/challenge"},
+		{http.MethodPost, "/api/v1/admin/dreamup/step-up/enroll"},
+		{http.MethodPost, "/api/v1/admin/dreamup/step-up/verify"},
 		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/content/intro"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/splash-ad"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/splash-poster-image-upload-intents"},
+		{http.MethodPut, "/api/v1/admin/dreamup/events/evt_shanghai/splash-poster-image-upload-intents/extra"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/announcement-background-image-upload-intents"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/announcement-background-image-upload-intents/extra"},
 		{http.MethodPut, "/api/v1/admin/dreamup/events/evt_shanghai/announcements"},
 		{http.MethodPatch, "/api/v1/admin/dreamup/events/evt_shanghai/announcements"},
 		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/contact-submissions/contact_1/extra"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/applications/application_1/review-identity"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/applications/application_1/review-identity/extra"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/inspection-point-image-upload-intents"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/inspection-point-image-upload-intents/extra"},
+		{http.MethodDelete, "/api/v1/admin/dreamup/events/evt_shanghai/inspection-points/point_1"},
+		{http.MethodPut, "/api/v1/admin/dreamup/events/evt_shanghai/asset-image-upload-intents"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/asset-image-upload-intents/extra"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/assets/asset_1/code-rotations"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/asset-units/unit_1"},
+		{http.MethodPatch, "/api/v1/admin/dreamup/events/evt_shanghai/personal-asset-image-upload-intents"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/personal-asset-image-upload-intents/extra"},
+		{http.MethodPost, "/api/v1/admin/dreamup/events/evt_shanghai/entity-codes/code_1/print-jobs/extra"},
+		{http.MethodGet, "/api/v1/admin/dreamup/events/evt_shanghai/qr-print-jobs/print_1/bulk/extra"},
 	} {
 		req := httptest.NewRequest(test.method, test.path, nil)
 		if nativeMiniProgramBearerRouteAllowed(req) {
 			t.Errorf("native route over-broadened: %s %s", test.method, test.path)
 		}
+	}
+}
+
+func TestRequireSessionAllowsNativeDreamUPReviewIdentityRoute(t *testing.T) {
+	svc, _, attrs := middlewareEnv(t)
+	created, err := svc.CreateSession(t.Context(), session.CreateSessionInput{
+		UserID: middlewareUser, ClientKind: session.ClientKindMiniProgram,
+		Provider: "zitadel", AuthenticationMethods: []auth.AuthenticationMethod{auth.MethodPassword},
+		UserAgent: "middleware-test-agent", ClientIP: "203.0.113.99",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const path = "/api/v1/admin/dreamup/events/evt_shanghai/applications/application_1/review-identity"
+	reached := false
+	router := chi.NewRouter()
+	router.Use(RequireSession(svc, &fakeStatusChecker{}, &fakeSecurityGate{verdict: securitystate.PromotionAllowed}, attrs, discardLogger()))
+	router.Post(path, func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		if _, ok := PrincipalFromContext(r.Context()); !ok {
+			t.Error("native review-identity request must carry the promoted principal")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, path, nil)
+	req.Header.Set("X-UnitedPass-Client", session.ClientKindMiniProgram)
+	req.Header.Set(AuthorizationHeaderName, "Bearer "+created.SessionToken)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusNoContent || !reached {
+		t.Fatalf("status=%d reached=%v body=%s", recorder.Code, reached, recorder.Body.String())
+	}
+}
+
+func TestRequireSessionRejectsRetiredNativeDreamUPSecurityQuestionRoutes(t *testing.T) {
+	svc, _, attrs := middlewareEnv(t)
+	created, err := svc.CreateSession(t.Context(), session.CreateSessionInput{
+		UserID: middlewareUser, ClientKind: session.ClientKindMiniProgram,
+		Provider: "zitadel", AuthenticationMethods: []auth.AuthenticationMethod{auth.MethodPassword},
+		UserAgent: "middleware-test-agent", ClientIP: "203.0.113.99",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/admin/dreamup/step-up/challenge"},
+		{http.MethodPost, "/api/v1/admin/dreamup/step-up/enroll"},
+		{http.MethodPost, "/api/v1/admin/dreamup/step-up/verify"},
+	} {
+		t.Run(test.method+" "+test.path, func(t *testing.T) {
+			reached := false
+			router := chi.NewRouter()
+			router.Use(RequireSession(svc, &fakeStatusChecker{}, &fakeSecurityGate{verdict: securitystate.PromotionAllowed}, attrs, discardLogger()))
+			router.MethodFunc(test.method, test.path, func(w http.ResponseWriter, _ *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusNoContent)
+			})
+			req := httptest.NewRequest(test.method, test.path, nil)
+			req.Header.Set("X-UnitedPass-Client", session.ClientKindMiniProgram)
+			req.Header.Set(AuthorizationHeaderName, "Bearer "+created.SessionToken)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusUnauthorized || reached {
+				t.Fatalf("status=%d reached=%v body=%s", recorder.Code, reached, recorder.Body.String())
+			}
+		})
 	}
 }

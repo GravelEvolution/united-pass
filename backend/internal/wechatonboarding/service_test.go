@@ -42,13 +42,18 @@ func (s *bindingStub) GetByID(context.Context, identity.UserID) (identity.User, 
 }
 
 type accountStub struct {
-	user      identity.User
-	snapshot  AccountSnapshot
-	findErr   error
-	findEmail string
-	bind      BindExistingInput
-	bindErr   error
-	events    *[]string
+	user                identity.User
+	snapshot            AccountSnapshot
+	findErr             error
+	findEmail           string
+	bind                BindExistingInput
+	bindErr             error
+	completedLinkedUser identity.UserID
+	completedTenant     string
+	completedSubject    string
+	completedPhone      string
+	completeLinkedErr   error
+	events              *[]string
 }
 
 func (s *accountStub) FindByNormalizedEmail(_ context.Context, email string) (AccountSnapshot, error) {
@@ -72,6 +77,11 @@ func (s *accountStub) FindByNormalizedEmail(_ context.Context, email string) (Ac
 func (s *accountStub) BindExistingWithWeChat(_ context.Context, input BindExistingInput) (BindExistingResult, error) {
 	s.bind = input
 	return BindExistingResult{UserID: input.UserID, Linked: true, PhoneAdded: input.Phone != ""}, s.bindErr
+}
+
+func (s *accountStub) CompleteLinkedWithVerifiedPhone(_ context.Context, userID identity.UserID, tenant, subject, phone string) error {
+	s.completedLinkedUser, s.completedTenant, s.completedSubject, s.completedPhone = userID, tenant, subject, phone
+	return s.completeLinkedErr
 }
 
 type passwordStub struct {
@@ -117,9 +127,10 @@ func (s *creatorStub) CreateVerified(_ context.Context, input wechatregistration
 }
 
 type memoryChallengeStore struct {
-	items    map[string]ChallengeData
-	claims   map[string]string
-	attempts map[string]int
+	items      map[string]ChallengeData
+	claims     map[string]string
+	attempts   map[string]int
+	consumeErr error
 }
 
 func newMemoryChallengeStore() *memoryChallengeStore {
@@ -161,6 +172,9 @@ func (s *memoryChallengeStore) Consume(_ context.Context, token, claimID string)
 	if _, exists := s.items[token]; !exists {
 		return ErrChallengeNotFound
 	}
+	if s.consumeErr != nil {
+		return s.consumeErr
+	}
 	delete(s.items, token)
 	delete(s.claims, token)
 	delete(s.attempts, token)
@@ -180,6 +194,9 @@ func (s *memoryChallengeStore) IncrementAttempts(_ context.Context, token string
 
 type rateStub struct {
 	allowed         bool
+	completionDeny  bool
+	completionErr   error
+	completionRetry time.Duration
 	targetDeny      bool
 	targetErr       error
 	targetRetry     time.Duration
@@ -216,6 +233,9 @@ func (s *rateStub) CheckRegistrationCreate(_ context.Context, ip, network, email
 	}
 	s.completionCalls++
 	s.completionIP, s.completionNet, s.completionEmail = ip, network, emailHash
+	if s.completionDeny || s.completionErr != nil {
+		return false, s.completionRetry, s.completionErr
+	}
 	return s.allowed, time.Minute, nil
 }
 
@@ -247,15 +267,60 @@ func serviceForTest(proof *proofStub, bindings *bindingStub, accounts *accountSt
 
 func TestBeginRestoresOnlyExistingActiveBinding(t *testing.T) {
 	userID := identity.UserID("user_existing")
-	proof := &proofStub{proof: wechat.IdentityProof{TenantID: "app", Subject: "open-id"}}
+	proof := &proofStub{proof: wechat.IdentityProof{TenantID: "app", Subject: "open-id", Phone: "+8613800138000"}}
 	bindings := &bindingStub{link: identity.IdentityLink{UserID: userID}, user: identity.User{ID: userID, Status: identity.UserStatusActive}}
-	service := serviceForTest(proof, bindings, &accountStub{}, &passwordStub{}, &creatorStub{}, newMemoryChallengeStore(), &rateStub{allowed: true})
-	result, err := service.Begin(context.Background(), BeginInput{LoginCode: "login-code", PhoneCode: " bad"})
+	accounts := &accountStub{}
+	service := serviceForTest(proof, bindings, accounts, &passwordStub{}, &creatorStub{}, newMemoryChallengeStore(), &rateStub{allowed: true})
+	result, err := service.Begin(context.Background(), BeginInput{LoginCode: "login-code", PhoneCode: "phone-code"})
 	if err != nil || result.Status != StatusAuthenticated || result.UserID != userID || result.OnboardingToken != "" {
 		t.Fatalf("Begin = %#v, %v", result, err)
 	}
-	if proof.phone != " bad" {
-		t.Fatalf("optional phone code was not delegated to best-effort verifier: %q", proof.phone)
+	if proof.phone != "phone-code" || accounts.completedLinkedUser != userID || accounts.completedTenant != "app" || accounts.completedSubject != "open-id" || accounts.completedPhone != "+8613800138000" {
+		t.Fatalf("linked phone completion = proofCode:%q account:%#v", proof.phone, accounts)
+	}
+}
+
+func TestBeginRejectsPhoneEmptyProofBeforeAnySessionOrChallenge(t *testing.T) {
+	userID := identity.UserID("user_existing")
+	proof := &proofStub{proof: wechat.IdentityProof{TenantID: "app", Subject: "open-id"}}
+	bindings := &bindingStub{link: identity.IdentityLink{UserID: userID}, user: identity.User{ID: userID, Status: identity.UserStatusActive}}
+	accounts := &accountStub{}
+	store := newMemoryChallengeStore()
+	service := serviceForTest(proof, bindings, accounts, &passwordStub{}, &creatorStub{}, store, &rateStub{allowed: true})
+	result, err := service.Begin(context.Background(), BeginInput{LoginCode: "login-code", PhoneCode: "phone-code"})
+	if !errors.Is(err, ErrPhoneRequired) || result.Status != "" || accounts.completedLinkedUser != "" || len(store.items) != 0 {
+		t.Fatalf("Begin = %#v, %v accounts=%#v challenges=%#v", result, err, accounts, store.items)
+	}
+}
+
+func TestBeginMapsStrictProviderPhoneFailureWithoutDowngrade(t *testing.T) {
+	proof := &proofStub{err: errors.Join(wechat.ErrPhoneRequired, wechat.ErrRejected)}
+	accounts := &accountStub{}
+	store := newMemoryChallengeStore()
+	service := serviceForTest(proof, &bindingStub{}, accounts, &passwordStub{}, &creatorStub{}, store, &rateStub{allowed: true})
+	result, err := service.Begin(context.Background(), BeginInput{LoginCode: "login-code", PhoneCode: "phone-code"})
+	if !errors.Is(err, ErrPhoneRequired) || result.Status != "" || accounts.completedLinkedUser != "" || len(store.items) != 0 {
+		t.Fatalf("Begin = %#v, %v accounts=%#v challenges=%#v", result, err, accounts, store.items)
+	}
+}
+
+func TestBeginPreservesProviderOutageInsteadOfMisreportingPhoneDenial(t *testing.T) {
+	service := serviceForTest(&proofStub{err: wechat.ErrUnavailable}, &bindingStub{}, &accountStub{}, &passwordStub{}, &creatorStub{}, newMemoryChallengeStore(), &rateStub{allowed: true})
+	result, err := service.Begin(context.Background(), BeginInput{LoginCode: "login-code", PhoneCode: "phone-code"})
+	if !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrPhoneRequired) || result.Status != "" {
+		t.Fatalf("Begin = %#v, %v; provider outage must remain unavailable", result, err)
+	}
+}
+
+func TestBeginFailsClosedWhenLinkedPhoneConflicts(t *testing.T) {
+	userID := identity.UserID("user_existing")
+	proof := &proofStub{proof: wechat.IdentityProof{TenantID: "app", Subject: "open-id", Phone: "+8613800138000"}}
+	bindings := &bindingStub{link: identity.IdentityLink{UserID: userID}, user: identity.User{ID: userID, Status: identity.UserStatusActive}}
+	accounts := &accountStub{completeLinkedErr: ErrPhoneConflict}
+	service := serviceForTest(proof, bindings, accounts, &passwordStub{}, &creatorStub{}, newMemoryChallengeStore(), &rateStub{allowed: true})
+	result, err := service.Begin(context.Background(), BeginInput{LoginCode: "login-code", PhoneCode: "phone-code"})
+	if !errors.Is(err, ErrPhoneConflict) || result.Status != "" || accounts.completedLinkedUser != userID {
+		t.Fatalf("Begin = %#v, %v accounts=%#v", result, err, accounts)
 	}
 }
 
@@ -284,7 +349,10 @@ func TestCompleteExistingUsesStableUserIDAndAcceptsHistoricPasswordShape(t *test
 	store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id", Phone: "+8613800138000"}
 	accounts := &accountStub{user: identity.User{ID: userID, Status: identity.UserStatusActive}}
 	password := &passwordStub{passwordResult: auth.AuthenticationResult{Status: auth.StatusAuthenticated, UserID: userID, Provider: "zitadel", ProviderSessionReference: "provider-session", AuthenticationMethods: []auth.AuthenticationMethod{auth.MethodPassword}}}
-	service := serviceForTest(&proofStub{}, &bindingStub{}, accounts, password, &creatorStub{}, store, &rateStub{allowed: true}, "claim-id")
+	// A public create bucket may already be exhausted by unrelated website
+	// registration traffic; that must not block an existing-account binding.
+	rate := &rateStub{allowed: true, completionDeny: true}
+	service := serviceForTest(&proofStub{}, &bindingStub{}, accounts, password, &creatorStub{}, store, rate, "claim-id")
 	result, err := service.Complete(context.Background(), CompleteInput{
 		OnboardingToken: "onboarding-token", Email: "EXISTING@EXAMPLE.COM", Password: "old",
 		AcceptedTerms: true, ClientIP: "127.0.0.1",
@@ -301,12 +369,15 @@ func TestCompleteExistingUsesStableUserIDAndAcceptsHistoricPasswordShape(t *test
 	if _, exists := store.items["onboarding-token"]; exists {
 		t.Fatal("successful onboarding token was not consumed")
 	}
+	if rate.completionCalls != 0 {
+		t.Fatalf("existing-account binding consumed public create budget %d time(s)", rate.completionCalls)
+	}
 }
 
 func TestCompleteExistingConsumesProofAndRevokesSessionWhenAuthoritySnapshotIsStale(t *testing.T) {
 	userID := identity.UserID("user_existing")
 	store := newMemoryChallengeStore()
-	store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id"}
+	store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id", Phone: "+8613800138000"}
 	accounts := &accountStub{
 		snapshot: AccountSnapshot{
 			User:            identity.User{ID: userID, Status: identity.UserStatusActive, Version: 7},
@@ -338,7 +409,7 @@ func TestCompleteExistingConsumesProofAndRevokesSessionWhenAuthoritySnapshotIsSt
 func TestCompleteExistingWrongPasswordReturnsStableSentinelAfterClaimAndRate(t *testing.T) {
 	userID := identity.UserID("user_existing")
 	store := newMemoryChallengeStore()
-	store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id"}
+	store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id", Phone: "+8613800138000"}
 	rate := &rateStub{allowed: true}
 	accounts := &accountStub{user: identity.User{ID: userID, Status: identity.UserStatusActive}}
 	password := &passwordStub{passwordResult: auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}}
@@ -347,7 +418,7 @@ func TestCompleteExistingWrongPasswordReturnsStableSentinelAfterClaimAndRate(t *
 	if !errors.Is(err, ErrPasswordMismatch) {
 		t.Fatalf("error = %v, want ErrPasswordMismatch", err)
 	}
-	if rate.calls != 3 || rate.completionCalls != 1 || rate.completionEmail == "existing@example.com" || len(rate.completionEmail) != 64 || store.attempts["onboarding-token"] != 1 || store.claims["onboarding-token"] != "" {
+	if rate.calls != 3 || rate.completionCalls != 0 || rate.completionEmail != "" || store.attempts["onboarding-token"] != 1 || store.claims["onboarding-token"] != "" {
 		t.Fatalf("rate/attempt/release = token:%d completion:%d email:%q attempts:%d claim:%q", rate.calls, rate.completionCalls, rate.completionEmail, store.attempts["onboarding-token"], store.claims["onboarding-token"])
 	}
 	if rate.peers[1] != "wechat-subject" || len(rate.keys[1]) != 64 || strings.Contains(rate.keys[1], "open-id") {
@@ -364,8 +435,8 @@ func TestCompleteExistingWrongPasswordReturnsStableSentinelAfterClaimAndRate(t *
 func TestTargetAccountBucketIsStableAcrossSubjectIPAndEmail(t *testing.T) {
 	userID := identity.UserID("user_target_1")
 	store := newMemoryChallengeStore()
-	store.items["token-one"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "subject-one"}
-	store.items["token-two"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "subject-two"}
+	store.items["token-one"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "subject-one", Phone: "+8613800138000"}
+	store.items["token-two"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "subject-two", Phone: "+8613800138000"}
 	rate := &rateStub{allowed: true}
 	accounts := &accountStub{user: identity.User{ID: userID, Status: identity.UserStatusActive}}
 	password := &passwordStub{passwordResult: auth.AuthenticationResult{Status: auth.StatusInvalidCredentials}}
@@ -405,7 +476,7 @@ func TestTargetAccountRateLimiterFailsClosedBeforePasswordWithRetryHint(t *testi
 		t.Run(test.name, func(t *testing.T) {
 			events := []string{}
 			store := newMemoryChallengeStore()
-			store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id"}
+			store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id", Phone: "+8613800138000"}
 			rate := &rateStub{allowed: true, targetDeny: test.targetErr == nil, targetErr: test.targetErr, targetRetry: test.retry, events: &events}
 			accounts := &accountStub{user: identity.User{ID: "user_existing", Status: identity.UserStatusActive}, events: &events}
 			password := &passwordStub{events: &events}
@@ -419,7 +490,7 @@ func TestTargetAccountRateLimiterFailsClosedBeforePasswordWithRetryHint(t *testi
 			if !errors.Is(err, ErrRateLimited) || !errors.As(err, &limitErr) || limitErr.RetryAfter != test.wantRetry {
 				t.Fatalf("rate error = %#v, want retry %v", err, test.wantRetry)
 			}
-			wantOrder := "rate:127.0.0.1,rate:wechat-subject,completion-rate,lookup,rate:" + targetAccountRatePeer
+			wantOrder := "rate:127.0.0.1,rate:wechat-subject,lookup,rate:" + targetAccountRatePeer
 			if got := strings.Join(events, ","); got != wantOrder {
 				t.Fatalf("call order = %q, want %q", got, wantOrder)
 			}
@@ -436,7 +507,7 @@ func TestMFACompletionRechecksTargetBucketBeforeProvider(t *testing.T) {
 	store := newMemoryChallengeStore()
 	store.items["mfa-token"] = ChallengeData{
 		Purpose: MFAChallengePurpose, Kind: ChallengeKindMFA,
-		TenantID: "app", Subject: "open-id", TargetUserID: userID, NormalizedEmail: "existing@example.com",
+		TenantID: "app", Subject: "open-id", Phone: "+8613800138000", TargetUserID: userID, NormalizedEmail: "existing@example.com",
 		ExpectedVersion: 1, ExpectedSecurityEpoch: 1, ProviderSessionID: "provider-mfa",
 		AvailableMethods: []auth.MFAMethod{auth.MFAMethodTOTP},
 	}
@@ -475,9 +546,10 @@ func TestCompleteDoesNotConsumeGlobalRegistrationBucketsBeforeChallengeClaim(t *
 
 func TestCompleteNewAccountAppliesStrongPolicyAndForwardsVerifiedProof(t *testing.T) {
 	store := newMemoryChallengeStore()
-	store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id"}
+	store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id", Phone: "+8613800138000"}
 	creator := &creatorStub{result: registration.CreateResult{RegistrationToken: "registration-token", ExpiresAt: time.Now().Add(time.Hour)}}
-	service := serviceForTest(&proofStub{}, &bindingStub{}, &accountStub{findErr: identity.ErrUserNotFound}, &passwordStub{}, creator, store, &rateStub{allowed: true}, "claim-id")
+	rate := &rateStub{allowed: true}
+	service := serviceForTest(&proofStub{}, &bindingStub{}, &accountStub{findErr: identity.ErrUserNotFound}, &passwordStub{}, creator, store, rate, "claim-id")
 	result, err := service.Complete(context.Background(), CompleteInput{
 		OnboardingToken: "onboarding-token", Email: "new@example.com", Password: "Strong-Password-123!",
 		Username: "new_user", DisplayName: "New User", AcceptedTerms: true, RequestID: "request-1", ClientIP: "127.0.0.1",
@@ -485,14 +557,79 @@ func TestCompleteNewAccountAppliesStrongPolicyAndForwardsVerifiedProof(t *testin
 	if err != nil || result.Status != StatusVerificationNeeded || result.RegistrationToken != "registration-token" {
 		t.Fatalf("Complete = %#v, %v", result, err)
 	}
-	if creator.input.Proof.TenantID != "app" || creator.input.Proof.Subject != "open-id" || creator.input.Proof.Phone != "" {
+	if creator.input.Proof.TenantID != "app" || creator.input.Proof.Subject != "open-id" || creator.input.Proof.Phone != "+8613800138000" {
 		t.Fatalf("verified proof = %#v", creator.input.Proof)
 	}
+	if rate.completionCalls != 1 || len(rate.completionEmail) != 64 || strings.Contains(rate.completionEmail, "new@example.com") {
+		t.Fatalf("new-account create rate = calls:%d email:%q", rate.completionCalls, rate.completionEmail)
+	}
 
-	store.items["weak-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id-2"}
+	store.items["weak-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id-2", Phone: "+8613800138001"}
+	completionCallsBeforeInvalidInput := rate.completionCalls
 	_, err = service.Complete(context.Background(), CompleteInput{OnboardingToken: "weak-token", Email: "new2@example.com", Password: "old", Username: "new_user2", DisplayName: "New", AcceptedTerms: true, ClientIP: "127.0.0.1"})
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("weak new password error = %v", err)
+	}
+	if rate.completionCalls != completionCallsBeforeInvalidInput {
+		t.Fatalf("invalid new-account input consumed public create budget: before=%d after=%d", completionCallsBeforeInvalidInput, rate.completionCalls)
+	}
+
+	store.items["empty-profile-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id-3", Phone: "+8613800138002"}
+	_, err = service.Complete(context.Background(), CompleteInput{OnboardingToken: "empty-profile-token", Email: "new3@example.com", Password: "Strong-Password-123!", AcceptedTerms: true, ClientIP: "127.0.0.1"})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("empty new-account profile error = %v", err)
+	}
+	if rate.completionCalls != completionCallsBeforeInvalidInput {
+		t.Fatalf("empty new-account profile consumed public create budget: before=%d after=%d", completionCallsBeforeInvalidInput, rate.completionCalls)
+	}
+}
+
+func TestCompleteNewAccountCreationRateFailsClosedAfterLookupBeforeCreator(t *testing.T) {
+	events := []string{}
+	store := newMemoryChallengeStore()
+	store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id", Phone: "+8613800138000"}
+	rate := &rateStub{allowed: true, completionDeny: true, completionRetry: 37 * time.Second, events: &events}
+	accounts := &accountStub{findErr: identity.ErrUserNotFound, events: &events}
+	creator := &creatorStub{}
+	service := serviceForTest(&proofStub{}, &bindingStub{}, accounts, &passwordStub{}, creator, store, rate, "claim-id")
+
+	_, err := service.Complete(context.Background(), CompleteInput{
+		OnboardingToken: "onboarding-token", Email: "new@example.com", Password: "Strong-Password-123!",
+		Username: "new_user", DisplayName: "New User", AcceptedTerms: true,
+		ClientIP: "203.0.113.10", ClientNetwork: "203.0.113.0/24",
+	})
+	var rateErr *RateLimitError
+	if !errors.Is(err, ErrRateLimited) || !errors.As(err, &rateErr) || rateErr.RetryAfter != 37*time.Second {
+		t.Fatalf("new-account rate error=%#v", err)
+	}
+	if got, want := strings.Join(events, ","), "rate:203.0.113.10,rate:wechat-subject,lookup,completion-rate"; got != want {
+		t.Fatalf("new-account call order=%q want=%q", got, want)
+	}
+	if creator.input.Registration.Email != "" || store.claims["onboarding-token"] != "" {
+		t.Fatalf("rate-denied new account reached creator or retained claim: creator=%#v claim=%q", creator.input, store.claims["onboarding-token"])
+	}
+}
+
+func TestCompleteNewOrHistoricalPendingPhoneOwnerConflictRemainsExplicit(t *testing.T) {
+	for _, targetUserID := range []identity.UserID{"", "user_pending"} {
+		store := newMemoryChallengeStore()
+		store.items["onboarding-token"] = ChallengeData{
+			Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding,
+			TenantID: "app", Subject: "open-id", Phone: "+8613800138000", TargetUserID: targetUserID,
+		}
+		accounts := &accountStub{findErr: identity.ErrUserNotFound}
+		if targetUserID != "" {
+			accounts = &accountStub{user: identity.User{ID: targetUserID, Status: identity.UserStatusPending, Email: "new@example.com"}}
+		}
+		creator := &creatorStub{err: registration.ErrPhoneConflict}
+		service := serviceForTest(&proofStub{}, &bindingStub{}, accounts, &passwordStub{}, creator, store, &rateStub{allowed: true}, "claim-phone-conflict")
+		result, err := service.Complete(context.Background(), CompleteInput{
+			OnboardingToken: "onboarding-token", Email: "new@example.com", Password: "Strong-Password-123!",
+			Username: "new_user", DisplayName: "New User", AcceptedTerms: true, ClientIP: "127.0.0.1",
+		})
+		if !errors.Is(err, ErrPhoneConflict) || result.Status != "" {
+			t.Fatalf("target=%q result=%#v error=%v, want explicit phone conflict", targetUserID, result, err)
+		}
 	}
 }
 
@@ -505,7 +642,8 @@ func TestCompleteReconcilesOnlyThePendingUserBoundIntoChallenge(t *testing.T) {
 	}
 	creator := &creatorStub{result: registration.CreateResult{RegistrationToken: "registration-token", ExpiresAt: time.Now().Add(time.Hour)}}
 	accounts := &accountStub{user: identity.User{ID: userID, Status: identity.UserStatusPending, Email: "pending@example.com"}}
-	service := serviceForTest(&proofStub{}, &bindingStub{}, accounts, &passwordStub{}, creator, store, &rateStub{allowed: true}, "claim-id")
+	rate := &rateStub{allowed: true}
+	service := serviceForTest(&proofStub{}, &bindingStub{}, accounts, &passwordStub{}, creator, store, rate, "claim-id")
 	result, err := service.Complete(context.Background(), CompleteInput{
 		OnboardingToken: "pending-token", Email: "pending@example.com", Password: "Strong-Password-123!",
 		Username: "pending_user", DisplayName: "Pending User", AcceptedTerms: true, RequestID: "request-1", ClientIP: "127.0.0.1",
@@ -516,10 +654,13 @@ func TestCompleteReconcilesOnlyThePendingUserBoundIntoChallenge(t *testing.T) {
 	if creator.input.Proof.Subject != "open-id" || creator.input.Registration.Email != "pending@example.com" || creator.input.ExpectedUserID != string(userID) {
 		t.Fatalf("reconciliation input = %#v", creator.input)
 	}
+	if rate.completionCalls != 0 {
+		t.Fatalf("pending-account recovery consumed public create budget %d time(s)", rate.completionCalls)
+	}
 
 	store.items["mismatch-token"] = ChallengeData{
 		Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding,
-		TenantID: "app", Subject: "open-id", TargetUserID: userID,
+		TenantID: "app", Subject: "open-id", Phone: "+8613800138000", TargetUserID: userID,
 	}
 	accounts.user = identity.User{ID: identity.UserID("different_pending"), Status: identity.UserStatusPending, Email: "pending@example.com"}
 	_, err = service.Complete(context.Background(), CompleteInput{
@@ -534,7 +675,7 @@ func TestCompleteReconcilesOnlyThePendingUserBoundIntoChallenge(t *testing.T) {
 func TestMFAChallengeBindsTargetAndRejectsCrossUserCompletion(t *testing.T) {
 	userID := identity.UserID("user_existing")
 	store := newMemoryChallengeStore()
-	store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id"}
+	store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id", Phone: "+8613800138000"}
 	accounts := &accountStub{user: identity.User{ID: userID, Status: identity.UserStatusActive}}
 	password := &passwordStub{
 		passwordResult: auth.AuthenticationResult{Status: auth.StatusMFARequired, Provider: "zitadel", ProviderSessionID: "provider-mfa", AvailableMethods: []auth.MFAMethod{auth.MFAMethodTOTP}, PasskeyRequestOptions: json.RawMessage(`{"challenge":"x"}`)},
@@ -561,7 +702,7 @@ func TestMFAChallengeBindsTargetAndRejectsCrossUserCompletion(t *testing.T) {
 func TestMFACompletionConsumesChallengeAndRevokesSessionWhenAuthoritySnapshotIsStale(t *testing.T) {
 	userID := identity.UserID("user_existing")
 	store := newMemoryChallengeStore()
-	store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id"}
+	store.items["onboarding-token"] = ChallengeData{Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding, TenantID: "app", Subject: "open-id", Phone: "+8613800138000"}
 	accounts := &accountStub{snapshot: AccountSnapshot{
 		User:            identity.User{ID: userID, Status: identity.UserStatusActive, Version: 9},
 		NormalizedEmail: "existing@example.com", Version: 9, SecurityEpoch: 6,
@@ -592,7 +733,7 @@ func TestMFACompletionRejectsChallengeWithoutAuthoritySnapshot(t *testing.T) {
 	store := newMemoryChallengeStore()
 	store.items["mfa-token"] = ChallengeData{
 		Purpose: MFAChallengePurpose, Kind: ChallengeKindMFA,
-		TenantID: "app", Subject: "open-id", TargetUserID: "user_existing",
+		TenantID: "app", Subject: "open-id", Phone: "+8613800138000", TargetUserID: "user_existing",
 		ProviderSessionID: "provider-mfa", AvailableMethods: []auth.MFAMethod{auth.MFAMethodTOTP},
 	}
 	password := &passwordStub{}
@@ -616,5 +757,118 @@ func TestInvalidChallengeNeverReachesRateOrEmailLookup(t *testing.T) {
 	}
 	if rate.calls != 0 || accounts.findEmail != "" {
 		t.Fatalf("invalid token reached rate/lookup: calls=%d email=%q", rate.calls, accounts.findEmail)
+	}
+}
+
+func TestCompleteConsumesLegacyPhoneEmptyOnboardingChallengeBeforeAnyBranch(t *testing.T) {
+	store := newMemoryChallengeStore()
+	store.items["legacy-token"] = ChallengeData{
+		Purpose: ChallengePurpose, Kind: ChallengeKindOnboarding,
+		TenantID: "app", Subject: "legacy-open-id",
+	}
+	rate := &rateStub{allowed: true}
+	accounts := &accountStub{user: identity.User{ID: "user_existing", Status: identity.UserStatusActive}}
+	creator := &creatorStub{}
+	service := serviceForTest(&proofStub{}, &bindingStub{}, accounts, &passwordStub{}, creator, store, rate, "claim-legacy")
+
+	_, err := service.Complete(context.Background(), CompleteInput{
+		OnboardingToken: "legacy-token", Email: "existing@example.com", Password: "password",
+		AcceptedTerms: true, ClientIP: "127.0.0.1",
+	})
+	if !errors.Is(err, ErrPhoneRequired) {
+		t.Fatalf("Complete error = %v, want ErrPhoneRequired", err)
+	}
+	if _, exists := store.items["legacy-token"]; exists || store.claims["legacy-token"] != "" {
+		t.Fatalf("legacy onboarding challenge was not consumed: items=%#v claims=%#v", store.items, store.claims)
+	}
+	if rate.calls != 0 || rate.completionCalls != 0 || accounts.findEmail != "" || creator.input.Proof.Subject != "" {
+		t.Fatalf("phone-empty onboarding reached a protected branch: rate=%d completion=%d email=%q creator=%#v", rate.calls, rate.completionCalls, accounts.findEmail, creator.input)
+	}
+}
+
+func TestCompleteMFAConsumesLegacyPhoneEmptyChallengeBeforeProvider(t *testing.T) {
+	store := newMemoryChallengeStore()
+	store.items["legacy-mfa-token"] = ChallengeData{
+		Purpose: MFAChallengePurpose, Kind: ChallengeKindMFA,
+		TenantID: "app", Subject: "legacy-open-id", TargetUserID: "user_existing",
+		NormalizedEmail: "existing@example.com", ExpectedVersion: 1, ExpectedSecurityEpoch: 1,
+		ProviderSessionID: "provider-session", AvailableMethods: []auth.MFAMethod{auth.MFAMethodTOTP},
+	}
+	rate := &rateStub{allowed: true}
+	password := &passwordStub{}
+	service := serviceForTest(&proofStub{}, &bindingStub{}, &accountStub{}, password, &creatorStub{}, store, rate, "claim-legacy-mfa")
+
+	_, err := service.CompleteMFA(context.Background(), MFAInput{
+		MFAToken: "legacy-mfa-token", Method: auth.MFAMethodTOTP, Code: "123456", ClientIP: "127.0.0.1",
+	})
+	if !errors.Is(err, ErrPhoneRequired) {
+		t.Fatalf("CompleteMFA error = %v, want ErrPhoneRequired", err)
+	}
+	if _, exists := store.items["legacy-mfa-token"]; exists || store.claims["legacy-mfa-token"] != "" {
+		t.Fatalf("legacy MFA challenge was not consumed: items=%#v claims=%#v", store.items, store.claims)
+	}
+	if rate.calls != 0 || password.mfaInput.ProviderSessionID != "" || len(password.revoked) != 1 || password.revoked[0] != "provider-session" {
+		t.Fatalf("phone-empty MFA reached provider or skipped revocation: rate=%d input=%#v revoked=%#v", rate.calls, password.mfaInput, password.revoked)
+	}
+}
+
+func TestCompleteMFARevokesLegacyProviderSessionEvenWhenChallengeConsumeFails(t *testing.T) {
+	store := newMemoryChallengeStore()
+	store.consumeErr = errors.New("redis cleanup unavailable")
+	store.items["legacy-mfa-token"] = ChallengeData{
+		Purpose: MFAChallengePurpose, Kind: ChallengeKindMFA,
+		TenantID: "app", Subject: "legacy-open-id", ProviderSessionID: "provider-session",
+	}
+	password := &passwordStub{}
+	service := serviceForTest(&proofStub{}, &bindingStub{}, &accountStub{}, password, &creatorStub{}, store, &rateStub{allowed: true}, "claim-consume-failure")
+
+	_, err := service.CompleteMFA(context.Background(), MFAInput{
+		MFAToken: "legacy-mfa-token", Method: auth.MFAMethodTOTP, Code: "123456", ClientIP: "127.0.0.1",
+	})
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("CompleteMFA error = %v, want ErrUnavailable", err)
+	}
+	if len(password.revoked) != 1 || password.revoked[0] != "provider-session" {
+		t.Fatalf("provider session was not revoked after Redis cleanup failure: %#v", password.revoked)
+	}
+}
+
+func TestLegacyMFAChallengeWrongRouteOrPurposeIsConsumedAndRevoked(t *testing.T) {
+	tests := []struct {
+		name      string
+		purpose   string
+		complete  bool
+		wantError error
+	}{
+		{name: "MFA token sent to onboarding completion", purpose: MFAChallengePurpose, complete: true, wantError: ErrChallengeNotFound},
+		{name: "MFA token has legacy wrong purpose", purpose: ChallengePurpose, wantError: ErrChallengeNotFound},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newMemoryChallengeStore()
+			store.items["legacy-mfa-token"] = ChallengeData{
+				Purpose: test.purpose, Kind: ChallengeKindMFA,
+				TenantID: "app", Subject: "legacy-open-id", ProviderSessionID: "provider-session",
+			}
+			password := &passwordStub{}
+			service := serviceForTest(&proofStub{}, &bindingStub{}, &accountStub{}, password, &creatorStub{}, store, &rateStub{allowed: true}, "claim-mismatch")
+			var err error
+			if test.complete {
+				_, err = service.Complete(context.Background(), CompleteInput{
+					OnboardingToken: "legacy-mfa-token", Email: "existing@example.com", Password: "password",
+					AcceptedTerms: true, ClientIP: "127.0.0.1",
+				})
+			} else {
+				_, err = service.CompleteMFA(context.Background(), MFAInput{
+					MFAToken: "legacy-mfa-token", Method: auth.MFAMethodTOTP, Code: "123456", ClientIP: "127.0.0.1",
+				})
+			}
+			if !errors.Is(err, test.wantError) {
+				t.Fatalf("error = %v, want %v", err, test.wantError)
+			}
+			if _, exists := store.items["legacy-mfa-token"]; exists || len(password.revoked) != 1 || password.revoked[0] != "provider-session" {
+				t.Fatalf("terminal mismatch cleanup items=%#v revoked=%#v", store.items, password.revoked)
+			}
+		})
 	}
 }

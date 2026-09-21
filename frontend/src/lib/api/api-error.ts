@@ -13,7 +13,14 @@
  * These types are consumed by the future HTTP-based UnitedPassDataSource
  * implementation and by Client Components that need to render field-level
  * or page-level errors.
- */
+*/
+
+import {
+  FIRST_PARTY_IMAGE_PROVIDER,
+  parseInteractiveCaptchaDescriptor,
+  RECAPTCHA_PROVIDER,
+  TURNSTILE_PROVIDER,
+} from "@/lib/security/interactive-captcha-contract";
 
 export type ApiErrorKind =
   | "network"
@@ -41,8 +48,6 @@ type StepUpBase = {
   level: "medium" | "high";
   expiresAt: string;
   providerReady: boolean;
-  provider?: string;
-  providerPayload?: Readonly<Record<string, unknown>>;
 };
 
 export type AutomationCostStepUp = StepUpBase & {
@@ -55,7 +60,28 @@ export type AutomationCostStepUp = StepUpBase & {
 export type InteractiveCaptchaStepUp = StepUpBase & {
   method: "interactive_captcha";
   completionPath: "/api/v1/auth/step-up";
-};
+} & (
+  | {
+    providerReady: false;
+    provider?: never;
+    providerPayload?: never;
+  }
+  | {
+    providerReady: true;
+    provider: typeof TURNSTILE_PROVIDER;
+    providerPayload: Readonly<{ siteKey: string; action: string; cdata: string }>;
+  }
+  | {
+    providerReady: true;
+    provider: typeof RECAPTCHA_PROVIDER;
+    providerPayload: Readonly<{ siteKey: string; action: string }>;
+  }
+  | {
+    providerReady: true;
+    provider: typeof FIRST_PARTY_IMAGE_PROVIDER;
+    providerPayload: Readonly<{ imageDataUrl: string; digits: number }>;
+  }
+);
 
 /**
  * Forward-compatible account-aware methods. The current pre-authentication
@@ -63,8 +89,18 @@ export type InteractiveCaptchaStepUp = StepUpBase & {
  * retain their existing API contracts.
  */
 export type AccountAwareStepUp = StepUpBase & (
-  | { method: "mfa"; completionPath: "/api/v1/auth/sessions/mfa" }
-  | { method: "reauth"; completionPath: "/api/v1/auth/reauthentication" }
+  | {
+    method: "mfa";
+    completionPath: "/api/v1/auth/sessions/mfa";
+    provider?: string;
+    providerPayload?: Readonly<Record<string, unknown>>;
+  }
+  | {
+    method: "reauth";
+    completionPath: "/api/v1/auth/reauthentication";
+    provider?: string;
+    providerPayload?: Readonly<Record<string, unknown>>;
+  }
 );
 
 export type StepUpChallenge =
@@ -81,6 +117,13 @@ export type ApiError = {
   retryAfter?: number;
   challenge?: ReauthenticationChallenge;
   stepUp?: StepUpChallenge;
+  /**
+   * A step-up-backed login failed after verification, or its completion became
+   * ambiguous. Login uses this local-only marker to reload before another
+   * credential attempt, preventing any completed challenge UI from being
+   * mistaken for a reusable grant.
+   */
+  requiresChallengeRefresh?: true;
 };
 
 const API_ERROR_KINDS: ReadonlySet<string> = new Set<ApiErrorKind>([
@@ -131,14 +174,21 @@ export function isStepUpChallenge(value: unknown): value is StepUpChallenge {
 
   switch (record.method) {
     case "automation_cost":
-      return record.completionPath === "/api/v1/auth/step-up"
+      return record.providerReady === true
+        && record.provider === undefined
+        && record.providerPayload === undefined
+        && record.completionPath === "/api/v1/auth/step-up"
         && record.algorithm === "sha256_leading_zero_bits"
         && Number.isSafeInteger(record.difficulty)
         && typeof record.difficulty === "number"
         && record.difficulty >= 1
         && record.difficulty <= 30;
     case "interactive_captcha":
-      return record.completionPath === "/api/v1/auth/step-up";
+      if (record.completionPath !== "/api/v1/auth/step-up") return false;
+      if (!record.providerReady) {
+        return record.provider === undefined && record.providerPayload === undefined;
+      }
+      return parseInteractiveCaptchaDescriptor(record.provider, record.providerPayload) !== undefined;
     case "mfa":
       return record.completionPath === "/api/v1/auth/sessions/mfa";
     case "reauth":
@@ -161,6 +211,7 @@ export function isApiError(value: unknown): value is ApiError {
   if (record.retryAfter !== undefined && typeof record.retryAfter !== "number") return false;
   if (record.challenge !== undefined && !isReauthenticationChallenge(record.challenge)) return false;
   if (record.stepUp !== undefined && !isStepUpChallenge(record.stepUp)) return false;
+  if (record.requiresChallengeRefresh !== undefined && record.requiresChallengeRefresh !== true) return false;
 
   return true;
 }

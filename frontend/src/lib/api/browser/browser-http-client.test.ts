@@ -164,6 +164,7 @@ describe("browserFetch error normalization", () => {
     if (isApiError(error)) {
       expect(error.kind).toBe(kind);
       expect(error.message).toBe("失败");
+      expect(error.requiresChallengeRefresh).toBeUndefined();
     }
   });
 
@@ -358,8 +359,12 @@ describe("browserFetch objective risk step-up", () => {
         method: "interactive_captcha",
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
         providerReady: true,
-        provider: "configured-provider",
-        providerPayload: { scene: "registration" },
+        provider: "cloudflare_turnstile",
+        providerPayload: {
+          siteKey: "public-site-key",
+          action: "united_pass_register_A1-b2",
+          cdata: "server_nonce-1",
+        },
         completionPath: "/api/v1/auth/step-up",
       }),
       new Response(null, { status: 204 }),
@@ -380,6 +385,257 @@ describe("browserFetch objective risk step-up", () => {
       challengeToken: "captcha-challenge",
       providerProof: "opaque-provider-proof",
     });
+  });
+
+  it("marks a credential failure after CAPTCHA completion for a full page refresh", async () => {
+    vi.stubGlobal("document", { cookie: "up_csrf=csrf-token-1" });
+    const unregister = registerRiskStepUpHandler(async () => ({
+      status: "provider_proof",
+      providerProof: "single-use-provider-proof",
+    }));
+    stubFetchSequence([
+      stepUpResponse({
+        challengeToken: "captcha-login-failure",
+        level: "high",
+        method: "interactive_captcha",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        providerReady: true,
+        provider: "cloudflare_turnstile",
+        providerPayload: {
+          siteKey: "public-site-key",
+          action: "united_pass_login_A1-b2",
+          cdata: "server_nonce-2",
+        },
+        completionPath: "/api/v1/auth/step-up",
+      }),
+      new Response(null, { status: 204 }),
+      jsonResponse(JSON.stringify({
+        error: { code: "session.unauthenticated", message: "账户或密码错误。" },
+      }), 401),
+    ]);
+
+    let error: unknown;
+    try {
+      error = await browserFetch("/auth/sessions", {
+        method: "POST",
+        body: { identifier: "account", password: "wrong-password" },
+      }).catch((caught: unknown) => caught);
+    } finally {
+      unregister();
+    }
+
+    expect(isApiError(error)).toBe(true);
+    if (isApiError(error)) {
+      expect(error.kind).toBe("unauthorized");
+      expect(error.requiresChallengeRefresh).toBe(true);
+    }
+  });
+
+  it("marks a credential failure after automation-cost completion for a full page refresh", async () => {
+    vi.stubGlobal("document", { cookie: "up_csrf=csrf-token-1" });
+    stubFetchSequence([
+      stepUpResponse({
+        challengeToken: "automation-login-failure",
+        level: "medium",
+        method: "automation_cost",
+        algorithm: "sha256_leading_zero_bits",
+        difficulty: 1,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        providerReady: true,
+        completionPath: "/api/v1/auth/step-up",
+      }),
+      new Response(null, { status: 204 }),
+      jsonResponse(JSON.stringify({
+        error: { code: "session.unauthenticated", message: "账户或密码错误。" },
+      }), 401),
+    ]);
+
+    const error = await browserFetch("/auth/sessions", {
+      method: "POST",
+      body: { identifier: "account", password: "wrong-password" },
+    }).catch((caught: unknown) => caught);
+
+    expect(isApiError(error)).toBe(true);
+    if (isApiError(error)) {
+      expect(error.kind).toBe("unauthorized");
+      expect(error.requiresChallengeRefresh).toBe(true);
+    }
+  });
+
+  it("marks a failed CAPTCHA completion because the provider proof cannot be reused", async () => {
+    vi.stubGlobal("document", { cookie: "up_csrf=csrf-token-1" });
+    const unregister = registerRiskStepUpHandler(async () => ({
+      status: "provider_proof",
+      providerProof: "already-consumed-provider-proof",
+    }));
+    stubFetchSequence([
+      stepUpResponse({
+        challengeToken: "captcha-completion-failure",
+        level: "high",
+        method: "interactive_captcha",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        providerReady: true,
+        provider: "cloudflare_turnstile",
+        providerPayload: {
+          siteKey: "public-site-key",
+          action: "united_pass_login_C3-d4",
+          cdata: "server_nonce-3",
+        },
+        completionPath: "/api/v1/auth/step-up",
+      }),
+      jsonResponse(JSON.stringify({
+        error: { code: "step_up_consumed", message: "验证已使用。" },
+      }), 409),
+    ]);
+
+    let error: unknown;
+    try {
+      error = await browserFetch("/auth/sessions", {
+        method: "POST",
+        body: { identifier: "account", password: "wrong-password" },
+      }).catch((caught: unknown) => caught);
+    } finally {
+      unregister();
+    }
+
+    expect(isApiError(error)).toBe(true);
+    if (isApiError(error)) {
+      expect(error.kind).toBe("conflict");
+      expect(error.requiresChallengeRefresh).toBe(true);
+    }
+  });
+
+  it("marks an ambiguous CAPTCHA completion network failure for refresh", async () => {
+    vi.stubGlobal("document", { cookie: "up_csrf=csrf-token-1" });
+    const unregister = registerRiskStepUpHandler(async () => ({
+      status: "provider_proof",
+      providerProof: "single-use-provider-proof",
+    }));
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        return stepUpResponse({
+          challengeToken: "captcha-completion-network",
+          level: "high",
+          method: "interactive_captcha",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          providerReady: true,
+          provider: "cloudflare_turnstile",
+          providerPayload: {
+            siteKey: "public-site-key",
+            action: "united_pass_login_G7-h8",
+            cdata: "server_nonce-5",
+          },
+          completionPath: "/api/v1/auth/step-up",
+        });
+      }
+      throw new TypeError("network connection closed");
+    }));
+
+    let error: unknown;
+    try {
+      error = await browserFetch("/auth/sessions", {
+        method: "POST",
+        body: { identifier: "account", password: "wrong-password" },
+      }).catch((caught: unknown) => caught);
+    } finally {
+      unregister();
+    }
+
+    expect(isApiError(error)).toBe(true);
+    if (isApiError(error)) {
+      expect(error.kind).toBe("network");
+      expect(error.requiresChallengeRefresh).toBe(true);
+    }
+  });
+
+  it("marks an ambiguous post-CAPTCHA login retry network failure for refresh", async () => {
+    vi.stubGlobal("document", { cookie: "up_csrf=csrf-token-1" });
+    const unregister = registerRiskStepUpHandler(async () => ({
+      status: "provider_proof",
+      providerProof: "single-use-provider-proof",
+    }));
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        return stepUpResponse({
+          challengeToken: "captcha-retry-network",
+          level: "high",
+          method: "interactive_captcha",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          providerReady: true,
+          provider: "cloudflare_turnstile",
+          providerPayload: {
+            siteKey: "public-site-key",
+            action: "united_pass_login_I9-j0",
+            cdata: "server_nonce-6",
+          },
+          completionPath: "/api/v1/auth/step-up",
+        });
+      }
+      if (call === 2) return new Response(null, { status: 204 });
+      throw new TypeError("network connection closed");
+    }));
+
+    let error: unknown;
+    try {
+      error = await browserFetch("/auth/sessions", {
+        method: "POST",
+        body: { identifier: "account", password: "wrong-password" },
+      }).catch((caught: unknown) => caught);
+    } finally {
+      unregister();
+    }
+
+    expect(isApiError(error)).toBe(true);
+    if (isApiError(error)) {
+      expect(error.kind).toBe("network");
+      expect(error.requiresChallengeRefresh).toBe(true);
+    }
+  });
+
+  it("refreshes a CAPTCHA-backed login after any failed retry", async () => {
+    vi.stubGlobal("document", { cookie: "up_csrf=csrf-token-1" });
+    const unregister = registerRiskStepUpHandler(async () => ({
+      status: "provider_proof",
+      providerProof: "single-use-provider-proof",
+    }));
+    stubFetchSequence([
+      stepUpResponse({
+        challengeToken: "captcha-server-failure",
+        level: "high",
+        method: "interactive_captcha",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        providerReady: true,
+        provider: "cloudflare_turnstile",
+        providerPayload: {
+          siteKey: "public-site-key",
+          action: "united_pass_login_E5-f6",
+          cdata: "server_nonce-4",
+        },
+        completionPath: "/api/v1/auth/step-up",
+      }),
+      new Response(null, { status: 204 }),
+      jsonResponse(JSON.stringify({ error: { message: "服务暂时不可用。" } }), 500),
+    ]);
+
+    let error: unknown;
+    try {
+      error = await browserFetch("/auth/sessions", {
+        method: "POST",
+        body: { identifier: "account", password: "wrong-password" },
+      }).catch((caught: unknown) => caught);
+    } finally {
+      unregister();
+    }
+
+    expect(isApiError(error)).toBe(true);
+    if (isApiError(error)) {
+      expect(error.kind).toBe("server_error");
+      expect(error.requiresChallengeRefresh).toBe(true);
+    }
   });
 
   it("fails closed without posting fake proof when the provider is unavailable", async () => {

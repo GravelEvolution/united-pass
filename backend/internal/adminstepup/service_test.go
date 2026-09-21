@@ -848,6 +848,17 @@ func TestEveryDreamUPHighRiskDelegationCapabilityMintsAndConsumesExactOneShotGra
 		{permissions.ActionAuditRead, dreamUPTestGrantTarget("evt_a", "event", "evt_a")},
 		{permissions.ActionContactSubmissionManage, dreamUPTestGrantTarget("evt_a", "contact_submission", "contact_1")},
 		{permissions.ActionContentManage, dreamUPTestGrantTarget("evt_a", "event", "evt_a")},
+		{permissions.ActionInspectionPointManage, dreamUPTestGrantTarget("evt_a", "inspection_point", "point_1")},
+		{permissions.ActionInspectionPerform, dreamUPTestGrantTarget("evt_a", "inspection_point", "point_1")},
+		{permissions.ActionInspectionReview, dreamUPTestGrantTarget("evt_a", "inspection_record", "inspection_1")},
+		{permissions.ActionAssetManage, dreamUPTestGrantTarget("evt_a", "event_asset", "asset_1")},
+		{permissions.ActionAssetReservationManage, dreamUPTestGrantTarget("evt_a", "asset_reservation", "reservation_1")},
+		{permissions.ActionAssetCustodyTransfer, dreamUPTestGrantTarget("evt_a", "asset_unit", "unit_1")},
+		{permissions.ActionAssetInventoryAdjust, dreamUPTestGrantTarget("evt_a", "event_asset", "asset_1")},
+		{permissions.ActionPersonalAssetAssignment, dreamUPTestGrantTarget("evt_a", "personal_asset_assignment", "assignment_1")},
+		{permissions.ActionAssetCodeRotate, dreamUPTestGrantTarget("evt_a", "asset_unit", "unit_1")},
+		{permissions.ActionQRPrintSingle, dreamUPTestGrantTarget("evt_a", "entity_code", "code_1")},
+		{permissions.ActionQRPrintBulk, dreamUPTestGrantTarget("evt_a", "event", "evt_a")},
 		{permissions.ActionRoleMigrationRead, dreamUPTestGrantTarget("evt_a", "event", "evt_a")},
 	}
 	for index, test := range tests {

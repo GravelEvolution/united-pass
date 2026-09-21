@@ -4,6 +4,12 @@ Status: Accepted
 
 Date: 2026-08-27
 
+Architecture amendment: 2026-08-28. The outcome ledger was moved from the
+shared United Pass authority schema to a physically distinct operational
+PostgreSQL database. Production authority remains at migration v13. Authority
+migrations 00014/00015 are retained only as compatibility history for retired
+shared-store installations and are not current production prerequisites.
+
 ## Context
 
 DreamUP administration mutations cross the United Pass and DreamUP process
@@ -21,11 +27,13 @@ deterministic 4xx rejections waiting for a receipt that cannot exist.
 
 ## Decision
 
-The PostgreSQL `admin_operation_outbox` is the authoritative United Pass
-mutation outcome ledger. Every DreamUP mutation row binds the event, initiating
-United Pass user and original operation request ID to the existing keyed request
-fingerprint and idempotency key. It also binds the expected receipt action,
-target type and, when known before execution, target ID.
+The `admin_operation_outbox` in the dedicated operational PostgreSQL database is
+the authoritative United Pass mutation outcome ledger. It is created by
+`isolated-migrations/00001_dreamup_operational_store.sql` and has no foreign key
+or table dependency on the authority database. Every DreamUP mutation row binds
+the event, initiating United Pass user and original operation request ID to the
+existing keyed request fingerprint and idempotency key. It also binds the
+expected receipt action, target type and, when known before execution, target ID.
 
 The ledger stores only allowlisted outcome metadata:
 
@@ -88,12 +96,13 @@ the receipt workflow.
   hash binds the learned target and persisted operation metadata; exact replay
   returns the original check-in, while a new key against an already checked-in
   credential writes a separate `checkin.terminal_state_confirmed` audit event.
-- Migration 00015 repairs the earlier result allowlist/terminal constraint drift
-  and adds a receipt-due index. It is intentionally forward-only: its Down
-  raises an error so Goose cannot record a false v14 schema version. The Up
-  uses bounded lock/per-statement timeouts and requires a maintenance window
-  with every API/worker process that accesses the shared outbox stopped; its
-  table lock lasts until the Goose transaction commits.
+- The current operational-store v1 migration includes the bounded result
+  allowlist, terminal-state rule and receipt-due index from first creation.
+  Authority migration 00015 is retained only to document and repair retired
+  shared-store installations. It must not be applied to the current production
+  authority database, whose supported ceiling is v13. The ordinary authority
+  migration CLI enforces that ceiling; the isolated CLI targets only
+  `UP_ISOLATED_DATABASE_URL` and accepts only `up|status|version`.
 
 ## Rejected alternatives
 
@@ -102,5 +111,8 @@ the receipt workflow.
   potentially personal data.
 - **Use process memory or Redis as authority:** neither provides the required
   durable cross-process audit record.
+- **Apply authority migration 00015 in current production:** rejected because
+  cross-system recovery state is owned by isolated PostgreSQL v1 and production
+  authority must remain at v13.
 - **Trust a client-supplied actor, request ID, or outcome:** all bindings and
   state transitions must remain server-authored.

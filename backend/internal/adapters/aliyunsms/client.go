@@ -16,20 +16,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"time"
-)
-
-const (
-	officialEndpoint = "https://dysmsapi.aliyuncs.com/"
-	requestTimeout   = 10 * time.Second
 )
 
 // Config holds the Aliyun SMS account and template settings.
@@ -47,72 +40,16 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// NewClient builds the Aliyun SMS client. Runtime clients are pinned to the
-// official Aliyun HTTPS endpoint. A caller-supplied HTTP client permits an
-// IP-loopback endpoint solely as a deterministic test seam.
-func NewClient(cfg Config, httpClient *http.Client) (*Client, error) {
-	required := []struct {
-		name  string
-		value string
-	}{
-		{"access key id", cfg.AccessKeyID},
-		{"access key secret", cfg.AccessKeySecret},
-		{"sign name", cfg.SignName},
-		{"template code", cfg.TemplateCode},
-	}
-	for _, field := range required {
-		if field.value == "" || field.value != strings.TrimSpace(field.value) {
-			return nil, fmt.Errorf("aliyunsms: %s is required and must be trimmed", field.name)
-		}
-	}
+// NewClient builds the Aliyun SMS client. Endpoint defaults to the public
+// dysmsapi endpoint.
+func NewClient(cfg Config, httpClient *http.Client) *Client {
 	if cfg.Endpoint == "" {
-		cfg.Endpoint = officialEndpoint
-	}
-	endpoint, err := parseEndpoint(cfg.Endpoint, httpClient != nil)
-	if err != nil {
-		return nil, err
+		cfg.Endpoint = "https://dysmsapi.aliyuncs.com/"
 	}
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: requestTimeout}
-	} else {
-		// Never mutate a caller-owned client. Tests may supply an httptest
-		// transport, but they cannot weaken redirect or timeout handling.
-		copy := *httpClient
-		if copy.Timeout <= 0 || copy.Timeout > requestTimeout {
-			copy.Timeout = requestTimeout
-		}
-		httpClient = &copy
+		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
-	httpClient.CheckRedirect = rejectRedirect
-	httpClient.Jar = nil
-	cfg.Endpoint = endpoint.String()
-	return &Client{cfg: cfg, httpClient: httpClient}, nil
-}
-
-func parseEndpoint(raw string, allowLoopback bool) (*url.URL, error) {
-	if raw == "" || raw != strings.TrimSpace(raw) {
-		return nil, errors.New("aliyunsms: endpoint must be non-empty and trimmed")
-	}
-	endpoint, err := url.Parse(raw)
-	if err != nil || strings.Contains(raw, "#") || endpoint.Scheme == "" || endpoint.Host == "" || endpoint.Opaque != "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.ForceQuery || endpoint.Fragment != "" || endpoint.RawPath != "" || (endpoint.Path != "" && endpoint.Path != "/") {
-		return nil, errors.New("aliyunsms: endpoint must be an origin without userinfo, path, query, or fragment")
-	}
-
-	hostname := endpoint.Hostname()
-	officialHost := strings.EqualFold(endpoint.Host, "dysmsapi.aliyuncs.com") || strings.EqualFold(endpoint.Host, "dysmsapi.aliyuncs.com:443")
-	if endpoint.Scheme == "https" && officialHost {
-		return endpoint, nil
-	}
-	if allowLoopback && (endpoint.Scheme == "http" || endpoint.Scheme == "https") {
-		if address := net.ParseIP(hostname); address != nil && address.IsLoopback() {
-			return endpoint, nil
-		}
-	}
-	return nil, errors.New("aliyunsms: endpoint must use the official Aliyun HTTPS origin")
-}
-
-func rejectRedirect(*http.Request, []*http.Request) error {
-	return http.ErrUseLastResponse
+	return &Client{cfg: cfg, httpClient: httpClient}
 }
 
 // SendCode sends an SMS with the verification code to the given phone.

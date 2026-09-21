@@ -22,6 +22,8 @@ const (
 	codeWeChatOnboardingExpired          = "wechat.onboarding_expired"
 	codeWeChatOnboardingPasswordMismatch = "wechat.onboarding_email_password_mismatch"
 	codeWeChatOnboardingConflict         = "wechat.onboarding_conflict"
+	codeWeChatPhoneRequired              = "wechat.phone_required"
+	codeWeChatPhoneConflict              = "wechat.phone_conflict"
 )
 
 type WeChatOnboardingService interface {
@@ -77,9 +79,9 @@ func (h *WeChatOnboardingHandlers) Mount(router chi.Router) {
 	router.With(RequireMiniProgramClient(), RequireJSONMutation()).Post("/auth/wechat/onboarding/mfa", h.CompleteMFA)
 }
 
-// Begin accepts only provider one-time codes. phoneCode is optional and its
-// provider redemption is best effort inside the verifier; no phone-specific
-// failure or intermediate authorization state is exposed to the client.
+// Begin accepts only provider one-time codes. Both wx.login and getPhoneNumber
+// proofs are required before this route may create an onboarding challenge or
+// issue a WeChat-authenticated session.
 func (h *WeChatOnboardingHandlers) Begin(w http.ResponseWriter, r *http.Request) {
 	if !h.ready() {
 		WriteNotFound(w, r)
@@ -87,13 +89,17 @@ func (h *WeChatOnboardingHandlers) Begin(w http.ResponseWriter, r *http.Request)
 	}
 	var body struct {
 		LoginCode string `json:"loginCode"`
-		PhoneCode string `json:"phoneCode,omitempty"`
+		PhoneCode string `json:"phoneCode"`
 	}
 	if !decodeWeChatBody(w, r, &body) {
 		return
 	}
 	if wechat.ValidateCode(body.LoginCode) != nil {
 		WriteValidation(w, r, "微信授权信息无效，请重试。", nil)
+		return
+	}
+	if wechat.ValidateCode(body.PhoneCode) != nil {
+		writeError(w, r, http.StatusUnprocessableEntity, codeWeChatPhoneRequired, "微信登录需要授权手机号，请重新发起。", nil)
 		return
 	}
 	allowed, retryAfter, err := h.beginRate.CheckWeChatLogin(r.Context(), clientIP(r), hashIdentifier(body.LoginCode), h.beginLimit, h.beginWindow)
@@ -208,7 +214,7 @@ func (h *WeChatOnboardingHandlers) writeCompleteResult(w http.ResponseWriter, r 
 func (h *WeChatOnboardingHandlers) createFederatedSession(w http.ResponseWriter, r *http.Request, userID identity.UserID) {
 	h.createSession(w, r, session.CreateSessionInput{
 		UserID: userID, ClientKind: session.ClientKindMiniProgram, Provider: wechat.ProviderName,
-		AuthenticationMethods: []auth.AuthenticationMethod{auth.MethodFederated}, UserAgent: r.UserAgent(), ClientIP: clientIP(r),
+		AuthenticationMethods: []auth.AuthenticationMethod{auth.MethodFederated, auth.MethodWeChatPhoneVerified}, UserAgent: r.UserAgent(), ClientIP: clientIP(r),
 	}, "")
 }
 
@@ -224,6 +230,9 @@ func (h *WeChatOnboardingHandlers) createAuthenticatedSession(w http.ResponseWri
 	methods := append([]auth.AuthenticationMethod(nil), result.AuthenticationMethods...)
 	if !hasAuthenticationMethod(methods, auth.MethodFederated) {
 		methods = append(methods, auth.MethodFederated)
+	}
+	if !hasAuthenticationMethod(methods, auth.MethodWeChatPhoneVerified) {
+		methods = append(methods, auth.MethodWeChatPhoneVerified)
 	}
 	provider := result.Provider
 	if provider == "" {
@@ -292,9 +301,13 @@ func (h *WeChatOnboardingHandlers) writeServiceError(w http.ResponseWriter, r *h
 		writeError(w, r, http.StatusUnauthorized, codeWeChatOnboardingExpired, "微信登录流程已过期，请重新发起。", nil)
 	case errors.Is(err, wechatonboarding.ErrPasswordMismatch):
 		writeError(w, r, http.StatusUnauthorized, codeWeChatOnboardingPasswordMismatch, "此邮箱已存在账号，请设定原始密码以进行绑定", nil)
+	case errors.Is(err, wechatonboarding.ErrPhoneRequired):
+		writeError(w, r, http.StatusUnprocessableEntity, codeWeChatPhoneRequired, "微信登录需要授权手机号，请重新发起。", nil)
 	case errors.Is(err, wechatonboarding.ErrInvalidInput):
 		WriteValidation(w, r, "请检查账户信息后重试。", nil)
-	case errors.Is(err, wechatonboarding.ErrIdentityConflict), errors.Is(err, wechatonboarding.ErrPhoneConflict), errors.Is(err, wechatonboarding.ErrEmailAmbiguous):
+	case errors.Is(err, wechatonboarding.ErrPhoneConflict):
+		writeError(w, r, http.StatusConflict, codeWeChatPhoneConflict, "该手机号已绑定其他统一账户，或与当前账户信息冲突；系统未自动合并，请使用原账户登录或联系支持。", nil)
+	case errors.Is(err, wechatonboarding.ErrIdentityConflict), errors.Is(err, wechatonboarding.ErrEmailAmbiguous):
 		writeError(w, r, http.StatusConflict, codeWeChatOnboardingConflict, "无法安全绑定该账户，请检查信息或联系支持。", nil)
 	case errors.Is(err, wechatonboarding.ErrAccountInactive), errors.Is(err, wechatonboarding.ErrAuthenticationFail):
 		writeError(w, r, http.StatusUnauthorized, CodeUnauthorized, "账户验证失败，请重试。", nil)

@@ -33,8 +33,15 @@ export async function resolveAuthenticatedLoginDestination(
     throw error;
   }
 
-  if (requestId) {
-    return `/authorize?requestId=${encodeURIComponent(requestId)}`;
-  }
-  return "/account";
+  if (!requestId) return "/account";
+
+  // The interaction gateway sends a browser to /login?requestId=... when
+  // this exact authorization request still requires authentication. A valid
+  // generic United Pass session is therefore not enough to skip the login
+  // form: prompt=login and max_age can require a newer authentication time.
+  // Resolve the opaque request before deciding. Terminal/non-login states
+  // still belong to /authorize, which owns their stable user-facing result.
+  const resolution = await serverQueries.getConsentResolution(requestId);
+  if (resolution.status === "unauthenticated") return undefined;
+  return `/authorize?requestId=${encodeURIComponent(requestId)}`;
 }

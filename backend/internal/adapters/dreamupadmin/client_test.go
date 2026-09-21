@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -498,7 +499,7 @@ func TestLookupOperationReceiptUsesReadOnlyEndpointAndStrictSchema(t *testing.T)
 			t.Fatalf("unsafe receipt headers = %#v", r.Header)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"receipt":{"action":"review","target_type":"application","target_id":"app_1","outcome":"applied","result_version":4,"receipt_hash":"sha256_abcdef","request_id":"req_original_123","created_at":"2026-08-17T12:00:00Z"}}`)
+		_, _ = io.WriteString(w, `{"receipt":{"event_id":"evt_shanghai","action":"review","target_type":"application","target_id":"app_1","outcome":"applied","result_version":4,"receipt_hash":"sha256_abcdef","request_id":"req_original_123","created_at":"2026-08-17T12:00:00Z"}}`)
 	}))
 	defer server.Close()
 	client := newTestClient(t, server.URL, server.Client())
@@ -506,8 +507,31 @@ func TestLookupOperationReceiptUsesReadOnlyEndpointAndStrictSchema(t *testing.T)
 	if err != nil {
 		t.Fatalf("LookupOperationReceipt: %v", err)
 	}
-	if receipt.Action != "review" || receipt.TargetType != "application" || receipt.TargetID != "app_1" || receipt.Outcome != "applied" || receipt.ResultVersion != 4 || receipt.ReceiptHash != "sha256_abcdef" || receipt.RequestID != "req_original_123" || !receipt.CreatedAt.Equal(time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)) {
+	if receipt.EventID != "evt_shanghai" || receipt.Action != "review" || receipt.TargetType != "application" || receipt.TargetID != "app_1" || receipt.Outcome != "applied" || receipt.ResultVersion != 4 || receipt.ReceiptHash != "sha256_abcdef" || receipt.RequestID != "req_original_123" || !receipt.CreatedAt.Equal(time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)) {
 		t.Fatalf("receipt = %+v", receipt)
+	}
+}
+
+func TestLookupOperationReceiptRejectsMissingOrCrossEventBinding(t *testing.T) {
+	t.Parallel()
+	const base = `{"receipt":{%s"action":"review","target_type":"application","target_id":"app_1","outcome":"applied","result_version":4,"receipt_hash":"sha256_abcdef","request_id":"req_original_123","created_at":"2026-08-17T12:00:00Z"}}`
+	for name, eventField := range map[string]string{
+		"missing event": "",
+		"cross event":   `"event_id":"evt_beijing",`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, fmt.Sprintf(base, eventField))
+			}))
+			defer server.Close()
+			client := newTestClient(t, server.URL, server.Client())
+			_, err := client.LookupOperationReceipt(context.Background(), "evt_shanghai", "opreq_12345678", "req_receipt_123456", "idem_0123456789abcdefghijklmnopqrstuv", validAssertion(10*time.Second))
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("event binding error = %v, want ErrProtocol", err)
+			}
+		})
 	}
 }
 

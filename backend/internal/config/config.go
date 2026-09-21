@@ -69,49 +69,93 @@ const (
 	defaultSessionTouchInterval = 5 * time.Minute
 	defaultSessionSameSite      = "lax"
 
-	defaultMFAChallengeTTL              = 5 * time.Minute
-	defaultMFAMaxAttempts               = 5
-	defaultLoginRateLimit               = 10
-	defaultLoginRateWindow              = 15 * time.Minute
-	defaultMFARateLimit                 = 10
-	defaultMFARateWindow                = 15 * time.Minute
-	defaultAliyunSMSEndpoint            = "https://dysmsapi.aliyuncs.com/"
-	defaultWeChatRequestTimeout         = 8 * time.Second
-	defaultQRAuthChallengeTTL           = 2 * time.Minute
-	defaultQRAuthRateLimit              = 12
-	defaultQRAuthRateWindow             = 2 * time.Minute
-	defaultDreamUPMobileScopedRateLimit = 60
-	defaultDreamUPMobileGlobalRateLimit = 2000
-	defaultDreamUPMobileRateWindow      = time.Minute
-	defaultRiskObservationWindow        = 15 * time.Minute
-	defaultRiskLoginMediumAfter         = 3
-	defaultRiskLoginHighAfter           = 7
-	defaultRiskRegistrationMediumAfter  = 2
-	defaultRiskRegistrationHighAfter    = 3
-	defaultRiskChallengeTTL             = 5 * time.Minute
-	defaultRiskDeviceIDTTL              = 30 * 24 * time.Hour
-	defaultRiskTrustTTL                 = 15 * time.Minute
-	defaultRiskAutomationCostDifficulty = 18
-	defaultRiskCompletionLimit          = 8
-	defaultRiskCompletionWindow         = 15 * time.Minute
-	defaultRiskCaptchaRegion            = "mainland_china"
-	defaultRiskRecaptchaMinScore        = 0.7
+	defaultMFAChallengeTTL                        = 5 * time.Minute
+	defaultMFAMaxAttempts                         = 5
+	defaultLoginRateLimit                         = 10
+	defaultLoginRateWindow                        = 15 * time.Minute
+	defaultMFARateLimit                           = 10
+	defaultMFARateWindow                          = 15 * time.Minute
+	defaultWeChatRequestTimeout                   = 8 * time.Second
+	defaultQRAuthChallengeTTL                     = 2 * time.Minute
+	defaultQRAuthRateLimit                        = 12
+	defaultQRAuthRateWindow                       = 2 * time.Minute
+	defaultDreamUPMobileScopedRateLimit           = 60
+	defaultDreamUPMobileGlobalRateLimit           = 2000
+	defaultDreamUPMobileRateWindow                = time.Minute
+	defaultRiskObservationWindow                  = 15 * time.Minute
+	defaultRiskLoginMediumAfter                   = 3
+	defaultRiskLoginHighAfter                     = 7
+	defaultRiskRegistrationMediumAfter            = 2
+	defaultRiskRegistrationHighAfter              = 3
+	defaultRiskChallengeTTL                       = 5 * time.Minute
+	defaultRiskDeviceIDTTL                        = 30 * 24 * time.Hour
+	defaultRiskTrustTTL                           = 15 * time.Minute
+	defaultRiskAutomationCostDifficulty           = 18
+	defaultRiskCompletionLimit                    = 8
+	defaultRiskCompletionWindow                   = 15 * time.Minute
+	defaultRiskRegistrationIssueDeviceLimit       = 4
+	defaultRiskRegistrationIssueNetworkLimit      = 128
+	defaultRiskRegistrationIssueWindow            = 15 * time.Minute
+	defaultRiskRegistrationIssueGlobalBurstLimit  = 20
+	defaultRiskRegistrationIssueGlobalBurstWindow = 10 * time.Second
+	defaultRiskRegistrationIssueGlobalLimit       = 100
+	defaultRiskRegistrationIssueGlobalWindow      = 5 * time.Minute
+	defaultRiskRegistrationIssueInFlight          = 4
+	defaultRiskRegistrationIssueQueued            = 32
+	defaultRiskRegistrationIssueWait              = 500 * time.Millisecond
+	defaultRiskCaptchaRegion                      = "mainland_china"
+	defaultRiskRecaptchaMinScore                  = 0.7
 
-	defaultRegistrationCreateIPLimit     = 3
-	defaultRegistrationCreateIPWindow    = time.Hour
-	defaultRegistrationCreateNetLimit    = 10
-	defaultRegistrationCreateNetWindow   = time.Hour
-	defaultRegistrationCreateEmailLimit  = 3
-	defaultRegistrationCreateEmailWindow = 24 * time.Hour
-	defaultRegistrationCreatePairLimit   = 2
-	defaultRegistrationCreatePairWindow  = time.Hour
-	defaultRegistrationVerifyLimit       = 8
-	defaultRegistrationVerifyWindow      = 15 * time.Minute
-	defaultRegistrationResendLimit       = 3
-	defaultRegistrationResendWindow      = 30 * time.Minute
-	defaultRegistrationIPv4NetBits       = 24
-	defaultRegistrationIPv6NetBits       = 56
-	defaultTrustedProxyCIDRs             = "127.0.0.1/32,::1/128"
+	defaultRegistrationCreateIPLimit             = 3
+	defaultRegistrationCreateIPWindow            = time.Hour
+	defaultRegistrationCreateNetLimit            = 10
+	defaultRegistrationCreateNetWindow           = time.Hour
+	defaultRegistrationCreateEmailLimit          = 3
+	defaultRegistrationCreateEmailWindow         = 24 * time.Hour
+	defaultRegistrationCreateMailboxFamilyLimit  = 3
+	defaultRegistrationCreateMailboxFamilyWindow = 24 * time.Hour
+	defaultRegistrationCreatePairLimit           = 2
+	defaultRegistrationCreatePairWindow          = time.Hour
+	defaultRegistrationFormIntentDeviceLimit     = 6
+	defaultRegistrationFormIntentDeviceWindow    = 5 * time.Minute
+	defaultRegistrationFormIntentNetLimit        = 20
+	defaultRegistrationFormIntentNetWindow       = 5 * time.Minute
+	defaultRegistrationFormIntentBurstLimit      = 30
+	defaultRegistrationFormIntentBurstWindow     = 10 * time.Second
+	defaultRegistrationFormIntentGlobalLimit     = 300
+	defaultRegistrationFormIntentGlobalWindow    = 5 * time.Minute
+	defaultRegistrationGlobalBurstLimit          = 20
+	defaultRegistrationGlobalBurstWindow         = 10 * time.Second
+	defaultRegistrationGlobalLimit               = 200
+	defaultRegistrationGlobalWindow              = time.Hour
+	defaultRegistrationDomainBurstLimit          = 3
+	defaultRegistrationDomainBurstWindow         = 10 * time.Minute
+	defaultRegistrationDomainLimit               = 10
+	defaultRegistrationDomainWindow              = 24 * time.Hour
+	defaultRegistrationMXBurstLimit              = 20
+	defaultRegistrationMXBurstWindow             = 10 * time.Minute
+	defaultRegistrationMXLimit                   = 100
+	defaultRegistrationMXWindow                  = 24 * time.Hour
+	defaultRegistrationAdmissionInFlight         = 8
+	defaultRegistrationAdmissionQueued           = 32
+	defaultRegistrationAdmissionWait             = 3 * time.Second
+	defaultRegistrationUnfamiliarInFlight        = 2
+	defaultRegistrationUnfamiliarQueued          = 8
+	defaultRegistrationUnfamiliarPerDomain       = 2
+	maxRegistrationAdmissionInFlight             = 4096
+	maxRegistrationAdmissionTotalSlots           = 65536
+	maxRegistrationAdmissionPerDomain            = 1024
+	defaultRegistrationVerifyLimit               = 8
+	defaultRegistrationVerifyWindow              = 15 * time.Minute
+	defaultRegistrationVerifyGlobalBurstLimit    = 20
+	defaultRegistrationVerifyGlobalBurstWindow   = 10 * time.Second
+	defaultRegistrationVerifyGlobalLimit         = 100
+	defaultRegistrationVerifyGlobalWindow        = 5 * time.Minute
+	defaultRegistrationResendLimit               = 3
+	defaultRegistrationResendWindow              = 30 * time.Minute
+	defaultRegistrationIPv4NetBits               = 24
+	defaultRegistrationIPv6NetBits               = 56
+	defaultTrustedProxyCIDRs                     = "127.0.0.1/32,::1/128"
 
 	defaultReauthChallengeTTL    = 5 * time.Minute
 	defaultReauthGrantTTL        = 5 * time.Minute
@@ -230,6 +274,8 @@ type Config struct {
 	// Emails are only sent when the SMTP host is configured.
 	Email EmailConfig
 
+	MSCIntegration MSCIntegrationConfig
+
 	// Integration tests
 	Test TestConfig
 }
@@ -321,20 +367,30 @@ type DreamUPMobileConfig struct {
 // Allowlist entries are SHA-256 hex digests of normalized identifiers; raw
 // emails, names, and usernames are intentionally not accepted here.
 type RiskDefenseConfig struct {
-	Enabled                  bool
-	ObservationWindow        time.Duration
-	LoginMediumAfter         int
-	LoginHighAfter           int
-	RegistrationMediumAfter  int
-	RegistrationHighAfter    int
-	ChallengeTTL             time.Duration
-	DeviceIDTTL              time.Duration
-	TrustTTL                 time.Duration
-	AutomationCostDifficulty int
-	CompletionLimit          int
-	CompletionWindow         time.Duration
-	AllowlistedHashes        []string
-	Captcha                  RiskCaptchaConfig
+	Enabled                            bool
+	ObservationWindow                  time.Duration
+	LoginMediumAfter                   int
+	LoginHighAfter                     int
+	RegistrationMediumAfter            int
+	RegistrationHighAfter              int
+	ChallengeTTL                       time.Duration
+	DeviceIDTTL                        time.Duration
+	TrustTTL                           time.Duration
+	AutomationCostDifficulty           int
+	CompletionLimit                    int
+	CompletionWindow                   time.Duration
+	RegistrationIssueDeviceLimit       int
+	RegistrationIssueNetworkLimit      int
+	RegistrationIssueWindow            time.Duration
+	RegistrationIssueGlobalBurstLimit  int
+	RegistrationIssueGlobalBurstWindow time.Duration
+	RegistrationIssueGlobalLimit       int
+	RegistrationIssueGlobalWindow      time.Duration
+	RegistrationIssueInFlight          int
+	RegistrationIssueQueued            int
+	RegistrationIssueWait              time.Duration
+	AllowlistedHashes                  []string
+	Captcha                            RiskCaptchaConfig
 }
 
 // RiskCaptchaConfig enables only providers whose complete credential and
@@ -449,6 +505,13 @@ type AliyunSMSConfig struct {
 	Enabled         bool
 }
 
+// PhoneVerifyConfig tunes the phone binding verification flow.
+type PhoneVerifyConfig struct {
+	TTL time.Duration
+}
+
+// InternalSMSConfig controls international SMS delivery through the internal
+// MoonStone business gateway. Domestic mainland numbers keep using Aliyun.
 type InternalSMSConfig struct {
 	Endpoint string
 	APIKey   string
@@ -457,28 +520,60 @@ type InternalSMSConfig struct {
 	Enabled  bool
 }
 
-// PhoneVerifyConfig tunes the phone binding verification flow.
-type PhoneVerifyConfig struct {
-	TTL time.Duration
-}
-
 // RegistrationConfig controls the public account-registration surface.
 type RegistrationConfig struct {
-	Enabled           bool
-	CreateIPLimit     int
-	CreateIPWindow    time.Duration
-	CreateNetLimit    int
-	CreateNetWindow   time.Duration
-	CreateEmailLimit  int
-	CreateEmailWindow time.Duration
-	CreatePairLimit   int
-	CreatePairWindow  time.Duration
-	VerifyLimit       int
-	VerifyWindow      time.Duration
-	ResendLimit       int
-	ResendWindow      time.Duration
-	IPv4NetBits       int
-	IPv6NetBits       int
+	Enabled                   bool
+	FormIntentDeviceLimit     int
+	FormIntentDeviceWindow    time.Duration
+	FormIntentNetLimit        int
+	FormIntentNetWindow       time.Duration
+	FormIntentBurstLimit      int
+	FormIntentBurstWindow     time.Duration
+	FormIntentGlobalLimit     int
+	FormIntentGlobalWindow    time.Duration
+	CreateIPLimit             int
+	CreateIPWindow            time.Duration
+	CreateNetLimit            int
+	CreateNetWindow           time.Duration
+	CreateEmailLimit          int
+	CreateEmailWindow         time.Duration
+	CreateMailboxFamilyLimit  int
+	CreateMailboxFamilyWindow time.Duration
+	CreatePairLimit           int
+	CreatePairWindow          time.Duration
+	GlobalBurstLimit          int
+	GlobalBurstWindow         time.Duration
+	GlobalLimit               int
+	GlobalWindow              time.Duration
+	DomainBurstLimit          int
+	DomainBurstWindow         time.Duration
+	DomainLimit               int
+	DomainWindow              time.Duration
+	MXBurstLimit              int
+	MXBurstWindow             time.Duration
+	MXLimit                   int
+	MXWindow                  time.Duration
+	AdmissionInFlight         int
+	AdmissionQueued           int
+	AdmissionWait             time.Duration
+	UnfamiliarInFlight        int
+	UnfamiliarQueued          int
+	UnfamiliarPerDomain       int
+	BlockedEmailDomains       []string
+	BlockedMXDomains          []string
+	EstablishedEmailDomains   []string
+	EstablishedMXDomains      []string
+	HoneypotIPBlocksEnabled   bool
+	VerifyLimit               int
+	VerifyWindow              time.Duration
+	VerifyGlobalBurstLimit    int
+	VerifyGlobalBurstWindow   time.Duration
+	VerifyGlobalLimit         int
+	VerifyGlobalWindow        time.Duration
+	ResendLimit               int
+	ResendWindow              time.Duration
+	IPv4NetBits               int
+	IPv6NetBits               int
 }
 
 // PermissionConfig holds permission resolver parameters.
@@ -616,6 +711,16 @@ type EmailConfig struct {
 // Configured reports whether an SMTP host has been set so the internal email
 // endpoint can fail closed when no sender is available.
 func (c EmailConfig) Configured() bool { return c.SMTPHost != "" }
+
+type MSCIntegrationConfig struct {
+	Enabled        bool
+	PublicJWKSPath string
+	Issuer         string
+	Audience       string
+	Subject        string
+	WriteEnabled   bool
+	ActorUserID    string
+}
 
 // SecurityNotificationsConfigured reports whether onboarding can start with
 // a usable notification transport. Credentials may be empty for SMTP relays
@@ -756,19 +861,29 @@ func Load() (Config, error) {
 			MFAWindow:   durationOr("UP_MFA_RATE_WINDOW", defaultMFARateWindow),
 		},
 		RiskDefense: RiskDefenseConfig{
-			Enabled:                  boolOr("UP_RISK_DEFENSE_ENABLED", false),
-			ObservationWindow:        durationOr("UP_RISK_OBSERVATION_WINDOW", defaultRiskObservationWindow),
-			LoginMediumAfter:         intOr("UP_RISK_LOGIN_MEDIUM_AFTER", defaultRiskLoginMediumAfter),
-			LoginHighAfter:           intOr("UP_RISK_LOGIN_HIGH_AFTER", defaultRiskLoginHighAfter),
-			RegistrationMediumAfter:  intOr("UP_RISK_REGISTRATION_MEDIUM_AFTER", defaultRiskRegistrationMediumAfter),
-			RegistrationHighAfter:    intOr("UP_RISK_REGISTRATION_HIGH_AFTER", defaultRiskRegistrationHighAfter),
-			ChallengeTTL:             durationOr("UP_RISK_CHALLENGE_TTL", defaultRiskChallengeTTL),
-			DeviceIDTTL:              durationOr("UP_RISK_DEVICE_ID_TTL", defaultRiskDeviceIDTTL),
-			TrustTTL:                 durationOr("UP_RISK_TRUST_TTL", defaultRiskTrustTTL),
-			AutomationCostDifficulty: intOr("UP_RISK_AUTOMATION_COST_DIFFICULTY", defaultRiskAutomationCostDifficulty),
-			CompletionLimit:          intOr("UP_RISK_COMPLETION_LIMIT", defaultRiskCompletionLimit),
-			CompletionWindow:         durationOr("UP_RISK_COMPLETION_WINDOW", defaultRiskCompletionWindow),
-			AllowlistedHashes:        csvOr("UP_RISK_ALLOWLIST_SHA256", ""),
+			Enabled:                            boolOr("UP_RISK_DEFENSE_ENABLED", false),
+			ObservationWindow:                  durationOr("UP_RISK_OBSERVATION_WINDOW", defaultRiskObservationWindow),
+			LoginMediumAfter:                   intOr("UP_RISK_LOGIN_MEDIUM_AFTER", defaultRiskLoginMediumAfter),
+			LoginHighAfter:                     intOr("UP_RISK_LOGIN_HIGH_AFTER", defaultRiskLoginHighAfter),
+			RegistrationMediumAfter:            intOr("UP_RISK_REGISTRATION_MEDIUM_AFTER", defaultRiskRegistrationMediumAfter),
+			RegistrationHighAfter:              intOr("UP_RISK_REGISTRATION_HIGH_AFTER", defaultRiskRegistrationHighAfter),
+			ChallengeTTL:                       durationOr("UP_RISK_CHALLENGE_TTL", defaultRiskChallengeTTL),
+			DeviceIDTTL:                        durationOr("UP_RISK_DEVICE_ID_TTL", defaultRiskDeviceIDTTL),
+			TrustTTL:                           durationOr("UP_RISK_TRUST_TTL", defaultRiskTrustTTL),
+			AutomationCostDifficulty:           intOr("UP_RISK_AUTOMATION_COST_DIFFICULTY", defaultRiskAutomationCostDifficulty),
+			CompletionLimit:                    intOr("UP_RISK_COMPLETION_LIMIT", defaultRiskCompletionLimit),
+			CompletionWindow:                   durationOr("UP_RISK_COMPLETION_WINDOW", defaultRiskCompletionWindow),
+			RegistrationIssueDeviceLimit:       intOr("UP_RISK_REGISTRATION_ISSUE_DEVICE_LIMIT", defaultRiskRegistrationIssueDeviceLimit),
+			RegistrationIssueNetworkLimit:      intOr("UP_RISK_REGISTRATION_ISSUE_NETWORK_LIMIT", defaultRiskRegistrationIssueNetworkLimit),
+			RegistrationIssueWindow:            durationOr("UP_RISK_REGISTRATION_ISSUE_WINDOW", defaultRiskRegistrationIssueWindow),
+			RegistrationIssueGlobalBurstLimit:  intOr("UP_RISK_REGISTRATION_ISSUE_GLOBAL_BURST_LIMIT", defaultRiskRegistrationIssueGlobalBurstLimit),
+			RegistrationIssueGlobalBurstWindow: durationOr("UP_RISK_REGISTRATION_ISSUE_GLOBAL_BURST_WINDOW", defaultRiskRegistrationIssueGlobalBurstWindow),
+			RegistrationIssueGlobalLimit:       intOr("UP_RISK_REGISTRATION_ISSUE_GLOBAL_LIMIT", defaultRiskRegistrationIssueGlobalLimit),
+			RegistrationIssueGlobalWindow:      durationOr("UP_RISK_REGISTRATION_ISSUE_GLOBAL_WINDOW", defaultRiskRegistrationIssueGlobalWindow),
+			RegistrationIssueInFlight:          intOr("UP_RISK_REGISTRATION_ISSUE_MAX_IN_FLIGHT", defaultRiskRegistrationIssueInFlight),
+			RegistrationIssueQueued:            intOr("UP_RISK_REGISTRATION_ISSUE_MAX_QUEUED", defaultRiskRegistrationIssueQueued),
+			RegistrationIssueWait:              durationOr("UP_RISK_REGISTRATION_ISSUE_WAIT_TIMEOUT", defaultRiskRegistrationIssueWait),
+			AllowlistedHashes:                  csvOr("UP_RISK_ALLOWLIST_SHA256", ""),
 			Captcha: RiskCaptchaConfig{
 				Region: envOr("UP_RISK_CAPTCHA_REGION", defaultRiskCaptchaRegion),
 				Turnstile: RiskCaptchaProviderConfig{
@@ -800,21 +915,58 @@ func Load() (Config, error) {
 		},
 
 		Registration: RegistrationConfig{
-			Enabled:           boolOr("UP_PUBLIC_REGISTRATION_ENABLED", false),
-			CreateIPLimit:     intOr("UP_REGISTRATION_CREATE_IP_LIMIT", defaultRegistrationCreateIPLimit),
-			CreateIPWindow:    durationOr("UP_REGISTRATION_CREATE_IP_WINDOW", defaultRegistrationCreateIPWindow),
-			CreateNetLimit:    intOr("UP_REGISTRATION_CREATE_NET_LIMIT", defaultRegistrationCreateNetLimit),
-			CreateNetWindow:   durationOr("UP_REGISTRATION_CREATE_NET_WINDOW", defaultRegistrationCreateNetWindow),
-			CreateEmailLimit:  intOr("UP_REGISTRATION_CREATE_EMAIL_LIMIT", defaultRegistrationCreateEmailLimit),
-			CreateEmailWindow: durationOr("UP_REGISTRATION_CREATE_EMAIL_WINDOW", defaultRegistrationCreateEmailWindow),
-			CreatePairLimit:   intOr("UP_REGISTRATION_CREATE_PAIR_LIMIT", defaultRegistrationCreatePairLimit),
-			CreatePairWindow:  durationOr("UP_REGISTRATION_CREATE_PAIR_WINDOW", defaultRegistrationCreatePairWindow),
-			VerifyLimit:       intOr("UP_REGISTRATION_VERIFY_LIMIT", defaultRegistrationVerifyLimit),
-			VerifyWindow:      durationOr("UP_REGISTRATION_VERIFY_WINDOW", defaultRegistrationVerifyWindow),
-			ResendLimit:       intOr("UP_REGISTRATION_RESEND_LIMIT", defaultRegistrationResendLimit),
-			ResendWindow:      durationOr("UP_REGISTRATION_RESEND_WINDOW", defaultRegistrationResendWindow),
-			IPv4NetBits:       intOr("UP_REGISTRATION_IPV4_NET_BITS", defaultRegistrationIPv4NetBits),
-			IPv6NetBits:       intOr("UP_REGISTRATION_IPV6_NET_BITS", defaultRegistrationIPv6NetBits),
+			Enabled:                   boolOr("UP_PUBLIC_REGISTRATION_ENABLED", false),
+			FormIntentDeviceLimit:     intOr("UP_REGISTRATION_FORM_INTENT_DEVICE_LIMIT", defaultRegistrationFormIntentDeviceLimit),
+			FormIntentDeviceWindow:    durationOr("UP_REGISTRATION_FORM_INTENT_DEVICE_WINDOW", defaultRegistrationFormIntentDeviceWindow),
+			FormIntentNetLimit:        intOr("UP_REGISTRATION_FORM_INTENT_NET_LIMIT", defaultRegistrationFormIntentNetLimit),
+			FormIntentNetWindow:       durationOr("UP_REGISTRATION_FORM_INTENT_NET_WINDOW", defaultRegistrationFormIntentNetWindow),
+			FormIntentBurstLimit:      intOr("UP_REGISTRATION_FORM_INTENT_GLOBAL_BURST_LIMIT", defaultRegistrationFormIntentBurstLimit),
+			FormIntentBurstWindow:     durationOr("UP_REGISTRATION_FORM_INTENT_GLOBAL_BURST_WINDOW", defaultRegistrationFormIntentBurstWindow),
+			FormIntentGlobalLimit:     intOr("UP_REGISTRATION_FORM_INTENT_GLOBAL_LIMIT", defaultRegistrationFormIntentGlobalLimit),
+			FormIntentGlobalWindow:    durationOr("UP_REGISTRATION_FORM_INTENT_GLOBAL_WINDOW", defaultRegistrationFormIntentGlobalWindow),
+			CreateIPLimit:             intOr("UP_REGISTRATION_CREATE_IP_LIMIT", defaultRegistrationCreateIPLimit),
+			CreateIPWindow:            durationOr("UP_REGISTRATION_CREATE_IP_WINDOW", defaultRegistrationCreateIPWindow),
+			CreateNetLimit:            intOr("UP_REGISTRATION_CREATE_NET_LIMIT", defaultRegistrationCreateNetLimit),
+			CreateNetWindow:           durationOr("UP_REGISTRATION_CREATE_NET_WINDOW", defaultRegistrationCreateNetWindow),
+			CreateEmailLimit:          intOr("UP_REGISTRATION_CREATE_EMAIL_LIMIT", defaultRegistrationCreateEmailLimit),
+			CreateEmailWindow:         durationOr("UP_REGISTRATION_CREATE_EMAIL_WINDOW", defaultRegistrationCreateEmailWindow),
+			CreateMailboxFamilyLimit:  intOr("UP_REGISTRATION_CREATE_MAILBOX_FAMILY_LIMIT", defaultRegistrationCreateMailboxFamilyLimit),
+			CreateMailboxFamilyWindow: durationOr("UP_REGISTRATION_CREATE_MAILBOX_FAMILY_WINDOW", defaultRegistrationCreateMailboxFamilyWindow),
+			CreatePairLimit:           intOr("UP_REGISTRATION_CREATE_PAIR_LIMIT", defaultRegistrationCreatePairLimit),
+			CreatePairWindow:          durationOr("UP_REGISTRATION_CREATE_PAIR_WINDOW", defaultRegistrationCreatePairWindow),
+			GlobalBurstLimit:          intOr("UP_REGISTRATION_GLOBAL_BURST_LIMIT", defaultRegistrationGlobalBurstLimit),
+			GlobalBurstWindow:         durationOr("UP_REGISTRATION_GLOBAL_BURST_WINDOW", defaultRegistrationGlobalBurstWindow),
+			GlobalLimit:               intOr("UP_REGISTRATION_GLOBAL_LIMIT", defaultRegistrationGlobalLimit),
+			GlobalWindow:              durationOr("UP_REGISTRATION_GLOBAL_WINDOW", defaultRegistrationGlobalWindow),
+			DomainBurstLimit:          intOr("UP_REGISTRATION_UNFAMILIAR_DOMAIN_BURST_LIMIT", defaultRegistrationDomainBurstLimit),
+			DomainBurstWindow:         durationOr("UP_REGISTRATION_UNFAMILIAR_DOMAIN_BURST_WINDOW", defaultRegistrationDomainBurstWindow),
+			DomainLimit:               intOr("UP_REGISTRATION_UNFAMILIAR_DOMAIN_LIMIT", defaultRegistrationDomainLimit),
+			DomainWindow:              durationOr("UP_REGISTRATION_UNFAMILIAR_DOMAIN_WINDOW", defaultRegistrationDomainWindow),
+			MXBurstLimit:              intOr("UP_REGISTRATION_UNFAMILIAR_MX_BURST_LIMIT", defaultRegistrationMXBurstLimit),
+			MXBurstWindow:             durationOr("UP_REGISTRATION_UNFAMILIAR_MX_BURST_WINDOW", defaultRegistrationMXBurstWindow),
+			MXLimit:                   intOr("UP_REGISTRATION_UNFAMILIAR_MX_LIMIT", defaultRegistrationMXLimit),
+			MXWindow:                  durationOr("UP_REGISTRATION_UNFAMILIAR_MX_WINDOW", defaultRegistrationMXWindow),
+			AdmissionInFlight:         intOr("UP_REGISTRATION_ADMISSION_MAX_IN_FLIGHT", defaultRegistrationAdmissionInFlight),
+			AdmissionQueued:           intOr("UP_REGISTRATION_ADMISSION_MAX_QUEUED", defaultRegistrationAdmissionQueued),
+			AdmissionWait:             durationOr("UP_REGISTRATION_ADMISSION_WAIT_TIMEOUT", defaultRegistrationAdmissionWait),
+			UnfamiliarInFlight:        intOr("UP_REGISTRATION_UNFAMILIAR_MAX_IN_FLIGHT", defaultRegistrationUnfamiliarInFlight),
+			UnfamiliarQueued:          intOr("UP_REGISTRATION_UNFAMILIAR_MAX_QUEUED", defaultRegistrationUnfamiliarQueued),
+			UnfamiliarPerDomain:       intOr("UP_REGISTRATION_UNFAMILIAR_PER_DOMAIN", defaultRegistrationUnfamiliarPerDomain),
+			BlockedEmailDomains:       csvOr("UP_REGISTRATION_BLOCKED_EMAIL_DOMAINS_EXTRA", ""),
+			BlockedMXDomains:          csvOr("UP_REGISTRATION_BLOCKED_MX_DOMAINS_EXTRA", ""),
+			EstablishedEmailDomains:   csvOr("UP_REGISTRATION_ESTABLISHED_EMAIL_DOMAINS_EXTRA", ""),
+			EstablishedMXDomains:      csvOr("UP_REGISTRATION_ESTABLISHED_MX_DOMAINS_EXTRA", ""),
+			HoneypotIPBlocksEnabled:   boolOr("UP_REGISTRATION_HONEYPOT_IP_BLOCKS_ENABLED", false),
+			VerifyLimit:               intOr("UP_REGISTRATION_VERIFY_LIMIT", defaultRegistrationVerifyLimit),
+			VerifyWindow:              durationOr("UP_REGISTRATION_VERIFY_WINDOW", defaultRegistrationVerifyWindow),
+			VerifyGlobalBurstLimit:    intOr("UP_REGISTRATION_VERIFY_GLOBAL_BURST_LIMIT", defaultRegistrationVerifyGlobalBurstLimit),
+			VerifyGlobalBurstWindow:   durationOr("UP_REGISTRATION_VERIFY_GLOBAL_BURST_WINDOW", defaultRegistrationVerifyGlobalBurstWindow),
+			VerifyGlobalLimit:         intOr("UP_REGISTRATION_VERIFY_GLOBAL_LIMIT", defaultRegistrationVerifyGlobalLimit),
+			VerifyGlobalWindow:        durationOr("UP_REGISTRATION_VERIFY_GLOBAL_WINDOW", defaultRegistrationVerifyGlobalWindow),
+			ResendLimit:               intOr("UP_REGISTRATION_RESEND_LIMIT", defaultRegistrationResendLimit),
+			ResendWindow:              durationOr("UP_REGISTRATION_RESEND_WINDOW", defaultRegistrationResendWindow),
+			IPv4NetBits:               intOr("UP_REGISTRATION_IPV4_NET_BITS", defaultRegistrationIPv4NetBits),
+			IPv6NetBits:               intOr("UP_REGISTRATION_IPV6_NET_BITS", defaultRegistrationIPv6NetBits),
 		},
 		WeChatMiniProgram: WeChatMiniProgramConfig{
 			Enabled:                          boolOr("UP_WECHAT_MINIPROGRAM_ENABLED", false),
@@ -851,7 +1003,7 @@ func Load() (Config, error) {
 			AccessKeySecret: envOr("UP_ALIYUN_SMS_ACCESS_KEY_SECRET", ""),
 			SignName:        envOr("UP_ALIYUN_SMS_SIGN_NAME", ""),
 			TemplateCode:    envOr("UP_ALIYUN_SMS_TEMPLATE_CODE", ""),
-			Endpoint:        envOr("UP_ALIYUN_SMS_ENDPOINT", defaultAliyunSMSEndpoint),
+			Endpoint:        envOr("UP_ALIYUN_SMS_ENDPOINT", "https://dysmsapi.aliyuncs.com/"),
 			Enabled:         boolOr("UP_ALIYUN_SMS_ENABLED", false),
 		},
 		InternalSMS: InternalSMSConfig{
@@ -915,6 +1067,16 @@ func Load() (Config, error) {
 			SyncTimeout:       durationOr("UP_FEISHU_SYNC_TIMEOUT", defaultFeishuSyncTimeout),
 		},
 
+		MSCIntegration: MSCIntegrationConfig{
+			Enabled:        boolOr("UP_MSC_INTEGRATION_ENABLED", false),
+			PublicJWKSPath: envOr("UP_MSC_PUBLIC_JWKS_PATH", ""),
+			Issuer:         envOr("UP_MSC_JWT_ISSUER", ""),
+			Audience:       envOr("UP_MSC_JWT_AUDIENCE", ""),
+			Subject:        envOr("UP_MSC_JWT_SUBJECT", ""),
+			WriteEnabled:   boolOr("UP_MSC_WRITE_ENABLED", false),
+			ActorUserID:    envOr("UP_MSC_WRITE_ACTOR_USER_ID", ""),
+		},
+
 		Cerbos: CerbosConfig{
 			PDPURL:            envOr("UP_CERBOS_PDP_URL", ""),
 			AdminURL:          envOr("UP_CERBOS_ADMIN_URL", ""),
@@ -942,7 +1104,7 @@ func Load() (Config, error) {
 			BaseURL:                          envOr("UP_DREAMUP_ADMIN_BASE_URL", "http://127.0.0.1:18084"),
 			DelegationIssuer:                 envOr("UP_DREAMUP_DELEGATION_ISSUER", "https://auth.moonstone.org.cn"),
 			DelegationAudience:               envOr("UP_DREAMUP_DELEGATION_AUDIENCE", "dreamup-admin-api"),
-			AdminOrigin:                      envOr("UP_DREAMUP_ADMIN_ORIGIN", "https://auth.moonstone.org.cn"),
+			AdminOrigin:                      envOr("UP_DREAMUP_ADMIN_ORIGIN", "https://moonstone.org.cn"),
 			ResponseLimitBytes:               int64Or("UP_DREAMUP_ADMIN_RESPONSE_LIMIT_BYTES", 8<<20),
 			ReconcileInterval:                durationOr("UP_DREAMUP_RECONCILE_INTERVAL", 15*time.Second),
 			ReconcileBatchSize:               intOr("UP_DREAMUP_RECONCILE_BATCH_SIZE", 50),
@@ -987,6 +1149,32 @@ func Load() (Config, error) {
 func (c Config) Validate() error {
 	var errs []error
 
+	if c.MSCIntegration.Enabled {
+		required := []struct {
+			name  string
+			value string
+		}{
+			{"UP_MSC_PUBLIC_JWKS_PATH", c.MSCIntegration.PublicJWKSPath},
+			{"UP_MSC_JWT_ISSUER", c.MSCIntegration.Issuer},
+			{"UP_MSC_JWT_AUDIENCE", c.MSCIntegration.Audience},
+			{"UP_MSC_JWT_SUBJECT", c.MSCIntegration.Subject},
+		}
+		for _, item := range required {
+			if strings.TrimSpace(item.value) == "" {
+				errs = append(errs, fmt.Errorf("MSC read-only integration requires %s", item.name))
+			}
+		}
+		if c.MSCIntegration.WriteEnabled {
+			actor := strings.TrimSpace(c.MSCIntegration.ActorUserID)
+			switch {
+			case actor == "":
+				errs = append(errs, errors.New("MSC write integration requires UP_MSC_WRITE_ACTOR_USER_ID"))
+			case len(actor) > 128 || !strings.HasPrefix(actor, "user_"):
+				errs = append(errs, errors.New("UP_MSC_WRITE_ACTOR_USER_ID must be a managed user identifier"))
+			}
+		}
+	}
+
 	if c.Registration.Enabled {
 		if c.Database.URL == "" || c.Redis.URL == "" {
 			errs = append(errs, errors.New("public registration requires UP_DATABASE_URL and UP_REDIS_URL"))
@@ -1012,17 +1200,42 @@ func (c Config) Validate() error {
 		window time.Duration
 		name   string
 	}{
+		{c.Registration.FormIntentDeviceLimit, c.Registration.FormIntentDeviceWindow, "registration form-intent device"},
+		{c.Registration.FormIntentNetLimit, c.Registration.FormIntentNetWindow, "registration form-intent network"},
+		{c.Registration.FormIntentBurstLimit, c.Registration.FormIntentBurstWindow, "registration form-intent global burst"},
+		{c.Registration.FormIntentGlobalLimit, c.Registration.FormIntentGlobalWindow, "registration form-intent global sustained"},
 		{c.Registration.CreateIPLimit, c.Registration.CreateIPWindow, "registration create IP"},
 		{c.Registration.CreateNetLimit, c.Registration.CreateNetWindow, "registration create network"},
 		{c.Registration.CreateEmailLimit, c.Registration.CreateEmailWindow, "registration create email"},
+		{c.Registration.CreateMailboxFamilyLimit, c.Registration.CreateMailboxFamilyWindow, "registration create mailbox family"},
 		{c.Registration.CreatePairLimit, c.Registration.CreatePairWindow, "registration create client/email pair"},
+		{c.Registration.GlobalBurstLimit, c.Registration.GlobalBurstWindow, "registration global burst"},
+		{c.Registration.GlobalLimit, c.Registration.GlobalWindow, "registration global sustained"},
+		{c.Registration.DomainBurstLimit, c.Registration.DomainBurstWindow, "registration unfamiliar domain burst"},
+		{c.Registration.DomainLimit, c.Registration.DomainWindow, "registration unfamiliar domain sustained"},
+		{c.Registration.MXBurstLimit, c.Registration.MXBurstWindow, "registration unfamiliar MX burst"},
+		{c.Registration.MXLimit, c.Registration.MXWindow, "registration unfamiliar MX sustained"},
 		{c.Registration.VerifyLimit, c.Registration.VerifyWindow, "registration verification"},
+		{c.Registration.VerifyGlobalBurstLimit, c.Registration.VerifyGlobalBurstWindow, "registration verification global burst"},
+		{c.Registration.VerifyGlobalLimit, c.Registration.VerifyGlobalWindow, "registration verification global sustained"},
 		{c.Registration.ResendLimit, c.Registration.ResendWindow, "registration resend"},
 	}
 	for _, rate := range registrationLimits {
 		if rate.limit <= 0 || rate.window <= 0 {
 			errs = append(errs, fmt.Errorf("%s rate limit and window must be positive", rate.name))
 		}
+	}
+	invalidAdmission := c.Registration.AdmissionInFlight <= 0 || c.Registration.AdmissionQueued < 0 || c.Registration.AdmissionWait <= 0 || c.Registration.AdmissionWait > 10*time.Second ||
+		c.Registration.UnfamiliarInFlight <= 0 || c.Registration.UnfamiliarInFlight > c.Registration.AdmissionInFlight ||
+		c.Registration.UnfamiliarQueued < 0 || c.Registration.UnfamiliarPerDomain <= 0 || c.Registration.UnfamiliarPerDomain > c.Registration.UnfamiliarInFlight ||
+		c.Registration.AdmissionInFlight > maxRegistrationAdmissionInFlight || c.Registration.UnfamiliarInFlight > maxRegistrationAdmissionInFlight ||
+		c.Registration.UnfamiliarPerDomain > maxRegistrationAdmissionPerDomain
+	if !invalidAdmission {
+		invalidAdmission = uint64(c.Registration.AdmissionInFlight)+uint64(c.Registration.AdmissionQueued) > maxRegistrationAdmissionTotalSlots ||
+			uint64(c.Registration.UnfamiliarInFlight)+uint64(c.Registration.UnfamiliarQueued) > maxRegistrationAdmissionTotalSlots
+	}
+	if invalidAdmission {
+		errs = append(errs, errors.New("registration admission limits are invalid"))
 	}
 	if c.Registration.IPv4NetBits < 8 || c.Registration.IPv4NetBits > 32 {
 		errs = append(errs, errors.New("registration IPv4 network prefix must be between 8 and 32 bits"))
@@ -1120,25 +1333,6 @@ func (c Config) Validate() error {
 		}
 		if c.WeChatMiniProgram.RequestTimeout <= 0 || c.WeChatMiniProgram.RequestTimeout > 30*time.Second {
 			errs = append(errs, errors.New("WeChat Mini Program request timeout must be positive and at most 30 seconds"))
-		}
-	}
-	if c.AliyunSMS.Enabled {
-		required := []struct {
-			name  string
-			value string
-		}{
-			{"UP_ALIYUN_SMS_ACCESS_KEY_ID", c.AliyunSMS.AccessKeyID},
-			{"UP_ALIYUN_SMS_ACCESS_KEY_SECRET", c.AliyunSMS.AccessKeySecret},
-			{"UP_ALIYUN_SMS_SIGN_NAME", c.AliyunSMS.SignName},
-			{"UP_ALIYUN_SMS_TEMPLATE_CODE", c.AliyunSMS.TemplateCode},
-		}
-		for _, field := range required {
-			if field.value == "" || field.value != strings.TrimSpace(field.value) {
-				errs = append(errs, fmt.Errorf("Aliyun SMS requires a non-empty, trimmed %s", field.name))
-			}
-		}
-		if err := validateAliyunSMSEndpoint(c.AliyunSMS.Endpoint); err != nil {
-			errs = append(errs, err)
 		}
 	}
 	if c.QRAuth.Enabled {
@@ -1391,6 +1585,15 @@ func (c Config) Validate() error {
 		}
 		if risk.AutomationCostDifficulty <= 0 || risk.AutomationCostDifficulty > 30 {
 			errs = append(errs, errors.New("risk automation-cost difficulty must be between 1 and 30 bits"))
+		}
+		if risk.RegistrationIssueDeviceLimit <= 0 || risk.RegistrationIssueNetworkLimit <= 0 || risk.RegistrationIssueWindow <= 0 ||
+			risk.RegistrationIssueGlobalBurstLimit <= 0 || risk.RegistrationIssueGlobalBurstWindow <= 0 ||
+			risk.RegistrationIssueGlobalLimit <= 0 || risk.RegistrationIssueGlobalWindow <= 0 {
+			errs = append(errs, errors.New("risk registration issue limits and windows must be positive"))
+		}
+		if risk.RegistrationIssueInFlight <= 0 || risk.RegistrationIssueInFlight > 128 || risk.RegistrationIssueQueued < 0 || risk.RegistrationIssueQueued > 4096 ||
+			risk.RegistrationIssueWait <= 0 || risk.RegistrationIssueWait > 10*time.Second {
+			errs = append(errs, errors.New("risk registration issue admission limits are invalid"))
 		}
 		for _, digest := range risk.AllowlistedHashes {
 			if !riskAllowlistDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(digest))) {
@@ -1754,24 +1957,6 @@ func validateDreamUPInternalBaseURL(raw string) error {
 	address := net.ParseIP(u.Hostname())
 	if u.Scheme != "http" || address == nil || !address.IsLoopback() {
 		return errors.New("DreamUP admin BFF cleartext base URL is permitted only on loopback")
-	}
-	return nil
-}
-
-// validateAliyunSMSEndpoint pins every runtime SMS request to Aliyun's public
-// SendSms origin. Tests that need a loopback provider use the adapter's
-// injected HTTP-client seam and never pass through deployment configuration.
-func validateAliyunSMSEndpoint(raw string) error {
-	if raw == "" || raw != strings.TrimSpace(raw) {
-		return errors.New("Aliyun SMS endpoint must be non-empty and trimmed")
-	}
-	endpoint, err := url.Parse(raw)
-	if err != nil || strings.Contains(raw, "#") || endpoint.Scheme == "" || endpoint.Host == "" || endpoint.Opaque != "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.ForceQuery || endpoint.Fragment != "" || endpoint.RawPath != "" || (endpoint.Path != "" && endpoint.Path != "/") {
-		return errors.New("Aliyun SMS endpoint must be an origin without userinfo, path, query, or fragment")
-	}
-	officialHost := strings.EqualFold(endpoint.Host, "dysmsapi.aliyuncs.com") || strings.EqualFold(endpoint.Host, "dysmsapi.aliyuncs.com:443")
-	if endpoint.Scheme != "https" || !officialHost {
-		return errors.New("Aliyun SMS endpoint must use the official https://dysmsapi.aliyuncs.com origin on port 443")
 	}
 	return nil
 }

@@ -19,21 +19,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// isPasskeyChallengeFailure reports whether a CreateSession error is a
-// WebAuthN challenge issuance failure that should fall back to a
-// challenge-less retry. ZITADEL returns codes.Internal with a WEBAU-* error
-// when it cannot begin a passkey login (no passkeys registered for the user,
-// RP not configured for the requested domain, etc.). Passkey challenges are
-// best-effort: a failure to issue one must not block password + TOTP login.
-func isPasskeyChallengeFailure(err error) bool {
-	st, ok := status.FromError(err)
-	if !ok || st.Code() != codes.Internal {
-		return false
-	}
-	msg := st.Message()
-	return strings.Contains(msg, "WebAuthN") || strings.Contains(msg, "WEBAU-")
-}
-
 // errProviderPermission marks a ZITADEL error caused by insufficient service
 // account permissions (NotFound + AUTHZ-*). It is classified at the specific
 // operation boundary (GetSession, ListAuthenticationMethodTypes) as

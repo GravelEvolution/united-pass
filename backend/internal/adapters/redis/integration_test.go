@@ -37,6 +37,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/integrationboundary"
 	"github.com/GravelEvolution/united-pass/backend/internal/qrauth"
 	"github.com/GravelEvolution/united-pass/backend/internal/registration"
+	"github.com/GravelEvolution/united-pass/backend/internal/riskdefense"
 	"github.com/GravelEvolution/united-pass/backend/internal/session"
 )
 
@@ -641,10 +642,10 @@ func TestIntegration_RegistrationStoreHashesTokenAndSeparatesRateBudgets(t *test
 			return limiter.CheckRegistrationCreate(ctx, "127.0.0.1", "127.0.0.0/24", "same", createPolicy)
 		},
 		func() (bool, time.Duration, error) {
-			return limiter.CheckRegistrationVerify(ctx, "127.0.0.1", "same", registration.Limit{Max: 1, Window: time.Minute})
+			return limiter.CheckRegistrationVerify(ctx, "127.0.0.1", registration.HashAbuseValue("same"), registration.Limit{Max: 1, Window: time.Minute})
 		},
 		func() (bool, time.Duration, error) {
-			return limiter.CheckRegistrationResend(ctx, "127.0.0.1", "same", registration.Limit{Max: 1, Window: time.Minute})
+			return limiter.CheckRegistrationResend(ctx, "127.0.0.1", registration.HashAbuseValue("same"), registration.Limit{Max: 1, Window: time.Minute})
 		},
 	}
 	for index, check := range checks {
@@ -652,6 +653,60 @@ func TestIntegration_RegistrationStoreHashesTokenAndSeparatesRateBudgets(t *test
 		if err != nil || !allowed {
 			t.Fatalf("independent rate budget %d allowed=%v err=%v", index, allowed, err)
 		}
+	}
+}
+
+func TestIntegration_RegistrationLifecycleTargetBudgetSurvivesIPRotation(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	limit := registration.Limit{Max: 3, Window: time.Minute}
+	for _, check := range []struct {
+		name string
+		call func(context.Context, string, string, registration.Limit) (bool, time.Duration, error)
+	}{
+		{name: "verify", call: limiter.CheckRegistrationVerify},
+		{name: "resend", call: limiter.CheckRegistrationResend},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			target := registration.HashAbuseValue("one-stable-target-" + check.name)
+			for attempt := 0; attempt < limit.Max; attempt++ {
+				allowed, _, err := check.call(t.Context(), fmt.Sprintf("198.51.100.%d", attempt+1), target, limit)
+				if err != nil || !allowed {
+					t.Fatalf("attempt %d allowed=%v err=%v", attempt, allowed, err)
+				}
+			}
+			allowed, retry, err := check.call(t.Context(), "203.0.113.250", target, limit)
+			if err != nil || allowed || retry <= 0 {
+				t.Fatalf("rotated IP bypass: allowed=%v retry=%v err=%v", allowed, retry, err)
+			}
+		})
+	}
+}
+
+func TestIntegration_RegistrationVerificationGlobalBudgetSurvivesTargetAndIPRotation(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	global := registration.AggregateRatePolicy{
+		Burst: registration.Limit{Max: 4, Window: time.Minute}, Sustained: registration.Limit{Max: 100, Window: time.Hour},
+	}
+	allowedCount := 0
+	for attempt := 0; attempt < 16; attempt++ {
+		allowed, retry, err := limiter.CheckRegistrationVerifyWithGlobal(
+			t.Context(), fmt.Sprintf("198.51.100.%d", attempt+1),
+			registration.HashAbuseValue(fmt.Sprintf("rotating-user-%d", attempt)),
+			registration.Limit{Max: 100, Window: time.Minute}, global,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if allowed {
+			allowedCount++
+		} else if retry <= 0 {
+			t.Fatalf("attempt %d denied without retry", attempt)
+		}
+	}
+	if allowedCount != global.Burst.Max {
+		t.Fatalf("fully rotated verification calls allowed=%d, want %d", allowedCount, global.Burst.Max)
 	}
 }
 
@@ -675,6 +730,44 @@ func TestIntegration_RegistrationCreateClientBudgetSurvivesEmailRotation(t *test
 	allowed, retry, err := limiter.CheckRegistrationCreate(ctx, "203.0.113.7", "203.0.113.0/24", "email-c", policy)
 	if err != nil || allowed || retry <= 0 {
 		t.Fatalf("rotated email bypassed client budget: allowed=%v retry=%v err=%v", allowed, retry, err)
+	}
+	buckets := limiter.registrationCreateBuckets("203.0.113.7", "203.0.113.0/24", "email-c", policy)
+	if ipCount, err := client.RDB().Get(ctx, buckets[0].key).Int(); err != nil || ipCount != 2 {
+		t.Fatalf("denied request changed saturated client budget: count=%d err=%v", ipCount, err)
+	}
+	for _, bucket := range buckets[2:] {
+		if _, err := client.RDB().Get(ctx, bucket.key).Result(); !errors.Is(err, goredis.Nil) {
+			t.Fatalf("denied request poisoned rotated-email bucket %q: err=%v", bucket.key, err)
+		}
+	}
+}
+
+func TestIntegration_RegistrationMailboxFamilyBudgetSurvivesAliasAndFullRotation(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	policy := registration.CreateRatePolicy{
+		ClientIP: registration.Limit{Max: 100, Window: time.Hour}, ClientNet: registration.Limit{Max: 100, Window: time.Hour},
+		Email: registration.Limit{Max: 100, Window: 24 * time.Hour}, ClientEmail: registration.Limit{Max: 100, Window: time.Hour},
+		MailboxFamily: registration.Limit{Max: 3, Window: 24 * time.Hour},
+		Global:        registration.AggregateRatePolicy{Burst: registration.Limit{Max: 100, Window: time.Minute}, Sustained: registration.Limit{Max: 100, Window: time.Hour}},
+	}
+	familyHash := registration.HashAbuseValue(registration.MailboxFamilyRateIdentity("victim.name@gmail.com"))
+	for attempt := 0; attempt < 4; attempt++ {
+		subject := registration.CreateRateSubject{
+			ClientIP: fmt.Sprintf("198.51.100.%d", attempt+1), ClientNetwork: fmt.Sprintf("198.51.%d.0/24", attempt+1),
+			EmailHash:         registration.HashAbuseValue(fmt.Sprintf("victim.name+campaign-%d@gmail.com", attempt)),
+			MailboxFamilyHash: familyHash, FormIntentHash: registration.HashAbuseValue(fmt.Sprintf("mailbox-family-intent-%d", attempt)),
+		}
+		outcome, retry, err := limiter.CheckRegistrationCreateChainWithCohorts(t.Context(), subject, policy, 20*time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempt < policy.MailboxFamily.Max && outcome != registration.CreateChainRateFirstAllowed {
+			t.Fatalf("alias %d outcome=%v retry=%v, want allowed", attempt, outcome, retry)
+		}
+		if attempt == policy.MailboxFamily.Max && (outcome != registration.CreateChainRateLimited || retry <= 0) {
+			t.Fatalf("rotated alias outcome=%v retry=%v, want family denial", outcome, retry)
+		}
 	}
 }
 
@@ -706,25 +799,1060 @@ func TestIntegration_RegistrationFormIntentBudgetIsAtomicAndIndependent(t *testi
 	}
 }
 
-func TestIntegration_RegistrationFormDefenseBindsExistingDeviceAndBlocksOnlySource(t *testing.T) {
+func TestIntegration_RegistrationFormIntentGlobalBudgetSurvivesFullRotation(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	policy := registration.AggregateRatePolicy{
+		Burst:     registration.Limit{Max: 5, Window: time.Minute},
+		Sustained: registration.Limit{Max: 100, Window: time.Hour},
+	}
+	allowedCount := 0
+	for attempt := 0; attempt < 20; attempt++ {
+		allowed, retry, err := limiter.CheckRegistrationFormIntentGlobal(
+			t.Context(), registration.HashAbuseValue(fmt.Sprintf("rotating-network-%d", attempt)),
+			registration.Limit{Max: 100, Window: time.Minute}, policy,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if allowed {
+			allowedCount++
+		} else if retry <= 0 {
+			t.Fatalf("attempt %d denied without retry", attempt)
+		}
+	}
+	if allowedCount != policy.Burst.Max {
+		t.Fatalf("fully rotated form intents allowed=%d, want %d", allowedCount, policy.Burst.Max)
+	}
+}
+
+func TestIntegration_RiskRegistrationIssueGlobalBudgetSurvivesFullRotation(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewRiskStore(client)
+	policy := riskdefense.RegistrationIssueRatePolicy{
+		Device:          riskdefense.RateLimit{Max: 100, Window: time.Minute},
+		Network:         riskdefense.RateLimit{Max: 100, Window: time.Minute},
+		GlobalBurst:     riskdefense.RateLimit{Max: 4, Window: time.Minute},
+		GlobalSustained: riskdefense.RateLimit{Max: 100, Window: time.Hour},
+	}
+	allowedCount := 0
+	for attempt := 0; attempt < 16; attempt++ {
+		allowed, retry, err := store.CheckRegistrationIssueRate(
+			t.Context(), session.HashToken(fmt.Sprintf("rotating-device-%d", attempt)),
+			session.HashToken(fmt.Sprintf("rotating-risk-network-%d", attempt)), policy,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if allowed {
+			allowedCount++
+		} else if retry <= 0 {
+			t.Fatalf("attempt %d denied without retry", attempt)
+		}
+	}
+	if allowedCount != policy.GlobalBurst.Max {
+		t.Fatalf("fully rotated CAPTCHA issues allowed=%d, want %d", allowedCount, policy.GlobalBurst.Max)
+	}
+}
+
+func TestIntegration_RegistrationCreateChainIsAtomicBoundAndSingleReplay(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	ctx := context.Background()
+	markerTTL := 20 * time.Minute
+	policy := registration.CreateRatePolicy{
+		ClientIP: registration.Limit{Max: 100, Window: time.Hour}, ClientNet: registration.Limit{Max: 100, Window: time.Hour},
+		Email: registration.Limit{Max: 100, Window: 24 * time.Hour}, ClientEmail: registration.Limit{Max: 100, Window: time.Hour},
+		IPv4NetBits: 24, IPv6NetBits: 56,
+	}
+	ip, network := "203.0.113.7", "203.0.113.0/24"
+	emailHash := registration.HashAbuseValue("chain@example.com")
+	intentHash := registration.HashAbuseValue("opaque-form-intent")
+
+	type result struct {
+		outcome registration.CreateChainRateOutcome
+		err     error
+	}
+	results := make(chan result, 16)
+	var wait sync.WaitGroup
+	for range 16 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			outcome, _, err := limiter.CheckRegistrationCreateChain(ctx, ip, network, emailHash, intentHash, policy, markerTTL)
+			results <- result{outcome: outcome, err: err}
+		}()
+	}
+	wait.Wait()
+	close(results)
+	counts := map[registration.CreateChainRateOutcome]int{}
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent create-chain check: %v", result.err)
+		}
+		counts[result.outcome]++
+	}
+	if counts[registration.CreateChainRateFirstAllowed] != 1 || counts[registration.CreateChainRateReplayAllowed] != 1 || counts[registration.CreateChainRateReplayExhausted] != 14 {
+		t.Fatalf("concurrent outcomes=%#v", counts)
+	}
+	for _, bucket := range limiter.registrationCreateBuckets(ip, network, emailHash, policy) {
+		value, err := client.RDB().Get(ctx, bucket.key).Int()
+		if err != nil || value != 1 {
+			t.Fatalf("bucket %q count=%d err=%v, want exactly one charge", bucket.key, value, err)
+		}
+	}
+	markerKey := limiter.registrationCreateChainKey(intentHash)
+	marker, err := client.RDB().HGetAll(ctx, markerKey).Result()
+	if err != nil || marker["uses"] != "2" || marker["binding"] != registrationCreateChainBinding(network, emailHash) {
+		t.Fatalf("marker=%#v err=%v", marker, err)
+	}
+	markerText := markerKey + fmt.Sprint(marker)
+	if strings.Contains(markerText, "opaque-form-intent") || strings.Contains(markerText, "chain@example.com") || strings.Contains(markerText, network) {
+		t.Fatalf("create-chain marker leaked raw binding material: %q", markerText)
+	}
+	ttl, err := client.RDB().PTTL(ctx, markerKey).Result()
+	if err != nil || ttl <= 0 || ttl > markerTTL {
+		t.Fatalf("marker ttl=%v err=%v", ttl, err)
+	}
+}
+
+func TestIntegration_RegistrationConflictRefundIsBoundIdempotentAndEmailOnly(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	ctx := context.Background()
+	policy := registration.CreateRatePolicy{
+		ClientIP: registration.Limit{Max: 100, Window: time.Hour}, ClientNet: registration.Limit{Max: 100, Window: time.Hour},
+		Email: registration.Limit{Max: 100, Window: 24 * time.Hour}, ClientEmail: registration.Limit{Max: 100, Window: time.Hour},
+		IPv4NetBits: 24, IPv6NetBits: 56,
+	}
+	ip, network := "203.0.113.31", "203.0.113.0/24"
+	emailHash := registration.HashAbuseValue("existing@example.com")
+	intentHash := registration.HashAbuseValue("conflict-form-intent")
+	legacyEmailHash := registration.HashAbuseValue("legacy-marker@example.com")
+	legacyIntentHash := registration.HashAbuseValue("legacy-marker-intent")
+	legacyMarkerKey := client.buildKey("rl:registration:create-chain:", "intent:", legacyIntentHash)
+	legacyBinding := registrationCreateChainBinding(network, legacyEmailHash)
+	if err := client.RDB().HSet(ctx, legacyMarkerKey, "binding", legacyBinding, "uses", "1").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RDB().Expire(ctx, legacyMarkerKey, 20*time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	legacyMarkerEmailKey := limiter.registrationCreateEmailKey(legacyEmailHash)
+	if err := client.RDB().Set(ctx, legacyMarkerEmailKey, 1, 24*time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if refunded, err := limiter.RefundRegistrationCreateEmail(ctx, network, legacyEmailHash, legacyIntentHash); err != nil || refunded {
+		t.Fatalf("legacy marker crossed v2 refund boundary: refunded=%v err=%v", refunded, err)
+	}
+	if value, err := client.RDB().Get(ctx, legacyMarkerEmailKey).Int(); err != nil || value != 1 {
+		t.Fatalf("legacy marker changed v2 email budget: value=%d err=%v", value, err)
+	}
+
+	oldEmailKey := client.buildKey(rateLimitRegistrationCreateSegment, "email:", emailHash)
+	if err := client.RDB().Set(ctx, oldEmailKey, 4, 12*time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, _, err := limiter.CheckRegistrationCreateChain(ctx, ip, network, emailHash, intentHash, policy, 20*time.Minute)
+	if err != nil || outcome != registration.CreateChainRateFirstAllowed {
+		t.Fatalf("v2 chain was blocked by legacy email key: outcome=%v err=%v", outcome, err)
+	}
+	buckets := limiter.registrationCreateBuckets(ip, network, emailHash, policy)
+	emailKey := limiter.registrationCreateEmailKey(emailHash)
+	if emailKey == oldEmailKey {
+		t.Fatalf("v2 email key reused legacy namespace: %q", emailKey)
+	}
+	if value, err := client.RDB().Incr(ctx, emailKey).Result(); err != nil || value != 2 {
+		t.Fatalf("prepare shared email count: value=%d err=%v", value, err)
+	}
+
+	if refunded, err := limiter.RefundRegistrationCreateEmail(ctx, "198.51.100.0/24", emailHash, intentHash); err != nil || refunded {
+		t.Fatalf("mismatched binding refunded=%v err=%v", refunded, err)
+	}
+	missingIntent := registration.HashAbuseValue("missing-form-intent")
+	if refunded, err := limiter.RefundRegistrationCreateEmail(ctx, network, emailHash, missingIntent); err != nil || refunded {
+		t.Fatalf("missing marker refunded=%v err=%v", refunded, err)
+	}
+
+	type refundResult struct {
+		refunded bool
+		err      error
+	}
+	results := make(chan refundResult, 16)
+	var wait sync.WaitGroup
+	for range 16 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			refunded, refundErr := limiter.RefundRegistrationCreateEmail(ctx, network, emailHash, intentHash)
+			results <- refundResult{refunded: refunded, err: refundErr}
+		}()
+	}
+	wait.Wait()
+	close(results)
+	refunds := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent refund: %v", result.err)
+		}
+		if result.refunded {
+			refunds++
+		}
+	}
+	if refunds != 1 {
+		t.Fatalf("successful refunds=%d, want exactly one", refunds)
+	}
+	if value, err := client.RDB().Get(ctx, emailKey).Int(); err != nil || value != 1 {
+		t.Fatalf("email count=%d err=%v, want one remaining charge", value, err)
+	}
+	for index, bucket := range buckets {
+		if index == 2 {
+			continue
+		}
+		if value, err := client.RDB().Get(ctx, bucket.key).Int(); err != nil || value != 1 {
+			t.Fatalf("non-email bucket %q count=%d err=%v", bucket.key, value, err)
+		}
+	}
+	if value, err := client.RDB().Get(ctx, oldEmailKey).Int(); err != nil || value != 4 {
+		t.Fatalf("legacy email key changed: value=%d err=%v", value, err)
+	}
+	marker, err := client.RDB().HGetAll(ctx, limiter.registrationCreateChainKey(intentHash)).Result()
+	if err != nil || marker["email_refunded"] != "1" {
+		t.Fatalf("refund marker=%#v err=%v", marker, err)
+	}
+
+	deleteEmailHash := registration.HashAbuseValue("single-charge@example.com")
+	deleteIntentHash := registration.HashAbuseValue("single-charge-intent")
+	outcome, _, err = limiter.CheckRegistrationCreateChain(ctx, ip, network, deleteEmailHash, deleteIntentHash, policy, 20*time.Minute)
+	if err != nil || outcome != registration.CreateChainRateFirstAllowed {
+		t.Fatalf("single-charge chain outcome=%v err=%v", outcome, err)
+	}
+	refunded, err := limiter.RefundRegistrationCreateEmail(ctx, network, deleteEmailHash, deleteIntentHash)
+	if err != nil || !refunded {
+		t.Fatalf("single-charge refund=%v err=%v", refunded, err)
+	}
+	if _, err := client.RDB().Get(ctx, limiter.registrationCreateEmailKey(deleteEmailHash)).Result(); !errors.Is(err, goredis.Nil) {
+		t.Fatalf("single-charge email key survived refund: err=%v", err)
+	}
+}
+
+func TestIntegration_RegistrationCohortRefundIsAtomicAcrossMultipleMXOperators(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	ctx := context.Background()
+	policy := registration.CreateRatePolicy{
+		ClientIP: registration.Limit{Max: 100, Window: time.Hour}, ClientNet: registration.Limit{Max: 100, Window: time.Hour},
+		Email: registration.Limit{Max: 100, Window: 24 * time.Hour}, ClientEmail: registration.Limit{Max: 100, Window: time.Hour},
+		MailboxFamily:    registration.Limit{Max: 100, Window: 24 * time.Hour},
+		Global:           registration.AggregateRatePolicy{Burst: registration.Limit{Max: 100, Window: time.Minute}, Sustained: registration.Limit{Max: 100, Window: time.Hour}},
+		UnfamiliarDomain: registration.AggregateRatePolicy{Burst: registration.Limit{Max: 100, Window: time.Minute}, Sustained: registration.Limit{Max: 100, Window: time.Hour}},
+		UnfamiliarMX:     registration.AggregateRatePolicy{Burst: registration.Limit{Max: 100, Window: time.Minute}, Sustained: registration.Limit{Max: 100, Window: time.Hour}},
+	}
+	subject := registration.CreateRateSubject{
+		ClientIP: "203.0.113.61", ClientNetwork: "203.0.113.0/24",
+		EmailHash: registration.HashAbuseValue("existing@rare.example"), DomainHash: registration.HashAbuseValue("rare.example"),
+		MailboxFamilyHash: registration.HashAbuseValue("existing-family@example.com"),
+		MXHashes:          []string{registration.HashAbuseValue("primary-operator.example"), registration.HashAbuseValue("backup-operator.example")},
+		FormIntentHash:    registration.HashAbuseValue("multi-mx-refund-intent"),
+	}
+	var err error
+	subject, err = normalizeRegistrationCreateMXCohorts(subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, _, err := limiter.CheckRegistrationCreateChainWithCohorts(ctx, subject, policy, 20*time.Minute)
+	if err != nil || outcome != registration.CreateChainRateFirstAllowed {
+		t.Fatalf("create outcome=%v err=%v", outcome, err)
+	}
+	refundableKeys := []string{limiter.registrationCreateEmailKey(subject.EmailHash)}
+	refundableKeys = append(refundableKeys, limiter.registrationCreateMailboxFamilyKey(subject.MailboxFamilyHash))
+	refundableKeys = append(refundableKeys, limiter.registrationDomainKeys(subject.DomainHash, policy.UnfamiliarDomain)...)
+	for _, mxHash := range subject.MXHashes {
+		refundableKeys = append(refundableKeys, limiter.registrationMXKeys(mxHash, policy.UnfamiliarMX)...)
+	}
+	for _, key := range refundableKeys {
+		if value, err := client.RDB().Get(ctx, key).Int(); err != nil || value != 1 {
+			t.Fatalf("initial refundable key %q count=%d err=%v", key, value, err)
+		}
+		if value, err := client.RDB().Incr(ctx, key).Result(); err != nil || value != 2 {
+			t.Fatalf("prepare refundable key %q count=%d err=%v", key, value, err)
+		}
+	}
+
+	type refundResult struct {
+		refunded bool
+		err      error
+	}
+	results := make(chan refundResult, 16)
+	var wait sync.WaitGroup
+	for range 16 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			refunded, refundErr := limiter.RefundRegistrationCreateCohorts(ctx, subject, policy)
+			results <- refundResult{refunded: refunded, err: refundErr}
+		}()
+	}
+	wait.Wait()
+	close(results)
+	refunds := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent multi-cohort refund: %v", result.err)
+		}
+		if result.refunded {
+			refunds++
+		}
+	}
+	if refunds != 1 {
+		t.Fatalf("successful refunds=%d, want exactly one", refunds)
+	}
+	for _, key := range refundableKeys {
+		if value, err := client.RDB().Get(ctx, key).Int(); err != nil || value != 1 {
+			t.Fatalf("refunded key %q count=%d err=%v, want one remaining charge", key, value, err)
+		}
+	}
+	marker, err := client.RDB().HGetAll(ctx, limiter.registrationCreateChainKey(subject.FormIntentHash)).Result()
+	if err != nil || marker["email_refunded"] != "1" {
+		t.Fatalf("refund marker=%#v err=%v", marker, err)
+	}
+}
+
+func TestIntegration_RegistrationCreateMultiMXDoesNotChargePastSaturatedOperator(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	ctx := context.Background()
+	policy := registration.CreateRatePolicy{
+		ClientIP: registration.Limit{Max: 100, Window: time.Hour}, ClientNet: registration.Limit{Max: 100, Window: time.Hour},
+		Email: registration.Limit{Max: 100, Window: 24 * time.Hour}, ClientEmail: registration.Limit{Max: 100, Window: time.Hour},
+		UnfamiliarMX: registration.AggregateRatePolicy{Burst: registration.Limit{Max: 1, Window: time.Minute}, Sustained: registration.Limit{Max: 1, Window: time.Hour}},
+	}
+	sharedMX := registration.HashAbuseValue("shared-operator.example")
+	first := registration.CreateRateSubject{
+		ClientIP: "203.0.113.70", ClientNetwork: "203.0.113.0/24", EmailHash: registration.HashAbuseValue("first@rare.example"),
+		MXHashes: []string{sharedMX, registration.HashAbuseValue("first-backup.example")}, FormIntentHash: registration.HashAbuseValue("first-multi-mx-intent"),
+	}
+	if outcome, _, err := limiter.CheckRegistrationCreateChainWithCohorts(ctx, first, policy, 20*time.Minute); err != nil || outcome != registration.CreateChainRateFirstAllowed {
+		t.Fatalf("first create outcome=%v err=%v", outcome, err)
+	}
+	freshMX := registration.HashAbuseValue("fresh-backup.example")
+	second := registration.CreateRateSubject{
+		ClientIP: "198.51.100.70", ClientNetwork: "198.51.100.0/24", EmailHash: registration.HashAbuseValue("second@other.example"),
+		MXHashes: []string{freshMX, sharedMX}, FormIntentHash: registration.HashAbuseValue("second-multi-mx-intent"),
+	}
+	if outcome, retry, err := limiter.CheckRegistrationCreateChainWithCohorts(ctx, second, policy, 20*time.Minute); err != nil || outcome != registration.CreateChainRateLimited || retry <= 0 {
+		t.Fatalf("second create outcome=%v retry=%v err=%v", outcome, retry, err)
+	}
+	for _, key := range limiter.registrationMXKeys(freshMX, policy.UnfamiliarMX) {
+		if exists, err := client.RDB().Exists(ctx, key).Result(); err != nil || exists != 0 {
+			t.Fatalf("denied request charged fresh MX key %q: exists=%d err=%v", key, exists, err)
+		}
+	}
+	if exists, err := client.RDB().Exists(ctx, limiter.registrationCreateChainKey(second.FormIntentHash)).Result(); err != nil || exists != 0 {
+		t.Fatalf("denied request created marker: exists=%d err=%v", exists, err)
+	}
+}
+
+func TestIntegration_RegistrationCreateScriptsValidateCountersBeforeAnyWrite(t *testing.T) {
+	t.Run("ordinary create", func(t *testing.T) {
+		client := setupTestRedis(t)
+		limiter := NewRateLimiter(client)
+		ctx := context.Background()
+		policy := registration.CreateRatePolicy{
+			ClientIP: registration.Limit{Max: 100, Window: time.Hour}, ClientNet: registration.Limit{Max: 100, Window: time.Hour},
+			Email: registration.Limit{Max: 100, Window: 24 * time.Hour}, ClientEmail: registration.Limit{Max: 100, Window: time.Hour},
+		}
+		buckets := limiter.registrationCreateBuckets("203.0.113.80", "203.0.113.0/24", "email-scope", policy)
+		corruptKey := buckets[len(buckets)-1].key
+		if err := client.RDB().Set(ctx, corruptKey, "1e0", time.Hour).Err(); err != nil {
+			t.Fatal(err)
+		}
+		if allowed, _, err := limiter.CheckRegistrationCreate(ctx, "203.0.113.80", "203.0.113.0/24", "email-scope", policy); err == nil || allowed {
+			t.Fatalf("non-canonical counter create allowed=%v err=%v", allowed, err)
+		}
+		for _, bucket := range buckets[:len(buckets)-1] {
+			if exists, err := client.RDB().Exists(ctx, bucket.key).Result(); err != nil || exists != 0 {
+				t.Fatalf("earlier bucket %q changed: exists=%d err=%v", bucket.key, exists, err)
+			}
+		}
+		if value, err := client.RDB().Get(ctx, corruptKey).Result(); err != nil || value != "1e0" {
+			t.Fatalf("corrupt counter changed: value=%q err=%v", value, err)
+		}
+	})
+
+	t.Run("browser chain with MX", func(t *testing.T) {
+		client := setupTestRedis(t)
+		limiter := NewRateLimiter(client)
+		ctx := context.Background()
+		policy := registration.CreateRatePolicy{
+			ClientIP: registration.Limit{Max: 100, Window: time.Hour}, ClientNet: registration.Limit{Max: 100, Window: time.Hour},
+			Email: registration.Limit{Max: 100, Window: 24 * time.Hour}, ClientEmail: registration.Limit{Max: 100, Window: time.Hour},
+			UnfamiliarMX: registration.AggregateRatePolicy{Burst: registration.Limit{Max: 100, Window: time.Minute}, Sustained: registration.Limit{Max: 100, Window: time.Hour}},
+		}
+		subject := registration.CreateRateSubject{
+			ClientIP: "203.0.113.81", ClientNetwork: "203.0.113.0/24", EmailHash: registration.HashAbuseValue("person@rare.example"),
+			MXHashes: []string{registration.HashAbuseValue("operator.example")}, FormIntentHash: registration.HashAbuseValue("non-canonical-chain-intent"),
+		}
+		buckets, err := limiter.registrationCreateBucketsWithCohorts(subject, policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		corruptKey := buckets[len(buckets)-1].key
+		if err := client.RDB().Set(ctx, corruptKey, "1e0", time.Hour).Err(); err != nil {
+			t.Fatal(err)
+		}
+		if outcome, _, err := limiter.CheckRegistrationCreateChainWithCohorts(ctx, subject, policy, 20*time.Minute); err == nil || outcome != registration.CreateChainRateUnknown {
+			t.Fatalf("non-canonical chain outcome=%v err=%v", outcome, err)
+		}
+		for _, bucket := range buckets[:len(buckets)-1] {
+			if exists, err := client.RDB().Exists(ctx, bucket.key).Result(); err != nil || exists != 0 {
+				t.Fatalf("earlier bucket %q changed: exists=%d err=%v", bucket.key, exists, err)
+			}
+		}
+		if exists, err := client.RDB().Exists(ctx, limiter.registrationCreateChainKey(subject.FormIntentHash)).Result(); err != nil || exists != 0 {
+			t.Fatalf("failed chain created marker: exists=%d err=%v", exists, err)
+		}
+		if value, err := client.RDB().Get(ctx, corruptKey).Result(); err != nil || value != "1e0" {
+			t.Fatalf("corrupt counter changed: value=%q err=%v", value, err)
+		}
+	})
+}
+
+func TestIntegration_RegistrationCohortRefundValidatesAllKeysBeforeMutation(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	ctx := context.Background()
+	policy := registration.CreateRatePolicy{
+		ClientIP: registration.Limit{Max: 100, Window: time.Hour}, ClientNet: registration.Limit{Max: 100, Window: time.Hour},
+		Email: registration.Limit{Max: 100, Window: 24 * time.Hour}, ClientEmail: registration.Limit{Max: 100, Window: time.Hour},
+		UnfamiliarDomain: registration.AggregateRatePolicy{Burst: registration.Limit{Max: 100, Window: time.Minute}, Sustained: registration.Limit{Max: 100, Window: time.Hour}},
+		UnfamiliarMX:     registration.AggregateRatePolicy{Burst: registration.Limit{Max: 100, Window: time.Minute}, Sustained: registration.Limit{Max: 100, Window: time.Hour}},
+	}
+	subject := registration.CreateRateSubject{
+		ClientIP: "203.0.113.62", ClientNetwork: "203.0.113.0/24",
+		EmailHash: registration.HashAbuseValue("existing@rare.example"), DomainHash: registration.HashAbuseValue("rare.example"),
+		MXHashes:       []string{registration.HashAbuseValue("primary-operator.example"), registration.HashAbuseValue("backup-operator.example")},
+		FormIntentHash: registration.HashAbuseValue("corrupt-multi-mx-refund-intent"),
+	}
+	var err error
+	subject, err = normalizeRegistrationCreateMXCohorts(subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, _, err := limiter.CheckRegistrationCreateChainWithCohorts(ctx, subject, policy, 20*time.Minute)
+	if err != nil || outcome != registration.CreateChainRateFirstAllowed {
+		t.Fatalf("create outcome=%v err=%v", outcome, err)
+	}
+	earlierKeys := []string{limiter.registrationCreateEmailKey(subject.EmailHash)}
+	earlierKeys = append(earlierKeys, limiter.registrationDomainKeys(subject.DomainHash, policy.UnfamiliarDomain)...)
+	for _, mxHash := range subject.MXHashes[:len(subject.MXHashes)-1] {
+		earlierKeys = append(earlierKeys, limiter.registrationMXKeys(mxHash, policy.UnfamiliarMX)...)
+	}
+	lastMXKeys := limiter.registrationMXKeys(subject.MXHashes[len(subject.MXHashes)-1], policy.UnfamiliarMX)
+	corruptKey := lastMXKeys[len(lastMXKeys)-1]
+	earlierKeys = append(earlierKeys, lastMXKeys[:len(lastMXKeys)-1]...)
+	if err := client.RDB().Set(ctx, corruptKey, "broken", time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if refunded, err := limiter.RefundRegistrationCreateCohorts(ctx, subject, policy); err == nil || refunded {
+		t.Fatalf("corrupt cohort refund=%v err=%v, want atomic failure", refunded, err)
+	}
+	for _, key := range earlierKeys {
+		if value, err := client.RDB().Get(ctx, key).Int(); err != nil || value != 1 {
+			t.Fatalf("earlier key %q changed after failed refund: count=%d err=%v", key, value, err)
+		}
+	}
+	if value, err := client.RDB().Get(ctx, corruptKey).Result(); err != nil || value != "broken" {
+		t.Fatalf("corrupt key changed: value=%q err=%v", value, err)
+	}
+	marker, err := client.RDB().HGetAll(ctx, limiter.registrationCreateChainKey(subject.FormIntentHash)).Result()
+	if err != nil || marker["email_refunded"] != "" {
+		t.Fatalf("failed refund marked completion: marker=%#v err=%v", marker, err)
+	}
+
+	if err := client.RDB().Set(ctx, corruptKey, 1, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if refunded, err := limiter.RefundRegistrationCreateCohorts(ctx, subject, policy); err == nil || refunded {
+		t.Fatalf("missing-TTL cohort refund=%v err=%v, want atomic failure", refunded, err)
+	}
+	for _, key := range earlierKeys {
+		if value, err := client.RDB().Get(ctx, key).Int(); err != nil || value != 1 {
+			t.Fatalf("earlier key %q changed after missing-TTL refund: count=%d err=%v", key, value, err)
+		}
+	}
+	marker, err = client.RDB().HGetAll(ctx, limiter.registrationCreateChainKey(subject.FormIntentHash)).Result()
+	if err != nil || marker["email_refunded"] != "" {
+		t.Fatalf("missing-TTL refund marked completion: marker=%#v err=%v", marker, err)
+	}
+}
+
+func TestIntegration_RegistrationCreateChainConcurrentLimitNeverPoisonsDeniedBuckets(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	ctx := context.Background()
+	const attempts = 16
+	const clientLimit = 3
+	policy := registration.CreateRatePolicy{
+		ClientIP: registration.Limit{Max: clientLimit, Window: time.Hour}, ClientNet: registration.Limit{Max: 100, Window: time.Hour},
+		Email: registration.Limit{Max: 10, Window: 24 * time.Hour}, ClientEmail: registration.Limit{Max: 10, Window: time.Hour},
+		IPv4NetBits: 24, IPv6NetBits: 56,
+	}
+	ip, network := "203.0.113.41", "203.0.113.0/24"
+	type attemptResult struct {
+		index   int
+		outcome registration.CreateChainRateOutcome
+		err     error
+	}
+	results := make(chan attemptResult, attempts)
+	var wait sync.WaitGroup
+	for index := range attempts {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			emailHash := registration.HashAbuseValue(fmt.Sprintf("concurrent-%d@example.com", index))
+			intentHash := registration.HashAbuseValue(fmt.Sprintf("concurrent-intent-%d", index))
+			outcome, _, err := limiter.CheckRegistrationCreateChain(ctx, ip, network, emailHash, intentHash, policy, 20*time.Minute)
+			results <- attemptResult{index: index, outcome: outcome, err: err}
+		}()
+	}
+	wait.Wait()
+	close(results)
+	allowedIndexes := make(map[int]struct{}, clientLimit)
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent attempt %d: %v", result.index, result.err)
+		}
+		switch result.outcome {
+		case registration.CreateChainRateFirstAllowed:
+			allowedIndexes[result.index] = struct{}{}
+		case registration.CreateChainRateLimited:
+		default:
+			t.Fatalf("concurrent attempt %d unexpected outcome=%v", result.index, result.outcome)
+		}
+	}
+	if len(allowedIndexes) != clientLimit {
+		t.Fatalf("allowed attempts=%d, want %d", len(allowedIndexes), clientLimit)
+	}
+	ipKey := limiter.registrationCreateBuckets(ip, network, registration.HashAbuseValue("unused@example.com"), policy)[0].key
+	if value, err := client.RDB().Get(ctx, ipKey).Int(); err != nil || value != clientLimit {
+		t.Fatalf("client bucket count=%d err=%v, want %d", value, err, clientLimit)
+	}
+	for index := range attempts {
+		emailHash := registration.HashAbuseValue(fmt.Sprintf("concurrent-%d@example.com", index))
+		intentHash := registration.HashAbuseValue(fmt.Sprintf("concurrent-intent-%d", index))
+		_, wasAllowed := allowedIndexes[index]
+		expected := int64(0)
+		if wasAllowed {
+			expected = 2
+		}
+		keys := []string{
+			limiter.registrationCreateEmailKey(emailHash),
+			limiter.registrationCreateBuckets(ip, network, emailHash, policy)[3].key,
+		}
+		if count, err := client.RDB().Exists(ctx, keys...).Result(); err != nil || count != expected {
+			t.Fatalf("attempt %d allowed=%v charged keys=%d err=%v, want %d", index, wasAllowed, count, err, expected)
+		}
+		markerExists, err := client.RDB().Exists(ctx, limiter.registrationCreateChainKey(intentHash)).Result()
+		expectedMarker := int64(0)
+		if wasAllowed {
+			expectedMarker = 1
+		}
+		if err != nil || markerExists != expectedMarker {
+			t.Fatalf("attempt %d allowed=%v marker=%d err=%v", index, wasAllowed, markerExists, err)
+		}
+	}
+}
+
+func TestIntegration_RegistrationCreateChainRejectsBindingChangesAndDoesNotMarkDeniedTokens(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	ctx := context.Background()
+	markerTTL := 20 * time.Minute
+	policy := registration.CreateRatePolicy{
+		ClientIP: registration.Limit{Max: 1, Window: time.Hour}, ClientNet: registration.Limit{Max: 10, Window: time.Hour},
+		Email: registration.Limit{Max: 10, Window: 24 * time.Hour}, ClientEmail: registration.Limit{Max: 10, Window: time.Hour},
+		IPv4NetBits: 24, IPv6NetBits: 56,
+	}
+	ip, network := "203.0.113.8", "203.0.113.0/24"
+	firstEmail := registration.HashAbuseValue("first@example.com")
+	firstIntent := registration.HashAbuseValue("first-form-intent")
+	outcome, _, err := limiter.CheckRegistrationCreateChain(ctx, ip, network, firstEmail, firstIntent, policy, markerTTL)
+	if err != nil || outcome != registration.CreateChainRateFirstAllowed {
+		t.Fatalf("first outcome=%v err=%v", outcome, err)
+	}
+	outcome, _, err = limiter.CheckRegistrationCreateChain(ctx, ip, network, registration.HashAbuseValue("changed@example.com"), firstIntent, policy, markerTTL)
+	if err != nil || outcome != registration.CreateChainRateBindingMismatch {
+		t.Fatalf("email-binding outcome=%v err=%v", outcome, err)
+	}
+	outcome, _, err = limiter.CheckRegistrationCreateChain(ctx, ip, "198.51.100.0/24", firstEmail, firstIntent, policy, markerTTL)
+	if err != nil || outcome != registration.CreateChainRateBindingMismatch {
+		t.Fatalf("network-binding outcome=%v err=%v", outcome, err)
+	}
+
+	deniedIntent := registration.HashAbuseValue("denied-form-intent")
+	deniedEmail := registration.HashAbuseValue("second@example.com")
+	outcome, retry, err := limiter.CheckRegistrationCreateChain(ctx, ip, network, deniedEmail, deniedIntent, policy, markerTTL)
+	if err != nil || outcome != registration.CreateChainRateLimited || retry <= 0 {
+		t.Fatalf("denied outcome=%v retry=%v err=%v", outcome, retry, err)
+	}
+	exists, err := client.RDB().Exists(ctx, limiter.registrationCreateChainKey(deniedIntent)).Result()
+	if err != nil || exists != 0 {
+		t.Fatalf("rate-denied arbitrary token created marker: exists=%d err=%v", exists, err)
+	}
+	for index, bucket := range limiter.registrationCreateBuckets(ip, network, deniedEmail, policy) {
+		value, getErr := client.RDB().Get(ctx, bucket.key).Int()
+		if index == 0 || index == 1 {
+			if getErr != nil || value != 1 {
+				t.Fatalf("existing shared bucket %q count=%d err=%v, want unchanged", bucket.key, value, getErr)
+			}
+			continue
+		}
+		if !errors.Is(getErr, goredis.Nil) {
+			t.Fatalf("denied request poisoned bucket %q: count=%d err=%v", bucket.key, value, getErr)
+		}
+	}
+}
+
+func TestIntegration_RegistrationCohortBudgetsStopFullProxyAndMailboxRotation(t *testing.T) {
+	tests := []struct {
+		name        string
+		attempts    int
+		wantAllowed int
+		subject     func(int) registration.CreateRateSubject
+		policy      registration.CreateRatePolicy
+	}{
+		{
+			name: "global survives complete rotation", attempts: 48, wantAllowed: 5,
+			policy: registration.CreateRatePolicy{
+				ClientIP: registration.Limit{Max: 100, Window: time.Hour}, ClientNet: registration.Limit{Max: 100, Window: time.Hour},
+				Email: registration.Limit{Max: 100, Window: time.Hour}, ClientEmail: registration.Limit{Max: 100, Window: time.Hour},
+				Global: registration.AggregateRatePolicy{Burst: registration.Limit{Max: 5, Window: time.Minute}, Sustained: registration.Limit{Max: 100, Window: time.Hour}},
+			},
+			subject: func(index int) registration.CreateRateSubject {
+				return registration.CreateRateSubject{
+					ClientIP: fmt.Sprintf("198.51.%d.%d", index/250, index%250+1), ClientNetwork: fmt.Sprintf("198.51.%d.0/24", index),
+					EmailHash:      registration.HashAbuseValue(fmt.Sprintf("person-%d@domain-%d.example", index, index)),
+					FormIntentHash: registration.HashAbuseValue(fmt.Sprintf("intent-%d", index)),
+				}
+			},
+		},
+		{
+			name: "one unfamiliar domain survives proxy rotation", attempts: 32, wantAllowed: 3,
+			policy: registration.CreateRatePolicy{
+				ClientIP: registration.Limit{Max: 100, Window: time.Hour}, ClientNet: registration.Limit{Max: 100, Window: time.Hour},
+				Email: registration.Limit{Max: 100, Window: time.Hour}, ClientEmail: registration.Limit{Max: 100, Window: time.Hour},
+				UnfamiliarDomain: registration.AggregateRatePolicy{Burst: registration.Limit{Max: 3, Window: time.Minute}, Sustained: registration.Limit{Max: 10, Window: time.Hour}},
+			},
+			subject: func(index int) registration.CreateRateSubject {
+				return registration.CreateRateSubject{
+					ClientIP: fmt.Sprintf("203.0.%d.%d", index/250, index%250+1), ClientNetwork: fmt.Sprintf("203.0.%d.0/24", index),
+					EmailHash: registration.HashAbuseValue(fmt.Sprintf("person-%d@rare.example", index)), DomainHash: registration.HashAbuseValue("rare.example"),
+					FormIntentHash: registration.HashAbuseValue(fmt.Sprintf("domain-intent-%d", index)),
+				}
+			},
+		},
+		{
+			name: "rotating domains on one unfamiliar MX", attempts: 32, wantAllowed: 4,
+			policy: registration.CreateRatePolicy{
+				ClientIP: registration.Limit{Max: 100, Window: time.Hour}, ClientNet: registration.Limit{Max: 100, Window: time.Hour},
+				Email: registration.Limit{Max: 100, Window: time.Hour}, ClientEmail: registration.Limit{Max: 100, Window: time.Hour},
+				UnfamiliarMX: registration.AggregateRatePolicy{Burst: registration.Limit{Max: 4, Window: time.Minute}, Sustained: registration.Limit{Max: 20, Window: time.Hour}},
+			},
+			subject: func(index int) registration.CreateRateSubject {
+				return registration.CreateRateSubject{
+					ClientIP: fmt.Sprintf("192.0.%d.%d", index/250, index%250+1), ClientNetwork: fmt.Sprintf("192.0.%d.0/24", index),
+					EmailHash: registration.HashAbuseValue(fmt.Sprintf("person@rare-%d.example", index)), MXHashes: []string{registration.HashAbuseValue("one-mail-operator.example")},
+					FormIntentHash: registration.HashAbuseValue(fmt.Sprintf("mx-intent-%d", index)),
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := setupTestRedis(t)
+			limiter := NewRateLimiter(client)
+			results := make(chan registration.CreateChainRateOutcome, test.attempts)
+			var wait sync.WaitGroup
+			for index := range test.attempts {
+				wait.Add(1)
+				go func() {
+					defer wait.Done()
+					outcome, _, err := limiter.CheckRegistrationCreateChainWithCohorts(t.Context(), test.subject(index), test.policy, 20*time.Minute)
+					if err != nil {
+						t.Errorf("attempt %d: %v", index, err)
+						return
+					}
+					results <- outcome
+				}()
+			}
+			wait.Wait()
+			close(results)
+			allowed := 0
+			for outcome := range results {
+				if outcome == registration.CreateChainRateFirstAllowed {
+					allowed++
+				} else if outcome != registration.CreateChainRateLimited {
+					t.Fatalf("unexpected outcome = %v", outcome)
+				}
+			}
+			if allowed != test.wantAllowed {
+				t.Fatalf("allowed = %d, want %d", allowed, test.wantAllowed)
+			}
+		})
+	}
+}
+
+func TestIntegration_WeChatRegistrationProofClaimIsAtomicGlobalAndIPBounded(t *testing.T) {
+	client := setupTestRedis(t)
+	limiter := NewRateLimiter(client)
+	ctx := context.Background()
+	window := time.Minute
+	claim := func(ip, loginCode, phoneCode string, limit int) (bool, time.Duration, error) {
+		return limiter.ClaimWeChatRegistrationProofs(
+			ctx, ip, registration.HashAbuseValue(loginCode), registration.HashAbuseValue(phoneCode), limit, window,
+		)
+	}
+
+	for _, pair := range [][2]string{{"login-one", "phone-one"}, {"login-two", "phone-two"}} {
+		allowed, retry, err := claim("203.0.113.20", pair[0], pair[1], 2)
+		if err != nil || !allowed || retry != 0 {
+			t.Fatalf("initial proof pair=%v allowed=%v retry=%v err=%v", pair, allowed, retry, err)
+		}
+	}
+	thirdLogin := registration.HashAbuseValue("login-three")
+	thirdPhone := registration.HashAbuseValue("phone-three")
+	allowed, retry, err := limiter.ClaimWeChatRegistrationProofs(ctx, "203.0.113.20", thirdLogin, thirdPhone, 2, window)
+	if err != nil || allowed || retry <= 0 {
+		t.Fatalf("IP overflow allowed=%v retry=%v err=%v", allowed, retry, err)
+	}
+	thirdKeys := limiter.wechatRegistrationProofKeys("203.0.113.20", thirdLogin, thirdPhone)
+	exists, err := client.RDB().Exists(ctx, thirdKeys[1:]...).Result()
+	if err != nil || exists != 0 {
+		t.Fatalf("IP-denied arbitrary codes created proof keys: exists=%d err=%v", exists, err)
+	}
+	ipCount, err := client.RDB().Get(ctx, thirdKeys[0]).Int()
+	if err != nil || ipCount != 3 {
+		t.Fatalf("proof IP counter=%d err=%v, want 3", ipCount, err)
+	}
+
+	allowed, retry, err = claim("198.51.100.30", "login-one", "phone-one", 2)
+	if err != nil || allowed || retry <= 0 {
+		t.Fatalf("global cross-IP replay allowed=%v retry=%v err=%v", allowed, retry, err)
+	}
+
+	const attempts = 24
+	type claimResult struct {
+		allowed bool
+		err     error
+	}
+	results := make(chan claimResult, attempts)
+	var wait sync.WaitGroup
+	for index := 0; index < attempts; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			allowed, _, err := claim(fmt.Sprintf("192.0.2.%d", index+1), "concurrent-login", "concurrent-phone", 2)
+			results <- claimResult{allowed: allowed, err: err}
+		}(index)
+	}
+	wait.Wait()
+	close(results)
+	allowedCount := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent proof claim: %v", result.err)
+		}
+		if result.allowed {
+			allowedCount++
+		}
+	}
+	if allowedCount != 1 {
+		t.Fatalf("concurrent proof claim allowed=%d, want 1", allowedCount)
+	}
+
+	keys, _, err := client.RDB().Scan(ctx, 0, client.KeyPrefix()+"rl:wechat:*", 200).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(keys, " ")
+	for _, rawCode := range []string{"login-one", "phone-one", "login-three", "phone-three", "concurrent-login", "concurrent-phone"} {
+		if strings.Contains(joined, rawCode) {
+			t.Fatalf("raw WeChat code leaked into Redis key: %q", rawCode)
+		}
+	}
+}
+
+func TestIntegration_RiskStoreRegistrationChallengeReservationIsAtomic(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewRiskStore(client)
+	ctx := context.Background()
+	scopeHash := session.HashToken("registration-scope-concurrent")
+
+	const workers = 8
+	type outcome struct {
+		challengeHash string
+		acquired      bool
+		retry         time.Duration
+		err           error
+	}
+	outcomes := make(chan outcome, workers)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		challengeHash := session.HashToken(fmt.Sprintf("registration-challenge-concurrent-%d", worker))
+		go func() {
+			defer wg.Done()
+			acquired, retry, err := store.ReserveRegistrationChallenge(ctx, scopeHash, challengeHash, 5*time.Second)
+			outcomes <- outcome{challengeHash: challengeHash, acquired: acquired, retry: retry, err: err}
+		}()
+	}
+	wg.Wait()
+	close(outcomes)
+
+	var winner string
+	for result := range outcomes {
+		if result.err != nil {
+			t.Fatalf("reserve %s: %v", result.challengeHash, result.err)
+		}
+		if result.acquired {
+			if winner != "" {
+				t.Fatalf("multiple reservation winners: %s and %s", winner, result.challengeHash)
+			}
+			if result.retry != 0 {
+				t.Errorf("winner retry=%v, want 0", result.retry)
+			}
+			winner = result.challengeHash
+			continue
+		}
+		if result.retry <= 0 {
+			t.Errorf("loser retry=%v, want positive active-lease TTL", result.retry)
+		}
+	}
+	if winner == "" {
+		t.Fatal("no registration reservation winner")
+	}
+
+	record := riskdefense.ChallengeRecord{
+		Operation:      riskdefense.OperationRegistration,
+		Level:          riskdefense.LevelHigh,
+		Method:         riskdefense.MethodInteractiveCAPTCHA,
+		DeviceIDHash:   session.HashToken("registration-device-concurrent"),
+		UserAgentHash:  session.HashToken("registration-ua-concurrent"),
+		IdentifierHash: session.HashToken("registration-identifier-concurrent"),
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := store.FinalizeRegistrationChallenge(ctx, scopeHash, winner, record, 5*time.Second); err != nil {
+		t.Fatalf("finalize reservation winner: %v", err)
+	}
+	got, err := store.ClaimChallenge(ctx, winner, "registration-claim-concurrent")
+	if err != nil {
+		t.Fatalf("claim finalized challenge: %v", err)
+	}
+	if got.Operation != record.Operation || got.DeviceIDHash != record.DeviceIDHash || got.IdentifierHash != record.IdentifierHash {
+		t.Fatalf("claimed challenge=%+v, want finalized binding=%+v", got, record)
+	}
+	if err := store.ConsumeRegistrationChallenge(ctx, winner, "registration-claim-concurrent", scopeHash); err != nil {
+		t.Fatalf("consume finalized registration challenge: %v", err)
+	}
+	if exists, err := client.RDB().Exists(ctx, client.buildKey(riskRegistrationActiveChallengeSegment, scopeHash)).Result(); err != nil || exists != 0 {
+		t.Fatalf("active scope after consume exists=%d err=%v, want absent", exists, err)
+	}
+	if acquired, retry, err := store.ReserveRegistrationChallenge(ctx, scopeHash, session.HashToken("registration-challenge-after-consume"), time.Second); err != nil || !acquired || retry != 0 {
+		t.Fatalf("reserve after consume acquired=%v retry=%v err=%v", acquired, retry, err)
+	}
+}
+
+func TestIntegration_RiskStoreRegistrationChallengeOwnerIsolation(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewRiskStore(client)
+	ctx := context.Background()
+	scopeHash := session.HashToken("registration-scope-owner")
+	ownerHash := session.HashToken("registration-challenge-owner")
+	foreignHash := session.HashToken("registration-challenge-foreign")
+
+	if acquired, _, err := store.ReserveRegistrationChallenge(ctx, scopeHash, ownerHash, 5*time.Second); err != nil || !acquired {
+		t.Fatalf("reserve owner acquired=%v err=%v", acquired, err)
+	}
+	record := riskdefense.ChallengeRecord{
+		Operation:      riskdefense.OperationRegistration,
+		Level:          riskdefense.LevelHigh,
+		Method:         riskdefense.MethodInteractiveCAPTCHA,
+		DeviceIDHash:   session.HashToken("registration-device-owner"),
+		UserAgentHash:  session.HashToken("registration-ua-owner"),
+		IdentifierHash: session.HashToken("registration-identifier-owner"),
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := store.FinalizeRegistrationChallenge(ctx, scopeHash, foreignHash, record, 5*time.Second); !errors.Is(err, riskdefense.ErrChallengeNotHeld) {
+		t.Fatalf("foreign finalize err=%v, want ErrChallengeNotHeld", err)
+	}
+	if err := store.ReleaseRegistrationChallenge(ctx, scopeHash, foreignHash); !errors.Is(err, riskdefense.ErrChallengeNotHeld) {
+		t.Fatalf("foreign release err=%v, want ErrChallengeNotHeld", err)
+	}
+	activeKey := client.buildKey(riskRegistrationActiveChallengeSegment, scopeHash)
+	if active, err := client.RDB().Get(ctx, activeKey).Result(); err != nil || active != ownerHash {
+		t.Fatalf("active owner after foreign operations=%q err=%v, want %q", active, err, ownerHash)
+	}
+	if err := store.FinalizeRegistrationChallenge(ctx, scopeHash, ownerHash, record, 5*time.Second); err != nil {
+		t.Fatalf("owner finalize: %v", err)
+	}
+	if _, err := store.ClaimChallenge(ctx, ownerHash, "registration-claim-owner"); err != nil {
+		t.Fatalf("claim owner challenge: %v", err)
+	}
+	if err := client.RDB().Set(ctx, activeKey, foreignHash, 5*time.Second).Err(); err != nil {
+		t.Fatalf("install newer active owner: %v", err)
+	}
+	if err := store.ConsumeRegistrationChallenge(ctx, ownerHash, "registration-claim-owner", scopeHash); err != nil {
+		t.Fatalf("consume stale challenge: %v", err)
+	}
+	if active, err := client.RDB().Get(ctx, activeKey).Result(); err != nil || active != foreignHash {
+		t.Fatalf("stale consume changed newer owner=%q err=%v, want %q", active, err, foreignHash)
+	}
+}
+
+func TestIntegration_RiskStoreRegistrationChallengeExpiryAllowsSafeReissue(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewRiskStore(client)
+	ctx := context.Background()
+	scopeHash := session.HashToken("registration-scope-expiry")
+	firstHash := session.HashToken("registration-challenge-expiry-first")
+	secondHash := session.HashToken("registration-challenge-expiry-second")
+
+	if acquired, _, err := store.ReserveRegistrationChallenge(ctx, scopeHash, firstHash, 3*time.Second); err != nil || !acquired {
+		t.Fatalf("reserve first acquired=%v err=%v", acquired, err)
+	}
+	record := riskdefense.ChallengeRecord{
+		Operation:      riskdefense.OperationRegistration,
+		Level:          riskdefense.LevelHigh,
+		Method:         riskdefense.MethodInteractiveCAPTCHA,
+		DeviceIDHash:   session.HashToken("registration-device-expiry"),
+		UserAgentHash:  session.HashToken("registration-ua-expiry"),
+		IdentifierHash: session.HashToken("registration-identifier-expiry"),
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := store.FinalizeRegistrationChallenge(ctx, scopeHash, firstHash, record, time.Second); err != nil {
+		t.Fatalf("finalize first: %v", err)
+	}
+	if acquired, retry, err := store.ReserveRegistrationChallenge(ctx, scopeHash, secondHash, 3*time.Second); err != nil || acquired || retry <= 0 {
+		t.Fatalf("reserve while first live acquired=%v retry=%v err=%v", acquired, retry, err)
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+	if exists, err := client.RDB().Exists(ctx, client.buildKey(riskChallengeSegment, firstHash)).Result(); err != nil || exists != 0 {
+		t.Fatalf("expired first challenge exists=%d err=%v, want absent", exists, err)
+	}
+	if acquired, retry, err := store.ReserveRegistrationChallenge(ctx, scopeHash, secondHash, 3*time.Second); err != nil || !acquired || retry != 0 {
+		t.Fatalf("reserve after expiry acquired=%v retry=%v err=%v", acquired, retry, err)
+	}
+}
+
+func TestIntegration_RiskStoreRegistrationAggregateRateBudgets(t *testing.T) {
+	client := setupTestRedis(t)
+	store := NewRiskStore(client)
+	ctx := context.Background()
+
+	checks := []struct {
+		name  string
+		check func(context.Context, string, string, int, int, time.Duration) (bool, time.Duration, error)
+	}{
+		{name: "issue", check: func(ctx context.Context, deviceHash, networkHash string, deviceLimit, networkLimit int, window time.Duration) (bool, time.Duration, error) {
+			return store.CheckRegistrationIssueRate(ctx, deviceHash, networkHash, riskdefense.RegistrationIssueRatePolicy{
+				Device: riskdefense.RateLimit{Max: deviceLimit, Window: window}, Network: riskdefense.RateLimit{Max: networkLimit, Window: window},
+				GlobalBurst: riskdefense.RateLimit{Max: 100, Window: window}, GlobalSustained: riskdefense.RateLimit{Max: 100, Window: window},
+			})
+		}},
+		{name: "completion", check: store.CheckRegistrationCompletionRate},
+	}
+	for _, check := range checks {
+		check := check
+		t.Run(check.name+" device budget", func(t *testing.T) {
+			deviceHash := session.HashToken(check.name + "-shared-device")
+			for attempt := 1; attempt <= 3; attempt++ {
+				networkHash := session.HashToken(fmt.Sprintf("%s-device-budget-network-%d", check.name, attempt))
+				allowed, retry, err := check.check(ctx, deviceHash, networkHash, 2, 10, time.Minute)
+				if err != nil {
+					t.Fatalf("attempt %d: %v", attempt, err)
+				}
+				if attempt <= 2 && (!allowed || retry != 0) {
+					t.Fatalf("attempt %d allowed=%v retry=%v, want allowed", attempt, allowed, retry)
+				}
+				if attempt == 3 && (allowed || retry <= 0) {
+					t.Fatalf("attempt %d allowed=%v retry=%v, want device denial", attempt, allowed, retry)
+				}
+			}
+		})
+		t.Run(check.name+" network budget", func(t *testing.T) {
+			networkHash := session.HashToken(check.name + "-shared-network")
+			for attempt := 1; attempt <= 3; attempt++ {
+				deviceHash := session.HashToken(fmt.Sprintf("%s-network-budget-device-%d", check.name, attempt))
+				allowed, retry, err := check.check(ctx, deviceHash, networkHash, 10, 2, time.Minute)
+				if err != nil {
+					t.Fatalf("attempt %d: %v", attempt, err)
+				}
+				if attempt <= 2 && (!allowed || retry != 0) {
+					t.Fatalf("attempt %d allowed=%v retry=%v, want allowed", attempt, allowed, retry)
+				}
+				if attempt == 3 && (allowed || retry <= 0) {
+					t.Fatalf("attempt %d allowed=%v retry=%v, want network denial", attempt, allowed, retry)
+				}
+			}
+		})
+		t.Run(check.name+" denied device does not burn shared network", func(t *testing.T) {
+			networkHash := session.HashToken(check.name + "-non-burning-network")
+			firstDevice := session.HashToken(check.name + "-non-burning-device-1")
+			secondDevice := session.HashToken(check.name + "-non-burning-device-2")
+			thirdDevice := session.HashToken(check.name + "-non-burning-device-3")
+			if allowed, _, err := check.check(ctx, firstDevice, networkHash, 1, 2, time.Minute); err != nil || !allowed {
+				t.Fatalf("first device allowed=%v err=%v", allowed, err)
+			}
+			if allowed, _, err := check.check(ctx, firstDevice, networkHash, 1, 2, time.Minute); err != nil || allowed {
+				t.Fatalf("exhausted first device allowed=%v err=%v, want denied", allowed, err)
+			}
+			if allowed, _, err := check.check(ctx, secondDevice, networkHash, 1, 2, time.Minute); err != nil || !allowed {
+				t.Fatalf("second device allowed=%v err=%v; denied peer burned shared network", allowed, err)
+			}
+			if allowed, _, err := check.check(ctx, thirdDevice, networkHash, 1, 2, time.Minute); err != nil || allowed {
+				t.Fatalf("third device allowed=%v err=%v, want shared-network denial", allowed, err)
+			}
+		})
+	}
+
+	// Issuance and completion are separate fixed windows. Exhausting one must
+	// not accidentally consume the other, or successful users could be locked
+	// out before submitting their first proof.
+	separationDevice := session.HashToken("registration-rate-separation-device")
+	separationNetwork := session.HashToken("registration-rate-separation-network")
+	separationIssuePolicy := riskdefense.RegistrationIssueRatePolicy{
+		Device: riskdefense.RateLimit{Max: 1, Window: time.Minute}, Network: riskdefense.RateLimit{Max: 1, Window: time.Minute},
+		GlobalBurst: riskdefense.RateLimit{Max: 10, Window: time.Minute}, GlobalSustained: riskdefense.RateLimit{Max: 10, Window: time.Minute},
+	}
+	if allowed, _, err := store.CheckRegistrationIssueRate(ctx, separationDevice, separationNetwork, separationIssuePolicy); err != nil || !allowed {
+		t.Fatalf("first issue allowed=%v err=%v", allowed, err)
+	}
+	if allowed, _, err := store.CheckRegistrationIssueRate(ctx, separationDevice, separationNetwork, separationIssuePolicy); err != nil || allowed {
+		t.Fatalf("second issue allowed=%v err=%v, want denied", allowed, err)
+	}
+	if allowed, retry, err := store.CheckRegistrationCompletionRate(ctx, separationDevice, separationNetwork, 1, 1, time.Minute); err != nil || !allowed || retry != 0 {
+		t.Fatalf("independent first completion allowed=%v retry=%v err=%v", allowed, retry, err)
+	}
+}
+
+func TestIntegration_RegistrationFormDefenseRequiresExactDeviceOriginAndBlocksOnlySource(t *testing.T) {
 	client := setupTestRedis(t)
 	store := NewRegistrationFormDefenseStore(client)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	uaHash := registration.HashAbuseValue("browser")
 	networkHash := registration.HashAbuseValue("203.0.113.0/24")
+	originHash := registration.HashAbuseValue("https://auth.moonstone.org.cn")
 
 	withoutDevice := registration.FormIntentRecord{
-		UserAgentHash: uaHash, ClientNetworkHash: networkHash,
+		UserAgentHash: uaHash, ClientNetworkHash: networkHash, OriginHash: originHash,
 		NotBefore: now.Add(-time.Second), ExpiresAt: now.Add(time.Minute),
 	}
-	if err := store.CreateFormIntent(ctx, "intent-before-device", withoutDevice, time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.ConsumeFormIntent(ctx, "intent-before-device", registration.FormIntentBinding{
-		UserAgentHash: uaHash, ClientNetworkHash: networkHash, DeviceIDHash: registration.HashAbuseValue("server-issued-device"),
-	}, now); err != nil {
-		t.Fatalf("first server device after step-up rejected: %v", err)
+	if err := store.CreateFormIntent(ctx, "intent-before-device", withoutDevice, time.Minute); !errors.Is(err, registration.ErrUnavailable) {
+		t.Fatalf("intent without a server device was accepted: %v", err)
 	}
 
 	withDevice := withoutDevice
@@ -732,10 +1860,76 @@ func TestIntegration_RegistrationFormDefenseBindsExistingDeviceAndBlocksOnlySour
 	if err := store.CreateFormIntent(ctx, "intent-bound-device", withDevice, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.ConsumeFormIntent(ctx, "intent-bound-device", registration.FormIntentBinding{
-		UserAgentHash: uaHash, ClientNetworkHash: networkHash, DeviceIDHash: registration.HashAbuseValue("replacement-device"),
-	}, now); !errors.Is(err, registration.ErrFormIntentInvalid) {
+	emailHash := registration.HashAbuseValue("person@example.com")
+	originalBinding := registration.FormIntentBinding{
+		UserAgentHash: uaHash, ClientNetworkHash: networkHash, DeviceIDHash: withDevice.DeviceIDHash, OriginHash: originHash, EmailHash: emailHash,
+	}
+	baseBinding := originalBinding
+	baseBinding.EmailHash = ""
+	if err := store.ValidateFormIntent(ctx, "intent-bound-device", baseBinding, now); err != nil {
+		t.Fatalf("validate unbound intent: %v", err)
+	}
+	if err := store.BindFormIntentEmail(ctx, "intent-bound-device", originalBinding, now); err != nil {
+		t.Fatalf("bind email: %v", err)
+	}
+	if err := store.ValidateFormIntent(ctx, "intent-bound-device", originalBinding, now); err != nil {
+		t.Fatalf("validate bound intent: %v", err)
+	}
+	changedEmail := originalBinding
+	changedEmail.EmailHash = registration.HashAbuseValue("other@example.com")
+	if err := store.ValidateFormIntent(ctx, "intent-bound-device", changedEmail, now); !errors.Is(err, registration.ErrFormIntentInvalid) {
+		t.Fatalf("validate accepted replacement email: %v", err)
+	}
+	if err := store.BindFormIntentEmail(ctx, "intent-bound-device", changedEmail, now); !errors.Is(err, registration.ErrFormIntentInvalid) {
+		t.Fatalf("replacement email accepted: %v", err)
+	}
+	replacementDevice := originalBinding
+	replacementDevice.DeviceIDHash = registration.HashAbuseValue("replacement-device")
+	if err := store.ConsumeFormIntent(ctx, "intent-bound-device", replacementDevice, now); !errors.Is(err, registration.ErrFormIntentInvalid) {
 		t.Fatalf("replacement device accepted: %v", err)
+	}
+	withDevice.DeviceIDHash = registration.HashAbuseValue("original-device-2")
+	if err := store.CreateFormIntent(ctx, "intent-bound-origin", withDevice, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	originBinding := registration.FormIntentBinding{
+		UserAgentHash: uaHash, ClientNetworkHash: networkHash, DeviceIDHash: withDevice.DeviceIDHash, OriginHash: originHash,
+		EmailHash: registration.HashAbuseValue("origin@example.com"),
+	}
+	if err := store.BindFormIntentEmail(ctx, "intent-bound-origin", originBinding, now); err != nil {
+		t.Fatalf("bind origin intent: %v", err)
+	}
+	wrongOrigin := originBinding
+	wrongOrigin.OriginHash = registration.HashAbuseValue("https://evil.example")
+	if err := store.ConsumeFormIntent(ctx, "intent-bound-origin", wrongOrigin, now); !errors.Is(err, registration.ErrFormIntentInvalid) {
+		t.Fatalf("replacement origin accepted: %v", err)
+	}
+
+	withDevice.DeviceIDHash = registration.HashAbuseValue("concurrent-device")
+	if err := store.CreateFormIntent(ctx, "intent-one-use", withDevice, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	oneUseBinding := registration.FormIntentBinding{
+		UserAgentHash: uaHash, ClientNetworkHash: networkHash, DeviceIDHash: withDevice.DeviceIDHash, OriginHash: originHash,
+		EmailHash: registration.HashAbuseValue("one-use@example.com"),
+	}
+	if err := store.BindFormIntentEmail(ctx, "intent-one-use", oneUseBinding, now); err != nil {
+		t.Fatalf("bind one-use intent: %v", err)
+	}
+	results := make(chan error, 2)
+	for range 2 {
+		go func() { results <- store.ConsumeFormIntent(ctx, "intent-one-use", oneUseBinding, now) }()
+	}
+	successes := 0
+	for range 2 {
+		if err := <-results; err == nil {
+			successes++
+		} else if !errors.Is(err, registration.ErrFormIntentInvalid) {
+			t.Fatalf("concurrent consume: %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent consume successes=%d, want 1", successes)
 	}
 
 	policy := registration.AbusePolicy{
