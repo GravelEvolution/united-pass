@@ -14,6 +14,7 @@ import {
 import { refreshRegistrationIntentIfRequired } from "@/features/auth/utils/registration-challenge-refresh";
 import { formatRetryAfter } from "@/features/auth/utils/retry-after";
 import { registrationIntentNeedsRefresh } from "./registration-intent-policy";
+import { usernameHtmlPattern } from "./registration-username-pattern";
 import styles from "./credential-panel.module.css";
 
 type RegistrationPanelProps = { requestId?: string };
@@ -241,7 +242,7 @@ export function RegistrationPanel({ requestId }: RegistrationPanelProps) {
             size="large"
             autoComplete="username"
             placeholder="3–64 位字母、数字、点、横线或下划线"
-            pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,63}"
+            pattern={usernameHtmlPattern}
             maxLength={64}
             required
           />
