@@ -10,14 +10,17 @@ import type { Metadata } from "next";
 import { PageHeader } from "@/components/common/page-header";
 import { AccountDeletionPanel } from "@/features/account/components/privacy-rights";
 import { serverQueries } from "@/lib/api/server/server-queries";
+import { withActiveSession } from "@/lib/api/server/server-session";
 
 export const metadata: Metadata = { title: "注销账户" };
 
 export default async function DeleteAccountPage() {
-  const [currentUser, deletion] = await Promise.all([
-    serverQueries.getCurrentUser(),
-    serverQueries.getAccountDeletion(),
-  ]);
+  const [currentUser, deletion] = await withActiveSession(() =>
+    Promise.all([
+      serverQueries.getCurrentUser(),
+      serverQueries.getAccountDeletion(),
+    ]),
+  );
   return (
     <>
       <PageHeader

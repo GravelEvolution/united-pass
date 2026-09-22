@@ -33,6 +33,7 @@ type CredentialPanelProps = {
   resumeRequestId?: string;
   feishuLoginEnabled?: boolean;
   providerError?: string;
+  sessionExpired?: boolean;
   registrationEnabled?: boolean;
   qrLoginEnabled?: boolean;
 };
@@ -52,6 +53,7 @@ export function CredentialPanel({
   resumeRequestId,
   feishuLoginEnabled = false,
   providerError,
+  sessionExpired = false,
   registrationEnabled = false,
   qrLoginEnabled = false,
 }: CredentialPanelProps) {
@@ -182,6 +184,12 @@ export function CredentialPanel({
         <h1>欢迎回来</h1>
         <p>使用你的统一账户继续访问。</p>
       </div>
+
+      {sessionExpired && (
+        <p className={styles.sessionExpiredNotice} role="status">
+          您已经安全退出登录。为保护您的账户，长时间不活跃的登录设备会自动下线，请返回登录页重新登录。
+        </p>
+      )}
 
       <form className={styles.form} method="post" onSubmit={handleSubmit}>
         <label className={styles.field}>

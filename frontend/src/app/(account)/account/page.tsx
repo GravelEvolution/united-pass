@@ -9,10 +9,11 @@
 import type { Metadata } from "next";
 import { AccountOverview } from "@/features/account/components/account-overview";
 import { serverQueries } from "@/lib/api/server/server-queries";
+import { withActiveSession } from "@/lib/api/server/server-session";
 
 export const metadata: Metadata = { title: "账户概览" };
 
 export default async function AccountPage() {
-  const currentUser = await serverQueries.getCurrentUser();
+  const currentUser = await withActiveSession(() => serverQueries.getCurrentUser());
   return <AccountOverview currentUser={currentUser} />;
 }

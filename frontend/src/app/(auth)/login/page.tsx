@@ -17,9 +17,9 @@ export const metadata: Metadata = { title: "登录" };
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ requestId?: string; providerError?: string }>;
+  searchParams: Promise<{ requestId?: string; providerError?: string; reason?: string }>;
 }) {
-  const { requestId, providerError } = await searchParams;
+  const { requestId, providerError, reason } = await searchParams;
   const authenticatedDestination = await resolveAuthenticatedLoginDestination(requestId);
   if (authenticatedDestination) {
     redirect(authenticatedDestination);
@@ -31,6 +31,7 @@ export default async function LoginPage({
     <CredentialPanel
       resumeRequestId={requestId}
       providerError={providerError}
+      sessionExpired={reason === "session-expired"}
       registrationEnabled={process.env.UP_PUBLIC_REGISTRATION_ENABLED === "true"}
       qrLoginEnabled={process.env.UP_QR_AUTH_ENABLED === "true"}
       feishuLoginEnabled={loginProviders.some(

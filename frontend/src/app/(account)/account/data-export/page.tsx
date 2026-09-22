@@ -10,11 +10,12 @@ import type { Metadata } from "next";
 import { PageHeader } from "@/components/common/page-header";
 import { PersonalDataExportPanel } from "@/features/account/components/privacy-rights";
 import { serverQueries } from "@/lib/api/server/server-queries";
+import { withActiveSession } from "@/lib/api/server/server-session";
 
 export const metadata: Metadata = { title: "数据导出" };
 
 export default async function DataExportPage() {
-  const currentUser = await serverQueries.getCurrentUser();
+  const currentUser = await withActiveSession(() => serverQueries.getCurrentUser());
   return (
     <>
       <PageHeader

@@ -9,10 +9,11 @@
 import type { Metadata } from "next";
 import { SessionList } from "@/features/account/components/session-list";
 import { serverQueries } from "@/lib/api/server/server-queries";
+import { withActiveSession } from "@/lib/api/server/server-session";
 
 export const metadata: Metadata = { title: "活跃会话" };
 
 export default async function SessionsPage() {
-  const sessions = await serverQueries.getSessions();
+  const sessions = await withActiveSession(() => serverQueries.getSessions());
   return <SessionList sessions={sessions} />;
 }

@@ -10,7 +10,7 @@ import type { ReactNode } from "react";
 import { redirect } from "next/navigation";
 import { DashboardShell } from "@/components/layouts/dashboard-shell";
 import { serverQueries } from "@/lib/api/server/server-queries";
-import { requireSession } from "@/lib/api/server/server-session";
+import { requireSession, withActiveSession } from "@/lib/api/server/server-session";
 import { canAccessAdminConsole } from "@/types/permissions";
 import { dreamUPAdminServerQueries } from "@/features/dreamup-admin/api/server-queries";
 import { hasDreamUPAdministrationAccess } from "@/features/dreamup-admin/permissions";
@@ -19,11 +19,13 @@ export const dynamic = "force-dynamic";
 
 export default async function AdminLayout({ children }: { children: ReactNode }) {
   await requireSession();
-  const [currentUser, permissions, dreamUPEvents] = await Promise.all([
-    serverQueries.getCurrentUser(),
-    serverQueries.getCurrentPermissions(),
-    dreamUPAdminServerQueries.getEvents().catch(() => []),
-  ]);
+  const [currentUser, permissions, dreamUPEvents] = await withActiveSession(() =>
+    Promise.all([
+      serverQueries.getCurrentUser(),
+      serverQueries.getCurrentPermissions(),
+      dreamUPAdminServerQueries.getEvents().catch(() => []),
+    ]),
+  );
   const showDreamUPAdministration = hasDreamUPAdministrationAccess(dreamUPEvents);
   if (!canAccessAdminConsole(permissions) && !showDreamUPAdministration) {
     redirect("/account");
