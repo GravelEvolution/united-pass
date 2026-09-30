@@ -223,7 +223,6 @@ export function ApplicationCreateForm({ availableScopes }: ApplicationCreateForm
         />
         <div className={styles.resultPanel}>
           <div className={styles.resultHeader}>
-            <span className={styles.mockBadge}>MOCK</span>
             <h2>创建结果</h2>
           </div>
 

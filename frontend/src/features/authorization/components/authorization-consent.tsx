@@ -210,7 +210,6 @@ export function AuthorizationConsent({ currentUser, resolution }: AuthorizationC
         <ConsentCard
           currentUser={currentUser}
           resolution={resolution}
-          showMockIndicators={USE_MOCK_DATA_SOURCE}
           onAllow={() => handleDecision("allow")}
           onDeny={() => handleDecision("deny")}
         />
@@ -234,13 +233,11 @@ export function AuthorizationConsent({ currentUser, resolution }: AuthorizationC
 function ConsentCard({
   currentUser,
   resolution,
-  showMockIndicators,
   onAllow,
   onDeny,
 }: {
   currentUser: CurrentUser;
   resolution: Extract<ConsentResolution, { status: "valid" }>;
-  showMockIndicators: boolean;
   onAllow: () => void;
   onDeny: () => void;
 }) {
@@ -249,7 +246,6 @@ function ConsentCard({
 
   return (
     <div className={styles.card}>
-      {showMockIndicators && <div className={styles.mockBadge}>授权请求 · MOCK</div>}
       <div className={styles.application}>
         <div className={styles.applicationIcon}>
           <img src={BRAND_LOGO_URL} alt="" />
@@ -292,7 +288,7 @@ function ConsentCard({
       <div className={styles.actions}>
         <Button size="large" theme="outline" onClick={onDeny}>拒绝</Button>
         <Button size="large" type="primary" theme="solid" onClick={onAllow}>
-          {showMockIndicators ? "允许并继续（Mock）" : "允许并继续"}
+          允许并继续
         </Button>
       </div>
     </div>

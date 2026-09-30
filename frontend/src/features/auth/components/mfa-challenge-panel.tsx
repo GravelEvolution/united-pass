@@ -13,7 +13,6 @@ import { useState } from "react";
 import { Banner, Button, Input } from "@douyinfe/semi-ui";
 import {
   IconAlertTriangle,
-  IconClose,
   IconHourglass,
   IconKey,
   IconLock,
@@ -64,13 +63,11 @@ function pickDefaultMethod(methods: MfaMethod[]): MfaMethod {
 }
 
 export function MfaChallengePanel({
-  mfaToken,
   availableMethods,
   onSuccess,
   onCancel,
   onVerify,
 }: MfaChallengePanelProps) {
-  const isRealMode = onVerify !== undefined;
   const [selectedMethod, setSelectedMethod] = useState<MfaMethod>(() =>
     pickDefaultMethod(availableMethods),
   );
@@ -178,7 +175,6 @@ export function MfaChallengePanel({
     return (
       <div className={styles.panel}>
         <div className={styles.heading}>
-          {!isRealMode && <span className={styles.mockBadge}>MOCK PREVIEW</span>}
           <h1>验证已过期</h1>
           <p>多因素验证挑战已超时，请返回登录重新发起。</p>
         </div>
@@ -192,9 +188,6 @@ export function MfaChallengePanel({
         <div className={styles.actions}>
           <Button theme="outline" size="large" onClick={onCancel}>返回登录</Button>
         </div>
-        {!isRealMode && (
-          <p className={styles.notice}>当前为界面 mock，不会执行真实的多因素验证。</p>
-        )}
       </div>
     );
   }
@@ -203,7 +196,6 @@ export function MfaChallengePanel({
     return (
       <div className={styles.panel}>
         <div className={styles.heading}>
-          {!isRealMode && <span className={styles.mockBadge}>MOCK PREVIEW</span>}
           <h1>尝试次数过多</h1>
           <p>为保护账户安全，多因素验证已被暂时锁定。</p>
         </div>
@@ -217,9 +209,6 @@ export function MfaChallengePanel({
         <div className={styles.actions}>
           <Button theme="outline" size="large" onClick={onCancel}>返回登录</Button>
         </div>
-        {!isRealMode && (
-          <p className={styles.notice}>当前为界面 mock，不会执行真实的多因素验证。</p>
-        )}
       </div>
     );
   }
@@ -229,9 +218,8 @@ export function MfaChallengePanel({
   return (
     <div className={styles.panel}>
       <div className={styles.heading}>
-        {!isRealMode && <span className={styles.mockBadge}>MOCK PREVIEW</span>}
         <h1>二次验证</h1>
-        <p>请完成多因素验证以继续登录。{!isRealMode && <>验证令牌：<code>{mfaToken}</code></>}</p>
+        <p>请完成多因素验证以继续登录。</p>
       </div>
 
       {availableMethods.length > 1 && (
@@ -294,7 +282,7 @@ export function MfaChallengePanel({
               loading={isSubmitting}
               disabled={isSubmitting}
             >
-              {isSubmitting ? "正在验证…" : isRealMode ? "验证" : "验证（Mock）"}
+              {isSubmitting ? "正在验证…" : "验证"}
             </Button>
           </div>
         </form>
@@ -372,42 +360,12 @@ export function MfaChallengePanel({
               loading={isSubmitting}
               disabled={isSubmitting}
             >
-              {isSubmitting ? "正在验证…" : isRealMode ? "验证" : "验证（Mock）"}
+              {isSubmitting ? "正在验证…" : "验证"}
             </Button>
           </div>
         </form>
       )}
 
-      {!isRealMode && (
-        <p className={styles.notice}>当前为界面 mock，不会执行真实的多因素验证。</p>
-      )}
-      {!isRealMode && (
-        <div className={styles.demoLinks}>
-        <p>Mock 状态演示</p>
-        <ul>
-          <li>
-            <button
-              type="button"
-              className={styles.demoButton}
-              onClick={() => setPhase({ phase: "expired" })}
-            >
-              <IconHourglass aria-hidden="true" />
-              模拟挑战已过期
-            </button>
-          </li>
-          <li>
-            <button
-              type="button"
-              className={styles.demoButton}
-              onClick={() => setPhase({ phase: "too_many_attempts" })}
-            >
-              <IconClose aria-hidden="true" />
-              模拟尝试次数过多
-            </button>
-          </li>
-        </ul>
-        </div>
-      )}
     </div>
   );
 }

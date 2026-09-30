@@ -14,7 +14,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, Checkbox, Input } from "@douyinfe/semi-ui";
 import { IconKey, IconUser } from "@douyinfe/semi-icons";
-import { authenticateMockAccount, MOCK_LOGIN_ACCOUNTS } from "@/lib/mock/mock-auth";
+import { authenticateMockAccount } from "@/lib/mock/mock-auth";
 import { USE_MOCK_DATA_SOURCE } from "@/lib/api/data-source-mode";
 import { isApiError } from "@/lib/api/api-error";
 import { completeLoginMfa, submitLogin } from "@/lib/api/browser/auth-commands";
@@ -180,7 +180,6 @@ export function CredentialPanel({
   return (
     <div className={styles.panel}>
       <div className={styles.heading}>
-        {USE_MOCK_DATA_SOURCE && <span className={styles.mockBadge}>MOCK PREVIEW</span>}
         <h1>欢迎回来</h1>
         <p>使用你的统一账户继续访问。</p>
       </div>
@@ -250,7 +249,7 @@ export function CredentialPanel({
           loading={!USE_MOCK_DATA_SOURCE && isSubmitting}
           disabled={!USE_MOCK_DATA_SOURCE && isSubmitting}
         >
-          {USE_MOCK_DATA_SOURCE ? "登录（Mock）" : isSubmitting ? "正在登录…" : "登录"}
+          {isSubmitting ? "正在登录…" : "登录"}
         </Button>
       </form>
 
@@ -270,21 +269,6 @@ export function CredentialPanel({
         <p className={styles.switchMode}><Link href="/login/qr">使用小程序扫码登录</Link></p>
       )}
 
-      {USE_MOCK_DATA_SOURCE && (
-        <div className={styles.demoCredential}>
-          <strong>普通用户演示凭据</strong>
-          <span>账户名</span>
-          <code>{MOCK_LOGIN_ACCOUNTS.externalUser.username}</code>
-          <span>邮箱</span>
-          <code>{MOCK_LOGIN_ACCOUNTS.externalUser.email}</code>
-          <span>密码</span>
-          <code>{MOCK_LOGIN_ACCOUNTS.externalUser.password}</code>
-        </div>
-      )}
-
-      {USE_MOCK_DATA_SOURCE && (
-        <p className={styles.notice}>当前为界面 mock，不会提交密码或创建真实账户。</p>
-      )}
       {!USE_MOCK_DATA_SOURCE && (
         <p className={styles.notice}>
           登录即表示你已阅读并同意<Link href="/terms">服务条款</Link>与<Link href="/privacy">隐私政策</Link>。

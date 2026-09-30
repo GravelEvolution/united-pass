@@ -53,7 +53,6 @@ export function LogoutRedirect() {
   return (
     <div className={styles.panel}>
       <div className={styles.heading}>
-        {USE_MOCK_DATA_SOURCE && <span className={styles.mockBadge}>MOCK PREVIEW</span>}
         <h1>正在退出登录</h1>
         <p>正在清除当前会话，请稍候。</p>
       </div>
@@ -78,7 +77,6 @@ export function LogoutRedirect() {
           <span>正在退出登录…</span>
         </div>
       )}
-      {USE_MOCK_DATA_SOURCE && <p className={styles.notice}>当前为界面 mock，不会撤销任何真实会话。</p>}
     </div>
   );
 }
