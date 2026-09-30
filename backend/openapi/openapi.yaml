@@ -3435,6 +3435,80 @@ paths:
         "409": {$ref: "#/components/responses/Conflict"}
         "500": {$ref: "#/components/responses/InternalError"}
 
+  /api/v1/auth/password-reset:
+    post:
+      tags: [Session]
+      summary: Request a one-time password reset link
+      description: |
+        Accepts the registration email address and always answers `202`, whether
+        or not the address belongs to a verified active account, so the endpoint
+        cannot be used to enumerate accounts. A reset link is emailed only when
+        a verified active account owns the address. The raw token is never
+        logged, never stored in an audit payload and never used as a Redis key.
+      operationId: requestPasswordReset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetRequest"
+      responses:
+        "202":
+          description: Accepted; the body never reveals whether the account exists.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PasswordResetAcceptedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/auth/password-reset/confirm:
+    post:
+      tags: [Session]
+      summary: Set a new password with a one-time reset token
+      description: |
+        Consumes the single-use token delivered by email and sets the new
+        password on the identity provider. An expired, already-used and unknown
+        token share one failure response, so the endpoint cannot distinguish
+        them. After a successful change every existing session of the account is
+        revoked.
+      operationId: confirmPasswordReset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetConfirmation"
+      responses:
+        "204":
+          description: Password reset; every prior session of the account was revoked.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/FieldValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/ProviderUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/auth/reauthentication:
     post:
       tags: [Reauthentication]
@@ -8932,6 +9006,45 @@ components:
           format: password
           writeOnly: true
           description: New password only. The current password is never accepted by this endpoint.
+
+    PasswordResetRequest:
+      type: object
+      required: [identifier]
+      additionalProperties: false
+      properties:
+        identifier:
+          type: string
+          minLength: 1
+          maxLength: 320
+          description: Registration email address. A non-email identifier never resolves an account.
+
+    PasswordResetConfirmation:
+      type: object
+      required: [token, newPassword]
+      additionalProperties: false
+      properties:
+        token:
+          type: string
+          minLength: 1
+          maxLength: 512
+          writeOnly: true
+          description: Single-use token delivered by email. Never logged or stored in audit payloads.
+        newPassword:
+          type: string
+          minLength: 12
+          maxLength: 128
+          format: password
+          writeOnly: true
+          description: At least 12 characters with upper case, lower case, digit and symbol.
+
+    PasswordResetAcceptedResponse:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [accepted]
 
     TotpEnrollmentResponse:
       type: object

@@ -66,6 +66,7 @@ const (
 	rateLimitWeChatRegistrationProofSegment   = "rl:wechat:registration-proof:"
 	rateLimitQRAuthBeginSegment               = "rl:qr-auth:begin:"
 	rateLimitDreamUPMobileSegment             = "rl:dreamup-mobile-assertion:"
+	rateLimitPasswordResetSegment             = "rl:password-reset:"
 )
 
 // rateLimitScript atomically increments a rate-limit counter and sets the TTL
@@ -394,6 +395,26 @@ func (r *RateLimiter) CheckRotation(
 ) (allowed bool, retryAfter time.Duration, err error) {
 	key := r.client.buildKey(rateLimitRotationSegment, ip, ":", clientIDHash)
 	return r.check(ctx, key, limit, window)
+}
+
+func (r *RateLimiter) CheckPasswordReset(
+	ctx context.Context,
+	ip string,
+	identifierHash string,
+	ipLimit int,
+	accountLimit int,
+	window time.Duration,
+) (allowed bool, retryAfter time.Duration, err error) {
+	buckets := []rateBucket{
+		{key: r.client.buildKey(rateLimitPasswordResetSegment, "ip:", ip), limit: registration.Limit{Max: ipLimit, Window: window}},
+	}
+	if identifierHash != "" {
+		buckets = append(buckets, rateBucket{
+			key:   r.client.buildKey(rateLimitPasswordResetSegment, "account:", identifierHash),
+			limit: registration.Limit{Max: accountLimit, Window: window},
+		})
+	}
+	return r.checkBuckets(ctx, buckets)
 }
 
 func (r *RateLimiter) CheckRegistrationCreate(ctx context.Context, ip, network, keyHash string, policy registration.CreateRatePolicy) (bool, time.Duration, error) {

@@ -106,6 +106,28 @@ func (r *UserRepository) GetByID(ctx context.Context, userID identity.UserID) (i
 	return user, nil
 }
 
+func (r *UserRepository) GetByEmail(ctx context.Context, email string) (identity.User, error) {
+	normalized := strings.ToLower(strings.TrimSpace(email))
+	if normalized == "" {
+		return identity.User{}, identity.ErrUserNotFound
+	}
+	row := r.pool.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users WHERE lower(email) = $1 AND email <> ''`, normalized)
+
+	user, err := scanUser(row)
+	if err != nil {
+		return identity.User{}, mapUserError(err, "get user by email")
+	}
+
+	personas, err := r.GetPersonas(ctx, user.ID)
+	if err != nil {
+		return identity.User{}, err
+	}
+	user.Personas = personas
+
+	return user, nil
+}
+
 // GetByIDForUpdate loads a user by ID within an existing transaction, acquiring
 // a FOR UPDATE row lock. This is used when the caller is about to mutate the
 // user row and must prevent concurrent modifications. Personas are not loaded

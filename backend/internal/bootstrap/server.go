@@ -53,6 +53,7 @@ import (
 	"github.com/GravelEvolution/united-pass/backend/internal/email"
 	"github.com/GravelEvolution/united-pass/backend/internal/identity"
 	"github.com/GravelEvolution/united-pass/backend/internal/mscaccess"
+	"github.com/GravelEvolution/united-pass/backend/internal/passwordreset"
 	"github.com/GravelEvolution/united-pass/backend/internal/permissions"
 	"github.com/GravelEvolution/united-pass/backend/internal/phoneverify"
 	"github.com/GravelEvolution/united-pass/backend/internal/policies"
@@ -1311,6 +1312,32 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	router.Post("/internal/v1/emails", emailHandlers.Send)
 
+	var passwordResetHandlers *httpapi.PasswordResetHandlers
+	if smtpSender != nil && redisClient != nil && userRepo != nil && sessionSvc != nil {
+		passwordSetter, passwordOK := authenticator.(auth.PasswordManager)
+		passwordResetRate, rateOK := rateChecker.(httpapi.PasswordResetRateChecker)
+		if !passwordOK || !rateOK {
+			logger.Warn("password reset surface is unavailable",
+				"passwordManager", passwordOK, "rateChecker", rateOK)
+		} else {
+			passwordResetHandlers = httpapi.NewPasswordResetHandlers(
+				passwordreset.NewService(
+					userRepo,
+					redis.NewPasswordResetStore(redisClient),
+					passwordSetter,
+					sessionSvc,
+					smtpSender,
+					sessionAuditor,
+					passwordreset.Config{PublicOrigin: cfg.OAuth.PublicOrigin, TokenTTL: 30 * time.Minute},
+					logger,
+				),
+				passwordResetRate,
+				httpapi.PasswordResetPolicy{},
+				logger,
+			)
+		}
+	}
+
 	if cfg.MSCIntegration.Enabled {
 		if workforceSvc == nil || auditSvc == nil {
 			return nil, errors.New("msc read-only integration requires PostgreSQL-backed workforce and audit services")
@@ -1401,6 +1428,12 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 			r.With(trustedAuthMutation).Post("/auth/step-up", riskGuard.Complete)
 		}
 		mountRegistrationSurfaces(r, registrationSurfaces, registrationHandlers, wechatRegistrationHandlers)
+		if passwordResetHandlers != nil {
+			r.Group(func(r chi.Router) {
+				r.Use(trustedAuthMutation)
+				passwordResetHandlers.Mount(r)
+			})
+		}
 		if registrationBlockHandlers != nil {
 			r.Group(func(r chi.Router) {
 				r.Use(httpapi.RequireSession(sessionSvc, userChecker, securityGate, cookieAttrs, logger))

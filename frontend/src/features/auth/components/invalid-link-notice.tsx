@@ -29,20 +29,19 @@ export function InvalidLinkNotice({
   return (
     <div className={styles.panel}>
       <div className={styles.heading}>
-        <span className={styles.mockBadge}>MOCK PREVIEW</span>
         <h1>{title}</h1>
         <p>{description}</p>
       </div>
       <div className={styles.statusCard} role="alert">
         <IconAlertTriangle size="extra-large" style={{ color: "var(--up-danger)" }} />
-        <p>链接缺少必要的令牌参数，无法继续。请使用完整链接，或重新发起请求。</p>
+        <p>请使用邮件中的完整链接打开本页，或重新发起一次请求。</p>
       </div>
       <div className={styles.actions}>
         <Link href={actionHref}>
           <Button theme="solid" type="primary" size="large" block>{actionLabel}</Button>
         </Link>
       </div>
-      <p className={styles.notice}>当前为界面 mock，不会校验任何真实令牌。</p>
+      <p className={styles.switchMode}>已想起密码？<Link href="/login">返回登录</Link></p>
     </div>
   );
 }
